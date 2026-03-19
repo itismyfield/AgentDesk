@@ -157,3 +157,22 @@ pub fn load() -> Result<Config> {
 
     Ok(config)
 }
+
+/// Compatibility shim: RCC's `config::Settings` is referenced by discord code
+/// for remote_profiles. AgentDesk doesn't have TUI settings, so this returns
+/// an empty struct.
+pub struct Settings {
+    pub remote_profiles: Vec<crate::services::remote::RemoteProfile>,
+}
+
+impl Settings {
+    pub fn load() -> Self {
+        Self {
+            remote_profiles: Vec::new(),
+        }
+    }
+
+    pub fn config_dir() -> Option<std::path::PathBuf> {
+        dirs::home_dir().map(|h| h.join(".remotecc"))
+    }
+}

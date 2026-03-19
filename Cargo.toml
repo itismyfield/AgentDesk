@@ -16,6 +16,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Discord
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
+poise = "0.6"
 
 # Policy engine (QuickJS)
 rquickjs = { version = "0.9", features = ["bindgen", "classes", "properties", "parallel"] }
@@ -27,13 +28,35 @@ serde_yaml = "0.9"
 
 # Utils
 uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 notify = "7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 dirs = "6.0.0"
+
+# From RCC — text/formatting
+unicode-width = "0.2"
+textwrap = "0.16"
+regex = "1"
+
+# From RCC — crypto/encoding
+base64 = "0.22"
+
+# From RCC — concurrency
+dashmap = "6"
+
+# From RCC — HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# From RCC — crypto
+sha2 = "0.10"
+hex = "0.4"
+
+# From RCC — misc
+rand = "0.8"
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"

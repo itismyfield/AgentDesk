@@ -1,0 +1,268 @@
+use std::sync::atomic::Ordering;
+
+use poise::serenity_prelude as serenity;
+use serenity::CreateMessage;
+
+use super::super::{
+    auto_restore_session, check_auth, Context, Error,
+};
+use super::super::formatting::{send_long_message_ctx, truncate_str};
+use super::super::router::handle_text_message;
+use super::super::turn_bridge::cancel_active_token;
+use crate::services::provider::ProviderKind;
+
+// Re-use the report builders from diagnostics (they are private to diagnostics,
+// so cmd_cc duplicates the built-in handler logic inline, matching the original code).
+
+/// Autocomplete handler for /cc skill names
+async fn autocomplete_skill<'a>(
+    ctx: Context<'a>,
+    partial: &'a str,
+) -> Vec<serenity::AutocompleteChoice> {
+    let builtins = [
+        ("health", "Show runtime health summary"),
+        ("status", "Show this channel session status"),
+        ("inflight", "Show saved inflight turn state"),
+        ("pwd", "Show current working directory"),
+        ("stop", "Stop current AI request"),
+        ("help", "Show command help"),
+    ];
+    let skills = ctx.data().shared.skills_cache.read().await;
+    let partial_lower = partial.to_lowercase();
+    let mut choices = Vec::new();
+
+    for (name, desc) in builtins {
+        if partial.is_empty() || name.contains(&partial_lower) {
+            let label = format!("{} — {}", name, truncate_str(desc, 60));
+            choices.push(serenity::AutocompleteChoice::new(label, name.to_string()));
+        }
+    }
+
+    for (name, desc) in skills.iter() {
+        if choices.len() >= 25 {
+            break;
+        }
+        if partial.is_empty() || name.to_lowercase().contains(&partial_lower) {
+            let label = format!("{} — {}", name, truncate_str(desc, 60));
+            choices.push(serenity::AutocompleteChoice::new(label, name.clone()));
+        }
+    }
+
+    choices
+}
+
+/// /cc <skill> [args] — Run a provider skill
+#[poise::command(slash_command, rename = "cc")]
+pub(in crate::services::discord) async fn cmd_cc(
+    ctx: Context<'_>,
+    #[description = "Skill name"]
+    #[autocomplete = "autocomplete_skill"]
+    skill: String,
+    #[description = "Additional arguments for the skill"] args: Option<String>,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    let args_str = args.as_deref().unwrap_or("");
+    println!("  [{ts}] ◀ [{user_name}] /cc {skill} {args_str}");
+
+    // Handle built-in commands directly instead of sending to AI
+    match skill.as_str() {
+        "clear" => {
+            ctx.say("Use the `/clear` slash command instead.").await?;
+            return Ok(());
+        }
+        "stop" => {
+            let channel_id = ctx.channel_id();
+            let token = {
+                let data = ctx.data().shared.core.lock().await;
+                data.cancel_tokens.get(&channel_id).cloned()
+            };
+            match token {
+                Some(token) => {
+                    if token.cancelled.load(Ordering::Relaxed) {
+                        ctx.say("Already stopping...").await?;
+                        return Ok(());
+                    }
+                    ctx.say("Stopping...").await?;
+                    cancel_active_token(&token, true, "/cc stop");
+                    println!("  [{ts}] ■ Cancel signal sent");
+                }
+                None => {
+                    ctx.say("No active request to stop.").await?;
+                }
+            }
+            return Ok(());
+        }
+        "pwd" => {
+            let (current_path, remote_name) = {
+                let data = ctx.data().shared.core.lock().await;
+                let session = data.sessions.get(&ctx.channel_id());
+                (
+                    session.and_then(|s| s.current_path.clone()),
+                    session.and_then(|s| s.remote_profile_name.clone()),
+                )
+            };
+            match current_path {
+                Some(path) => {
+                    let remote_info = remote_name
+                        .map(|n| format!(" (remote: **{}**)", n))
+                        .unwrap_or_else(|| " (local)".to_string());
+                    ctx.say(format!("`{}`{}", path, remote_info)).await?
+                }
+                None => {
+                    ctx.say("No active session. Use `/start <path>` first.")
+                        .await?
+                }
+            };
+            return Ok(());
+        }
+        "health" => {
+            let text = super::diagnostics::build_health_report(
+                &ctx.data().shared,
+                &ctx.data().provider,
+                ctx.channel_id(),
+            )
+            .await;
+            send_long_message_ctx(ctx, &text).await?;
+            return Ok(());
+        }
+        "status" => {
+            let text = super::diagnostics::build_status_report(
+                &ctx.data().shared,
+                &ctx.data().provider,
+                ctx.channel_id(),
+            )
+            .await;
+            send_long_message_ctx(ctx, &text).await?;
+            return Ok(());
+        }
+        "inflight" => {
+            let text = super::diagnostics::build_inflight_report(
+                &ctx.data().shared,
+                &ctx.data().provider,
+                ctx.channel_id(),
+            )
+            .await;
+            send_long_message_ctx(ctx, &text).await?;
+            return Ok(());
+        }
+        "help" => {
+            // Redirect to help — just tell user to use /help
+            ctx.say("Use `/help` to see all commands.").await?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Auto-restore session (must run before skill check to refresh skills_cache with project path)
+    auto_restore_session(&ctx.data().shared, ctx.channel_id(), ctx.serenity_context()).await;
+
+    // Verify skill exists
+    let skill_exists = {
+        let skills = ctx.data().shared.skills_cache.read().await;
+        skills.iter().any(|(name, _)| name == &skill)
+    };
+
+    if !skill_exists {
+        ctx.say(format!(
+            "Unknown skill: `{}`. Use `/cc` to see available skills.",
+            skill
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    // Check session exists
+    let has_session = {
+        let data = ctx.data().shared.core.lock().await;
+        data.sessions
+            .get(&ctx.channel_id())
+            .and_then(|s| s.current_path.as_ref())
+            .is_some()
+    };
+
+    if !has_session {
+        ctx.say("No active session. Use `/start <path>` first.")
+            .await?;
+        return Ok(());
+    }
+
+    // Block if AI is in progress
+    {
+        let d = ctx.data().shared.core.lock().await;
+        if d.cancel_tokens.contains_key(&ctx.channel_id()) {
+            drop(d);
+            ctx.say("AI request in progress. Use `/stop` to cancel.")
+                .await?;
+            return Ok(());
+        }
+    }
+
+    // Build the prompt that tells the active provider to invoke the skill
+    let skill_prompt = match &ctx.data().provider {
+        ProviderKind::Claude => {
+            if args_str.is_empty() {
+                format!(
+                    "Execute the skill `/{skill}` now. \
+                     Use the Skill tool with skill=\"{skill}\"."
+                )
+            } else {
+                format!(
+                    "Execute the skill `/{skill}` with arguments: {args_str}\n\
+                     Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\"."
+                )
+            }
+        }
+        ProviderKind::Codex => {
+            if args_str.is_empty() {
+                format!(
+                    "Use the local Codex skill `/{skill}` now. \
+                     Follow its SKILL.md instructions exactly and complete the task."
+                )
+            } else {
+                format!(
+                    "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
+                     Follow its SKILL.md instructions exactly and adapt them to the request."
+                )
+            }
+        }
+        ProviderKind::Unsupported(name) => {
+            ctx.say(format!("Provider '{}' is not installed. This skill cannot run.", name)).await?;
+            return Ok(());
+        }
+    };
+
+    // Send a confirmation message that we can use as the "user message" for reactions
+    ctx.defer().await?;
+    let confirm = ctx
+        .channel_id()
+        .send_message(
+            ctx.serenity_context(),
+            CreateMessage::new().content(format!("⚡ Running skill: `/{skill}`")),
+        )
+        .await?;
+
+    // Hand off to the text message handler (it creates its own placeholder)
+    handle_text_message(
+        ctx.serenity_context(),
+        ctx.channel_id(),
+        confirm.id,
+        ctx.author().id,
+        &ctx.author().name,
+        &skill_prompt,
+        &ctx.data().shared,
+        &ctx.data().token,
+        false,
+        false,
+        false,
+        None,
+    )
+    .await?;
+
+    Ok(())
+}
