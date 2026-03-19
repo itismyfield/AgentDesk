@@ -1,0 +1,17 @@
+[Unit]
+Description=AgentDesk - AI Agent Orchestration
+After=network.target
+
+[Service]
+Type=simple
+Environment=REMOTECC_ROOT_DIR=%h/.agentdesk
+Environment=REMOTECC_HEALTH_PORT=8796
+ExecStart=%h/.agentdesk/bin/agentdesk dcserver
+WorkingDirectory=%h/.agentdesk
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.agentdesk/logs/agentdesk.stdout.log
+StandardError=append:%h/.agentdesk/logs/agentdesk.stderr.log
+
+[Install]
+WantedBy=default.target
