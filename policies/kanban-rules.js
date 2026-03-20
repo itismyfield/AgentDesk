@@ -73,6 +73,33 @@ var rules = {
       );
       agentdesk.log.info("[kanban] " + card.id + " in_progress → review");
     }
+
+    // idle + review dispatch → auto-complete with verdict
+    // 카운터모델 리뷰 세션이 idle이 되면 디스패치를 자동 완료하고 verdict 전달
+    if (payload.status === "idle" && card.status === "review") {
+      var dispatch = agentdesk.db.query(
+        "SELECT id, dispatch_type, status, result FROM task_dispatches WHERE id = ?",
+        [payload.dispatch_id]
+      );
+      if (dispatch.length > 0 && dispatch[0].dispatch_type === "review" && dispatch[0].status === "pending") {
+        // 디스패치 결과에서 verdict 추출 시도
+        var verdict = "pass"; // 기본값: 리뷰어가 이슈 없이 종료 = 통과
+        var resultJson = dispatch[0].result;
+        if (resultJson) {
+          try {
+            var parsed = JSON.parse(resultJson);
+            if (parsed.verdict) verdict = parsed.verdict;
+          } catch(e) { /* parse fail = use default */ }
+        }
+
+        // 디스패치 completed 처리
+        agentdesk.db.execute(
+          "UPDATE task_dispatches SET status = 'completed', result = ?, updated_at = datetime('now') WHERE id = ?",
+          [JSON.stringify({ verdict: verdict, auto_completed: true }), payload.dispatch_id]
+        );
+        agentdesk.log.info("[kanban] review dispatch " + payload.dispatch_id + " auto-completed with verdict: " + verdict);
+      }
+    }
   },
 
   // ── Dispatch Completed — PM Decision Gate ─────────────────

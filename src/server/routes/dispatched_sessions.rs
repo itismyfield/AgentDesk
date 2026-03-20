@@ -205,7 +205,6 @@ pub async fn hook_session(
     match result {
         Ok(_) => {
             // Fire OnSessionStatusChange hook for policy engines
-            // Read old status to detect change (best-effort — the upsert may have changed it)
             let dispatch_id = body.dispatch_id.clone();
             drop(conn);
             let _ = state.engine.fire_hook(
@@ -218,6 +217,38 @@ pub async fn hook_session(
                     "provider": provider,
                 }),
             );
+
+            // After the hook fires, check if the policy auto-completed a review dispatch.
+            // If so, fire OnDispatchCompleted so review-automation.js can process the verdict.
+            if status == "idle" {
+                if let Some(ref did) = dispatch_id {
+                    let conn = state.db.lock().ok();
+                    if let Some(conn) = conn {
+                        let dispatch_status: Option<(String, String)> = conn
+                            .query_row(
+                                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+                                [did],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .ok();
+                        drop(conn);
+                        if let Some((dtype, dstatus)) = dispatch_status {
+                            if (dtype == "review" || dtype == "review-decision")
+                                && dstatus == "completed"
+                            {
+                                // Policy auto-completed this review dispatch — fire OnDispatchCompleted
+                                let _ = state.engine.fire_hook(
+                                    crate::engine::hooks::Hook::OnDispatchCompleted,
+                                    json!({
+                                        "dispatch_id": did,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             (StatusCode::OK, Json(json!({"ok": true})))
         }
         Err(e) => (
