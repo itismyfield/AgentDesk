@@ -571,6 +571,82 @@ async fn handle_session_start<'a>(registry: &HealthRegistry, body: &str) -> (&'a
     ("200 OK", response)
 }
 
+/// Self-watchdog: runs on a dedicated OS thread (not tokio) to detect
+/// runtime hangs.  Periodically opens a raw TCP connection to the health
+/// port and expects a response within a few seconds.  If the check fails
+/// `max_failures` times in a row the process is force-killed so launchd
+/// (or systemd) can restart it.
+pub fn spawn_watchdog(port: u16) {
+    const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    const TCP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const MAX_FAILURES: u32 = 3;
+    // Grace period: skip checks for the first 30s after startup so the
+    // runtime has time to initialise Discord bots and register providers.
+    const STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    std::thread::Builder::new()
+        .name("health-watchdog".into())
+        .spawn(move || {
+            std::thread::sleep(STARTUP_GRACE);
+
+            let mut consecutive_failures: u32 = 0;
+
+            loop {
+                std::thread::sleep(CHECK_INTERVAL);
+
+                let ok = (|| -> bool {
+                    use std::io::{Read, Write};
+                    let addr = format!("127.0.0.1:{port}");
+                    let mut stream =
+                        match std::net::TcpStream::connect_timeout(
+                            &addr.parse().unwrap(),
+                            TCP_TIMEOUT,
+                        ) {
+                            Ok(s) => s,
+                            Err(_) => return false,
+                        };
+                    let _ = stream.set_read_timeout(Some(TCP_TIMEOUT));
+                    let _ = stream.set_write_timeout(Some(TCP_TIMEOUT));
+                    let req = "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+                    if stream.write_all(req.as_bytes()).is_err() {
+                        return false;
+                    }
+                    let mut buf = [0u8; 512];
+                    match stream.read(&mut buf) {
+                        Ok(n) if n > 0 => {
+                            let resp = String::from_utf8_lossy(&buf[..n]);
+                            resp.contains("200 OK")
+                        }
+                        _ => false,
+                    }
+                })();
+
+                if ok {
+                    if consecutive_failures > 0 {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!(
+                            "  [{ts}] 🩺 watchdog: health recovered after {consecutive_failures} failure(s)"
+                        );
+                    }
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures += 1;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] 🩺 watchdog: health check failed ({consecutive_failures}/{MAX_FAILURES})"
+                    );
+                    if consecutive_failures >= MAX_FAILURES {
+                        eprintln!(
+                            "  [{ts}] 🩺 watchdog: runtime unresponsive — forcing exit"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        })
+        .expect("Failed to spawn watchdog thread");
+}
+
 /// Parse a /api/send JSON body and extract (target, content, source).
 /// Returns Err with an error message on invalid input.
 /// Factored out of handle_send for testability.

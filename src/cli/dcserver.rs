@@ -816,6 +816,10 @@ pub fn handle_dcserver(token: Option<String>) {
             services::discord::health::serve(health_reg_clone, health_port).await;
         });
 
+        // Self-watchdog: dedicated OS thread that probes the health endpoint
+        // and force-exits if the tokio runtime becomes unresponsive.
+        services::discord::health::spawn_watchdog(health_port);
+
         match token {
             Some(token) => {
                 let provider = services::discord::resolve_discord_bot_provider(&token);
