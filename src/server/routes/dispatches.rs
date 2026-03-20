@@ -546,29 +546,69 @@ pub(super) async fn send_review_result_to_primary(
         },
     };
 
-    let verdict_emoji = match verdict {
-        "pass" | "accept" | "approved" => "✅",
-        "improve" | "rework" => "📝",
-        "reject" => "❌",
-        _ => "❓",
-    };
+    // For pass verdict, just send a simple notification (no action needed)
+    if verdict == "pass" || verdict == "accept" || verdict == "approved" {
+        let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
+        let message = format!("✅ [리뷰 통과] {title} — done으로 이동{url_line}");
 
-    let action_guide = if verdict == "pass" || verdict == "accept" || verdict == "approved" {
-        "리뷰 통과 — 카드가 done으로 이동합니다.".to_string()
-    } else {
-        format!(
-            "GitHub 이슈 코멘트를 확인하고 다음 중 하나를 선택하세요:\n\
-             • **수용** → 리뷰 내용을 반영하여 수정 후 `/review-decision accept`\n\
-             • **반론** → GitHub 코멘트로 이의 제기 후 `/review-decision dispute`\n\
-             • **불수용** → 리뷰 무시 `/review-decision dismiss`"
-        )
-    };
+        let config = crate::config::load_graceful();
+        let token = match config
+            .discord
+            .bots
+            .get("announce")
+            .or_else(|| config.discord.bots.get("command"))
+        {
+            Some(bot) => bot.token.clone(),
+            None => return,
+        };
+        let url = format!(
+            "https://discord.com/api/v10/channels/{}/messages",
+            channel_id_num
+        );
+        let client = reqwest::Client::new();
+        let _ = client
+            .post(&url)
+            .header("Authorization", format!("Bot {}", token))
+            .json(&serde_json::json!({"content": message}))
+            .send()
+            .await;
+        return;
+    }
+
+    // For improve/rework/reject: create a review-decision dispatch to the original agent
+    // This triggers a turn where the agent reads review comments and decides action
+    let db_ref = db;
+    let dispatch_id = uuid::Uuid::new_v4().to_string();
+    {
+        let conn = match db_ref.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'review-decision', 'pending', ?4, ?5, datetime('now'), datetime('now'))",
+            rusqlite::params![
+                dispatch_id,
+                card_id,
+                &agent_id,
+                format!("[리뷰 검토] {title}"),
+                serde_json::json!({"verdict": verdict}).to_string(),
+            ],
+        ).ok();
+        conn.execute(
+            "UPDATE kanban_cards SET latest_dispatch_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![dispatch_id, card_id],
+        ).ok();
+    }
 
     let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
     let message = format!(
-        "{verdict_emoji} [리뷰 완료] {title}\n\
-         verdict: **{verdict}**\n\
-         {action_guide}{url_line}"
+        "DISPATCH:{dispatch_id} - [리뷰 검토] {title}\n\
+         📝 카운터모델 리뷰 결과: **{verdict}**\n\
+         GitHub 이슈 코멘트를 확인하고 다음 중 하나를 선택하세요:\n\
+         • 수용 → 리뷰 반영 수정 후 review-decision API에 accept 호출\n\
+         • 반론 → GitHub 코멘트로 이의 제기 후 review-decision API에 dispute 호출\n\
+         • 불수용 → review-decision API에 dismiss 호출{url_line}"
     );
 
     // Send to primary channel

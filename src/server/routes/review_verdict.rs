@@ -119,3 +119,111 @@ pub async fn submit_verdict(
         })),
     )
 }
+
+// ── Review Decision (agent's response to counter-model review) ──────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewDecisionBody {
+    pub card_id: String,
+    pub decision: String, // "accept", "dispute", "dismiss"
+    pub comment: Option<String>,
+}
+
+/// POST /api/review-decision
+///
+/// Agent's decision on counter-model review feedback.
+/// - accept: agent will rework based on review → card to in_progress
+/// - dispute: agent disagrees, sends back for re-review → new review dispatch
+/// - dismiss: agent ignores review → card to done
+pub async fn submit_review_decision(
+    State(state): State<AppState>,
+    Json(body): Json<ReviewDecisionBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let valid = ["accept", "dispute", "dismiss"];
+    if !valid.contains(&body.decision.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("decision must be one of: {}", valid.join(", "))})),
+        );
+    }
+
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    // Verify card exists
+    let card_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = ?1",
+            [&body.card_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if card_status.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "card not found"})),
+        );
+    }
+
+    match body.decision.as_str() {
+        "accept" => {
+            // Agent accepts review feedback → go to in_progress for rework
+            conn.execute(
+                "UPDATE kanban_cards SET status = 'in_progress', review_status = 'rework_pending', updated_at = datetime('now') WHERE id = ?1",
+                [&body.card_id],
+            ).ok();
+        }
+        "dispute" => {
+            // Agent disputes → increment review_round, create new review dispatch to counter-model
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = 'reviewing', updated_at = datetime('now') WHERE id = ?1",
+                [&body.card_id],
+            ).ok();
+            drop(conn);
+
+            // Fire OnReviewEnter to create new review dispatch
+            let _ = state.engine.fire_hook(
+                Hook::OnReviewEnter,
+                json!({
+                    "card_id": body.card_id,
+                    "from": "review",
+                }),
+            );
+
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "card_id": body.card_id,
+                    "decision": "dispute",
+                    "message": "Re-review dispatched to counter-model",
+                })),
+            );
+        }
+        "dismiss" => {
+            // Agent dismisses review → go to done
+            conn.execute(
+                "UPDATE kanban_cards SET status = 'done', review_status = NULL, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
+                [&body.card_id],
+            ).ok();
+        }
+        _ => {}
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "card_id": body.card_id,
+            "decision": body.decision,
+        })),
+    )
+}

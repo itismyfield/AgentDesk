@@ -41,6 +41,7 @@ pub async fn auth_middleware(
         || path.starts_with("/dispatches")
         || path.starts_with("/dispatched-sessions")
         || path == "/review-verdict"
+        || path == "/review-decision"
     {
         return next.run(req).await;
     }
