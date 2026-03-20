@@ -18,8 +18,27 @@ pub fn new_broadcast() -> BroadcastTx {
     Arc::new(tx)
 }
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(tx): State<BroadcastTx>) -> impl IntoResponse {
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(tx): State<BroadcastTx>,
+    query: axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Check auth token if configured
+    let config = crate::config::load_graceful();
+    if let Some(expected) = config.server.auth_token.as_deref() {
+        if !expected.is_empty() {
+            let token = query.get("token").map(|s| s.as_str()).unwrap_or("");
+            if token != expected {
+                return axum::response::Response::builder()
+                    .status(401)
+                    .body(axum::body::Body::from("unauthorized"))
+                    .unwrap()
+                    .into_response();
+            }
+        }
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, tx))
+        .into_response()
 }
 
 async fn handle_socket(socket: WebSocket, tx: BroadcastTx) {
