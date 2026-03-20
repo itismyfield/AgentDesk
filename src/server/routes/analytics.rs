@@ -145,11 +145,88 @@ pub struct AchievementsQuery {
 }
 
 pub async fn achievements(
-    State(_state): State<AppState>,
-    Query(_params): Query<AchievementsQuery>,
+    State(state): State<AppState>,
+    Query(params): Query<AchievementsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Stub: achievements 테이블이 없으므로 빈 배열 반환
-    (StatusCode::OK, Json(json!({ "achievements": [] })))
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    // XP milestone thresholds
+    let milestones: &[(i64, &str, &str)] = &[
+        (10, "first_task", "첫 번째 작업 완료"),
+        (50, "getting_started", "본격적인 시작"),
+        (100, "centurion", "100 XP 달성"),
+        (250, "veteran", "베테랑"),
+        (500, "expert", "전문가"),
+        (1000, "master", "마스터"),
+    ];
+
+    // Build agent filter
+    let mut sql = String::from(
+        "SELECT id, COALESCE(name, id), COALESCE(name_ko, name, id), xp, sprite_number FROM agents WHERE xp > 0",
+    );
+    let mut bind_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(ref agent_id) = params.agent_id {
+        sql.push_str(&format!(" AND id = ?{}", bind_params.len() + 1));
+        bind_params.push(Box::new(agent_id.clone()));
+    }
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        bind_params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    let agents: Vec<(String, String, String, i64, i64)> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            ))
+        })
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    let sprite_emojis = ["🤖", "🦾", "🧠", "⚡", "🎯", "🔥", "💎", "🌟", "🏆", "👾"];
+
+    let mut achievements = Vec::new();
+    for (agent_id, name, name_ko, xp, sprite) in &agents {
+        for (threshold, achievement_type, description) in milestones {
+            if xp >= threshold {
+                let emoji = sprite_emojis.get(*sprite as usize % sprite_emojis.len()).unwrap_or(&"🤖");
+                achievements.push(json!({
+                    "id": format!("{agent_id}:{achievement_type}"),
+                    "agent_id": agent_id,
+                    "type": achievement_type,
+                    "name": format!("{description} ({threshold} XP)"),
+                    "description": description,
+                    "earned_at": 0,
+                    "agent_name": name,
+                    "agent_name_ko": name_ko,
+                    "avatar_emoji": emoji,
+                }));
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!({ "achievements": achievements })))
 }
 
 /// GET /api/activity-heatmap?date=2026-03-19
@@ -350,12 +427,55 @@ pub async fn machine_status() -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(json!({"machines": machines})))
 }
 
-/// GET /api/rate-limits (stub)
-pub async fn rate_limits() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::OK,
-        Json(json!({"rate_limits": [], "note": "not yet implemented"})),
-    )
+/// GET /api/rate-limits
+/// Returns cached rate limit data from rate_limit_cache table.
+pub async fn rate_limits(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT provider, data, fetched_at FROM rate_limit_cache ORDER BY provider",
+    ) {
+        Ok(s) => s,
+        Err(_) => return (StatusCode::OK, Json(json!({"providers": []}))),
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let providers: Vec<serde_json::Value> = stmt
+        .query_map([], |row| {
+            let provider: String = row.get(0)?;
+            let data: String = row.get(1)?;
+            let fetched_at: i64 = row.get(2)?;
+            Ok((provider, data, fetched_at))
+        })
+        .ok()
+        .map(|rows| {
+            rows.filter_map(|r| r.ok())
+                .filter_map(|(provider, data, fetched_at)| {
+                    let parsed: serde_json::Value = serde_json::from_str(&data).ok()?;
+                    let buckets = parsed.get("buckets")?.as_array()?.clone();
+                    let stale = (now - fetched_at) > 600; // >10min = stale
+                    Some(json!({
+                        "provider": provider,
+                        "buckets": buckets,
+                        "fetched_at": fetched_at,
+                        "stale": stale,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    (StatusCode::OK, Json(json!({"providers": providers})))
 }
 
 /// GET /api/skills-trend?days=30
