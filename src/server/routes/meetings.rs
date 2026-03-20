@@ -214,44 +214,351 @@ pub async fn update_issue_repo(
     }
 }
 
-/// POST /api/round-table-meetings/:id/issues — stub
-pub async fn create_issues(Path(_id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
+/// POST /api/round-table-meetings/:id/issues
+/// Extract action items from meeting summary and create GitHub issues.
+#[derive(Debug, Deserialize)]
+pub struct CreateIssuesBody {
+    pub repo: Option<String>,
+}
+
+#[axum::debug_handler]
+pub async fn create_issues(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<CreateIssuesBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    // Verify meeting exists
+    let meeting_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM meetings WHERE id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !meeting_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "meeting not found"})),
+        );
+    }
+
+    // Get issue repo from kv_meta or request body
+    let repo: Option<String> = body.repo.clone().or_else(|| {
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [&format!("meeting:{id}:issue_repo")],
+                |row| row.get(0),
+            )
+            .ok()
+        });
+
+    let Some(repo) = repo else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no repo configured for this meeting — set issue_repo first"})),
+        );
+    };
+
+    // Get summary transcripts (action items)
+    let summaries: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT content FROM meeting_transcripts
+                 WHERE meeting_id = ?1 AND is_summary = 1
+                 ORDER BY seq ASC",
+            )
+            .unwrap();
+        stmt.query_map([&id], |row| row.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    };
+
+    if summaries.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "skipped": true,
+                "results": [],
+                "summary": {"total": 0, "created": 0, "failed": 0, "discarded": 0, "pending": 0, "all_created": true, "all_resolved": true}
+            })),
+        );
+    }
+
+    drop(conn);
+
+    // Create issues from summaries using gh CLI
+    let mut results = Vec::new();
+    let mut created = 0i64;
+    let mut failed = 0i64;
+
+    for (i, summary) in summaries.iter().enumerate() {
+        let key = format!("item-{i}");
+        // Check if already discarded
+        let discarded = {
+            let conn = state.db.lock().unwrap();
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [&format!("meeting:{id}:issue:{key}:discarded")],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        };
+        if discarded {
+            results.push(json!({"key": key, "title": summary.lines().next().unwrap_or(""), "assignee": "", "ok": true, "discarded": true, "attempted_at": 0}));
+            continue;
+        }
+
+        // Check if already created
+        let already_url: Option<String> = {
+            let conn = state.db.lock().unwrap();
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [&format!("meeting:{id}:issue:{key}:url")],
+                |row| row.get(0),
+            )
+            .ok()
+        };
+        if let Some(url) = already_url {
+            results.push(json!({"key": key, "title": summary.lines().next().unwrap_or(""), "assignee": "", "ok": true, "issue_url": url, "attempted_at": 0}));
+            created += 1;
+            continue;
+        }
+
+        // Extract first line as title
+        let title = summary.lines().next().unwrap_or("Meeting action item").trim();
+        let body_text = if summary.lines().count() > 1 {
+            summary.lines().skip(1).collect::<Vec<_>>().join("\n")
+        } else {
+            String::new()
+        };
+
+        // Create GitHub issue
+        let output = std::process::Command::new("gh")
+            .args([
+                "issue",
+                "create",
+                "--repo",
+                &repo,
+                "--title",
+                title,
+                "--body",
+                &body_text,
+            ])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                // Store result
+                let conn = state.db.lock().unwrap();
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![format!("meeting:{id}:issue:{key}:url"), url],
+                )
+                .ok();
+                drop(conn);
+                results.push(json!({"key": key, "title": title, "assignee": "", "ok": true, "issue_url": url, "attempted_at": chrono::Utc::now().timestamp()}));
+                created += 1;
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr).to_string();
+                results.push(json!({"key": key, "title": title, "assignee": "", "ok": false, "error": err, "attempted_at": chrono::Utc::now().timestamp()}));
+                failed += 1;
+            }
+            Err(e) => {
+                results.push(json!({"key": key, "title": title, "assignee": "", "ok": false, "error": format!("{e}"), "attempted_at": chrono::Utc::now().timestamp()}));
+                failed += 1;
+            }
+        }
+    }
+
+    let total = results.len() as i64;
+    let discarded = results.iter().filter(|r| r["discarded"].as_bool().unwrap_or(false)).count() as i64;
+    let pending = total - created - failed - discarded;
+
     (
         StatusCode::OK,
         Json(json!({
             "ok": true,
-            "skipped": true,
-            "results": [],
+            "results": results,
             "summary": {
-                "created": 0,
-                "failed": 0,
-                "reason": "Issue creation is handled by the Discord bot layer"
+                "total": total,
+                "created": created,
+                "failed": failed,
+                "discarded": discarded,
+                "pending": pending,
+                "all_created": pending == 0 && failed == 0,
+                "all_resolved": pending == 0 && failed == 0,
             }
         })),
     )
 }
 
-/// POST /api/round-table-meetings/:id/issues/discard — stub
-pub async fn discard_issue(Path(_id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::OK, Json(json!({"ok": true})))
+/// POST /api/round-table-meetings/:id/issues/discard
+#[derive(Debug, Deserialize)]
+pub struct DiscardIssueBody {
+    pub key: Option<String>,
 }
 
-/// POST /api/round-table-meetings/:id/issues/discard-all — stub
-pub async fn discard_all_issues(Path(_id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::OK, Json(json!({"ok": true})))
-}
-
-/// POST /api/round-table-meetings/start — stub
-pub async fn start_meeting(
-    Json(_body): Json<StartMeetingBody>,
+pub async fn discard_issue(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<DiscardIssueBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let key = body.key.as_deref().unwrap_or("");
+    if key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "key is required"})),
+        );
+    }
+
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, 'true')",
+        [&format!("meeting:{id}:issue:{key}:discarded")],
+    )
+    .ok();
+
+    // Return meeting + summary for UI refresh
+    let meeting = conn
+        .query_row(
+            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary FROM meetings WHERE id = ?1",
+            [&id],
+            |row| meeting_row_to_json(row),
+        )
+        .unwrap_or(json!(null));
+
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "meeting": meeting, "summary": {"total": 0, "created": 0, "failed": 0, "discarded": 1, "pending": 0, "all_created": false, "all_resolved": false}})),
+    )
+}
+
+/// POST /api/round-table-meetings/:id/issues/discard-all
+pub async fn discard_all_issues(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    // Count summary items and mark all as discarded
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM meeting_transcripts WHERE meeting_id = ?1 AND is_summary = 1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    for i in 0..count {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, 'true')",
+            [&format!("meeting:{id}:issue:item-{i}:discarded")],
+        )
+        .ok();
+    }
+
+    let meeting = conn
+        .query_row(
+            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary FROM meetings WHERE id = ?1",
+            [&id],
+            |row| meeting_row_to_json(row),
+        )
+        .unwrap_or(json!(null));
+
     (
         StatusCode::OK,
         Json(json!({
             "ok": true,
-            "message": "Meeting start is handled by the Discord bot layer"
+            "meeting": meeting,
+            "results": [],
+            "summary": {"total": count, "created": 0, "failed": 0, "discarded": count, "pending": 0, "all_created": false, "all_resolved": true}
         })),
     )
+}
+
+/// POST /api/round-table-meetings/start
+/// Send meeting start request to Discord channel via announce bot.
+pub async fn start_meeting(
+    State(state): State<AppState>,
+    Json(body): Json<StartMeetingBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let channel_id = match &body.channel_id {
+        Some(id) if !id.is_empty() => id.clone(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "channel_id is required"})),
+            );
+        }
+    };
+
+    let agenda = body.agenda.as_deref().unwrap_or("General discussion");
+
+    // Send meeting start command to the channel via /api/send (health server)
+    let health_port = crate::services::discord::health::resolve_port();
+
+    let message = format!("/meeting start {agenda}");
+    let client = reqwest::Client::new();
+    match client
+        .post(format!("http://127.0.0.1:{health_port}/api/send"))
+        .json(&json!({
+            "target": format!("channel:{channel_id}"),
+            "content": message,
+            "source": "dashboard",
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => (
+            StatusCode::OK,
+            Json(json!({"ok": true, "message": "Meeting start command sent"})),
+        ),
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": format!("Discord send failed: {status} {body}")})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": format!("Request failed: {e}")})),
+        ),
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────
