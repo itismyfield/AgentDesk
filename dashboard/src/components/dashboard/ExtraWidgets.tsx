@@ -148,7 +148,7 @@ interface KanbanOpsWidgetProps {
   t: TFunction;
 }
 
-type OpsCategory = "review" | "acceptance" | "stalled" | "blocked_failed";
+type OpsCategory = "review" | "acceptance" | "stalled" | "blocked";
 
 export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
   const [expanded, setExpanded] = useState<OpsCategory | null>(null);
@@ -159,7 +159,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
     review: (c) => c.status === "review",
     acceptance: (c) => c.status === "requested",
     stalled: (c) => c.status === "in_progress",
-    blocked_failed: (c) => c.status === "blocked" || c.status === "failed",
+    blocked: (c) => c.status === "blocked",
   }), []);
 
   const handleToggle = async (cat: OpsCategory) => {
@@ -190,7 +190,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
     { key: "review", label: t({ ko: "검토 대기", en: "Review", ja: "レビュー待ち", zh: "待审查" }), value: kanban.review_queue, color: "#14b8a6" },
     { key: "acceptance", label: t({ ko: "수락 지연", en: "Ack delay", ja: "受諾遅延", zh: "接收延迟" }), value: kanban.waiting_acceptance, color: "#8b5cf6" },
     { key: "stalled", label: t({ ko: "진행 정체", en: "Stalled", ja: "停滞", zh: "停滞" }), value: kanban.stale_in_progress, color: "#f59e0b" },
-    { key: "blocked_failed", label: t({ ko: "막힘/실패", en: "Blocked/Failed", ja: "詰まり/失敗", zh: "阻塞/失败" }), value: kanban.blocked + kanban.failed, color: "#ef4444" },
+    { key: "blocked", label: t({ ko: "막힘", en: "Blocked", ja: "詰まり", zh: "阻塞" }), value: kanban.blocked, color: "#ef4444" },
   ];
 
   return (
@@ -285,8 +285,7 @@ function OpsCardRow({ card, t, onAction }: {
   onAction: (id: string, action: "retry" | "ready" | "done") => void;
 }) {
   const repo = card.github_repo?.replace(/^[^/]+\//, "") ?? "";
-  const statusColor = card.status === "failed" ? "#ef4444"
-    : card.status === "blocked" ? "#f59e0b"
+  const statusColor = card.status === "blocked" ? "#f59e0b"
     : card.status === "review" ? "#14b8a6"
     : "#8b5cf6";
 
@@ -318,7 +317,7 @@ function OpsCardRow({ card, t, onAction }: {
               {card.blocked_reason}
             </div>
           )}
-          {card.latest_dispatch_result_summary && card.status === "failed" && (
+          {card.latest_dispatch_result_summary && card.status === "blocked" && (
             <div className="text-[10px] mt-0.5" style={{ color: "#fca5a5" }}>
               {card.latest_dispatch_result_summary}
             </div>
@@ -337,7 +336,7 @@ function OpsCardRow({ card, t, onAction }: {
         )}
       </div>
       <div className="flex items-center gap-1.5">
-        {(card.status === "failed" || card.status === "blocked") && (
+        {card.status === "blocked" && (
           <>
             <button
               type="button"

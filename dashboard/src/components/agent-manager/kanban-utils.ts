@@ -28,30 +28,26 @@ export const COLUMN_DEFS: Array<{
   { status: "pending_decision", labelKo: "판단 대기", labelEn: "Pending Decision", accent: "#f472b6" },
   { status: "blocked", labelKo: "막힘", labelEn: "Blocked", accent: "#ef4444" },
   { status: "done", labelKo: "완료", labelEn: "Done", accent: "#22c55e" },
-  { status: "failed", labelKo: "실패", labelEn: "Failed", accent: "#f97316" },
-  { status: "cancelled", labelKo: "취소", labelEn: "Cancelled", accent: "#6b7280" },
 ];
 
-export const TERMINAL_STATUSES = new Set<KanbanCardStatus>(["done", "failed", "cancelled"]);
+export const TERMINAL_STATUSES = new Set<KanbanCardStatus>(["done"]);
 export const QA_STATUSES = new Set<KanbanCardStatus>(["qa_pending", "qa_in_progress", "qa_failed"]);
 export const PRIORITY_OPTIONS: KanbanCardPriority[] = ["low", "medium", "high", "urgent"];
 export const REVIEW_DISPATCH_TYPES = new Set(["review", "review-decision"]);
 
 /** Quick-transition targets per status. Order = button order (primary first). */
 export const STATUS_TRANSITIONS: Record<KanbanCardStatus, KanbanCardStatus[]> = {
-  backlog: ["ready", "cancelled"],
-  ready: ["requested", "backlog", "cancelled"],
-  requested: ["ready", "in_progress", "cancelled"],
+  backlog: ["ready"],
+  ready: ["requested", "backlog"],
+  requested: ["ready", "in_progress"],
   in_progress: ["review", "blocked"],
   review: ["done", "in_progress"],
-  blocked: ["in_progress", "cancelled"],
+  blocked: ["in_progress"],
   done: ["backlog"],
-  failed: ["backlog"],
-  cancelled: ["backlog"],
-  qa_pending: ["qa_in_progress", "done", "cancelled"],
+  qa_pending: ["qa_in_progress", "done"],
   qa_in_progress: ["done", "qa_failed"],
-  qa_failed: ["ready", "cancelled"],
-  pending_decision: ["review", "failed", "blocked", "in_progress"],
+  qa_failed: ["ready"],
+  pending_decision: ["review", "blocked", "in_progress"],
 };
 
 export const TRANSITION_STYLE: Record<string, { bg: string; text: string }> = {

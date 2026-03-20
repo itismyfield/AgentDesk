@@ -93,7 +93,7 @@ var rules = {
     var card = cards[0];
 
     // Skip terminal cards
-    if (card.status === "done" || card.status === "cancelled") return;
+    if (card.status === "done") return;
 
     // Review/decision dispatches — handled by review-automation policy
     if (dispatch.dispatch_type === "review" || dispatch.dispatch_type === "review-decision") return;
@@ -211,8 +211,8 @@ var rules = {
       }
     }
 
-    // → failed/blocked: PMD 알림 (Agent in the Loop)
-    if (payload.to === "failed" || payload.to === "blocked") {
+    // → blocked: PMD 알림 (Agent in the Loop)
+    if (payload.to === "blocked") {
       var reason = "상태 전이: " + payload.from + " → " + payload.to;
 
       // blocked_reason이 있으면 사용

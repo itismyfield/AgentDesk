@@ -345,7 +345,7 @@ export default function KanbanTab({
   const recentDoneCards = useMemo(() => {
     return repoCards
       .filter((c) => {
-        if (c.status !== "done" && c.status !== "cancelled") return false;
+        if (c.status !== "done") return false;
         if (c.parent_card_id) return false;
         if (cardTypeFilter === "issue" && isReviewCard(c)) return false;
         if (cardTypeFilter === "review" && !isReviewCard(c)) return false;
@@ -390,7 +390,7 @@ export default function KanbanTab({
     return grouped;
   }, [filteredCards, effectiveColumnDefs]);
 
-  // Include ALL cards (including terminal) to prevent done/failed issues
+  // Include ALL cards (including terminal) to prevent done issues
   // from reappearing in the backlog when the done column is hidden.
   const activeIssueNumbers = useMemo(() => {
     const set = new Set<number>();
@@ -418,7 +418,7 @@ export default function KanbanTab({
       );
 
   const canRetryCard = (card: KanbanCard | null) =>
-    Boolean(card && ["failed", "blocked", "requested", "in_progress", "cancelled"].includes(card.status));
+    Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
 
   const canRedispatchCard = (card: KanbanCard | null) =>
     Boolean(card && ["requested", "in_progress"].includes(card.status));
@@ -1498,13 +1498,6 @@ export default function KanbanTab({
                           if (target === "done" && editor.review_checklist.some((item) => !item.done)) {
                             setActionError(tr("review checklist를 모두 완료해야 done으로 이동할 수 있습니다.", "Complete the review checklist before moving to done."));
                             return;
-                          }
-                          if (target === "cancelled") {
-                            const hasIssue = selectedCard.github_issue_number;
-                            const msg = hasIssue
-                              ? tr(`이 카드를 취소하고 GitHub 이슈 #${selectedCard.github_issue_number}을 닫을까요?`, `Cancel this card and close GitHub issue #${selectedCard.github_issue_number}?`)
-                              : tr("이 카드를 취소할까요?", "Cancel this card?");
-                            if (!window.confirm(msg)) return;
                           }
                           setSavingCard(true);
                           setActionError(null);

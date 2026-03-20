@@ -161,10 +161,6 @@ export default function App() {
           break;
         }
         case "kanban_card_updated": {
-          const card = event.payload as KanbanCard;
-          if (card.status === "failed" || card.status === "cancelled") {
-            pushNotification(`칸반 상태 변경: ${card.title} → ${card.status}`, "warning");
-          }
           break;
         }
       }

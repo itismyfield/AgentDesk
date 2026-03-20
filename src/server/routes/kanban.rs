@@ -363,7 +363,7 @@ pub async fn update_card(
             );
 
             // Terminal states
-            let terminal = ["done", "failed", "cancelled"];
+            let terminal = ["done"];
             if terminal.contains(&new_s.as_str()) {
                 let _ = state.engine.fire_hook(
                     Hook::OnCardTerminal,
@@ -941,7 +941,7 @@ pub async fn bulk_action(
     let target_status = match body.action.as_str() {
         "pass" => "done",
         "reset" => "backlog",
-        "cancel" => "cancelled",
+        "cancel" => "done", // cancelled 상태 제거됨 — cancel은 done으로 처리
         other => {
             return (
                 StatusCode::BAD_REQUEST,

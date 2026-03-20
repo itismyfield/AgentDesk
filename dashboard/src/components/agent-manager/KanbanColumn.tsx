@@ -527,13 +527,6 @@ function KanbanCardArticle({
                 type="button"
                 onClick={(event) => {
                   event.stopPropagation();
-                  if (target === "cancelled") {
-                    const hasIssue = card.github_issue_number;
-                    const msg = hasIssue
-                      ? tr(`카드를 취소하고 GitHub 이슈 #${card.github_issue_number}을 닫을까요?`, `Cancel card and close GitHub issue #${card.github_issue_number}?`)
-                      : tr("카드를 취소할까요?", "Cancel this card?");
-                    if (!window.confirm(msg)) return;
-                  }
                   onSetActionError(null);
                   onUpdateCardStatus(card.id, target);
                 }}

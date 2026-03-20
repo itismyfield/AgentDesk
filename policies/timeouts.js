@@ -25,18 +25,19 @@ var timeouts = {
       "WHERE status = 'requested' AND updated_at < datetime('now', '-45 minutes')"
     );
     for (var i = 0; i < staleRequested.length; i++) {
-      // Dispatch도 failed로
+      // Dispatch를 failed로
       if (staleRequested[i].latest_dispatch_id) {
         agentdesk.db.execute(
           "UPDATE task_dispatches SET status = 'failed', result_summary = 'Timed out waiting for agent', updated_at = datetime('now') WHERE id = ? AND status IN ('pending','dispatched')",
           [staleRequested[i].latest_dispatch_id]
         );
       }
+      // 카드는 pending_decision으로 (PMD가 판단)
       agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'failed', blocked_reason = 'Timed out waiting for agent acceptance', updated_at = datetime('now') WHERE id = ?",
+        "UPDATE kanban_cards SET status = 'pending_decision', blocked_reason = 'Timed out waiting for agent acceptance', updated_at = datetime('now') WHERE id = ?",
         [staleRequested[i].id]
       );
-      agentdesk.log.warn("[timeout] Card " + staleRequested[i].id + " requested timeout → failed");
+      agentdesk.log.warn("[timeout] Card " + staleRequested[i].id + " requested timeout → pending_decision");
     }
 
     // ─── [B] In-Progress 스테일 (2시간) ────────────────────
@@ -113,7 +114,7 @@ var timeouts = {
       );
       if (staleDispatches[sd].kanban_card_id) {
         agentdesk.db.execute(
-          "UPDATE kanban_cards SET status = 'failed', updated_at = datetime('now') WHERE id = ? AND status NOT IN ('done','cancelled')",
+          "UPDATE kanban_cards SET status = 'pending_decision', blocked_reason = 'Stale dispatch auto-failed after 24h', updated_at = datetime('now') WHERE id = ? AND status NOT IN ('done')",
           [staleDispatches[sd].kanban_card_id]
         );
       }

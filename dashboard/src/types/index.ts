@@ -387,8 +387,6 @@ export type KanbanCardStatus =
   | "review"
   | "blocked"
   | "done"
-  | "failed"
-  | "cancelled"
   | "qa_pending"
   | "qa_in_progress"
   | "qa_failed"
