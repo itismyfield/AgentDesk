@@ -235,7 +235,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         .route("/skills/ranking", get(skills_api::ranking))
         // Cron jobs (stub)
         .route("/cron-jobs", get(cron_api::list_cron_jobs))
-        // Auto-queue (stub)
+        // Auto-queue
         .route("/auto-queue/generate", post(auto_queue::generate))
         .route("/auto-queue/activate", post(auto_queue::activate))
         .route("/auto-queue/status", get(auto_queue::status))
