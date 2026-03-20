@@ -107,8 +107,8 @@ fn solo_org_yaml(channels: &[(String, String, String)]) -> String {
         r#"version: 1
 name: "My Agent Org"
 
-prompts_root: "~/.remotecc/prompts"
-skills_root: "~/.remotecc/skills"
+prompts_root: "prompts"
+skills_root: "skills"
 
 agents:
   assistant:
@@ -138,8 +138,8 @@ fn small_team_org_yaml(channels: &[(String, String, String)]) -> String {
         r#"version: 1
 name: "Small Team Org"
 
-prompts_root: "~/.remotecc/prompts"
-skills_root: "~/.remotecc/skills"
+prompts_root: "prompts"
+skills_root: "skills"
 
 agents:
 "#,
@@ -200,6 +200,12 @@ fn generate_launchd_plist(home: &Path, remotecc_bin: &Path) -> String {
     let home_str = home.display();
     let bin_str = remotecc_bin.display();
     let label = dcserver::REMOTECC_DCSERVER_LAUNCHD_LABEL;
+    // Use REMOTECC_ROOT_DIR if set, otherwise default to ~/.remotecc
+    let root_dir = dcserver::remotecc_runtime_root()
+        .unwrap_or_else(|| home.join(".remotecc"));
+    let root_str = root_dir.display();
+    let logs_dir = root_dir.join("logs");
+    let logs_str = logs_dir.display();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -226,11 +232,13 @@ fn generate_launchd_plist(home: &Path, remotecc_bin: &Path) -> String {
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{home_str}/.cargo/bin</string>
     <key>HOME</key>
     <string>{home_str}</string>
+    <key>REMOTECC_ROOT_DIR</key>
+    <string>{root_str}</string>
   </dict>
   <key>StandardOutPath</key>
-  <string>{home_str}/.remotecc/dcserver.stdout.log</string>
+  <string>{logs_str}/dcserver.stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>{home_str}/.remotecc/dcserver.stderr.log</string>
+  <string>{logs_str}/dcserver.stderr.log</string>
 </dict>
 </plist>"#
     )

@@ -624,7 +624,7 @@ pub fn handle_restart_dcserver(
             .expect("Failed to set script permissions");
     }
 
-    let tmux_session = "remoteCC";
+    let tmux_session = "AgentDesk-dcserver";
 
     // Kill existing tmux session if it exists
     let _ = std::process::Command::new("tmux")

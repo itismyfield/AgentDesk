@@ -99,10 +99,15 @@ fn debug_log(msg: &str) {
     debug_log_to("claude.log", msg);
 }
 
-/// Write a debug message to a specific log file under ~/.remotecc/debug/.
+/// Write a debug message to a specific log file under $REMOTECC_ROOT_DIR/debug/.
 pub fn debug_log_to(filename: &str, msg: &str) {
-    if let Some(home) = dirs::home_dir() {
-        let debug_dir = home.join(".remotecc").join("debug");
+    let debug_dir = std::env::var("REMOTECC_ROOT_DIR")
+        .ok()
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .map(|r| std::path::PathBuf::from(r).join("debug"))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".remotecc").join("debug")));
+    if let Some(debug_dir) = debug_dir {
         let _ = std::fs::create_dir_all(&debug_dir);
         let log_path = debug_dir.join(filename);
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
@@ -1521,6 +1526,15 @@ fn execute_streaming_local_tmux(
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
 
     let mut env_lines = String::from("unset CLAUDECODE\n");
+    if let Ok(root_dir) = std::env::var("REMOTECC_ROOT_DIR") {
+        let trimmed = root_dir.trim();
+        if !trimmed.is_empty() {
+            env_lines.push_str(&format!(
+                "export REMOTECC_ROOT_DIR='{}'\n",
+                trimmed.replace('\'', "'\\''")
+            ));
+        }
+    }
     if let Some(channel_id) = report_channel_id {
         env_lines.push_str(&format!(
             "export {}={}\n",

@@ -60,13 +60,14 @@ pub(in crate::services::discord) async fn build_health_report(
         )
     };
 
-    let current_release = dirs::home_dir()
-        .map(|h| h.join(".remotecc").join("releases").join("current"))
+    let runtime_root = crate::cli::dcserver::remotecc_runtime_root();
+    let current_release = runtime_root.as_ref()
+        .map(|r| r.join("releases").join("current"))
         .and_then(|p| fs::read_link(p).ok())
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "(unknown)".to_string());
-    let previous_release = dirs::home_dir()
-        .map(|h| h.join(".remotecc").join("releases").join("previous"))
+    let previous_release = runtime_root.as_ref()
+        .map(|r| r.join("releases").join("previous"))
         .and_then(|p| fs::read_link(p).ok())
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "(none)".to_string());
