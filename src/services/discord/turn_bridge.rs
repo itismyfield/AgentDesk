@@ -838,6 +838,14 @@ pub(super) fn spawn_turn_bridge(
                     } else {
                         (None, false)
                     };
+                    // Write-through: update disk after dequeue
+                    if next.0.is_some() {
+                        if remove_queue {
+                            super::save_channel_queue(&provider, channel_id, &[]);
+                        } else if let Some(q) = data.intervention_queue.get(&channel_id) {
+                            super::save_channel_queue(&provider, channel_id, q);
+                        }
+                    }
                     if remove_queue {
                         data.intervention_queue.remove(&channel_id);
                     }
@@ -887,6 +895,7 @@ pub(super) fn spawn_turn_bridge(
                 }
                 // Deferred drain: wait briefly then kickoff idle queues using cached context
                 let shared_for_drain = shared_owned.clone();
+                let provider_for_drain = provider.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     if let (Some(ctx), Some(tok)) = (
@@ -895,7 +904,7 @@ pub(super) fn spawn_turn_bridge(
                     ) {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         println!("  [{ts}] 🚀 Deferred drain: kicking off idle queues");
-                        super::kickoff_idle_queues(ctx, &shared_for_drain, tok).await;
+                        super::kickoff_idle_queues(ctx, &shared_for_drain, tok, &provider_for_drain).await;
                     } else {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         println!(

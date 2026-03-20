@@ -197,15 +197,18 @@ pub(super) async fn handle_event(
                         )
                     };
 
-                    // During shutdown, persist immediately so messages arriving
-                    // after the SIGTERM final save are not lost.
+                    // Write-through: persist this channel's queue to disk immediately
+                    // so it survives SIGKILL, OOM kill, or crash.
+                    if inserted {
+                        if let Some(q) = d.intervention_queue.get(&channel_id) {
+                            save_channel_queue(&data.provider, channel_id, q);
+                        }
+                    }
+
                     let is_shutting_down = data
                         .shared
                         .shutting_down
                         .load(std::sync::atomic::Ordering::Relaxed);
-                    if is_shutting_down && inserted {
-                        save_pending_queues(&data.provider, &d.intervention_queue);
-                    }
 
                     drop(d);
 
@@ -262,10 +265,9 @@ pub(super) async fn handle_event(
                     },
                 );
 
-                // During shutdown, persist queue + checkpoint to disk immediately
-                // so messages arriving after the SIGTERM final save are not lost.
-                if is_shutting_down {
-                    save_pending_queues(&data.provider, &d.intervention_queue);
+                // Write-through: persist this channel's queue to disk immediately
+                if let Some(q) = d.intervention_queue.get(&channel_id) {
+                    save_channel_queue(&data.provider, channel_id, q);
                 }
                 drop(d);
 
@@ -764,6 +766,10 @@ pub(super) async fn handle_text_message(
                     created_at: std::time::Instant::now(),
                 },
             );
+            // Write-through: persist this channel's queue to disk
+            if let Some(q) = data.intervention_queue.get(&channel_id) {
+                super::save_channel_queue(&provider, channel_id, q);
+            }
             drop(data);
             // Clean up: remove placeholder and reaction created before this check
             let _ = channel_id

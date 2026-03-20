@@ -403,7 +403,7 @@ pub(super) fn requeue_intervention_front(
     }
 }
 
-// ─── Pending queue persistence (SIGTERM → restore) ──────────────────────────
+// ─── Pending queue persistence (write-through + SIGTERM) ─────────────────────
 
 /// Serializable form of a queued intervention for disk persistence.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -411,6 +411,37 @@ pub(super) struct PendingQueueItem {
     pub(super) author_id: u64,
     pub(super) message_id: u64,
     pub(super) text: String,
+}
+
+/// Write-through: save a single channel's queue to disk.
+/// If the queue is empty the file is removed.
+/// This is designed to be called from `tokio::spawn` after every enqueue/dequeue.
+pub(super) fn save_channel_queue(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    queue: &[Intervention],
+) {
+    let Some(root) = runtime_store::discord_pending_queue_root() else {
+        return;
+    };
+    let dir = root.join(provider.as_str());
+    let path = dir.join(format!("{}.json", channel_id.get()));
+    if queue.is_empty() {
+        let _ = fs::remove_file(&path);
+        return;
+    }
+    let _ = fs::create_dir_all(&dir);
+    let items: Vec<PendingQueueItem> = queue
+        .iter()
+        .map(|i| PendingQueueItem {
+            author_id: i.author_id.get(),
+            message_id: i.message_id.get(),
+            text: i.text.clone(),
+        })
+        .collect();
+    if let Ok(json) = serde_json::to_string_pretty(&items) {
+        let _ = runtime_store::atomic_write(&path, &json);
+    }
 }
 
 /// Save all non-empty intervention queues to `discord_pending_queue/{provider}/`.
@@ -806,7 +837,12 @@ async fn execute_handoff_turns(
 /// turn running. This bridges the gap where restored pending queues or
 /// handoff injections sit idle because no turn-completion event triggers
 /// the dequeue chain.
-async fn kickoff_idle_queues(ctx: &serenity::Context, shared: &Arc<SharedData>, token: &str) {
+async fn kickoff_idle_queues(
+    ctx: &serenity::Context,
+    shared: &Arc<SharedData>,
+    token: &str,
+    provider: &ProviderKind,
+) {
     // Collect channels with queued items that are idle (no active turn)
     let channels_to_kick: Vec<(ChannelId, Intervention, bool)> = {
         let mut data = shared.core.lock().await;
@@ -820,8 +856,12 @@ async fn kickoff_idle_queues(ctx: &serenity::Context, shared: &Arc<SharedData>, 
             if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
                 if let Some(intervention) = dequeue_next_soft_intervention(queue) {
                     let has_more = has_soft_intervention(queue);
+                    // Write-through: update disk after dequeue
                     if queue.is_empty() {
+                        save_channel_queue(provider, channel_id, &[]);
                         data.intervention_queue.remove(&channel_id);
+                    } else {
+                        save_channel_queue(provider, channel_id, queue);
                     }
                     result.push((channel_id, intervention, has_more));
                 }
@@ -1406,6 +1446,7 @@ pub async fn run_bot(
                         &ctx_for_kickoff,
                         &shared_for_restart_reports,
                         &token_for_kickoff,
+                        &provider_for_restore,
                     )
                     .await;
 
