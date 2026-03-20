@@ -358,6 +358,36 @@ pub async fn update_card(
                     }),
                 );
             }
+
+            // Auto-create dispatch when transitioning to "requested"
+            if new_s == "requested" {
+                let (to_agent_id, title) = {
+                    let conn = state.db.lock().unwrap();
+                    let agent_id: Option<String> = conn
+                        .query_row("SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1", [&id], |row| row.get(0))
+                        .ok().flatten();
+                    let title: String = conn
+                        .query_row("SELECT title FROM kanban_cards WHERE id = ?1", [&id], |row| row.get(0))
+                        .unwrap_or_else(|_| "Dispatch".to_string());
+                    (agent_id, title)
+                };
+                if let Some(ref agent_id) = to_agent_id {
+                    match crate::dispatch::create_dispatch(
+                        &state.db, &state.engine, &id, agent_id, "implementation", &title, &json!({}),
+                    ) {
+                        Ok(_) => {
+                            let db = state.db.clone();
+                            let agent_id = agent_id.clone();
+                            let title = title.clone();
+                            let card_id = id.clone();
+                            tokio::spawn(async move {
+                                super::dispatches::send_dispatch_to_discord(&db, &agent_id, &title, &card_id).await;
+                            });
+                        }
+                        Err(e) => tracing::warn!("[update_card] auto-dispatch creation failed: {e}"),
+                    }
+                }
+            }
         }
     }
 
