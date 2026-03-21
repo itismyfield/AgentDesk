@@ -699,7 +699,14 @@ fn resolve_channel_alias(alias: &str) -> Option<u64> {
     let provider = entry
         .get("provider")
         .and_then(|v| v.as_str())
-        .unwrap_or("claude");
+        .unwrap_or_else(|| {
+            // Infer provider from channel name convention: *-cdx = codex, *-cc = claude
+            if alias.ends_with("-cdx") {
+                "codex"
+            } else {
+                "claude"
+            }
+        });
     let by_id = json.get("byChannelId")?.as_object()?;
     for (ch_id, ch_entry) in by_id {
         if ch_entry.get("roleId").and_then(|v| v.as_str()) == Some(role_id)
