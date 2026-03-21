@@ -143,6 +143,15 @@ pub fn complete_dispatch(
                 }),
             );
         }
+        if card_status.as_deref() == Some("done") {
+            let _ = engine.fire_hook(
+                Hook::OnCardTerminal,
+                json!({
+                    "card_id": card_id,
+                    "status": "done",
+                }),
+            );
+        }
     }
 
     Ok(dispatch)

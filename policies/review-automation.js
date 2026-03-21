@@ -153,6 +153,11 @@ function processVerdict(cardId, verdict, result) {
         "UPDATE kanban_cards SET status = 'done', review_status = NULL, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
         [cardId]
       );
+      // Mark auto-queue entry as done so next entry can be dispatched
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ? AND status = 'dispatched'",
+        [cardId]
+      );
       agentdesk.log.info("[review] Card " + cardId + " passed review → done");
     }
 
