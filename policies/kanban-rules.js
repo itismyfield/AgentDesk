@@ -180,8 +180,7 @@ var rules = {
 
       if (reasons.length > 0) {
         // Gate failed → pending_decision
-        agentdesk.db.execute(
-      agentdesk.kanban.setStatus(card.id, "pending_decision");
+        agentdesk.kanban.setStatus(card.id, "pending_decision");
         agentdesk.db.execute(
           "UPDATE kanban_cards SET review_status = NULL WHERE id = ?",
           [card.id]
