@@ -59,7 +59,32 @@ var timeouts = {
         [staleRequested[i].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleRequested[i].id + " requested timeout → pending_decision");
-      sendNotifyAlert(getPMDChannel(), "⏰ [Timeout] 카드 " + staleRequested[i].id + " — 45분 대기 → pending_decision");
+      // PMD에게 결정 요청 (announce bot — 에이전트가 반응)
+      var cardInfo = agentdesk.db.query(
+        "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
+        [staleRequested[i].id]
+      );
+      var cardTitle = (cardInfo.length > 0) ? cardInfo[0].title : staleRequested[i].id;
+      var cardUrl = (cardInfo.length > 0 && cardInfo[0].github_issue_url) ? "\n" + cardInfo[0].github_issue_url : "";
+      var assignee = (cardInfo.length > 0 && cardInfo[0].assigned_agent_id) ? cardInfo[0].assigned_agent_id : "미배정";
+      try {
+        var port = agentdesk.config.get("health_port") || 8798;
+        agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
+          target: getPMDChannel(),
+          content: "[ADK → PMD] ⏰ 타임아웃 결정 요청\n\n" +
+            "카드: " + cardTitle + "\n" +
+            "담당: " + assignee + "\n" +
+            "사유: 45분간 에이전트 무응답\n\n" +
+            "다음 중 하나를 선택해주세요:\n" +
+            "• 재디스패치 → 같은/다른 에이전트에게 재전송\n" +
+            "• 백로그 → 우선순위 재조정\n" +
+            "• 취소 → 이슈 닫기" + cardUrl,
+          source: "timeouts",
+          bot: "announce"
+        });
+      } catch(e) {
+        agentdesk.log.warn("[timeout] PMD decision request failed: " + e);
+      }
     }
 
     // ─── [B] In-Progress 스테일 (2시간) ────────────────────
@@ -73,7 +98,32 @@ var timeouts = {
         [staleInProgress[j].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " in_progress stale → blocked");
-      sendNotifyAlert(getPMDChannel(), "⚠️ [Stalled] 카드 " + staleInProgress[j].id + " — 2시간 이상 진행 없음 → blocked");
+      // PMD에게 결정 요청 (announce bot)
+      var stalledInfo = agentdesk.db.query(
+        "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
+        [staleInProgress[j].id]
+      );
+      var stalledTitle = (stalledInfo.length > 0) ? stalledInfo[0].title : staleInProgress[j].id;
+      var stalledUrl = (stalledInfo.length > 0 && stalledInfo[0].github_issue_url) ? "\n" + stalledInfo[0].github_issue_url : "";
+      var stalledAssignee = (stalledInfo.length > 0 && stalledInfo[0].assigned_agent_id) ? stalledInfo[0].assigned_agent_id : "미배정";
+      try {
+        var port = agentdesk.config.get("health_port") || 8798;
+        agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
+          target: getPMDChannel(),
+          content: "[ADK → PMD] ⚠️ 정체 카드 결정 요청\n\n" +
+            "카드: " + stalledTitle + "\n" +
+            "담당: " + stalledAssignee + "\n" +
+            "사유: 2시간 이상 진행 없음 → blocked\n\n" +
+            "다음 중 하나를 선택해주세요:\n" +
+            "• 재디스패치 → 에이전트에게 재전송\n" +
+            "• 백로그 → 우선순위 재조정\n" +
+            "• 취소 → 이슈 닫기" + stalledUrl,
+          source: "timeouts",
+          bot: "announce"
+        });
+      } catch(e) {
+        agentdesk.log.warn("[timeout] PMD stalled request failed: " + e);
+      }
     }
 
     // ─── [C] 스테일 리뷰 (dispatch 완료인데 verdict 없음) ──
