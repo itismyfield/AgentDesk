@@ -69,6 +69,9 @@ pub fn transition_status(
 
     drop(conn);
 
+    // GitHub auto-sync (close on done, comment on review)
+    github_sync_on_transition(db, card_id, new_status);
+
     // Fire hooks
     let _ = engine.fire_hook(
         Hook::OnCardTransition,
@@ -125,7 +128,7 @@ pub fn fire_transition_hooks(
         return;
     }
 
-    // Sync auto_queue_entries on terminal status
+    // Sync auto_queue_entries + GitHub on terminal status
     if to == "done" {
         if let Ok(conn) = db.lock() {
             conn.execute(
@@ -136,6 +139,9 @@ pub fn fire_transition_hooks(
             .ok();
         }
     }
+
+    // GitHub auto-sync
+    github_sync_on_transition(db, card_id, to);
 
     let _ = engine.fire_hook(
         Hook::OnCardTransition,
@@ -164,5 +170,55 @@ pub fn fire_transition_hooks(
                 "from": from,
             }),
         );
+    }
+}
+
+/// Sync GitHub issue state when kanban card transitions.
+fn github_sync_on_transition(db: &Db, card_id: &str, new_status: &str) {
+    let info: Option<(String, Option<i64>)> = db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT COALESCE(github_issue_url, ''), github_issue_number FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok()
+        });
+
+    let Some((issue_url, issue_number)) = info else {
+        return;
+    };
+    if issue_url.is_empty() {
+        return;
+    }
+
+    let repo = match issue_url
+        .strip_prefix("https://github.com/")
+        .and_then(|s| s.find("/issues/").map(|i| &s[..i]))
+    {
+        Some(r) => r.to_string(),
+        None => return,
+    };
+    let Some(num) = issue_number else { return };
+
+    match new_status {
+        "done" => {
+            let _ = std::process::Command::new("gh")
+                .args(["issue", "close", &num.to_string(), "--repo", &repo])
+                .output();
+        }
+        "review" => {
+            let comment = "🔍 칸반 상태: **review** (카운터모델 리뷰 진행 중)";
+            let _ = std::process::Command::new("gh")
+                .args([
+                    "issue", "comment", &num.to_string(),
+                    "--repo", &repo,
+                    "--body", comment,
+                ])
+                .output();
+        }
+        _ => {}
     }
 }
