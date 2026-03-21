@@ -51,6 +51,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
             "/agents/{id}",
             get(get_agent).patch(update_agent).delete(delete_agent),
         )
+        .route("/agent-channels", get(agents::agent_channels))
         .route("/agents/{id}/offices", get(agents::agent_offices))
         .route("/agents/{id}/signal", post(agents::agent_signal))
         .route("/agents/{id}/cron", get(cron_api::agent_cron_jobs))

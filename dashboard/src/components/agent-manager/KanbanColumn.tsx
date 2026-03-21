@@ -247,7 +247,7 @@ function BacklogIssueCard({
       className="rounded-2xl border p-3 cursor-pointer transition-colors hover:border-[rgba(148,163,184,0.4)]"
       style={{ borderColor: "rgba(148,163,184,0.2)", backgroundColor: "rgba(2,6,23,0.82)" }}
       onClick={() => onBacklogIssueClick(issue)}
-      draggable={!compactBoard}
+      draggable
       onDragStart={(event) => {
         event.dataTransfer.setData("application/x-backlog-issue", JSON.stringify(issue));
         event.dataTransfer.effectAllowed = "move";
@@ -367,7 +367,7 @@ function KanbanCardArticle({
 
   return (
     <article
-      draggable={!compactBoard}
+      draggable
       onDragStart={(event) => {
         if (compactBoard) return;
         onSetDraggingCardId(card.id);
