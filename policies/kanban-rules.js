@@ -139,8 +139,13 @@ var rules = {
     }
 
     // ── PM Decision Gate ──
+    // Skip gate if dispatch context has skip_gate flag (e.g., PMD manual review)
+    var dispatchContext = {};
+    try { dispatchContext = JSON.parse(dispatch.context || "{}"); } catch(e) {}
     var pmGateEnabled = agentdesk.config.get("pm_decision_gate_enabled");
-    if (pmGateEnabled !== false && pmGateEnabled !== "false") {
+    if (dispatchContext.skip_gate) {
+      agentdesk.log.info("[pm-gate] Skipped for card " + card.id + " (skip_gate flag)");
+    } else if (pmGateEnabled !== false && pmGateEnabled !== "false") {
       var reasons = [];
 
       // Check 1: DoD completion

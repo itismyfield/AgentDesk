@@ -385,3 +385,49 @@ pub async fn agent_timeline(
 
     (StatusCode::OK, Json(json!({"events": events})))
 }
+
+/// POST /api/agents/:id/signal
+/// Agent sends a status signal (e.g., "blocked" with reason).
+pub async fn agent_signal(
+    State(state): State<super::AppState>,
+    axum::extract::Path(agent_id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let signal = body.get("signal").and_then(|v| v.as_str()).unwrap_or("");
+    let reason = body.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+
+    if signal != "blocked" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("unknown signal: {signal}. supported: blocked")})),
+        );
+    }
+
+    // Find active card for this agent
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+    };
+
+    let card_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM kanban_cards WHERE assigned_agent_id = ?1 AND status = 'in_progress' ORDER BY updated_at DESC LIMIT 1",
+            [&agent_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let Some(card_id) = card_id else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "no active card for agent"})));
+    };
+
+    conn.execute(
+        "UPDATE kanban_cards SET blocked_reason = ?1 WHERE id = ?2",
+        rusqlite::params![reason, card_id],
+    ).ok();
+    drop(conn);
+
+    let _ = crate::kanban::transition_status(&state.db, &state.engine, &card_id, "blocked");
+
+    (StatusCode::OK, Json(json!({"ok": true, "card_id": card_id, "signal": signal})))
+}
