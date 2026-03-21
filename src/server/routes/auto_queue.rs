@@ -476,14 +476,29 @@ pub async fn status(
 
     let run = run_to_json(&conn, &run_id);
 
-    // Get entries
+    // Get entries (filtered by agent_id and repo if specified)
     let entry_ids: Vec<String> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id FROM auto_queue_entries WHERE run_id = ?1 ORDER BY priority_rank ASC",
-            )
-            .unwrap();
-        stmt.query_map([&run_id], |row| row.get::<_, String>(0))
+        let mut entry_sql = String::from(
+            "SELECT e.id FROM auto_queue_entries e \
+             LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
+             WHERE e.run_id = ?1",
+        );
+        let mut entry_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(run_id.clone())];
+        if let Some(ref agent_id) = query.agent_id {
+            entry_sql.push_str(&format!(" AND e.agent_id = ?{}", entry_params.len() + 1));
+            entry_params.push(Box::new(agent_id.clone()));
+        }
+        if let Some(ref repo) = query.repo {
+            entry_sql.push_str(&format!(" AND kc.repo_id = ?{}", entry_params.len() + 1));
+            entry_params.push(Box::new(repo.clone()));
+        }
+        entry_sql.push_str(" ORDER BY e.priority_rank ASC");
+
+        let entry_refs: Vec<&dyn rusqlite::types::ToSql> =
+            entry_params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&entry_sql).unwrap();
+        stmt.query_map(entry_refs.as_slice(), |row| row.get::<_, String>(0))
             .ok()
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
             .unwrap_or_default()
