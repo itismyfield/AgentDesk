@@ -355,6 +355,13 @@ fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Op
         })
         .unwrap_or_default();
 
+    // Filter out review/review-decision dispatches — these are notified by
+    // handle_completed_dispatch_followups / send_review_result_to_primary
+    let pending_dispatches: Vec<_> = pending_dispatches
+        .into_iter()
+        .filter(|(_, _, dtype, _, _, _)| dtype != "review" && dtype != "review-decision")
+        .collect();
+
     if pending_dispatches.is_empty() {
         return;
     }
