@@ -140,6 +140,14 @@ var reviewAutomation = {
     try { result = JSON.parse(dispatch.result || "{}"); } catch(e) { result = {}; }
     var verdict = result.verdict || result.decision;
 
+    // When a review dispatch is auto-completed on session idle without an explicit
+    // verdict, default to "pass". The reviewer would have sent an "improve" verdict
+    // or kept the session active if blocking issues were found.
+    if (!verdict && result.auto_completed) {
+      verdict = "pass";
+      agentdesk.log.info("[review] Auto-completed review dispatch " + dispatch.id + " — defaulting verdict to pass");
+    }
+
     if (!verdict) {
       agentdesk.log.info("[review] No verdict in dispatch " + dispatch.id + " result, waiting for API verdict");
       return;
