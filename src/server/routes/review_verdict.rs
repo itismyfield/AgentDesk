@@ -63,9 +63,11 @@ pub async fn submit_verdict(
         )
         .ok();
     if let Some((reviewer, reviewee, dispatch_type)) = &self_review_check {
-        // Allow review-type dispatches (counter-model review uses same agent_id but alt channel)
-        let is_review_dispatch = dispatch_type == "review" || dispatch_type == "review-decision";
-        if reviewer == reviewee && !is_review_dispatch {
+        // Allow only 'review' dispatch type (counter-model review uses same agent_id but alt channel).
+        // 'review-decision' is NOT exempt — it's the original agent's own decision path,
+        // which has its own dedicated API at /api/review-decision.
+        let is_counter_model_review = dispatch_type == "review";
+        if reviewer == reviewee && !is_counter_model_review {
             return (
                 StatusCode::FORBIDDEN,
                 Json(
@@ -535,5 +537,47 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::FORBIDDEN, "self-review on non-review dispatch should be blocked");
+    }
+
+    #[tokio::test]
+    async fn review_decision_dispatch_blocked_by_self_review() {
+        // review-decision is the original agent's decision path — should be blocked
+        // by self-review check (it has its own dedicated API at /api/review-decision)
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-rd', 'RD', '333', '444')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-rd', 'RD Test', 'review', 'agent-rd', 'dispatch-rd', 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rd', 'card-rd', 'agent-rd', 'review-decision', 'pending', '[Decision] card-rd', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        drop(conn);
+
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+        };
+
+        let (status, _) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-rd".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "review-decision dispatch should be blocked by self-review (use /api/review-decision instead)");
     }
 }
