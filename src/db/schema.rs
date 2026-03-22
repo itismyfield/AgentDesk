@@ -83,35 +83,111 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN sort_order INTEGER DEFAULT 0;");
 
     // Unique constraint: one kanban card per GitHub issue per repo.
-    // First, deduplicate any existing rows — keep the one with the highest id
-    // for each (github_issue_number, repo_id) pair so that CREATE UNIQUE INDEX
-    // does not silently fail.
-    let dedup_deleted: usize = conn
+    // Deduplicate existing rows first so CREATE UNIQUE INDEX succeeds.
+    // Strategy: for each duplicate (github_issue_number, repo_id) group,
+    // pick the "survivor" — the card with FK references (task_dispatches,
+    // auto_queue_entries, review_decisions), or the most recently updated one.
+    // Re-point all FK references to the survivor, then delete the rest.
+    let _ = conn
+        .execute_batch(
+            "-- Re-point FK references from duplicate cards to the survivor.
+             -- Survivor = the card with the most recent updated_at in each group.
+             UPDATE task_dispatches SET kanban_card_id = (
+                 SELECT kc2.id FROM kanban_cards kc2
+                 WHERE kc2.github_issue_number = (
+                     SELECT github_issue_number FROM kanban_cards WHERE id = task_dispatches.kanban_card_id
+                 )
+                 AND kc2.repo_id = (
+                     SELECT repo_id FROM kanban_cards WHERE id = task_dispatches.kanban_card_id
+                 )
+                 ORDER BY kc2.updated_at DESC, kc2.created_at DESC
+                 LIMIT 1
+             )
+             WHERE kanban_card_id IN (
+                 SELECT id FROM kanban_cards kc
+                 WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL
+                 AND EXISTS (
+                     SELECT 1 FROM kanban_cards kc3
+                     WHERE kc3.github_issue_number = kc.github_issue_number
+                     AND kc3.repo_id = kc.repo_id
+                     AND kc3.id != kc.id
+                 )
+             );
+             UPDATE auto_queue_entries SET kanban_card_id = (
+                 SELECT kc2.id FROM kanban_cards kc2
+                 WHERE kc2.github_issue_number = (
+                     SELECT github_issue_number FROM kanban_cards WHERE id = auto_queue_entries.kanban_card_id
+                 )
+                 AND kc2.repo_id = (
+                     SELECT repo_id FROM kanban_cards WHERE id = auto_queue_entries.kanban_card_id
+                 )
+                 ORDER BY kc2.updated_at DESC, kc2.created_at DESC
+                 LIMIT 1
+             )
+             WHERE kanban_card_id IN (
+                 SELECT id FROM kanban_cards kc
+                 WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL
+                 AND EXISTS (
+                     SELECT 1 FROM kanban_cards kc3
+                     WHERE kc3.github_issue_number = kc.github_issue_number
+                     AND kc3.repo_id = kc.repo_id
+                     AND kc3.id != kc.id
+                 )
+             );
+             UPDATE review_decisions SET card_id = (
+                 SELECT kc2.id FROM kanban_cards kc2
+                 WHERE kc2.github_issue_number = (
+                     SELECT github_issue_number FROM kanban_cards WHERE id = review_decisions.card_id
+                 )
+                 AND kc2.repo_id = (
+                     SELECT repo_id FROM kanban_cards WHERE id = review_decisions.card_id
+                 )
+                 ORDER BY kc2.updated_at DESC, kc2.created_at DESC
+                 LIMIT 1
+             )
+             WHERE card_id IN (
+                 SELECT id FROM kanban_cards kc
+                 WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL
+                 AND EXISTS (
+                     SELECT 1 FROM kanban_cards kc3
+                     WHERE kc3.github_issue_number = kc.github_issue_number
+                     AND kc3.repo_id = kc.repo_id
+                     AND kc3.id != kc.id
+                 )
+             );",
+        )
+        .ok();
+    // Now delete the non-survivor duplicates (FK references already re-pointed).
+    // Survivor = most recently updated card per (github_issue_number, repo_id).
+    let deleted = conn
         .execute(
-            "DELETE FROM kanban_cards WHERE id NOT IN (
-                SELECT MAX(id) FROM kanban_cards
-                WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL
-                GROUP BY github_issue_number, repo_id
-            ) AND github_issue_number IS NOT NULL AND repo_id IS NOT NULL
-            AND EXISTS (
-                SELECT 1 FROM kanban_cards kc2
-                WHERE kc2.github_issue_number = kanban_cards.github_issue_number
-                AND kc2.repo_id = kanban_cards.repo_id
-                AND kc2.id > kanban_cards.id
-            )",
+            "DELETE FROM kanban_cards
+             WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL
+             AND id NOT IN (
+                 SELECT id FROM (
+                     SELECT id, ROW_NUMBER() OVER (
+                         PARTITION BY github_issue_number, repo_id
+                         ORDER BY updated_at DESC, created_at DESC
+                     ) AS rn
+                     FROM kanban_cards
+                     WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL
+                 ) WHERE rn = 1
+             )",
             [],
         )
         .unwrap_or(0);
-    if dedup_deleted > 0 {
+    if deleted > 0 {
         tracing::warn!(
-            "Cleaned up {dedup_deleted} duplicate kanban_cards rows (by github_issue_number, repo_id)"
+            "Cleaned up {deleted} duplicate kanban_cards rows (by github_issue_number, repo_id)"
         );
     }
-    let _ = conn.execute_batch(
+    if let Err(e) = conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_kanban_cards_issue_repo \
          ON kanban_cards (github_issue_number, repo_id) \
          WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL;",
-    );
+    ) {
+        tracing::error!("Failed to create unique index idx_kanban_cards_issue_repo: {e}");
+    }
 
     // Audit logs table for analytics dashboard
     conn.execute_batch(
