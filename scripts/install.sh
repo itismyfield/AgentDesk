@@ -242,7 +242,7 @@ if launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH" 2>/dev/null; then
   sleep 3
 
   # Health check
-  if curl -sf --max-time 5 "http://127.0.0.1:$DEFAULT_PORT/api/health" | grep -q '"status"'; then
+  if curl -sf --max-time 5 "http://127.0.0.1:$DEFAULT_PORT/api/health" | grep -q '"ok":true'; then
     ok "AgentDesk is running on port $DEFAULT_PORT"
   else
     warn "Service started but health check pending. Check logs: $INSTALL_DIR/logs/"

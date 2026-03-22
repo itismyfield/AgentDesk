@@ -13,7 +13,7 @@ use crate::server;
 use crate::services;
 
 use super::VERSION;
-pub(crate) const AGENTDESK_DCSERVER_LAUNCHD_LABEL: &str = "com.agentdesk.dcserver";
+pub(crate) const AGENTDESK_DCSERVER_LAUNCHD_LABEL: &str = "com.agentdesk.release";
 const AGENTDESK_DCSERVER_LABEL_ENV: &str = "AGENTDESK_DCSERVER_LABEL";
 const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 

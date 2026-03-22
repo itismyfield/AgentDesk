@@ -30,24 +30,28 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // Skip auth for health/session/hook endpoints (internal service calls)
+    // Skip auth for specific internal/public endpoints only.
     // Note: path is relative to the /api nest, so "/health" not "/api/health"
     let path = req.uri().path();
-    // Skip auth for internal endpoints and browser requests (same-origin dashboard)
-    // External programmatic access requires Bearer token.
-    // Browser requests are identified by Sec-Fetch-Mode or Referer headers.
-    let is_browser = req.headers().contains_key("sec-fetch-mode")
-        || req
-            .headers()
-            .get("accept")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.contains("text/html"))
-            .unwrap_or(false);
-    if is_browser {
+
+    if path == "/health"
+        || path == "/auth/session"
+        || path.starts_with("/hook/")
+        || path.starts_with("/onboarding/")
+    {
         return next.run(req).await;
     }
 
-    if path == "/health" || path == "/auth/session" || path.starts_with("/hook/") {
+    // Allow same-origin requests (dashboard served from this server).
+    // Check Origin/Referer to verify the request comes from our own host.
+    let is_same_origin = req
+        .headers()
+        .get("origin")
+        .or_else(|| req.headers().get("referer"))
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("http://127.0.0.1") || v.starts_with("http://localhost"))
+        .unwrap_or(false);
+    if is_same_origin {
         return next.run(req).await;
     }
 
