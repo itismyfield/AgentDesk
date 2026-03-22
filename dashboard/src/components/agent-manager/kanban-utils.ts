@@ -38,7 +38,7 @@ export const REVIEW_DISPATCH_TYPES = new Set(["review", "review-decision"]);
 /** Quick-transition targets per status. Order = button order (primary first). */
 export const STATUS_TRANSITIONS: Record<KanbanCardStatus, KanbanCardStatus[]> = {
   backlog: ["ready"],
-  ready: ["requested", "backlog"],
+  ready: ["backlog"],
   requested: ["ready", "in_progress"],
   in_progress: ["review", "blocked"],
   review: ["done", "in_progress"],

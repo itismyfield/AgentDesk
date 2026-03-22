@@ -532,10 +532,20 @@ export default function KanbanTab({
     if (!draggedId) return;
     if (beforeCardId === draggedId) return;
     try {
-      await onUpdateCard(draggedId, {
-        status: targetStatus,
-        before_card_id: beforeCardId,
-      });
+      if (targetStatus === "requested") {
+        const card = cardsById.get(draggedId);
+        await api.createDispatch({
+          kanban_card_id: draggedId,
+          to_agent_id: card?.assignee_agent_id ?? "",
+          title: card?.title ?? "Dispatch",
+        });
+        window.location.reload();
+      } else {
+        await onUpdateCard(draggedId, {
+          status: targetStatus,
+          before_card_id: beforeCardId,
+        });
+      }
     } catch (error) {
       setActionError(error instanceof Error ? error.message : tr("카드 이동에 실패했습니다.", "Failed to move card."));
     }
@@ -552,7 +562,18 @@ export default function KanbanTab({
       }
     }
     try {
-      await onUpdateCard(cardId, { status: targetStatus });
+      if (targetStatus === "requested") {
+        // requested 전환은 POST /api/dispatches로만 가능
+        const card = cardsById.get(cardId);
+        await api.createDispatch({
+          kanban_card_id: cardId,
+          to_agent_id: card?.assignee_agent_id ?? "",
+          title: card?.title ?? "Dispatch",
+        });
+        window.location.reload();
+      } else {
+        await onUpdateCard(cardId, { status: targetStatus });
+      }
     } catch (error) {
       setActionError(error instanceof Error ? error.message : tr("상태 전환에 실패했습니다.", "Failed to change status."));
     }

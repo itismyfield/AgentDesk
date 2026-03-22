@@ -235,6 +235,20 @@ export async function saveRuntimeConfig(
   });
 }
 
+// ── Dispatches ──
+
+export async function createDispatch(body: {
+  kanban_card_id: string;
+  to_agent_id: string;
+  title: string;
+  dispatch_type?: string;
+}): Promise<{ dispatch: Record<string, unknown> }> {
+  return request("/api/dispatches", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 // ── Stats ──
 
 export async function getStats(officeId?: string): Promise<DashboardStats> {
