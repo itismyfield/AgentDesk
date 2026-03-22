@@ -54,6 +54,10 @@ pub(super) struct Meeting {
     pub summary: Option<String>,
     /// Meeting start timestamp (RFC 3339)
     pub started_at: String,
+    /// Discord thread ID for meeting context isolation
+    pub thread_id: Option<u64>,
+    /// Channel to send meeting messages (thread_id if available, else parent channel)
+    pub msg_channel: Option<u64>,
 }
 
 /// Rule for dynamic summary agent selection based on agenda keywords.
@@ -392,15 +396,25 @@ pub(super) async fn start_meeting(
                 status: MeetingStatus::SelectingParticipants,
                 summary: None,
                 started_at: chrono::Local::now().to_rfc3339(),
+                thread_id: None,
+                msg_channel: None,
             },
         );
     }
 
     // Create a Discord thread for the meeting so all output is contained there.
-    // The meeting state is still keyed by the parent channel_id; the thread is used only for messages.
     let thread_name = format!("Meeting: {}", &agenda[..agenda.len().min(90)]);
     let msg_channel: ChannelId = match create_meeting_thread(http, channel_id, &thread_name).await {
-        Some(tid) => tid,
+        Some(tid) => {
+            // Save thread_id in Meeting struct
+            let mut core = shared.core.lock().await;
+            if let Some(m) = core.active_meetings.get_mut(&channel_id) {
+                m.thread_id = Some(tid.get());
+                m.msg_channel = Some(tid.get());
+            }
+            drop(core);
+            tid
+        }
         None => {
             tracing::warn!("[meeting] Thread creation failed, falling back to parent channel");
             channel_id
@@ -1599,6 +1613,8 @@ mod tests {
             status,
             summary: None,
             started_at: "2026-03-06T00:00:00+09:00".to_string(),
+            thread_id: None,
+            msg_channel: None,
         }
     }
 

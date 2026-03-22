@@ -229,7 +229,8 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     try {
       const s = await api.getAutoQueueStatus(selectedRepo || null, selectedAgentId);
       setStatus(s);
-      setNoReadyCards(false);
+      // Only reset noReadyCards when a run with entries exists
+      if (s?.run && s?.entries?.length > 0) setNoReadyCards(false);
     } catch {
       // silent
     }
@@ -263,6 +264,8 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
           : tr("준비됨 상태의 카드가 없습니다.", "No ready cards found.");
         setError(hint);
         setNoReadyCards(true);
+        setGenerating(false);
+        return; // Don't fetchStatus — it would reset noReadyCards
       }
       await fetchStatus();
     } catch (e) {
