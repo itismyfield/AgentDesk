@@ -325,69 +325,13 @@ pub async fn hook_session(
                                     }),
                                 );
 
-                                // Send review result notification to original channel + dispatch notification for new dispatches
                                 let db_clone = state.db.clone();
                                 let did_owned = did.clone();
                                 tokio::spawn(async move {
-                                    // Get card info and verdict
-                                    let info: Option<(
-                                        String,
-                                        String,
-                                        String,
-                                        String,
-                                        Option<String>,
-                                    )> = {
-                                        let conn = match db_clone.lock() {
-                                            Ok(c) => c,
-                                            Err(_) => return,
-                                        };
-                                        conn.query_row(
-                                            "SELECT kc.id, kc.assigned_agent_id, kc.title, kc.latest_dispatch_id, td.result \
-                                             FROM kanban_cards kc \
-                                             JOIN task_dispatches td ON td.kanban_card_id = kc.id \
-                                             WHERE td.id = ?1",
-                                            [&did_owned],
-                                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-                                        ).ok()
-                                    };
-                                    if let Some((
-                                        card_id,
-                                        _agent_id,
-                                        _title,
-                                        new_did,
-                                        result_json,
-                                    )) = &info
-                                    {
-                                        // Extract verdict from result
-                                        let verdict = result_json
-                                            .as_deref()
-                                            .and_then(|r| {
-                                                serde_json::from_str::<serde_json::Value>(r).ok()
-                                            })
-                                            .and_then(|v| {
-                                                v.get("verdict")
-                                                    .and_then(|s| s.as_str())
-                                                    .map(|s| s.to_string())
-                                            })
-                                            .unwrap_or_else(|| "pass".to_string());
-
-                                        // Send review result to primary channel
-                                        super::dispatches::send_review_result_to_primary(
-                                            &db_clone, card_id, &verdict,
-                                        )
-                                        .await;
-
-                                        // If a new dispatch was created (e.g., by OnReviewEnter for next round),
-                                        // send notification to the appropriate channel
-                                        if new_did != &did_owned {
-                                            if let Some((_, agent_id, title, _, _)) = &info {
-                                                super::dispatches::send_dispatch_to_discord(
-                                                    &db_clone, agent_id, title, card_id, new_did,
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                    }
+                                    super::dispatches::handle_completed_dispatch_followups(
+                                        &db_clone, &did_owned,
+                                    )
+                                    .await;
                                 });
                             }
                         }

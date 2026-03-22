@@ -180,36 +180,10 @@ pub async fn update_dispatch(
         let result = body.result.unwrap_or(json!({}));
         match dispatch::complete_dispatch(&state.db, &state.engine, &id, &result) {
             Ok(d) => {
-                // Check if OnDispatchCompleted → OnReviewEnter created a new dispatch
-                // (e.g., counter-model review). If so, send async Discord notification.
                 let db_clone = state.db.clone();
                 let dispatch_id = id.clone();
                 tokio::spawn(async move {
-                    // Get the card associated with this dispatch
-                    let info: Option<(String, String, String, String)> = {
-                        let conn = match db_clone.lock() {
-                            Ok(c) => c,
-                            Err(_) => return,
-                        };
-                        conn.query_row(
-                            "SELECT kc.id, kc.assigned_agent_id, kc.title, kc.latest_dispatch_id \
-                             FROM kanban_cards kc \
-                             JOIN task_dispatches td ON td.kanban_card_id = kc.id \
-                             WHERE td.id = ?1",
-                            [&dispatch_id],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                        )
-                        .ok()
-                    };
-                    if let Some((card_id, agent_id, title, new_dispatch_id)) = info {
-                        // Only send if a NEW dispatch was created (different from completed one)
-                        if new_dispatch_id != dispatch_id {
-                            send_dispatch_to_discord(
-                                &db_clone, &agent_id, &title, &card_id, &new_dispatch_id,
-                            )
-                            .await;
-                        }
-                    }
+                    handle_completed_dispatch_followups(&db_clone, &dispatch_id).await;
                 });
                 return (StatusCode::OK, Json(json!({"dispatch": d})));
             }
@@ -647,6 +621,81 @@ pub(super) async fn send_review_result_to_primary(
     }
 }
 
+fn extract_review_verdict(result_json: Option<&str>) -> String {
+    result_json
+        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+        .and_then(|v| {
+            v.get("verdict")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    v.get("decision")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string())
+                })
+        })
+        .unwrap_or_else(|| "pass".to_string())
+}
+
+pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, dispatch_id: &str) {
+    let info: Option<(String, String, String, String, String, Option<String>)> = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        conn.query_row(
+            "SELECT td.dispatch_type, td.status, kc.id, COALESCE(kc.assigned_agent_id, ''), kc.title, td.result \
+             FROM task_dispatches td \
+             JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
+             WHERE td.id = ?1",
+            [dispatch_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .ok()
+    };
+
+    let Some((dispatch_type, status, card_id, agent_id, title, result_json)) = info else {
+        return;
+    };
+    if status != "completed" {
+        return;
+    }
+
+    if dispatch_type == "review" {
+        let verdict = extract_review_verdict(result_json.as_deref());
+        send_review_result_to_primary(db, &card_id, &verdict).await;
+    }
+
+    let latest_dispatch_id: Option<String> = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        conn.query_row(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = ?1",
+            [&card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
+    };
+
+    if let Some(new_dispatch_id) = latest_dispatch_id {
+        if new_dispatch_id != dispatch_id && !agent_id.is_empty() {
+            send_dispatch_to_discord(db, &agent_id, &title, &card_id, &new_dispatch_id).await;
+        }
+    }
+}
+
 /// Resolve a channel name alias (e.g. "adk-cc") to a numeric channel ID
 /// by reading role_map.json's byChannelName section.
 pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
@@ -746,7 +795,19 @@ fn resolve_channel_alias(alias: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_dispatch_message, use_counter_model_channel};
+    use super::{
+        extract_review_verdict, format_dispatch_message, handle_completed_dispatch_followups,
+        use_counter_model_channel,
+    };
+    use crate::db::Db;
+    use std::sync::{Arc, Mutex};
+
+    fn test_db() -> Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        Arc::new(Mutex::new(conn))
+    }
 
     #[test]
     fn review_dispatch_uses_counter_model_channel() {
@@ -785,5 +846,60 @@ mod tests {
 
         assert!(message.contains("[Implement feature #24](<https://github.com/itismyfield/AgentDesk/issues/24>)"));
         assert!(!message.contains("검토 전용"));
+    }
+
+    #[test]
+    fn review_verdict_extraction_defaults_to_pass() {
+        assert_eq!(extract_review_verdict(None), "pass");
+        assert_eq!(extract_review_verdict(Some(r#"{"decision":"dismiss"}"#)), "dismiss");
+        assert_eq!(extract_review_verdict(Some(r#"{"verdict":"improve"}"#)), "improve");
+    }
+
+    #[tokio::test]
+    async fn completed_review_dispatch_creates_review_decision_followup() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+                 VALUES ('card-1', 'Needs follow-up', 'review', 'agent-1', 'dispatch-review', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+                 VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"improve\"}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        handle_completed_dispatch_followups(&db, "dispatch-review").await;
+
+        let conn = db.lock().unwrap();
+        let latest_dispatch_id: String = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let followup: (String, String, String) = conn
+            .query_row(
+                "SELECT dispatch_type, status, context FROM task_dispatches WHERE id = ?1",
+                [&latest_dispatch_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_ne!(latest_dispatch_id, "dispatch-review");
+        assert_eq!(followup.0, "review-decision");
+        assert_eq!(followup.1, "pending");
+        assert!(followup.2.contains("\"verdict\":\"improve\""));
     }
 }

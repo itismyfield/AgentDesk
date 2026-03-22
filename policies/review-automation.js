@@ -140,6 +140,11 @@ var reviewAutomation = {
 
 function processVerdict(cardId, verdict, result) {
   if (verdict === "pass" || verdict === "accept" || verdict === "approved") {
+    agentdesk.db.execute(
+      "UPDATE kanban_cards SET review_status = NULL, updated_at = datetime('now') WHERE id = ?",
+      [cardId]
+    );
+
     // Review passed — check pipeline, otherwise done
     var stages = agentdesk.db.query(
       "SELECT id FROM pipeline_stages WHERE repo_id = (SELECT repo_id FROM kanban_cards WHERE id = ?) AND trigger_after = 'review_pass' LIMIT 1",
