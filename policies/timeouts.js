@@ -162,18 +162,38 @@ var timeouts = {
     }
 
     // ─── [E] 자동-수용 결정 타임아웃 (suggestion_pending 15분) ──
+    // Auto-accept: same effect as manual review-decision accept
+    // (status → in_progress, review_status → rework_pending, create rework dispatch)
     var staleSuggestions = agentdesk.db.query(
-      "SELECT id FROM kanban_cards " +
+      "SELECT id, assigned_agent_id, title FROM kanban_cards " +
       "WHERE review_status = 'suggestion_pending' " +
       "AND updated_at < datetime('now', '-15 minutes')"
     );
     for (var s = 0; s < staleSuggestions.length; s++) {
-      // Auto-accept: suggestion_pending → rework_pending
+      var sc = staleSuggestions[s];
+      // 1. Transition to in_progress
+      agentdesk.kanban.setStatus(sc.id, "in_progress");
+      // 2. Set review_status to rework_pending
       agentdesk.db.execute(
         "UPDATE kanban_cards SET review_status = 'rework_pending', updated_at = datetime('now') WHERE id = ?",
-        [staleSuggestions[s].id]
+        [sc.id]
       );
-      agentdesk.log.warn("[timeout] Auto-accepted suggestions for card " + staleSuggestions[s].id);
+      // 3. Create rework dispatch so agent gets a session
+      if (sc.assigned_agent_id) {
+        try {
+          agentdesk.dispatch.create(
+            sc.id,
+            sc.assigned_agent_id,
+            "rework",
+            "[Rework] " + (sc.title || sc.id)
+          );
+          agentdesk.log.warn("[timeout] Auto-accepted suggestions for card " + sc.id + " — rework dispatch created");
+        } catch (e) {
+          agentdesk.log.error("[timeout] Failed to create rework dispatch for " + sc.id + ": " + e);
+        }
+      } else {
+        agentdesk.log.warn("[timeout] Auto-accepted card " + sc.id + " but no agent assigned — no rework dispatch");
+      }
     }
 
     // ─── [F] 디스패치 큐 타임아웃 (100분) ──────────────────
