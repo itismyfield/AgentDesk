@@ -328,7 +328,7 @@ async fn list_agents(
                     "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
                             a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
                             a.sprite_number, d.name, d.name, NULL, a.created_at,
-                            (SELECT COUNT(*) FROM task_dispatches td WHERE td.to_agent_id = a.id AND td.status = 'completed') AS tasks_done,
+                            (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                             (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
                             (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task
                      FROM agents a
@@ -343,7 +343,7 @@ async fn list_agents(
                     "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
                             a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
                             a.sprite_number, d.name, d.name, NULL, a.created_at,
-                            (SELECT COUNT(*) FROM task_dispatches td WHERE td.to_agent_id = a.id AND td.status = 'completed') AS tasks_done,
+                            (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                             (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
                             (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task
                      FROM agents a
@@ -421,7 +421,7 @@ async fn get_agent(
                 "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
                         a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
                         a.sprite_number, d.name, d.name, NULL, a.created_at,
-                        (SELECT COUNT(*) FROM task_dispatches td WHERE td.to_agent_id = a.id AND td.status = 'completed') AS tasks_done,
+                        (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                         (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
                         (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task
                  FROM agents a

@@ -151,7 +151,7 @@ pub async fn get_stats(
         .map(|(id, name, name_ko, avatar_emoji, xp, _, _, sprite_number)| {
             let tasks_done: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM task_dispatches WHERE to_agent_id = ?1 AND status = 'completed'",
+                    "SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = ?1 AND kc.status = 'done'",
                     [&id],
                     |row| row.get(0),
                 )
@@ -334,7 +334,7 @@ pub async fn get_stats(
 
         let waiting_acceptance: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM kanban_cards WHERE status = 'pending_decision'",
+                "SELECT COUNT(*) FROM kanban_cards WHERE status = 'requested'",
                 [],
                 |row| row.get(0),
             )

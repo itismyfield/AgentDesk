@@ -13,7 +13,8 @@ use crate::engine::hooks::Hook;
 const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc.priority, kc.assigned_agent_id, \
     kc.github_issue_url, kc.github_issue_number, kc.latest_dispatch_id, kc.review_round, kc.metadata, \
     kc.created_at, kc.updated_at, \
-    td.status AS d_status, td.dispatch_type AS d_type, td.title AS d_title, td.chain_depth AS d_depth \
+    td.status AS d_status, td.dispatch_type AS d_type, td.title AS d_title, td.chain_depth AS d_depth, \
+    td.result AS d_result \
     FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id";
 
 // ── Query / Body types ─────────────────────────────────────────
@@ -1180,7 +1181,9 @@ fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> 
         "latest_dispatch_status": row.get::<_, Option<String>>(13).unwrap_or(None),
         "latest_dispatch_title": row.get::<_, Option<String>>(15).unwrap_or(None),
         "latest_dispatch_type": row.get::<_, Option<String>>(14).unwrap_or(None),
-        "latest_dispatch_result_summary": null,
+        "latest_dispatch_result_summary": row.get::<_, Option<String>>(17).unwrap_or(None)
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
+            .and_then(|v| v.get("summary").and_then(|s| s.as_str().map(|s| s.to_string()))),
         "latest_dispatch_chain_depth": row.get::<_, Option<i64>>(16).unwrap_or(None),
         "child_count": 0,
     }))

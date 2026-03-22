@@ -282,6 +282,21 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     }
   };
 
+  /** Pending run → activate immediately with default order, then dispatch first entry */
+  const handleFallbackActivate = async (runId: string) => {
+    setActivating(true);
+    setError(null);
+    try {
+      await api.updateAutoQueueRun(runId, "active");
+      await api.activateAutoQueue(selectedRepo || null, selectedAgentId);
+      await fetchStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : tr("기본 순서 시작 실패", "Default order start failed"));
+    } finally {
+      setActivating(false);
+    }
+  };
+
   const handleSkip = async (entryId: string) => {
     try {
       await api.skipAutoQueueEntry(entryId);
@@ -482,8 +497,13 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
             )}
             <div>{tr("PMD가 순서를 결정하면 자동으로 활성화됩니다.", "Queue will activate automatically when PMD submits the order.")}</div>
           </div>
+          {run.ai_rationale && (
+            <div className="text-[11px] italic" style={{ color: "var(--th-text-muted)" }}>
+              {run.ai_rationale}
+            </div>
+          )}
           <button
-            onClick={() => void handleActivate()}
+            onClick={() => void handleFallbackActivate(run.id)}
             disabled={activating}
             className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
             style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}

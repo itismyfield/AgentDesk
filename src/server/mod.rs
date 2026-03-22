@@ -62,14 +62,28 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         if let Err(e) = engine.fire_hook(crate::engine::hooks::Hook::OnTick, serde_json::json!({}))
         {
             tracing::warn!("[policy-tick] OnTick hook error: {e}");
-        }
-        // Record last tick time for cron-jobs API
-        if let Ok(conn) = db.lock() {
-            conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
-                [chrono::Utc::now().timestamp_millis().to_string()],
-            )
-            .ok();
+            // Record failure
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_status', 'error')",
+                    [],
+                )
+                .ok();
+            }
+        } else {
+            // Record success
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
+                    [chrono::Utc::now().timestamp_millis().to_string()],
+                )
+                .ok();
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_status', 'ok')",
+                    [],
+                )
+                .ok();
+            }
         }
     }
 }

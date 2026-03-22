@@ -327,6 +327,9 @@ pub(super) async fn start_meeting(
         );
     }
 
+    // TODO(#61): Create a Discord thread for the meeting (same pattern as dispatch threads in
+    // dispatches.rs::send_dispatch_to_discord). Send the start message into the thread so all
+    // meeting output is contained there, and archive the thread on conclude_meeting.
     rate_limit_wait(shared, channel_id).await;
     let _ = channel_id
         .send_message(

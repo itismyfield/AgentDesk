@@ -22,7 +22,21 @@ fn build_cron_jobs(state: &AppState, agent_filter: Option<&str>) -> Vec<serde_js
             .ok()
         })
         .and_then(|v| v.parse().ok())
-        .unwrap_or(now_ms - 30000);
+        .unwrap_or(0); // 0 = never run, not approximate
+
+    let last_tick_status: String = state
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = 'last_tick_status'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .unwrap_or_else(|| "unknown".to_string());
 
     let next_tick_ms = last_tick_ms + 60000;
 
@@ -63,7 +77,7 @@ fn build_cron_jobs(state: &AppState, agent_filter: Option<&str>) -> Vec<serde_js
                 },
                 "state": {
                     "status": "active",
-                    "lastStatus": "ok",
+                    "lastStatus": last_tick_status,
                     "lastRunAtMs": last_tick_ms,
                     "nextRunAtMs": next_tick_ms,
                 },

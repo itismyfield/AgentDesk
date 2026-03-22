@@ -209,15 +209,21 @@ pub async fn generate(
 
     if cards.is_empty() {
         // Provide context: how many cards are in backlog vs other statuses
-        let backlog_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'backlog'", [], |row| row.get(0))
-            .unwrap_or(0);
-        let in_progress_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'in_progress'", [], |row| row.get(0))
-            .unwrap_or(0);
-        let review_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'review'", [], |row| row.get(0))
-            .unwrap_or(0);
+        let backlog_count: i64 = if let Some(ref repo) = body.repo {
+            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'backlog' AND repo_id = ?1", [repo], |row| row.get(0)).unwrap_or(0)
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'backlog'", [], |row| row.get(0)).unwrap_or(0)
+        };
+        let in_progress_count: i64 = if let Some(ref repo) = body.repo {
+            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'in_progress' AND repo_id = ?1", [repo], |row| row.get(0)).unwrap_or(0)
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'in_progress'", [], |row| row.get(0)).unwrap_or(0)
+        };
+        let review_count: i64 = if let Some(ref repo) = body.repo {
+            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'review' AND repo_id = ?1", [repo], |row| row.get(0)).unwrap_or(0)
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'review'", [], |row| row.get(0)).unwrap_or(0)
+        };
         return (
             StatusCode::OK,
             Json(json!({

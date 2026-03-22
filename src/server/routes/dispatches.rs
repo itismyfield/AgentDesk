@@ -514,6 +514,17 @@ pub(super) async fn send_dispatch_to_discord(
                                             rusqlite::params![thread_id, dispatch_id],
                                         ).ok();
                                     }
+                                    // Send dispatch content into the thread so the session starts there
+                                    let thread_msg_url = format!(
+                                        "https://discord.com/api/v10/channels/{}/messages",
+                                        thread_id
+                                    );
+                                    let _ = client
+                                        .post(&thread_msg_url)
+                                        .header("Authorization", format!("Bot {}", token))
+                                        .json(&serde_json::json!({"content": message}))
+                                        .send()
+                                        .await;
                                     tracing::info!(
                                         "[dispatch] Created thread {} for dispatch {dispatch_id}",
                                         thread_id
@@ -729,6 +740,40 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
     if dispatch_type == "review" {
         let verdict = extract_review_verdict(result_json.as_deref());
         send_review_result_to_primary(db, &card_id, &verdict).await;
+    }
+
+    // Archive thread on dispatch completion
+    let thread_id: Option<String> = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        conn.query_row(
+            "SELECT json_extract(context, '$.thread_id') FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    };
+    if let Some(ref tid) = thread_id {
+        let config = crate::config::load_graceful();
+        if let Some(bot) = config
+            .discord
+            .bots
+            .get("announce")
+            .or_else(|| config.discord.bots.get("command"))
+        {
+            let archive_url = format!("https://discord.com/api/v10/channels/{}", tid);
+            let client = reqwest::Client::new();
+            let _ = client
+                .patch(&archive_url)
+                .header("Authorization", format!("Bot {}", bot.token))
+                .json(&serde_json::json!({"archived": true}))
+                .send()
+                .await;
+            tracing::info!("[dispatch] Archived thread {tid} for completed dispatch {dispatch_id}");
+        }
     }
 
     let latest_dispatch_id: Option<String> = {

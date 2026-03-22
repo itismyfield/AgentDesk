@@ -384,11 +384,32 @@ var timeouts = {
       // Skip working sessions — don't interrupt active work
       if (s.status === "working") continue;
 
+      // Check provider — /compact and /clear are Claude Code commands only
+      var sessionInfo = agentdesk.db.query(
+        "SELECT provider FROM sessions WHERE session_key = ?", [s.session_key]
+      );
+      var provider = sessionInfo.length > 0 ? sessionInfo[0].provider : "claude";
+      if (provider !== "claude") continue; // Skip non-Claude sessions for now
+
+      // Check cooldown (5 min) to avoid spamming commands
+      var cooldownKey = "context_action_" + s.session_key;
+      var lastAction = agentdesk.db.query(
+        "SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]
+      );
+      if (lastAction.length > 0) {
+        var lastMs = parseInt(lastAction[0].value, 10);
+        if (now - lastMs < 300000) continue; // 5 min cooldown
+      }
+
       // Compact: >= compactPercent
       if (pct >= compactPercent) {
         var result = JSON.parse(agentdesk.session.sendCommand(s.session_key, "/compact"));
         if (result.ok) {
           agentdesk.log.info("[context] Auto-compact: " + s.session_key + " (" + Math.round(pct) + "%)");
+          agentdesk.db.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+            [cooldownKey, "" + now]
+          );
           // Discord notification
           var agent = agentdesk.db.query("SELECT discord_channel_id FROM agents WHERE id = ?", [s.agent_id]);
           if (agent.length > 0 && agent[0].discord_channel_id) {
@@ -411,6 +432,10 @@ var timeouts = {
           var result2 = JSON.parse(agentdesk.session.sendCommand(s.session_key, "/clear"));
           if (result2.ok) {
             agentdesk.log.info("[context] Auto-clear: " + s.session_key + " (" + Math.round(pct) + "%, idle " + Math.round(idleMin) + "min)");
+            agentdesk.db.execute(
+              "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+              [cooldownKey, "" + now]
+            );
             var agent2 = agentdesk.db.query("SELECT discord_channel_id FROM agents WHERE id = ?", [s.agent_id]);
             if (agent2.length > 0 && agent2[0].discord_channel_id) {
               sendNotifyAlert(
