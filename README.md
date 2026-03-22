@@ -339,7 +339,7 @@ Full API documentation is available at `/api/docs` when the server is running.
 
 ## Limitations
 
-- **macOS only** — The installer and launchd integration currently support macOS only. Linux systemd support exists in `--init` but is not yet tested with the one-click installer.
+- **Installer is macOS-focused** — The `curl | bash` installer and launchd integration target macOS. Linux systemd and Windows service support exist in `--init` but are not yet covered by the one-click installer.
 - **Local execution** — Agents run on the same machine as AgentDesk. Distributed agent execution is not supported.
 - **Discord-dependent** — Agent communication requires Discord. There is no built-in alternative messaging backend.
 - **tmux sessions** — Agent sessions use tmux. The machine must have tmux installed.
