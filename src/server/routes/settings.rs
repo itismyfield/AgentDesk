@@ -58,6 +58,77 @@ pub async fn put_settings(
     (StatusCode::OK, Json(json!({"ok": true})))
 }
 
+/// Known config keys with metadata for the settings UI.
+const CONFIG_KEYS: &[(&str, &str, &str, &str)] = &[
+    ("kanban_manager_channel_id", "pipeline", "칸반매니저 채널 ID", "Kanban Manager Channel ID"),
+    ("review_enabled", "review", "리뷰 활성화", "Review Enabled"),
+    ("counter_model_review_enabled", "review", "카운터모델 리뷰 활성화", "Counter-Model Review"),
+    ("max_review_rounds", "review", "최대 리뷰 라운드", "Max Review Rounds"),
+    ("pm_decision_gate_enabled", "pipeline", "PM 판단 게이트", "PM Decision Gate"),
+    ("health_port", "system", "헬스체크 포트", "Health Check Port"),
+];
+
+/// GET /api/settings/config
+pub async fn get_config_entries(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+    };
+    let mut entries = Vec::new();
+    for (key, category, label_ko, label_en) in CONFIG_KEYS {
+        let value: Option<String> = conn
+            .query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| row.get(0))
+            .ok();
+        entries.push(json!({
+            "key": key, "value": value, "category": category,
+            "label_ko": label_ko, "label_en": label_en,
+        }));
+    }
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM kv_meta WHERE key NOT LIKE 'triage_%' \
+         AND key NOT LIKE 'meeting%' AND key NOT LIKE 'dispatch_notified%' \
+         AND key NOT LIKE 'deadlock%' AND key != 'settings' AND key != 'runtime-config' \
+         AND key != 'schema_version' ORDER BY key"
+    ).unwrap();
+    let extra: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+    for (key, value) in extra {
+        if CONFIG_KEYS.iter().any(|(k, _, _, _)| *k == key.as_str()) { continue; }
+        entries.push(json!({
+            "key": key, "value": value, "category": "other",
+            "label_ko": key, "label_en": key,
+        }));
+    }
+    (StatusCode::OK, Json(json!({"entries": entries})))
+}
+
+/// PATCH /api/settings/config
+pub async fn patch_config_entries(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+    };
+    let entries = match body.as_object() {
+        Some(obj) => obj,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "expected JSON object"}))),
+    };
+    let mut updated = 0;
+    for (key, value) in entries {
+        let v = match value { serde_json::Value::String(s) => s.clone(), other => other.to_string() };
+        conn.execute("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)", rusqlite::params![key, v]).ok();
+        updated += 1;
+    }
+    (StatusCode::OK, Json(json!({"ok": true, "updated": updated})))
+}
+
 /// GET /api/settings/runtime-config
 pub async fn get_runtime_config(
     State(state): State<AppState>,

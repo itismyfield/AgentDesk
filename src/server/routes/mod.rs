@@ -185,6 +185,10 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
             get(settings::get_settings).put(settings::put_settings),
         )
         .route(
+            "/settings/config",
+            get(settings::get_config_entries).patch(settings::patch_config_entries),
+        )
+        .route(
             "/settings/runtime-config",
             get(settings::get_runtime_config).put(settings::put_runtime_config),
         )

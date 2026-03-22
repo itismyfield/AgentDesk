@@ -113,12 +113,23 @@ export default function SettingsView({
   const [rcSaving, setRcSaving] = useState(false);
   const [rcDirty, setRcDirty] = useState(false);
 
+  // ── kv_meta Config state ──
+  interface ConfigEntry { key: string; value: string | null; category: string; label_ko: string; label_en: string; }
+  const [configEntries, setConfigEntries] = useState<ConfigEntry[]>([]);
+  const [configEdits, setConfigEdits] = useState<Record<string, string>>({});
+  const [configSaving, setConfigSaving] = useState(false);
+
   useEffect(() => {
     void api.getRuntimeConfig().then((data) => {
       setRcValues(data.current);
       setRcDefaults(data.defaults);
       setRcLoaded(true);
     }).catch(() => {});
+    // Load kv_meta config
+    void fetch("/api/settings/config", { credentials: "include" })
+      .then((r) => r.json())
+      .then((d: { entries: ConfigEntry[] }) => setConfigEntries(d.entries || []))
+      .catch(() => {});
   }, []);
 
   const handleSave = async () => {
@@ -344,6 +355,78 @@ export default function SettingsView({
           </button>
         </>
       )}
+
+      {/* ── kv_meta Config Section ── */}
+      <div className="mt-8">
+        <h3 className="text-lg font-semibold mb-4" style={{ color: "var(--th-text-heading)" }}>
+          {tr("시스템 설정", "System Config")}
+        </h3>
+        {configEntries.length === 0 ? (
+          <p className="text-sm" style={{ color: "var(--th-text-muted)" }}>{tr("설정 로딩 중...", "Loading config...")}</p>
+        ) : (
+          <>
+            {["pipeline", "review", "system", "other"].map((cat) => {
+              const items = configEntries.filter((e) => e.category === cat);
+              if (items.length === 0) return null;
+              const catLabel: Record<string, string> = {
+                pipeline: tr("파이프라인", "Pipeline"),
+                review: tr("리뷰", "Review"),
+                system: tr("시스템", "System"),
+                other: tr("기타", "Other"),
+              };
+              return (
+                <div key={cat} className="mb-4">
+                  <h4 className="text-sm font-medium mb-2" style={{ color: "var(--th-text-secondary)" }}>
+                    {catLabel[cat] || cat}
+                  </h4>
+                  <div className="space-y-2">
+                    {items.map((entry) => (
+                      <div key={entry.key} className="flex items-center gap-3 rounded-xl border px-4 py-2" style={{ borderColor: "rgba(148,163,184,0.2)" }}>
+                        <span className="text-sm min-w-[200px]" style={{ color: "var(--th-text-primary)" }}>
+                          {isKo ? entry.label_ko : entry.label_en}
+                        </span>
+                        <input
+                          type="text"
+                          className="flex-1 rounded-lg px-3 py-1.5 text-sm bg-white/5 border"
+                          style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                          defaultValue={entry.value ?? ""}
+                          onChange={(e) => setConfigEdits((prev) => ({ ...prev, [entry.key]: e.target.value }))}
+                        />
+                        <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>{entry.key}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+            <button
+              onClick={async () => {
+                if (Object.keys(configEdits).length === 0) return;
+                setConfigSaving(true);
+                try {
+                  await fetch("/api/settings/config", {
+                    method: "PATCH",
+                    credentials: "include",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(configEdits),
+                  });
+                  setConfigEdits({});
+                  // Reload
+                  const r = await fetch("/api/settings/config", { credentials: "include" });
+                  const d = await r.json();
+                  setConfigEntries(d.entries || []);
+                } finally {
+                  setConfigSaving(false);
+                }
+              }}
+              disabled={configSaving || Object.keys(configEdits).length === 0}
+              className="px-6 py-2.5 rounded-xl text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+            >
+              {configSaving ? tr("저장 중...", "Saving...") : tr("시스템 설정 저장", "Save System Config")}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
