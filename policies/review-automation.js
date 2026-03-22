@@ -141,11 +141,29 @@ var reviewAutomation = {
     var verdict = result.verdict || result.decision;
 
     // When a review dispatch is auto-completed on session idle without an explicit
-    // verdict, default to "pass". The reviewer would have sent an "improve" verdict
-    // or kept the session active if blocking issues were found.
+    // verdict, create a review-decision dispatch to the original agent so they
+    // check the review comments and decide the verdict (agent-in-the-loop).
     if (!verdict && result.auto_completed) {
-      verdict = "pass";
-      agentdesk.log.info("[review] Auto-completed review dispatch " + dispatch.id + " — defaulting verdict to pass");
+      var cards = agentdesk.db.query(
+        "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?",
+        [dispatch.kanban_card_id]
+      );
+      if (cards.length > 0 && cards[0].assigned_agent_id) {
+        var card = cards[0];
+        var issueNum = card.github_issue_number || "?";
+        try {
+          agentdesk.dispatch.create(
+            dispatch.kanban_card_id,
+            card.assigned_agent_id,
+            "review-decision",
+            "[Review Decision] #" + issueNum + " " + card.title
+          );
+          agentdesk.log.info("[review] Auto-completed review has no verdict — dispatched review-decision to " + card.assigned_agent_id + " for #" + issueNum);
+        } catch (e) {
+          agentdesk.log.warn("[review] Failed to create review-decision dispatch: " + e);
+        }
+      }
+      return;
     }
 
     if (!verdict) {
