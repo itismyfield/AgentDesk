@@ -7,7 +7,8 @@ use serenity::ChannelId;
 use crate::services::claude;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 use crate::services::tmux_diagnostics::{
-    build_tmux_death_diagnostic, record_tmux_exit_reason, tmux_session_has_live_pane,
+    build_tmux_death_diagnostic, record_tmux_exit_reason, tmux_session_exists,
+    tmux_session_has_live_pane,
 };
 
 use super::formatting::{
@@ -485,6 +486,20 @@ pub(super) async fn tmux_output_watcher(
 
     // Cleanup
     shared.tmux_watchers.remove(&channel_id);
+
+    // Kill dead tmux session to prevent accumulation (especially for thread sessions
+    // which are created per-dispatch and would otherwise linger for 24h).
+    if tmux_session_exists(&tmux_session_name) && !tmux_session_has_live_pane(&tmux_session_name) {
+        record_tmux_exit_reason(&tmux_session_name, "watcher cleanup: dead session after turn");
+        let sess = tmux_session_name.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &sess])
+                .output();
+        })
+        .await;
+    }
+
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!("  [{ts}] 👁 tmux watcher stopped for #{tmux_session_name}");
 }
