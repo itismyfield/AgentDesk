@@ -903,7 +903,7 @@ export interface AutoQueueRun {
   id: string;
   repo: string | null;
   agent_id: string | null;
-  status: "active" | "paused" | "completed";
+  status: "pending" | "active" | "paused" | "completed";
   ai_model: string | null;
   ai_rationale: string | null;
   timeout_minutes: number;

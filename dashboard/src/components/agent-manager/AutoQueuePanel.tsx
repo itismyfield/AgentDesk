@@ -354,11 +354,11 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
             <span
               className="text-[11px] px-2 py-0.5 rounded-full"
               style={{
-                backgroundColor: run.status === "active" ? "rgba(139,92,246,0.2)" : run.status === "paused" ? "rgba(245,158,11,0.2)" : "rgba(34,197,94,0.2)",
-                color: run.status === "active" ? "#a78bfa" : run.status === "paused" ? "#fbbf24" : "#4ade80",
+                backgroundColor: run.status === "pending" ? "rgba(56,189,248,0.2)" : run.status === "active" ? "rgba(139,92,246,0.2)" : run.status === "paused" ? "rgba(245,158,11,0.2)" : "rgba(34,197,94,0.2)",
+                color: run.status === "pending" ? "#38bdf8" : run.status === "active" ? "#a78bfa" : run.status === "paused" ? "#fbbf24" : "#4ade80",
               }}
             >
-              {run.status === "active" ? tr("실행 중", "Active") : run.status === "paused" ? tr("일시정지", "Paused") : tr("완료", "Done")}
+              {run.status === "pending" ? tr("PMD 대기", "Awaiting PMD") : run.status === "active" ? tr("실행 중", "Active") : run.status === "paused" ? tr("일시정지", "Paused") : tr("완료", "Done")}
             </span>
           )}
           {totalCount > 0 && (
@@ -450,6 +450,38 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
           style={{ borderColor: "rgba(248,113,113,0.4)", color: "#fecaca", backgroundColor: "rgba(127,29,29,0.2)" }}
         >
           {error}
+        </div>
+      )}
+
+      {/* PMD pending state */}
+      {run?.status === "pending" && expanded && (
+        <div
+          className="rounded-xl p-3 space-y-2 border"
+          style={{ borderColor: "rgba(56,189,248,0.25)", backgroundColor: "rgba(56,189,248,0.06)" }}
+        >
+          <div className="flex items-center gap-2">
+            <span className="animate-pulse text-lg">⏳</span>
+            <span className="text-sm font-medium" style={{ color: "#7dd3fc" }}>
+              {tr("PMD 순서 분석 대기 중", "Awaiting PMD order analysis")}
+            </span>
+          </div>
+          <div className="text-xs space-y-1" style={{ color: "var(--th-text-muted)" }}>
+            <div>
+              {tr("요청 시각", "Requested")}: {run.created_at ? formatTs(run.created_at, locale) : "-"}
+            </div>
+            {run.repo && (
+              <div>{tr("대상 레포", "Target repo")}: {run.repo}</div>
+            )}
+            <div>{tr("PMD가 순서를 결정하면 자동으로 활성화됩니다.", "Queue will activate automatically when PMD submits the order.")}</div>
+          </div>
+          <button
+            onClick={() => void handleActivate()}
+            disabled={activating}
+            className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
+            style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
+          >
+            {tr("기본 순서로 바로 시작", "Start with default order")}
+          </button>
         </div>
       )}
 
