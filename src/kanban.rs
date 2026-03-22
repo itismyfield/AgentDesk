@@ -2,6 +2,28 @@
 //!
 //! ALL card status transitions MUST go through `transition_status()`.
 //! This ensures hooks fire, auto-queue syncs, and notifications are sent.
+//!
+//! ## Transition Rules
+//!
+//! | From | To | Requires |
+//! |------|----|----------|
+//! | backlog | ready | Free (no dispatch needed) |
+//! | ready | backlog | Free (no dispatch needed) |
+//! | ready | requested | Active dispatch (pending/dispatched) |
+//! | requested | in_progress | Active dispatch + session working acknowledgement |
+//! | in_progress | review | Dispatch completion triggers this |
+//! | review | done | Review pass verdict |
+//! | review | in_progress | Rework dispatch (review-decision accept) |
+//! | * | pending_decision | Timeout/gate failure (force via policy) |
+//! | * | blocked | Agent signal or timeout (force via policy) |
+//!
+//! ## Dispatch Acknowledgement
+//!
+//! `requested → in_progress` requires an explicit dispatch acknowledgement:
+//! 1. Session must have `active_dispatch_id` set (links session to dispatch)
+//! 2. Session status must change to `working` (triggers onSessionStatusChange)
+//! 3. Policy checks `dispatch_type` is `implementation` or `rework` (not review)
+//! 4. Policy checks `card.status === "requested"` (prevents re-entry)
 
 use crate::db::Db;
 use crate::engine::PolicyEngine;

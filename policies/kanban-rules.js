@@ -47,6 +47,7 @@ var rules = {
 
   // ── Session status → Card status ──────────────────────────
   onSessionStatusChange: function(payload) {
+    // Require dispatch_id — sessions without an active dispatch cannot drive card transitions
     if (!payload.dispatch_id) return;
 
     var cards = agentdesk.db.query(
@@ -56,10 +57,20 @@ var rules = {
     if (cards.length === 0) return;
     var card = cards[0];
 
-    // working → in_progress
+    // working → in_progress: only for implementation/rework dispatches
+    // Review dispatches should NOT advance the card to in_progress
     if (payload.status === "working" && card.status === "requested") {
-      agentdesk.kanban.setStatus(card.id, "in_progress");
-      agentdesk.log.info("[kanban] " + card.id + " requested → in_progress");
+      var dispatch = agentdesk.db.query(
+        "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?",
+        [payload.dispatch_id]
+      );
+      if (dispatch.length === 0) return;
+      var dtype = dispatch[0].dispatch_type;
+      // Only implementation and rework dispatches acknowledge work start
+      if (dtype === "implementation" || dtype === "rework") {
+        agentdesk.kanban.setStatus(card.id, "in_progress");
+        agentdesk.log.info("[kanban] " + card.id + " requested → in_progress (ack via " + dtype + " dispatch " + payload.dispatch_id + ")");
+      }
     }
 
     // idle on implementation/rework is handled in Rust hook_session by completing
