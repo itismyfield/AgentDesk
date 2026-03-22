@@ -209,21 +209,24 @@ pub async fn generate(
 
     if cards.is_empty() {
         // Provide context: how many cards are in backlog vs other statuses
-        let backlog_count: i64 = if let Some(ref repo) = body.repo {
-            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'backlog' AND repo_id = ?1", [repo], |row| row.get(0)).unwrap_or(0)
-        } else {
-            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'backlog'", [], |row| row.get(0)).unwrap_or(0)
+        // Uses the same repo + agent_id filters as the main ready query
+        let count_with_filters = |status_val: &str| -> i64 {
+            let mut sql = format!("SELECT COUNT(*) FROM kanban_cards WHERE status = '{}'", status_val);
+            let mut count_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            if let Some(ref repo) = body.repo {
+                count_params.push(Box::new(repo.clone()));
+                sql.push_str(&format!(" AND repo_id = ?{}", count_params.len()));
+            }
+            if let Some(ref agent_id) = body.agent_id {
+                count_params.push(Box::new(agent_id.clone()));
+                sql.push_str(&format!(" AND assigned_agent_id = ?{}", count_params.len()));
+            }
+            let refs: Vec<&dyn rusqlite::types::ToSql> = count_params.iter().map(|p| p.as_ref()).collect();
+            conn.query_row(&sql, refs.as_slice(), |row| row.get(0)).unwrap_or(0)
         };
-        let in_progress_count: i64 = if let Some(ref repo) = body.repo {
-            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'in_progress' AND repo_id = ?1", [repo], |row| row.get(0)).unwrap_or(0)
-        } else {
-            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'in_progress'", [], |row| row.get(0)).unwrap_or(0)
-        };
-        let review_count: i64 = if let Some(ref repo) = body.repo {
-            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'review' AND repo_id = ?1", [repo], |row| row.get(0)).unwrap_or(0)
-        } else {
-            conn.query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'review'", [], |row| row.get(0)).unwrap_or(0)
-        };
+        let backlog_count: i64 = count_with_filters("backlog");
+        let in_progress_count: i64 = count_with_filters("in_progress");
+        let review_count: i64 = count_with_filters("review");
         return (
             StatusCode::OK,
             Json(json!({
@@ -551,6 +554,67 @@ pub async fn activate(
             Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
         );
     };
+
+    // If run has no entries (e.g. PM-assisted that never received order), auto-populate from ready cards
+    let entry_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1",
+        [&run_id],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if entry_count == 0 {
+        // Read run's repo and agent_id for filtering
+        let (run_repo, run_agent): (Option<String>, Option<String>) = conn.query_row(
+            "SELECT repo, agent_id FROM auto_queue_runs WHERE id = ?1",
+            [&run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap_or((None, None));
+
+        let mut ready_sql = "SELECT kc.id, kc.assigned_agent_id FROM kanban_cards kc WHERE kc.status = 'ready'".to_string();
+        let mut ready_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(ref repo) = run_repo {
+            if !repo.is_empty() {
+                ready_params.push(Box::new(repo.clone()));
+                ready_sql.push_str(&format!(" AND kc.repo_id = ?{}", ready_params.len()));
+            }
+        }
+        if let Some(ref agent_id) = run_agent {
+            if !agent_id.is_empty() {
+                ready_params.push(Box::new(agent_id.clone()));
+                ready_sql.push_str(&format!(" AND kc.assigned_agent_id = ?{}", ready_params.len()));
+            }
+        }
+        ready_sql.push_str(" ORDER BY CASE kc.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, kc.created_at ASC");
+        let ready_refs: Vec<&dyn rusqlite::types::ToSql> = ready_params.iter().map(|p| p.as_ref()).collect();
+        if let Ok(mut ready_stmt) = conn.prepare(&ready_sql) {
+            let ready_cards: Vec<(String, String)> = ready_stmt
+                .query_map(ready_refs.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                })
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default();
+            for (rank, (card_id, agent_id)) in ready_cards.iter().enumerate() {
+                let entry_id = uuid::Uuid::new_v4().to_string();
+                let agent = if agent_id.is_empty() {
+                    run_agent.as_deref().unwrap_or("")
+                } else {
+                    agent_id
+                };
+                conn.execute(
+                    "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![entry_id, run_id, card_id, agent, rank as i64],
+                ).ok();
+            }
+            if !ready_cards.is_empty() {
+                tracing::info!("[auto-queue] Auto-populated {} entries for run {run_id} (PM-assisted fallback)", ready_cards.len());
+            }
+        }
+    }
 
     // Get first pending entry only (sequential dispatch — one at a time)
     let mut stmt = conn

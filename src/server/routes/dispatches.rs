@@ -462,90 +462,90 @@ pub(super) async fn send_dispatch_to_discord(
         }
     };
 
-    // Use reqwest to send directly via Discord REST API
-    let url = format!(
-        "https://discord.com/api/v10/channels/{}/messages",
+    // Create a thread in the channel (no parent message needed), then send dispatch into the thread.
+    // This avoids dedup issues from sending the same content to both channel and thread.
+    let client = reqwest::Client::new();
+
+    let thread_name = if let Some(num) = issue_number {
+        format!("#{} {}", num, &title[..title.len().min(90)])
+    } else {
+        title[..title.len().min(100)].to_string()
+    };
+
+    let thread_url = format!(
+        "https://discord.com/api/v10/channels/{}/threads",
         channel_id_num
     );
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
+    let thread_resp = client
+        .post(&thread_url)
         .header("Authorization", format!("Bot {}", token))
-        .json(&serde_json::json!({"content": message}))
+        .json(&serde_json::json!({
+            "name": thread_name,
+            "type": 11, // PUBLIC_THREAD
+            "auto_archive_duration": 1440, // 24h
+        }))
         .send()
         .await;
 
-    match resp {
-        Ok(resp) if resp.status().is_success() => {
-            // Try to create a thread from the dispatch message
-            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                let message_id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                if !message_id.is_empty() {
-                    // Create thread from this message
-                    let thread_name = if let Some(num) = issue_number {
-                        format!("#{} {}", num, &title[..title.len().min(90)])
-                    } else {
-                        title[..title.len().min(100)].to_string()
-                    };
-
-                    let thread_url = format!(
-                        "https://discord.com/api/v10/channels/{}/messages/{}/threads",
-                        channel_id_num, message_id
+    match thread_resp {
+        Ok(tr) if tr.status().is_success() => {
+            if let Ok(thread_body) = tr.json::<serde_json::Value>().await {
+                let thread_id = thread_body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if !thread_id.is_empty() {
+                    // Save thread_id to the dedicated column
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
+                            rusqlite::params![thread_id, dispatch_id],
+                        ).ok();
+                    }
+                    // Send dispatch message into the thread
+                    let thread_msg_url = format!(
+                        "https://discord.com/api/v10/channels/{}/messages",
+                        thread_id
                     );
-                    let thread_resp = client
-                        .post(&thread_url)
+                    let _ = client
+                        .post(&thread_msg_url)
                         .header("Authorization", format!("Bot {}", token))
-                        .json(&serde_json::json!({
-                            "name": thread_name,
-                            "auto_archive_duration": 1440, // 24h
-                        }))
+                        .json(&serde_json::json!({"content": message}))
                         .send()
                         .await;
-
-                    if let Ok(tr) = thread_resp {
-                        if tr.status().is_success() {
-                            if let Ok(thread_body) = tr.json::<serde_json::Value>().await {
-                                let thread_id = thread_body.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                if !thread_id.is_empty() {
-                                    // Save thread_id to dispatch
-                                    if let Ok(conn) = db.lock() {
-                                        conn.execute(
-                                            "UPDATE task_dispatches SET context = json_set(COALESCE(context, '{}'), '$.thread_id', ?1) WHERE id = ?2",
-                                            rusqlite::params![thread_id, dispatch_id],
-                                        ).ok();
-                                    }
-                                    // Send dispatch content into the thread so the session starts there
-                                    let thread_msg_url = format!(
-                                        "https://discord.com/api/v10/channels/{}/messages",
-                                        thread_id
-                                    );
-                                    let _ = client
-                                        .post(&thread_msg_url)
-                                        .header("Authorization", format!("Bot {}", token))
-                                        .json(&serde_json::json!({"content": message}))
-                                        .send()
-                                        .await;
-                                    tracing::info!(
-                                        "[dispatch] Created thread {} for dispatch {dispatch_id}",
-                                        thread_id
-                                    );
-                                }
-                            }
-                        } else {
-                            tracing::warn!("[dispatch] Thread creation failed: {}", tr.status());
-                        }
-                    }
+                    tracing::info!(
+                        "[dispatch] Created thread {thread_id} and sent dispatch {dispatch_id} to {agent_id}"
+                    );
                 }
             }
-            tracing::info!("[dispatch] Sent message to {agent_id} (channel {channel_id})");
         }
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!("[dispatch] Discord API error {status}: {body}");
+        Ok(tr) => {
+            // Thread creation failed — fall back to sending directly to the channel
+            let status = tr.status();
+            tracing::warn!("[dispatch] Thread creation failed ({status}), falling back to channel message");
+            let url = format!(
+                "https://discord.com/api/v10/channels/{}/messages",
+                channel_id_num
+            );
+            match client
+                .post(&url)
+                .header("Authorization", format!("Bot {}", token))
+                .json(&serde_json::json!({"content": message}))
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => {
+                    tracing::info!("[dispatch] Sent fallback message to {agent_id} (channel {channel_id})");
+                }
+                Ok(r) => {
+                    let st = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    tracing::warn!("[dispatch] Discord API error {st}: {body}");
+                }
+                Err(e) => {
+                    tracing::warn!("[dispatch] Request failed: {e}");
+                }
+            }
         }
         Err(e) => {
-            tracing::warn!("[dispatch] Request failed: {e}");
+            tracing::warn!("[dispatch] Thread creation request failed: {e}");
         }
     }
 }
@@ -748,8 +748,9 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
             Ok(c) => c,
             Err(_) => return,
         };
+        // Check dedicated thread_id column first, fall back to context JSON for legacy dispatches
         conn.query_row(
-            "SELECT json_extract(context, '$.thread_id') FROM task_dispatches WHERE id = ?1",
+            "SELECT COALESCE(thread_id, json_extract(context, '$.thread_id')) FROM task_dispatches WHERE id = ?1",
             [dispatch_id],
             |row| row.get::<_, Option<String>>(0),
         )

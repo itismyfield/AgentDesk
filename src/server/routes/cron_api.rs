@@ -38,7 +38,7 @@ fn build_cron_jobs(state: &AppState, agent_filter: Option<&str>) -> Vec<serde_js
         })
         .unwrap_or_else(|| "unknown".to_string());
 
-    let next_tick_ms = last_tick_ms + 60000;
+    let next_tick_ms = if last_tick_ms == 0 { 0 } else { last_tick_ms + 60000 };
 
     policies
         .iter()
@@ -78,8 +78,8 @@ fn build_cron_jobs(state: &AppState, agent_filter: Option<&str>) -> Vec<serde_js
                 "state": {
                     "status": "active",
                     "lastStatus": last_tick_status,
-                    "lastRunAtMs": last_tick_ms,
-                    "nextRunAtMs": next_tick_ms,
+                    "lastRunAtMs": if last_tick_ms == 0 { serde_json::Value::Null } else { json!(last_tick_ms) },
+                    "nextRunAtMs": if next_tick_ms == 0 { serde_json::Value::Null } else { json!(next_tick_ms) },
                 },
             })
         })

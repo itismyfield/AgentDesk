@@ -134,6 +134,75 @@ fn generate_meeting_id() -> String {
     format!("mtg-{}-{:08x}", ts, random)
 }
 
+/// Create a Discord thread (without a parent message) for a meeting.
+/// Returns the thread's ChannelId on success, or None on failure.
+async fn create_meeting_thread(
+    _http: &serenity::Http,
+    parent_channel_id: ChannelId,
+    thread_name: &str,
+) -> Option<ChannelId> {
+    let config = crate::config::load_graceful();
+    let token = config
+        .discord
+        .bots
+        .get("announce")
+        .or_else(|| config.discord.bots.get("command"))?
+        .token
+        .clone();
+
+    let url = format!(
+        "https://discord.com/api/v10/channels/{}/threads",
+        parent_channel_id
+    );
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({
+            "name": thread_name,
+            "type": 11, // PUBLIC_THREAD
+            "auto_archive_duration": 1440,
+        }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        tracing::warn!("[meeting] Thread creation HTTP {}", resp.status());
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let thread_id_str = body.get("id")?.as_str()?;
+    let thread_id_num: u64 = thread_id_str.parse().ok()?;
+    Some(ChannelId::new(thread_id_num))
+}
+
+/// Archive a meeting thread (set archived=true via Discord REST API).
+async fn archive_meeting_thread(thread_channel_id: ChannelId) {
+    let config = crate::config::load_graceful();
+    let token = match config
+        .discord
+        .bots
+        .get("announce")
+        .or_else(|| config.discord.bots.get("command"))
+    {
+        Some(bot) => bot.token.clone(),
+        None => return,
+    };
+
+    let url = format!(
+        "https://discord.com/api/v10/channels/{}",
+        thread_channel_id
+    );
+    let client = reqwest::Client::new();
+    let _ = client
+        .patch(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({"archived": true}))
+        .send()
+        .await;
+    tracing::info!("[meeting] Archived thread {thread_channel_id}");
+}
+
 fn parse_json_array_fragment(text: &str) -> Result<Vec<String>, String> {
     let trimmed = text.trim();
     let json_str = if let Some(start) = trimmed.find('[') {
@@ -327,11 +396,19 @@ pub(super) async fn start_meeting(
         );
     }
 
-    // TODO(#61): Create a Discord thread for the meeting (same pattern as dispatch threads in
-    // dispatches.rs::send_dispatch_to_discord). Send the start message into the thread so all
-    // meeting output is contained there, and archive the thread on conclude_meeting.
-    rate_limit_wait(shared, channel_id).await;
-    let _ = channel_id
+    // Create a Discord thread for the meeting so all output is contained there.
+    // The meeting state is still keyed by the parent channel_id; the thread is used only for messages.
+    let thread_name = format!("Meeting: {}", &agenda[..agenda.len().min(90)]);
+    let msg_channel: ChannelId = match create_meeting_thread(http, channel_id, &thread_name).await {
+        Some(tid) => tid,
+        None => {
+            tracing::warn!("[meeting] Thread creation failed, falling back to parent channel");
+            channel_id
+        }
+    };
+
+    rate_limit_wait(shared, msg_channel).await;
+    let _ = msg_channel
         .send_message(
             http,
             CreateMessage::new().content(format!(
@@ -368,8 +445,8 @@ pub(super) async fn start_meeting(
         .iter()
         .map(|p| format!("• {}", p.display_name))
         .collect();
-    rate_limit_wait(shared, channel_id).await;
-    let _ = channel_id
+    rate_limit_wait(shared, msg_channel).await;
+    let _ = msg_channel
         .send_message(
             http,
             CreateMessage::new().content(format!(
@@ -410,8 +487,8 @@ pub(super) async fn start_meeting(
             return Ok(None);
         }
 
-        rate_limit_wait(shared, channel_id).await;
-        let _ = channel_id
+        rate_limit_wait(shared, msg_channel).await;
+        let _ = msg_channel
             .send_message(
                 http,
                 CreateMessage::new()
@@ -419,6 +496,9 @@ pub(super) async fn start_meeting(
             )
             .await;
 
+        // NOTE: run_meeting_round uses channel_id for state lookups (active_meetings key),
+        // so we pass the parent channel_id here. The round messages will go to parent channel
+        // until run_meeting_round is refactored to accept a separate msg target.
         let consensus =
             match run_meeting_round(http, channel_id, &meeting_id, round, shared).await? {
                 Some(consensus) => consensus,
@@ -461,6 +541,11 @@ pub(super) async fn start_meeting(
     if !save_meeting_record(shared, channel_id, Some(&meeting_id)).await? {
         cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
         return Ok(None);
+    }
+
+    // Archive the meeting thread if one was created
+    if msg_channel != channel_id {
+        archive_meeting_thread(msg_channel).await;
     }
 
     // Clean up

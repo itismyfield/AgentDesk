@@ -220,6 +220,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
   const [generating, setGenerating] = useState(false);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [noReadyCards, setNoReadyCards] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("agent");
 
   const agentMap = new Map(agents.map((a) => [a.id, a]));
@@ -228,6 +229,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     try {
       const s = await api.getAutoQueueStatus(selectedRepo || null, selectedAgentId);
       setStatus(s);
+      setNoReadyCards(false);
     } catch {
       // silent
     }
@@ -260,6 +262,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                `No ready cards. ${backlog} cards in backlog — move them to ready first.`)
           : tr("준비됨 상태의 카드가 없습니다.", "No ready cards found.");
         setError(hint);
+        setNoReadyCards(true);
       }
       await fetchStatus();
     } catch (e) {
@@ -420,13 +423,15 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
               </select>
               <button
                 onClick={() => void handleGenerate()}
-                disabled={generating}
+                disabled={generating || noReadyCards}
                 className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
                 style={{
-                  borderColor: "rgba(139,92,246,0.4)",
-                  color: "#a78bfa",
-                  backgroundColor: "rgba(139,92,246,0.1)",
+                  borderColor: noReadyCards ? "rgba(148,163,184,0.2)" : "rgba(139,92,246,0.4)",
+                  color: noReadyCards ? "var(--th-text-muted)" : "#a78bfa",
+                  backgroundColor: noReadyCards ? "rgba(148,163,184,0.05)" : "rgba(139,92,246,0.1)",
+                  cursor: noReadyCards ? "not-allowed" : undefined,
                 }}
+                title={noReadyCards ? tr("준비됨 상태의 카드가 없습니다", "No ready cards available") : undefined}
               >
                 {generating ? tr("분석 중…", "Analyzing…") : tr("큐 생성", "Generate")}
               </button>
