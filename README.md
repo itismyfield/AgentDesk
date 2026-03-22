@@ -342,7 +342,7 @@ Full API documentation is available at `/api/docs` when the server is running.
 - **Installer is macOS-focused** — The `curl | bash` installer and launchd integration target macOS. Linux systemd and Windows service support exist in `--init` but are not yet covered by the one-click installer.
 - **Local execution** — Agents run on the same machine as AgentDesk. Distributed agent execution is not supported.
 - **Discord-dependent** — Agent communication requires Discord. There is no built-in alternative messaging backend.
-- **tmux sessions** — Agent sessions use tmux. The machine must have tmux installed.
+- **tmux optional** — Agent sessions use tmux by default, but a backend process mode is available that does not require tmux.
 - **Single SQLite database** — Not designed for multi-instance or clustered deployment.
 - **Provider CLI required** — AI providers (Claude Code, Codex) must be installed and authenticated on the host machine for agents to function.
 - **GitHub integration via CLI** — GitHub features require the `gh` CLI tool to be installed and authenticated.
