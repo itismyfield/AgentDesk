@@ -208,6 +208,56 @@ var timeouts = {
       );
     }
 
+    // ─── [I-0] 미전송 디스패치 알림 복구 ──────────────────────
+    // pending dispatch가 2분 이상 됐는데 알림이 안 갔을 수 있음 → 재전송
+    var unnotifiedDispatches = agentdesk.db.query(
+      "SELECT td.id, td.dispatch_type, td.to_agent_id, kc.title, kc.github_issue_url, kc.github_issue_number " +
+      "FROM task_dispatches td " +
+      "JOIN kanban_cards kc ON td.kanban_card_id = kc.id " +
+      "WHERE td.status = 'pending' " +
+      "AND td.created_at < datetime('now', '-2 minutes') " +
+      "AND td.id NOT IN (SELECT value FROM kv_meta WHERE key LIKE 'dispatch_notified:%')"
+    );
+    for (var un = 0; un < unnotifiedDispatches.length; un++) {
+      var ud = unnotifiedDispatches[un];
+      // Mark as notified to avoid spam
+      agentdesk.db.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+        ["dispatch_notified:" + ud.id, ud.id]
+      );
+
+      // Determine channel
+      var agentChannel = agentdesk.db.query(
+        "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?",
+        [ud.to_agent_id]
+      );
+      if (agentChannel.length === 0) continue;
+
+      var useAlt = (ud.dispatch_type === "review" || ud.dispatch_type === "review-decision");
+      var channelId = useAlt ? agentChannel[0].discord_channel_alt : agentChannel[0].discord_channel_id;
+      if (!channelId) continue;
+
+      var issueLink = ud.github_issue_url
+        ? "\n[" + ud.title + " #" + ud.github_issue_number + "](<" + ud.github_issue_url + ">)"
+        : "";
+      var prefix = useAlt
+        ? "DISPATCH:" + ud.id + " - " + ud.title + "\n⚠️ 검토 전용 — 작업 착수 금지\n코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
+        : "DISPATCH:" + ud.id + " - " + ud.title;
+
+      try {
+        var port = agentdesk.config.get("health_port") || 8798;
+        agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
+          target: "channel:" + channelId,
+          content: prefix + issueLink,
+          source: "timeouts",
+          bot: "announce"
+        });
+        agentdesk.log.info("[notify-recovery] Resent dispatch notification: " + ud.id + " → " + channelId);
+      } catch(e) {
+        agentdesk.log.warn("[notify-recovery] Failed: " + e);
+      }
+    }
+
     // ─── [I] 턴 데드락 감지 (15분) ──────────────────────────
     var DEADLOCK_MINUTES = 15;
     var MAX_EXTENSIONS = 3;
