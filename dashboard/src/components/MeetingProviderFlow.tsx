@@ -1,3 +1,5 @@
+import { useI18n } from "../i18n";
+
 const PROVIDER_META: Record<string, { label: string; bg: string; color: string; border: string }> = {
   claude: {
     label: "Claude",
@@ -72,10 +74,17 @@ export function formatProviderFlow(
 export function providerFlowCaption(
   primaryProvider: string | null,
   reviewerProvider: string | null,
+  t?: (text: { ko: string; en: string }) => string,
 ): string {
   const primary = getProviderMeta(primaryProvider).label;
   const reviewer = getProviderMeta(reviewerProvider).label;
-  return `초안/최종: ${primary} · 비판 검토: ${reviewer}`;
+  if (t) {
+    return t({
+      ko: `초안/최종: ${primary} · 비판 검토: ${reviewer}`,
+      en: `Draft/Final: ${primary} · Critique: ${reviewer}`,
+    });
+  }
+  return `Draft/Final: ${primary} · Critique: ${reviewer}`;
 }
 
 export default function MeetingProviderFlow({
@@ -87,6 +96,7 @@ export default function MeetingProviderFlow({
   reviewerProvider: string | null;
   compact?: boolean;
 }) {
+  const { t } = useI18n();
   if (!primaryProvider && !reviewerProvider) return null;
 
   const primary = getProviderMeta(primaryProvider);
@@ -104,14 +114,14 @@ export default function MeetingProviderFlow({
       )}
       <ProviderChip label={primary.label} bg={primary.bg} color={primary.color} border={primary.border} />
       <span className="text-[10px] font-semibold" style={{ color: "var(--th-text-muted)" }}>
-        draft/final
+        {t({ ko: "초안/최종", en: "draft/final" })}
       </span>
       <span className="text-[10px] font-semibold px-1" style={{ color: "var(--th-text-muted)" }}>
         →
       </span>
       <ProviderChip label={reviewer.label} bg={reviewer.bg} color={reviewer.color} border={reviewer.border} />
       <span className="text-[10px] font-semibold" style={{ color: "var(--th-text-muted)" }}>
-        critique
+        {t({ ko: "비판 검토", en: "critique" })}
       </span>
     </div>
   );

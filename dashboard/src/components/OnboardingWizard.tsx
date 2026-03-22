@@ -18,7 +18,9 @@ interface CommandBotEntry {
 interface AgentDef {
   id: string;
   name: string;
+  nameEn?: string;
   description: string;
+  descriptionEn?: string;
   prompt: string;
   custom?: boolean;
 }
@@ -53,15 +55,19 @@ interface Props {
 interface TemplateAgent {
   id: string;
   name: string;
+  nameEn: string;
   description: string;
+  descriptionEn: string;
   prompt: string;
 }
 
 interface Template {
   key: string;
   name: string;
+  nameEn: string;
   icon: string;
   description: string;
+  descriptionEn: string;
   agents: TemplateAgent[];
 }
 
@@ -69,41 +75,53 @@ const TEMPLATES: Template[] = [
   {
     key: "household",
     name: "가사 및 일정 도우미",
+    nameEn: "Household & Schedule",
     icon: "🏠",
     description: "가정생활을 돕는 AI 에이전트 팀",
+    descriptionEn: "AI agent team for household management",
     agents: [
       {
         id: "scheduler",
         name: "일정봇",
+        nameEn: "Scheduler",
         description: "가족 일정 관리, 리마인더, 약속 조율",
+        descriptionEn: "Family scheduling, reminders, appointments",
         prompt:
           "당신은 가족 일정 관리 도우미입니다. 가족 구성원의 일정을 조율하고, 중요한 약속을 리마인드합니다. 충돌하는 일정이 있으면 미리 알려주고 대안을 제안합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 일정 변경은 반드시 확인 후 반영합니다",
       },
       {
         id: "household",
         name: "가사봇",
+        nameEn: "Household",
         description: "장보기 목록, 청소 루틴, 가사 분담 관리",
+        descriptionEn: "Shopping lists, cleaning routines, chore management",
         prompt:
           "당신은 가사 관리 도우미입니다. 장보기 목록을 관리하고, 청소 루틴을 설정하며, 가족 간 가사 분담을 조율합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 실용적이고 구체적인 제안을 합니다",
       },
       {
         id: "cooking",
         name: "요리봇",
+        nameEn: "Cooking",
         description: "레시피 추천, 식단 계획, 영양 관리",
+        descriptionEn: "Recipe suggestions, meal planning, nutrition",
         prompt:
           "당신은 요리 및 식단 관리 도우미입니다. 가족의 식성과 영양 균형을 고려한 레시피를 추천하고, 주간 식단을 계획합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 재료와 조리법을 명확하게 안내합니다",
       },
       {
         id: "health",
         name: "건강봇",
+        nameEn: "Health",
         description: "건강 관리, 운동 추천, 복약 알림",
+        descriptionEn: "Health tracking, exercise, medication reminders",
         prompt:
           "당신은 가족 건강 관리 도우미입니다. 운동 루틴을 추천하고, 복약 시간을 알려주며, 건강 관련 정보를 제공합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 의학적 판단은 전문가 상담을 권유합니다",
       },
       {
         id: "shopping",
         name: "쇼핑봇",
+        nameEn: "Shopping",
         description: "가격 비교, 쿠폰 검색, 온라인 구매 도우미",
+        descriptionEn: "Price comparison, coupons, online shopping",
         prompt:
           "당신은 스마트 쇼핑 도우미입니다. 제품 가격을 비교하고, 할인 정보와 쿠폰을 찾아주며, 효율적인 구매를 돕습니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 가성비 중심으로 추천합니다",
       },
@@ -112,41 +130,53 @@ const TEMPLATES: Template[] = [
   {
     key: "startup",
     name: "소규모 스타트업",
+    nameEn: "Small Startup",
     icon: "🚀",
     description: "스타트업 팀을 위한 AI 에이전트 팀",
+    descriptionEn: "AI agent team for startup teams",
     agents: [
       {
         id: "pm",
         name: "PM",
+        nameEn: "PM",
         description: "프로젝트 관리, 스프린트 계획, 이슈 추적",
+        descriptionEn: "Project management, sprint planning, issue tracking",
         prompt:
           "당신은 프로젝트 매니저입니다. 스프린트를 계획하고, 이슈를 추적하며, 팀원 간 작업을 조율합니다. 우선순위를 관리하고 데드라인을 지키도록 돕습니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 결정과 근거를 명확히 전달합니다",
       },
       {
         id: "developer",
         name: "개발자",
+        nameEn: "Developer",
         description: "코드 작성, 버그 수정, 코드 리뷰",
+        descriptionEn: "Coding, bug fixes, code review",
         prompt:
           "당신은 소프트웨어 개발자입니다. 기능 구현, 버그 수정, 코드 리뷰를 수행합니다. 클린 코드와 테스트를 중시합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 코드 변경은 이유와 함께 설명합니다",
       },
       {
         id: "designer",
         name: "디자이너",
+        nameEn: "Designer",
         description: "UI/UX 디자인, 프로토타입, 디자인 시스템",
+        descriptionEn: "UI/UX design, prototyping, design system",
         prompt:
           "당신은 UI/UX 디자이너입니다. 사용자 중심의 인터페이스를 설계하고, 프로토타입을 제작하며, 일관된 디자인 시스템을 유지합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 디자인 결정의 근거를 설명합니다",
       },
       {
         id: "qa",
         name: "QA",
+        nameEn: "QA",
         description: "테스트 자동화, 품질 관리, 버그 리포트",
+        descriptionEn: "Test automation, quality assurance, bug reports",
         prompt:
           "당신은 QA 엔지니어입니다. 테스트 케이스를 작성하고, 자동화 테스트를 구축하며, 발견된 버그를 체계적으로 보고합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 재현 경로를 정확히 기술합니다",
       },
       {
         id: "marketing",
         name: "마케팅",
+        nameEn: "Marketing",
         description: "마케팅 전략, SNS 관리, 콘텐츠 제작",
+        descriptionEn: "Marketing strategy, social media, content creation",
         prompt:
           "당신은 마케팅 담당자입니다. 마케팅 전략을 수립하고, SNS 콘텐츠를 제작하며, 고객 분석과 캠페인을 관리합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 데이터 기반으로 의사결정합니다",
       },
@@ -155,41 +185,53 @@ const TEMPLATES: Template[] = [
   {
     key: "office",
     name: "사무업무",
+    nameEn: "Office Work",
     icon: "🏢",
     description: "사무 업무를 자동화하는 AI 에이전트 팀",
+    descriptionEn: "AI agent team for office automation",
     agents: [
       {
         id: "schedule-mgr",
         name: "일정관리",
+        nameEn: "Schedule Manager",
         description: "회의 일정 조율, 캘린더 관리, 알림",
+        descriptionEn: "Meeting scheduling, calendar management, reminders",
         prompt:
           "당신은 일정 관리 비서입니다. 회의 일정을 조율하고, 캘린더를 관리하며, 중요한 일정을 리마인드합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 일정 변경 시 참석자 전원에게 알립니다",
       },
       {
         id: "email-asst",
         name: "이메일",
+        nameEn: "Email",
         description: "이메일 작성, 분류, 자동 응답",
+        descriptionEn: "Email drafting, sorting, auto-reply",
         prompt:
           "당신은 이메일 관리 비서입니다. 이메일을 작성하고, 수신 메일을 분류하며, 일상적인 문의에 자동 응답을 작성합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 비즈니스 메일은 격식체로 작성합니다",
       },
       {
         id: "doc-writer",
         name: "문서작성",
+        nameEn: "Document Writer",
         description: "보고서, 제안서, 회의록 작성",
+        descriptionEn: "Reports, proposals, meeting notes",
         prompt:
           "당신은 문서 작성 전문가입니다. 보고서, 제안서, 회의록 등 비즈니스 문서를 깔끔하고 전문적으로 작성합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 명확한 구조와 간결한 문장을 사용합니다",
       },
       {
         id: "researcher",
         name: "리서치",
+        nameEn: "Researcher",
         description: "시장 조사, 자료 수집, 경쟁사 분석",
+        descriptionEn: "Market research, data collection, competitive analysis",
         prompt:
           "당신은 리서치 전문가입니다. 시장 동향을 조사하고, 경쟁사를 분석하며, 의사결정에 필요한 자료를 수집하고 정리합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 출처를 명시하고 객관적으로 분석합니다",
       },
       {
         id: "data-analyst",
         name: "데이터분석",
+        nameEn: "Data Analyst",
         description: "데이터 분석, 시각화, 인사이트 도출",
+        descriptionEn: "Data analysis, visualization, insights",
         prompt:
           "당신은 데이터 분석가입니다. 비즈니스 데이터를 분석하고, 시각화 자료를 제작하며, 실행 가능한 인사이트를 도출합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 수치와 근거를 명확히 제시합니다",
       },
@@ -422,19 +464,23 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
 
   const addCustomAgent = () => {
     if (!customName.trim()) return;
-    const id = customName
+    const name = customName.trim();
+    const desc = customDesc.trim();
+    const id = name
       .toLowerCase()
       .replace(/[^a-z0-9가-힣]/g, "-")
       .replace(/-+/g, "-")
       .replace(/^-|-$/g, "")
       || `agent-${agents.length + 1}`;
+    // Generate prompt in the same format as templates
+    const prompt = `당신은 ${name}입니다. ${desc || name + "의 역할을 수행합니다"}.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 간결하고 명확하게 답변합니다\n- 필요시 확인 질문을 합니다`;
     setAgents((prev) => [
       ...prev,
       {
         id,
-        name: customName.trim(),
-        description: customDesc.trim(),
-        prompt: "",
+        name,
+        description: desc,
+        prompt,
         custom: true,
       },
     ]);
@@ -941,10 +987,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 }}
               >
                 <div className="text-2xl mb-2">{tpl.icon}</div>
-                <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>{tpl.name}</div>
-                <div className="text-xs mt-1" style={{ color: "var(--th-text-muted)" }}>{tpl.description}</div>
+                <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>{tr(tpl.name, tpl.nameEn)}</div>
+                <div className="text-xs mt-1" style={{ color: "var(--th-text-muted)" }}>{tr(tpl.description, tpl.descriptionEn)}</div>
                 <div className="text-[11px] mt-2" style={{ color: "var(--th-text-muted)" }}>
-                  {tpl.agents.map((a) => a.name).join(", ")}
+                  {tpl.agents.map((a) => tr(a.name, a.nameEn)).join(", ")}
                 </div>
               </button>
             ))}
@@ -963,10 +1009,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                     onClick={() => setExpandedAgent(expandedAgent === agent.id ? null : agent.id)}
                   >
                     <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
-                      {agent.name}
+                      {tr(agent.name, agent.nameEn || agent.name)}
                     </span>
                     <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                      {agent.description}
+                      {tr(agent.description, agent.descriptionEn || agent.description)}
                     </span>
                     <span className="ml-auto text-xs" style={{ color: "var(--th-text-muted)" }}>
                       {expandedAgent === agent.id ? "▲" : "▼"}
@@ -1016,36 +1062,30 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             </div>
           )}
 
-          {/* Custom agent creation */}
-          <div className="rounded-xl p-4 border space-y-3" style={{ borderColor: "rgba(148,163,184,0.15)" }}>
-            <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
-              {tr("커스텀 에이전트 추가", "Add Custom Agent")}
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <input
-                type="text"
-                placeholder={tr("에이전트 이름", "Agent name")}
-                value={customName}
-                onChange={(e) => setCustomName(e.target.value)}
-                className="rounded-lg px-3 py-2 text-sm bg-white/5 border"
-                style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
-              />
-              <input
-                type="text"
-                placeholder={tr("한줄 설명", "Brief description")}
-                value={customDesc}
-                onChange={(e) => setCustomDesc(e.target.value)}
-                className="rounded-lg px-3 py-2 text-sm bg-white/5 border"
-                style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
-              />
-            </div>
+          {/* Custom agent creation — single row */}
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              placeholder={tr("에이전트 이름", "Agent name")}
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+              className="flex-1 rounded-lg px-3 py-2 text-sm bg-white/5 border"
+              style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
+            />
+            <input
+              type="text"
+              placeholder={tr("한줄 설명", "Brief description")}
+              value={customDesc}
+              onChange={(e) => setCustomDesc(e.target.value)}
+              className="flex-1 rounded-lg px-3 py-2 text-sm bg-white/5 border"
+              style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
+            />
             <button
               onClick={addCustomAgent}
               disabled={!customName.trim()}
-              className={btnSmall}
-              style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
+              className="px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
             >
-              + {tr("에이전트 추가", "Add Agent")}
+              + {tr("추가", "Add")}
             </button>
           </div>
 

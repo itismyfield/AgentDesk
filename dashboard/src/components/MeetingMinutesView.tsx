@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useI18n } from "../i18n";
 import type { IssueCreationResult, ProposedIssue, RoundTableMeeting } from "../types";
 import {
   createRoundTableIssues,
@@ -72,6 +73,7 @@ function getMeetingIssueState(
 }
 
 export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
+  const { t, locale } = useI18n();
   const [detailMeeting, setDetailMeeting] = useState<RoundTableMeeting | null>(null);
   const [creatingIssue, setCreatingIssue] = useState<string | null>(null);
   const [discardingIssueIds, setDiscardingIssueIds] = useState<Record<string, boolean>>({});
@@ -112,7 +114,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
       setGithubRepos([]);
       setRepoOwner("");
       setLoadingRepos(false);
-      setRepoError(error instanceof Error ? error.message : "repo 목록을 불러오지 못했습니다");
+      setRepoError(error instanceof Error ? error.message : t({ ko: "repo 목록을 불러오지 못했습니다", en: "Failed to load repo list" }));
     });
 
     return () => {
@@ -208,7 +210,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
       });
       setRepoSaveErrors((prev) => ({
         ...prev,
-        [meetingId]: e instanceof Error ? e.message : "repo 저장 실패",
+        [meetingId]: e instanceof Error ? e.message : t({ ko: "repo 저장 실패", en: "Failed to save repo" }),
       }));
       console.error("Repo setting save failed:", e);
     } finally {
@@ -224,7 +226,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
     const issueKey = getProposedIssueKey(issue);
     const actionKey = `${meetingId}:${issueKey}`;
 
-    if (!window.confirm("이 일감은 생성하지 않기로 처리하시겠습니까?")) return;
+    if (!window.confirm(t({ ko: "이 일감은 생성하지 않기로 처리하시겠습니까?", en: "Discard this issue and skip creation?" }))) return;
 
     setDiscardingIssueIds((prev) => ({ ...prev, [actionKey]: true }));
     try {
@@ -242,7 +244,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
   };
 
   const handleDiscardAllIssues = async (meetingId: string) => {
-    if (!window.confirm("이 회의록의 생성되지 않은 일감을 전부 폐기하시겠습니까?")) return;
+    if (!window.confirm(t({ ko: "이 회의록의 생성되지 않은 일감을 전부 폐기하시겠습니까?", en: "Discard all uncreated issues from this meeting?" }))) return;
 
     setDiscardingMeetingIds((prev) => ({ ...prev, [meetingId]: true }));
     try {
@@ -260,7 +262,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm("이 회의록을 삭제하시겠습니까?")) return;
+    if (!window.confirm(t({ ko: "이 회의록을 삭제하시겠습니까?", en: "Delete this meeting record?" }))) return;
     setDeleting(id);
     try {
       await deleteRoundTableMeeting(id);
@@ -290,7 +292,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
       setAgenda("");
       setShowStartForm(false);
     } catch (e) {
-      setStartError(e instanceof Error ? e.message : "회의 시작 실패");
+      setStartError(e instanceof Error ? e.message : t({ ko: "회의 시작 실패", en: "Failed to start meeting" }));
     } finally {
       setStarting(false);
     }
@@ -298,9 +300,9 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
   const statusBadge = (status: string) => {
     const map: Record<string, { bg: string; color: string; label: string }> = {
-      completed: { bg: "rgba(16,185,129,0.15)", color: "#34d399", label: "완료" },
-      in_progress: { bg: "rgba(245,158,11,0.15)", color: "#fbbf24", label: "진행중" },
-      cancelled: { bg: "rgba(239,68,68,0.15)", color: "#f87171", label: "취소" },
+      completed: { bg: "rgba(16,185,129,0.15)", color: "#34d399", label: t({ ko: "완료", en: "Completed" }) },
+      in_progress: { bg: "rgba(245,158,11,0.15)", color: "#fbbf24", label: t({ ko: "진행중", en: "In Progress" }) },
+      cancelled: { bg: "rgba(239,68,68,0.15)", color: "#f87171", label: t({ ko: "취소", en: "Cancelled" }) },
     };
     const s = map[status] || map.completed;
     return (
@@ -342,20 +344,38 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
   const getIssueProgressText = (issueProgress: ReturnType<typeof getIssueProgress>) => {
     if (issueProgress.allCreated) {
-      return `일감 생성 완료 ${issueProgress.created}/${issueProgress.total}`;
+      return t({
+        ko: `일감 생성 완료 ${issueProgress.created}/${issueProgress.total}`,
+        en: `Issues created ${issueProgress.created}/${issueProgress.total}`,
+      });
     }
     if (issueProgress.allResolved) {
-      return `일감 처리 완료 생성 ${issueProgress.created}/${issueProgress.total}, 폐기 ${issueProgress.discarded}건`;
+      return t({
+        ko: `일감 처리 완료 생성 ${issueProgress.created}/${issueProgress.total}, 폐기 ${issueProgress.discarded}건`,
+        en: `Issues resolved: created ${issueProgress.created}/${issueProgress.total}, discarded ${issueProgress.discarded}`,
+      });
     }
     if (issueProgress.failed > 0) {
-      return `생성 성공 ${issueProgress.created}/${issueProgress.total}, 실패 ${issueProgress.failed}건${issueProgress.discarded > 0 ? `, 폐기 ${issueProgress.discarded}건` : ""}`;
+      return t({
+        ko: `생성 성공 ${issueProgress.created}/${issueProgress.total}, 실패 ${issueProgress.failed}건${issueProgress.discarded > 0 ? `, 폐기 ${issueProgress.discarded}건` : ""}`,
+        en: `Created ${issueProgress.created}/${issueProgress.total}, failed ${issueProgress.failed}${issueProgress.discarded > 0 ? `, discarded ${issueProgress.discarded}` : ""}`,
+      });
     }
     if (issueProgress.discarded > 0) {
       return issueProgress.pending > 0
-        ? `생성 대기 ${issueProgress.pending}건, 폐기 ${issueProgress.discarded}건`
-        : `일감 처리 완료 생성 ${issueProgress.created}/${issueProgress.total}, 폐기 ${issueProgress.discarded}건`;
+        ? t({
+            ko: `생성 대기 ${issueProgress.pending}건, 폐기 ${issueProgress.discarded}건`,
+            en: `Pending ${issueProgress.pending}, discarded ${issueProgress.discarded}`,
+          })
+        : t({
+            ko: `일감 처리 완료 생성 ${issueProgress.created}/${issueProgress.total}, 폐기 ${issueProgress.discarded}건`,
+            en: `Issues resolved: created ${issueProgress.created}/${issueProgress.total}, discarded ${issueProgress.discarded}`,
+          });
     }
-    return `생성 대기 ${issueProgress.pending}건`;
+    return t({
+      ko: `생성 대기 ${issueProgress.pending}건`,
+      en: `Pending ${issueProgress.pending}`,
+    });
   };
 
   return (
@@ -368,10 +388,10 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
         <div className="flex items-center gap-3">
           <FileText className="text-amber-400" size={24} />
           <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
-            라운드 테이블 회의
+            {t({ ko: "라운드 테이블 회의", en: "Round Table Meeting" })}
           </h1>
           <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(245,158,11,0.15)", color: "#fbbf24" }}>
-            {meetings.length}건
+            {meetings.length}
           </span>
         </div>
         <button
@@ -379,7 +399,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors"
         >
           <Plus size={14} />
-          새 회의
+          {t({ ko: "새 회의", en: "New Meeting" })}
         </button>
       </div>
 
@@ -390,20 +410,20 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
           style={{ background: "var(--th-surface)", borderColor: "var(--th-border)" }}
         >
           <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
-            회의 시작
+            {t({ ko: "회의 시작", en: "Start Meeting" })}
           </h3>
 
           {/* Channel ID row */}
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
             <label className="text-[10px] font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
-              채널 ID
+              {t({ ko: "채널 ID", en: "Channel ID" })}
             </label>
             {showChannelEdit || !channelId ? (
               <input
                 type="text"
                 value={channelId}
                 onChange={(e) => setChannelId(e.target.value)}
-                placeholder="Discord 채널 ID"
+                placeholder={t({ ko: "Discord 채널 ID", en: "Discord Channel ID" })}
                 className="flex-1 px-3 py-1.5 rounded-lg text-xs font-mono"
                 style={inputStyle}
                 onBlur={() => { if (channelId) setShowChannelEdit(false); }}
@@ -417,7 +437,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 <button
                   onClick={() => setShowChannelEdit(true)}
                   className="p-1 rounded hover:bg-white/10 transition-colors"
-                  title="채널 ID 변경"
+                  title={t({ ko: "채널 ID 변경", en: "Change Channel ID" })}
                 >
                   <Settings2 size={12} style={{ color: "var(--th-text-muted)" }} />
                 </button>
@@ -428,13 +448,13 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
           {/* Agenda input */}
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
             <label className="text-[10px] font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
-              안건
+              {t({ ko: "안건", en: "Agenda" })}
             </label>
             <input
               type="text"
               value={agenda}
               onChange={(e) => setAgenda(e.target.value)}
-              placeholder="회의 안건을 입력하세요"
+              placeholder={t({ ko: "회의 안건을 입력하세요", en: "Enter meeting agenda" })}
               className="flex-1 px-3 py-1.5 rounded-lg text-sm"
               style={inputStyle}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) handleStartMeeting(); }}
@@ -443,7 +463,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
             <label className="text-[10px] font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
-              진행 모델
+              {t({ ko: "진행 모델", en: "Model" })}
             </label>
             <select
               value={primaryProvider}
@@ -456,7 +476,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               ))}
             </select>
             <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-              반대 모델이 자동 교차검증
+              {t({ ko: "반대 모델이 자동 교차검증", en: "Counter model auto cross-review" })}
             </span>
           </div>
 
@@ -472,14 +492,14 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-white/5"
               style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
             >
-              취소
+              {t({ ko: "취소", en: "Cancel" })}
             </button>
             <button
               onClick={handleStartMeeting}
               disabled={starting || !agenda.trim() || !channelId.trim()}
               className="px-4 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors disabled:opacity-40"
             >
-              {starting ? "시작 중..." : "회의 시작"}
+              {starting ? t({ ko: "시작 중...", en: "Starting..." }) : t({ ko: "회의 시작", en: "Start Meeting" })}
             </button>
           </div>
         </div>
@@ -489,8 +509,8 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
       {meetings.length === 0 && !showStartForm && (
         <div className="text-center py-16" style={{ color: "var(--th-text-muted)" }}>
           <FileText size={48} className="mx-auto mb-4 opacity-30" />
-          <p>회의 기록이 없습니다</p>
-          <p className="text-sm mt-1">"새 회의" 버튼으로 라운드 테이블을 시작하세요</p>
+          <p>{t({ ko: "회의 기록이 없습니다", en: "No meeting records" })}</p>
+          <p className="text-sm mt-1">{t({ ko: "\"새 회의\" 버튼으로 라운드 테이블을 시작하세요", en: "Start a round table with the \"New Meeting\" button" })}</p>
         </div>
       )}
 
@@ -525,7 +545,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                       </span>
                     )}
                     <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                      {new Date(m.started_at).toLocaleDateString("ko-KR")}
+                      {new Date(m.started_at).toLocaleDateString(locale)}
                     </span>
                     {m.total_rounds > 0 && (
                       <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
@@ -538,7 +558,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                   onClick={() => handleDelete(m.id)}
                   disabled={deleting === m.id}
                   className="p-1.5 rounded-lg transition-colors hover:bg-red-500/10 shrink-0"
-                  title="삭제"
+                  title={t({ ko: "삭제", en: "Delete" })}
                 >
                   <Trash2 size={14} style={{ color: deleting === m.id ? "var(--th-text-muted)" : "#f87171" }} />
                 </button>
@@ -564,7 +584,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     reviewerProvider={m.reviewer_provider}
                   />
                   <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                    {providerFlowCaption(m.primary_provider, m.reviewer_provider)}
+                    {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
                   </div>
                 </div>
               )}
@@ -589,10 +609,10 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     }}
                   >
                     <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
-                      <div className="text-[10px] font-semibold" style={{ color: "#818cf8" }}>PMD 요약</div>
+                      <div className="text-[10px] font-semibold" style={{ color: "#818cf8" }}>{t({ ko: "PMD 요약", en: "PMD Summary" })}</div>
                       {(m.primary_provider || m.reviewer_provider) && (
                         <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
-                          {providerFlowCaption(m.primary_provider, m.reviewer_provider)}
+                          {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
                         </div>
                       )}
                     </div>
@@ -610,7 +630,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     style={{ color: "#34d399" }}
                   >
                     {issuesExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                    생성될 일감 미리보기 ({m.proposed_issues!.length}건)
+                    {t({ ko: `생성될 일감 미리보기 (${m.proposed_issues!.length}건)`, en: `Preview issues to create (${m.proposed_issues!.length})` })}
                   </button>
                   {issuesExpanded && (
                     <div className="mt-2 space-y-1.5">
@@ -622,27 +642,27 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                         const isDiscardingIssue = !!discardingIssueIds[actionKey];
                         const statusMeta = issueState === "created"
                           ? {
-                              label: "생성됨",
+                              label: t({ ko: "생성됨", en: "Created" }),
                               color: "#34d399",
                               bg: "rgba(16,185,129,0.12)",
                               border: "rgba(16,185,129,0.18)",
                             }
                           : issueState === "discarded"
                             ? {
-                                label: "폐기됨",
+                                label: t({ ko: "폐기됨", en: "Discarded" }),
                                 color: "#94a3b8",
                                 bg: "rgba(148,163,184,0.12)",
                                 border: "rgba(148,163,184,0.18)",
                               }
                             : issueState === "failed"
                               ? {
-                                  label: "실패",
+                                  label: t({ ko: "실패", en: "Failed" }),
                                   color: "#fbbf24",
                                   bg: "rgba(245,158,11,0.12)",
                                   border: "rgba(245,158,11,0.18)",
                                 }
                               : {
-                                  label: "대기",
+                                  label: t({ ko: "대기", en: "Pending" }),
                                   color: "#60a5fa",
                                   bg: "rgba(96,165,250,0.12)",
                                   border: "rgba(96,165,250,0.18)",
@@ -663,11 +683,11 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                                   [RT] {issue.title}
                                 </div>
                                 <div className="mt-0.5" style={{ color: "var(--th-text-muted)" }}>
-                                  담당: {issue.assignee}
+                                  {t({ ko: `담당: ${issue.assignee}`, en: `Assignee: ${issue.assignee}` })}
                                 </div>
                                 {issueResult?.error && issueState === "failed" && (
                                   <div className="mt-1" style={{ color: "#fbbf24" }}>
-                                    실패: {issueResult.error}
+                                    {t({ ko: `실패: ${issueResult.error}`, en: `Failed: ${issueResult.error}` })}
                                   </div>
                                 )}
                                 {issueResult?.issue_url && issueState === "created" && (
@@ -678,7 +698,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                                     className="mt-1 inline-flex hover:underline"
                                     style={{ color: "#34d399" }}
                                   >
-                                    생성된 이슈 열기
+                                    {t({ ko: "생성된 이슈 열기", en: "Open created issue" })}
                                   </a>
                                 )}
                               </div>
@@ -701,7 +721,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                                     }}
                                   >
                                     <Trash2 size={11} />
-                                    {isDiscardingIssue ? "폐기 중..." : "폐기"}
+                                    {isDiscardingIssue ? t({ ko: "폐기 중...", en: "Discarding..." }) : t({ ko: "폐기", en: "Discard" })}
                                   </button>
                                 )}
                               </div>
@@ -728,7 +748,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-white/5"
                     style={{ borderColor: "var(--th-border)", color: "var(--th-text-secondary)" }}
                   >
-                    상세 보기
+                    {t({ ko: "상세 보기", en: "Details" })}
                   </button>
                   {hasProposedIssues ? (
                     <>
@@ -755,18 +775,18 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                         }}
                       >
                         {issueProgress.allCreated
-                          ? `일감 생성 완료 (${issueProgress.created}/${issueProgress.total})`
+                          ? t({ ko: `일감 생성 완료 (${issueProgress.created}/${issueProgress.total})`, en: `Issues created (${issueProgress.created}/${issueProgress.total})` })
                           : issueProgress.allResolved
-                            ? `일감 처리 완료 (생성 ${issueProgress.created}, 폐기 ${issueProgress.discarded})`
+                            ? t({ ko: `일감 처리 완료 (생성 ${issueProgress.created}, 폐기 ${issueProgress.discarded})`, en: `Issues resolved (created ${issueProgress.created}, discarded ${issueProgress.discarded})` })
                             : creatingIssue === m.id
-                              ? "생성 중..."
+                              ? t({ ko: "생성 중...", en: "Creating..." })
                               : isSavingRepo
-                                ? "Repo 저장 중..."
+                                ? t({ ko: "Repo 저장 중...", en: "Saving repo..." })
                                 : !selectedRepo
-                                  ? "Repo 선택 필요"
+                                  ? t({ ko: "Repo 선택 필요", en: "Select repo" })
                                   : issueProgress.failed > 0
-                                    ? `실패분 재시도 (${issueProgress.created}/${issueProgress.total})`
-                                    : `일감 생성 (${issueProgress.total}건)`}
+                                    ? t({ ko: `실패분 재시도 (${issueProgress.created}/${issueProgress.total})`, en: `Retry failed (${issueProgress.created}/${issueProgress.total})` })
+                                    : t({ ko: `일감 생성 (${issueProgress.total}건)`, en: `Create issues (${issueProgress.total})` })}
                       </button>
                       {issueProgress.pending + issueProgress.failed > 0 && (
                         <button
@@ -780,19 +800,19 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                           }}
                         >
                           {!!discardingMeetingIds[m.id]
-                            ? "전체 폐기 중..."
-                            : `남은 일감 전체 폐기 (${issueProgress.pending + issueProgress.failed}건)`}
+                            ? t({ ko: "전체 폐기 중...", en: "Discarding all..." })
+                            : t({ ko: `남은 일감 전체 폐기 (${issueProgress.pending + issueProgress.failed}건)`, en: `Discard all remaining (${issueProgress.pending + issueProgress.failed})` })}
                         </button>
                       )}
                     </>
                   ) : (
                     m.issues_created ? (
                       <span className="px-3 py-1.5 text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
-                        일감 생성 완료
+                        {t({ ko: "일감 생성 완료", en: "Issues created" })}
                       </span>
                     ) : (
                       <span className="px-3 py-1.5 text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
-                        추출된 일감 없음
+                        {t({ ko: "추출된 일감 없음", en: "No issues extracted" })}
                       </span>
                     )
                   )}
@@ -800,7 +820,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 {hasProposedIssues && (
                   <div className="flex flex-col gap-1 min-w-0 sm:min-w-[280px]">
                     <div className="text-[10px] font-semibold uppercase tracking-widest text-left sm:text-right" style={{ color: "var(--th-text-muted)" }}>
-                      이 회의용 Repo
+                      {t({ ko: "이 회의용 Repo", en: "Repo for this meeting" })}
                     </div>
                     <select
                       value={selectedRepo}
@@ -809,21 +829,21 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                       style={inputStyle}
                       disabled={loadingRepos || isSavingRepo || repoOptions.length === 0}
                     >
-                      {!selectedRepo && <option value="">Repo 선택</option>}
+                      {!selectedRepo && <option value="">{t({ ko: "Repo 선택", en: "Select repo" })}</option>}
                       {repoOptions.map((repo) => (
                         <option key={repo.nameWithOwner} value={repo.nameWithOwner}>
                           {githubRepos.some((item) => item.nameWithOwner === repo.nameWithOwner)
                             ? repo.nameWithOwner
-                            : `${repo.nameWithOwner} (현재 목록에 없음)`}
+                            : `${repo.nameWithOwner} ${t({ ko: "(현재 목록에 없음)", en: "(not in current list)" })}`}
                         </option>
                       ))}
                     </select>
                     <div className="text-[11px] text-left sm:text-right" style={{ color: repoSaveErrors[m.id] ? "#fbbf24" : "var(--th-text-muted)" }}>
                       {repoSaveErrors[m.id]
-                        || (isSavingRepo ? "repo 저장 중..." : null)
+                        || (isSavingRepo ? t({ ko: "repo 저장 중...", en: "Saving repo..." }) : null)
                         || repoError
-                        || (loadingRepos ? "repo 목록 불러오는 중..." : null)
-                        || (repoOwner ? `gh 계정 ${repoOwner}` : "")}
+                        || (loadingRepos ? t({ ko: "repo 목록 불러오는 중...", en: "Loading repos..." }) : null)
+                        || (repoOwner ? t({ ko: `gh 계정 ${repoOwner}`, en: `gh account ${repoOwner}` }) : "")}
                     </div>
                   </div>
                 )}

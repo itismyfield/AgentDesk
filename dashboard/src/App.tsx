@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, lazy, Suspense, useMemo } from "react";
 import type {
   Agent,
   AuditLogEntry,
@@ -30,6 +30,7 @@ import OfficeSelectorBar from "./components/OfficeSelectorBar";
 const OfficeManagerModal = lazy(() => import("./components/OfficeManagerModal"));
 const AgentInfoCard = lazy(() => import("./components/agent-manager/AgentInfoCard"));
 import { useSpriteMap } from "./components/AgentAvatar";
+import { useI18n } from "./i18n";
 import NotificationCenter, { type Notification, useNotifications } from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
 import {
@@ -171,12 +172,14 @@ export default function App() {
 
   const { wsConnected, wsRef } = useDashboardSocket(handleWsEvent);
 
+  const { t } = useI18n();
+
   if (!data) {
     return (
       <div className="flex items-center justify-center h-screen bg-gray-900 text-gray-400">
         <div className="text-center">
           <div className="text-4xl mb-4">🐾</div>
-          <div>Loading AgentDesk Dashboard...</div>
+          <div>{t({ ko: "AgentDesk 대시보드 로딩 중...", en: "Loading AgentDesk Dashboard..." })}</div>
         </div>
       </div>
     );
@@ -276,24 +279,24 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
   }, [refreshOffices, refreshAgents, refreshAllAgents, refreshDepartments, refreshAllDepartments, refreshAuditLogs]);
 
   const newMeetingsCount = roundTableMeetings.filter(hasUnresolvedMeetingIssues).length;
-  const viewFallbackLabel = {
-    office: "Loading Office...",
-    dashboard: "Loading Dashboard...",
-    agents: "Loading Agents...",
-    kanban: "Loading Kanban...",
-    meetings: "Loading Meetings...",
-    chat: "Loading Chat...",
-    skills: "Loading Skills...",
-    settings: "Loading Settings...",
-  } satisfies Record<ViewMode, string>;
+  const viewFallbackLabel = useMemo(() => ({
+    office: isKo ? "오피스 로딩 중..." : "Loading Office...",
+    dashboard: isKo ? "대시보드 로딩 중..." : "Loading Dashboard...",
+    agents: isKo ? "직원 로딩 중..." : "Loading Agents...",
+    kanban: isKo ? "칸반 로딩 중..." : "Loading Kanban...",
+    meetings: isKo ? "회의 로딩 중..." : "Loading Meetings...",
+    chat: isKo ? "채팅 로딩 중..." : "Loading Chat...",
+    skills: isKo ? "스킬 로딩 중..." : "Loading Skills...",
+    settings: isKo ? "설정 로딩 중..." : "Loading Settings...",
+  } satisfies Record<ViewMode, string>), [isKo]);
 
   const navItems: Array<{ id: ViewMode; icon: React.ReactNode; label: string; badge?: number; badgeColor?: string }> = [
-    { id: "office", icon: <Building2 size={20} />, label: "오피스" },
-    { id: "dashboard", icon: <LayoutDashboard size={20} />, label: "대시보드" },
-    { id: "kanban", icon: <KanbanSquare size={20} />, label: "칸반" },
-    { id: "agents", icon: <Users size={20} />, label: "직원" },
-    { id: "meetings", icon: <FileText size={20} />, label: "회의", badge: newMeetingsCount || undefined, badgeColor: "bg-amber-500" },
-    { id: "settings", icon: <Settings size={20} />, label: "설정" },
+    { id: "office", icon: <Building2 size={20} />, label: isKo ? "오피스" : "Office" },
+    { id: "dashboard", icon: <LayoutDashboard size={20} />, label: isKo ? "대시보드" : "Dashboard" },
+    { id: "kanban", icon: <KanbanSquare size={20} />, label: isKo ? "칸반" : "Kanban" },
+    { id: "agents", icon: <Users size={20} />, label: isKo ? "직원" : "Staff" },
+    { id: "meetings", icon: <FileText size={20} />, label: isKo ? "회의" : "Meetings", badge: newMeetingsCount || undefined, badgeColor: "bg-amber-500" },
+    { id: "settings", icon: <Settings size={20} />, label: isKo ? "설정" : "Settings" },
   ];
 
   return (
@@ -316,7 +319,7 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
         <NotificationCenter notifications={notifications} onDismiss={dismissNotification} />
         <div
           className="w-10 h-10 flex items-center justify-center rounded-lg"
-          title={wsConnected ? "서버 연결됨" : "서버 연결 끊김"}
+          title={wsConnected ? (isKo ? "서버 연결됨" : "Server connected") : (isKo ? "서버 연결 끊김" : "Server disconnected")}
         >
           {wsConnected
             ? <Wifi size={16} className="text-emerald-500" />

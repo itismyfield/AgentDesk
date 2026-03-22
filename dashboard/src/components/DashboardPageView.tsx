@@ -85,7 +85,7 @@ export default function DashboardPageView({
       <div className="flex items-center justify-center h-full" style={{ color: "var(--th-text-muted)" }}>
         <div className="text-center">
           <div className="text-4xl mb-4 opacity-30">📊</div>
-          <div>Loading stats...</div>
+          <div>{t({ ko: "통계 로딩 중...", en: "Loading stats...", ja: "統計読み込み中...", zh: "加载统计中..." })}</div>
         </div>
       </div>
     );
@@ -330,7 +330,7 @@ export default function DashboardPageView({
 
           <SkillTrendWidget t={t} />
 
-          <Suspense fallback={<div className="py-8 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>Loading catalog...</div>}>
+          <Suspense fallback={<div className="py-8 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>{t({ ko: "카탈로그 로딩 중...", en: "Loading catalog...", ja: "カタログ読み込み中...", zh: "加载目录中..." })}</div>}>
             <SkillCatalogView embedded />
           </Suspense>
         </>

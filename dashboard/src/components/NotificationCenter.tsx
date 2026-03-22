@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from "react";
 import { Bell, X } from "lucide-react";
+import { useI18n } from "../i18n";
 
 export interface Notification {
   id: string;
@@ -40,6 +41,7 @@ const TYPE_COLORS: Record<Notification["type"], string> = {
 };
 
 export default function NotificationCenter({ notifications, onDismiss }: NotificationCenterProps) {
+  const { t, locale } = useI18n();
   const [open, setOpen] = useState(false);
   const unread = notifications.filter((n) => Date.now() - n.ts < 60_000).length;
 
@@ -48,7 +50,7 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
       <button
         onClick={() => setOpen((o) => !o)}
         className="relative w-10 h-10 rounded-lg flex items-center justify-center text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
-        title="알림"
+        title={t({ ko: "알림", en: "Notifications" })}
       >
         <Bell size={20} />
         {unread > 0 && (
@@ -64,13 +66,13 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
           style={{ minHeight: 100 }}
         >
           <div className="sticky top-0 bg-gray-900 border-b border-gray-700 px-3 py-2 flex items-center justify-between">
-            <span className="text-sm font-semibold text-gray-300">알림 센터</span>
+            <span className="text-sm font-semibold text-gray-300">{t({ ko: "알림 센터", en: "Notification Center" })}</span>
             <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-gray-300">
               <X size={14} />
             </button>
           </div>
           {notifications.length === 0 ? (
-            <div className="px-3 py-6 text-center text-gray-500 text-sm">알림이 없습니다</div>
+            <div className="px-3 py-6 text-center text-gray-500 text-sm">{t({ ko: "알림이 없습니다", en: "No notifications" })}</div>
           ) : (
             <ul className="divide-y divide-gray-800">
               {notifications.slice(0, 30).map((n) => (
@@ -82,7 +84,7 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
                   <div className="flex-1 min-w-0">
                     <div className="text-xs text-gray-300 break-words">{n.message}</div>
                     <div className="text-[10px] text-gray-600 mt-0.5">
-                      {new Date(n.ts).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}
+                      {new Date(n.ts).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
                     </div>
                   </div>
                   <button

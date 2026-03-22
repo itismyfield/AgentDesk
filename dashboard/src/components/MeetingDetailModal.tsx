@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { RoundTableMeeting, RoundTableEntry } from "../types";
 import MeetingProviderFlow, { formatProviderFlow, providerFlowCaption } from "./MeetingProviderFlow";
 import MarkdownContent from "./common/MarkdownContent";
+import { useI18n } from "../i18n";
 
 const ROLE_SPRITE_MAP: Record<string, number> = {
   "ch-td": 5,
@@ -21,6 +22,7 @@ interface Props {
 }
 
 export default function MeetingDetailModal({ meeting, onClose }: Props) {
+  const { t, locale } = useI18n();
   const overlayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -42,10 +44,10 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
 
   const statusLabel =
     meeting.status === "completed"
-      ? "완료"
+      ? t({ ko: "완료", en: "Completed" })
       : meeting.status === "cancelled"
-        ? "취소"
-        : "진행중";
+        ? t({ ko: "취소", en: "Cancelled" })
+        : t({ ko: "진행중", en: "In Progress" });
 
   return (
     <div
@@ -77,7 +79,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                 </span>
               ))}
               <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                {new Date(meeting.started_at).toLocaleDateString("ko-KR")}
+                {new Date(meeting.started_at).toLocaleDateString(locale)}
               </span>
               {(meeting.primary_provider || meeting.reviewer_provider) && (
                 <span className="text-[10px] px-2 py-0.5 rounded-full font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}>
@@ -104,18 +106,18 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                 reviewerProvider={meeting.reviewer_provider}
               />
               <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                {providerFlowCaption(meeting.primary_provider, meeting.reviewer_provider)}
+                {providerFlowCaption(meeting.primary_provider, meeting.reviewer_provider, t)}
               </div>
             </div>
           )}
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <MetaCard label="상태" value={statusLabel} />
-            <MetaCard label="라운드" value={`${meeting.total_rounds}R`} />
-            <MetaCard label="참여자" value={`${meeting.participant_names.length}명`} />
+            <MetaCard label={t({ ko: "상태", en: "Status" })} value={statusLabel} />
+            <MetaCard label={t({ ko: "라운드", en: "Rounds" })} value={`${meeting.total_rounds}R`} />
+            <MetaCard label={t({ ko: "참여자", en: "Participants" })} value={`${meeting.participant_names.length}`} />
             <MetaCard
-              label="시작"
-              value={new Date(meeting.started_at).toLocaleString("ko-KR", {
+              label={t({ ko: "시작", en: "Started" })}
+              value={new Date(meeting.started_at).toLocaleString(locale, {
                 month: "2-digit",
                 day: "2-digit",
                 hour: "2-digit",
@@ -135,7 +137,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                 </div>
                 {(meeting.primary_provider || meeting.reviewer_provider) && (
                   <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                    {providerFlowCaption(meeting.primary_provider, meeting.reviewer_provider)}
+                    {providerFlowCaption(meeting.primary_provider, meeting.reviewer_provider, t)}
                   </div>
                 )}
               </div>
@@ -147,8 +149,8 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
               style={{ background: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.14)", color: "var(--th-text-muted)" }}
             >
               {meeting.status === "cancelled"
-                ? "취소된 회의라 요약이 생성되지 않았습니다."
-                : "아직 요약이 저장되지 않았습니다."}
+                ? t({ ko: "취소된 회의라 요약이 생성되지 않았습니다.", en: "No summary generated for cancelled meeting." })
+                : t({ ko: "아직 요약이 저장되지 않았습니다.", en: "No summary saved yet." })}
             </div>
           )}
 
@@ -203,7 +205,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
             className="px-4 py-2 rounded-lg text-sm font-medium border transition-colors hover:bg-white/5"
             style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
           >
-            닫기
+            {t({ ko: "닫기", en: "Close" })}
           </button>
         </div>
       </div>

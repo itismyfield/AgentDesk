@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import type { Agent, Department, DispatchedSession } from "../../types";
 import { Monitor, MapPin, Clock, Wifi, WifiOff } from "lucide-react";
 import { getRankTier } from "../dashboard/model";
+import { useI18n } from "../../i18n";
 
 function sessionSpriteNum(s: DispatchedSession): number {
   if (s.sprite_number != null && s.sprite_number > 0) return s.sprite_number;
@@ -23,6 +24,8 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
   const active = sessions.filter((s) => s.status !== "disconnected");
   const disconnected = sessions.filter((s) => s.status === "disconnected");
   const [infoSession, setInfoSession] = useState<DispatchedSession | null>(null);
+  const { t, language } = useI18n();
+  const isKo = language === "ko";
 
   return (
     <div
@@ -31,22 +34,24 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
     >
       <div className="flex items-center gap-3 mb-6">
         <Monitor className="text-indigo-400" size={24} />
-        <h1 className="text-2xl font-bold">파견 인력</h1>
+        <h1 className="text-2xl font-bold">{t({ ko: "파견 인력", en: "Dispatched Sessions" })}</h1>
         <span className="bg-emerald-600 text-white text-xs px-2 py-0.5 rounded-full">
-          {active.length} 활성
+          {active.length} {t({ ko: "활성", en: "Active" })}
         </span>
       </div>
 
       <p className="text-gray-400 text-sm mb-6">
-        AgentDesk 세션이 감지되면 파견 인력으로 등록됩니다.
-        각 세션을 부서에 배치하여 오피스에서 시각화할 수 있습니다.
+        {t({
+          ko: "AgentDesk 세션이 감지되면 파견 인력으로 등록됩니다. 각 세션을 부서에 배치하여 오피스에서 시각화할 수 있습니다.",
+          en: "Detected AgentDesk sessions are registered as dispatched staff. Assign each session to a department to visualize them in the office.",
+        })}
       </p>
 
       {active.length === 0 && disconnected.length === 0 && (
         <div className="text-center py-16 text-gray-500">
           <Monitor size={48} className="mx-auto mb-4 opacity-30" />
-          <p>현재 활성 세션이 없습니다</p>
-          <p className="text-sm mt-1">AgentDesk 세션이 실행되면 자동으로 표시됩니다</p>
+          <p>{t({ ko: "현재 활성 세션이 없습니다", en: "No active sessions" })}</p>
+          <p className="text-sm mt-1">{t({ ko: "AgentDesk 세션이 실행되면 자동으로 표시됩니다", en: "Sessions will appear automatically when AgentDesk starts" })}</p>
         </div>
       )}
 
@@ -71,7 +76,7 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
         <>
           <h2 className="text-sm font-semibold text-gray-500 mb-3 flex items-center gap-2">
             <WifiOff size={14} />
-            종료된 세션 ({disconnected.length})
+            {t({ ko: "종료된 세션", en: "Disconnected" })} ({disconnected.length})
           </h2>
           <div className="space-y-2 opacity-60">
             {disconnected.slice(0, 10).map((s) => (
@@ -96,7 +101,7 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
                 </span>
                 {s.last_seen_at && (
                   <span className="text-xs text-gray-600">
-                    {formatTimeAgo(s.last_seen_at)}
+                    {formatTimeAgo(s.last_seen_at, isKo)}
                   </span>
                 )}
               </div>
@@ -126,6 +131,8 @@ function SessionCard({
 }) {
   const [assigning, setAssigning] = useState(false);
   const [selectedDept, setSelectedDept] = useState(s.department_id || "");
+  const { t, language } = useI18n();
+  const isKo = language === "ko";
 
   const handleAssign = async () => {
     setAssigning(true);
@@ -189,7 +196,7 @@ function SessionCard({
           {s.connected_at && (
             <div className="flex items-center gap-1 text-xs text-gray-500 mt-1">
               <Clock size={10} className="shrink-0" />
-              <span className="whitespace-nowrap">접속: {formatTimeAgo(s.connected_at)}</span>
+              <span className="whitespace-nowrap">{t({ ko: "접속", en: "Connected" })}: {formatTimeAgo(s.connected_at, isKo)}</span>
             </div>
           )}
         </div>
@@ -203,7 +210,7 @@ function SessionCard({
           onChange={(e) => setSelectedDept(e.target.value)}
           className="bg-gray-700 text-sm rounded px-2 py-1 border border-gray-600 text-gray-200 flex-1 min-w-[120px]"
         >
-          <option value="">미배정</option>
+          <option value="">{t({ ko: "미배정", en: "Unassigned" })}</option>
           {departments.map((d) => (
             <option key={d.id} value={d.id}>
               {d.icon} {d.name_ko || d.name}
@@ -215,7 +222,7 @@ function SessionCard({
           disabled={assigning || selectedDept === (s.department_id || "")}
           className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs px-3 py-1.5 rounded transition-colors shrink-0"
         >
-          {assigning ? "..." : "배치"}
+          {assigning ? "..." : t({ ko: "배치", en: "Assign" })}
         </button>
       </div>
 
@@ -226,7 +233,7 @@ function SessionCard({
             className="text-xs px-2 py-0.5 rounded-full text-white"
             style={{ backgroundColor: s.department_color || "#6366f1" }}
           >
-            {s.department_name_ko}에 배치됨
+            {t({ ko: `${s.department_name_ko}에 배치됨`, en: `Assigned to ${s.department_name_ko}` })}
           </span>
         </div>
       )}
@@ -234,24 +241,25 @@ function SessionCard({
   );
 }
 
-function formatTimeAgo(ts: number): string {
+function formatTimeAgo(ts: number, isKo = true): string {
   const diff = Date.now() - ts;
   const sec = Math.floor(diff / 1000);
-  if (sec < 60) return `${sec}초 전`;
+  if (sec < 60) return isKo ? `${sec}초 전` : `${sec}s ago`;
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}분 전`;
+  if (min < 60) return isKo ? `${min}분 전` : `${min}m ago`;
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}시간 전`;
-  return `${Math.floor(hr / 24)}일 전`;
+  if (hr < 24) return isKo ? `${hr}시간 전` : `${hr}h ago`;
+  const days = Math.floor(hr / 24);
+  return isKo ? `${days}일 전` : `${days}d ago`;
 }
 
-function formatDuration(ms: number): string {
+function formatDuration(ms: number, isKo = true): string {
   const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}초`;
+  if (sec < 60) return isKo ? `${sec}초` : `${sec}s`;
   const min = Math.floor(sec / 60);
   const hr = Math.floor(min / 60);
-  if (hr > 0) return `${hr}시간 ${min % 60}분`;
-  return `${min}분`;
+  if (hr > 0) return isKo ? `${hr}시간 ${min % 60}분` : `${hr}h ${min % 60}m`;
+  return isKo ? `${min}분` : `${min}m`;
 }
 
 function SessionInfoCard({
@@ -269,6 +277,8 @@ function SessionInfoCard({
   const tier = getRankTier(s.stats_xp);
   const isDisconnected = s.status === "disconnected";
   const uptime = s.connected_at ? Date.now() - s.connected_at : 0;
+  const { t, language } = useI18n();
+  const isKo = language === "ko";
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -279,9 +289,9 @@ function SessionInfoCard({
   }, [onClose]);
 
   const statusLabel: Record<string, string> = {
-    working: "작업 중",
-    idle: "대기",
-    disconnected: "연결 종료",
+    working: t({ ko: "작업 중", en: "Working" }),
+    idle: t({ ko: "대기", en: "Idle" }),
+    disconnected: t({ ko: "연결 종료", en: "Disconnected" }),
   };
 
   return (
@@ -337,7 +347,7 @@ function SessionInfoCard({
               )}
               {!dept && (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-800 text-gray-500">
-                  미배정
+                  {t({ ko: "미배정", en: "Unassigned" })}
                 </span>
               )}
             </div>
@@ -353,20 +363,20 @@ function SessionInfoCard({
         {/* Details */}
         <div className="px-5 py-3 space-y-2.5 border-b border-gray-700">
           {s.model && (
-            <InfoRow label="모델" value={s.model} />
+            <InfoRow label={t({ ko: "모델", en: "Model" })} value={s.model} />
           )}
           {s.session_info && (
-            <InfoRow label="최근 도구" value={s.session_info} />
+            <InfoRow label={t({ ko: "최근 도구", en: "Recent Tool" })} value={s.session_info} />
           )}
-          <InfoRow label="세션 키" value={s.session_key} mono />
+          <InfoRow label={t({ ko: "세션 키", en: "Session Key" })} value={s.session_key} mono />
           {s.connected_at > 0 && (
-            <InfoRow label="접속 시각" value={new Date(s.connected_at).toLocaleString("ko-KR")} />
+            <InfoRow label={t({ ko: "접속 시각", en: "Connected At" })} value={new Date(s.connected_at).toLocaleString(isKo ? "ko-KR" : "en-US")} />
           )}
           {s.connected_at > 0 && !isDisconnected && (
-            <InfoRow label="가동 시간" value={formatDuration(uptime)} />
+            <InfoRow label={t({ ko: "가동 시간", en: "Uptime" })} value={formatDuration(uptime, isKo)} />
           )}
           {s.last_seen_at && (
-            <InfoRow label="마지막 신호" value={formatTimeAgo(s.last_seen_at)} />
+            <InfoRow label={t({ ko: "마지막 신호", en: "Last Seen" })} value={formatTimeAgo(s.last_seen_at, isKo)} />
           )}
         </div>
 
@@ -394,7 +404,7 @@ function SessionInfoCard({
             onClick={onClose}
             className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-600 text-gray-400 hover:bg-gray-800 transition-colors"
           >
-            닫기
+            {t({ ko: "닫기", en: "Close" })}
           </button>
         </div>
       </div>
