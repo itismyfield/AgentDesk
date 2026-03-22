@@ -290,6 +290,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
             "/review-decision",
             post(review_verdict::submit_review_decision),
         )
+        .route("/pm-decision", post(kanban::pm_decision))
         .layer(axum::middleware::from_fn(auth::auth_middleware))
         .with_state(state)
 }

@@ -1180,3 +1180,124 @@ fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> 
         "child_count": 0,
     }))
 }
+
+// ── PM Decision API ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PmDecisionBody {
+    pub card_id: String,
+    pub decision: String, // "resume", "rework", "dismiss", "requeue"
+    pub comment: Option<String>,
+}
+
+/// POST /api/pm-decision
+/// PM's decision on a pending_decision card.
+/// - resume: return card to in_progress (continue work)
+/// - rework: create rework dispatch to assigned agent
+/// - dismiss: move card to done (PM decides work is sufficient)
+/// - requeue: move card back to ready for re-prioritization
+pub async fn pm_decision(
+    State(state): State<AppState>,
+    Json(body): Json<PmDecisionBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let valid = ["resume", "rework", "dismiss", "requeue"];
+    if !valid.contains(&body.decision.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("decision must be one of: {}", valid.join(", "))})),
+        );
+    }
+
+    // Verify card exists and is in pending_decision
+    let card_info: Option<(String, String, String)> = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+        };
+        conn.query_row(
+            "SELECT status, COALESCE(assigned_agent_id, ''), title FROM kanban_cards WHERE id = ?1",
+            [&body.card_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok()
+    };
+
+    let Some((status, agent_id, title)) = card_info else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "card not found"})));
+    };
+
+    if status != "pending_decision" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("card is '{}', not 'pending_decision'", status)})),
+        );
+    }
+
+    // Complete any pending pm-decision dispatches
+    if let Ok(conn) = state.db.lock() {
+        conn.execute(
+            "UPDATE task_dispatches SET status = 'completed', result = ?1, updated_at = datetime('now') \
+             WHERE kanban_card_id = ?2 AND dispatch_type = 'pm-decision' AND status = 'pending'",
+            rusqlite::params![
+                serde_json::to_string(&json!({"decision": body.decision, "comment": body.comment})).unwrap_or_default(),
+                body.card_id
+            ],
+        ).ok();
+        // Clear blocked_reason
+        conn.execute(
+            "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = ?1",
+            [&body.card_id],
+        ).ok();
+    }
+
+    let message = match body.decision.as_str() {
+        "resume" => {
+            let _ = crate::kanban::transition_status_with_opts(
+                &state.db, &state.engine, &body.card_id, "in_progress", "pm-decision", true,
+            );
+            "Card resumed to in_progress"
+        }
+        "rework" => {
+            let _ = crate::kanban::transition_status_with_opts(
+                &state.db, &state.engine, &body.card_id, "in_progress", "pm-decision", true,
+            );
+            if let Ok(conn) = state.db.lock() {
+                conn.execute(
+                    "UPDATE kanban_cards SET review_status = 'rework_pending' WHERE id = ?1",
+                    [&body.card_id],
+                ).ok();
+            }
+            if !agent_id.is_empty() {
+                let _ = crate::dispatch::create_dispatch(
+                    &state.db, &state.engine, &body.card_id, &agent_id,
+                    "rework", &format!("[Rework] {}", title),
+                    &json!({"pm_decision": "rework", "comment": body.comment}),
+                );
+            }
+            "Rework dispatch created"
+        }
+        "dismiss" => {
+            let _ = crate::kanban::transition_status_with_opts(
+                &state.db, &state.engine, &body.card_id, "done", "pm-decision", true,
+            );
+            "Card dismissed to done"
+        }
+        "requeue" => {
+            let _ = crate::kanban::transition_status_with_opts(
+                &state.db, &state.engine, &body.card_id, "ready", "pm-decision", true,
+            );
+            "Card requeued to ready"
+        }
+        _ => "Unknown decision",
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "card_id": body.card_id,
+            "decision": body.decision,
+            "message": message,
+        })),
+    )
+}

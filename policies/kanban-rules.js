@@ -311,9 +311,43 @@ var rules = {
       notifyPMD(payload.card_id, reason);
     }
 
-    // → pending_decision: PMD 알림
+    // → pending_decision: create pm-decision dispatch + notify PMD
     if (payload.to === "pending_decision") {
-      notifyPMD(payload.card_id, "PM 결정 필요 (자동 게이트에서 전환됨)");
+      var blockInfo = agentdesk.db.query(
+        "SELECT blocked_reason, assigned_agent_id, title FROM kanban_cards WHERE id = ?",
+        [payload.card_id]
+      );
+      var reason = "PM 결정 필요";
+      var agentId = "";
+      var title = payload.card_id;
+      if (blockInfo.length > 0) {
+        reason = blockInfo[0].blocked_reason || reason;
+        agentId = blockInfo[0].assigned_agent_id || "";
+        title = blockInfo[0].title || title;
+      }
+
+      // Create pm-decision dispatch to PMD
+      var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
+      if (pmdChannel) {
+        // Find PMD agent by channel
+        var pmdAgent = agentdesk.db.query(
+          "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? LIMIT 1",
+          [pmdChannel, pmdChannel]
+        );
+        var pmdAgentId = pmdAgent.length > 0 ? pmdAgent[0].id : agentId;
+        try {
+          agentdesk.dispatch.create(
+            payload.card_id,
+            pmdAgentId,
+            "pm-decision",
+            "[PM Decision] " + title
+          );
+        } catch (e) {
+          agentdesk.log.warn("[kanban] pm-decision dispatch failed: " + e);
+        }
+      }
+
+      notifyPMD(payload.card_id, reason);
     }
   },
 
