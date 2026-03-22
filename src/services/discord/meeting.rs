@@ -531,8 +531,8 @@ pub(super) async fn start_meeting(
         }
 
         if consensus {
-            rate_limit_wait(shared, channel_id).await;
-            let _ = channel_id
+            rate_limit_wait(shared, msg_channel).await;
+            let _ = msg_channel
                 .send_message(
                     http,
                     CreateMessage::new().content("✅ **합의 도달! 회의를 마무리할게.**"),
@@ -571,22 +571,23 @@ pub(super) async fn cancel_meeting(
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
-    let had_meeting = {
+    let meeting_info = {
         let mut core = shared.core.lock().await;
         if let Some(m) = core.active_meetings.get_mut(&channel_id) {
             m.status = MeetingStatus::Cancelled;
-            true
+            let mc = m.msg_channel.map(ChannelId::new).unwrap_or(channel_id);
+            Some(mc)
         } else {
-            false
+            None
         }
     };
 
-    if had_meeting {
+    if let Some(mc) = meeting_info {
         // Save whatever transcript we have
         let _ = save_meeting_record(shared, channel_id, None).await;
         cleanup_meeting(shared, channel_id).await;
-        rate_limit_wait(shared, channel_id).await;
-        let _ = channel_id
+        rate_limit_wait(shared, mc).await;
+        let _ = mc
             .send_message(
                 http,
                 CreateMessage::new()
