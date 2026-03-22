@@ -215,10 +215,40 @@ pub async fn achievements(
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
 
+    // Pre-fetch completion timestamps per agent (nth completed dispatch as earned_at proxy)
+    let mut agent_completed_times: std::collections::HashMap<String, Vec<i64>> =
+        std::collections::HashMap::new();
+    for (agent_id, _, _, _, _) in &agents {
+        let times: Vec<i64> = conn
+            .prepare(
+                "SELECT CAST(strftime('%s', updated_at) AS INTEGER) * 1000 \
+                 FROM task_dispatches WHERE to_agent_id = ?1 AND status = 'completed' \
+                 ORDER BY updated_at ASC",
+            )
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_map([agent_id], |row| row.get::<_, i64>(0))
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
+        agent_completed_times.insert(agent_id.clone(), times);
+    }
+
     let mut achievements = Vec::new();
     for (agent_id, name, name_ko, xp, avatar_emoji) in &agents {
+        let completion_times = agent_completed_times.get(agent_id.as_str());
         for (threshold, achievement_type, description) in milestones {
             if xp >= threshold {
+                // Estimate earned_at: use the Nth completed dispatch timestamp
+                // where N approximates when this XP threshold was crossed
+                // (assuming ~10 XP per completion on average)
+                let approx_index = (*threshold as usize / 10).saturating_sub(1);
+                let earned_at = completion_times
+                    .and_then(|times| times.get(approx_index.min(times.len().saturating_sub(1))))
+                    .copied()
+                    .unwrap_or(0);
+
                 let emoji = avatar_emoji.as_str();
                 achievements.push(json!({
                     "id": format!("{agent_id}:{achievement_type}"),
@@ -226,7 +256,7 @@ pub async fn achievements(
                     "type": achievement_type,
                     "name": format!("{description} ({threshold} XP)"),
                     "description": description,
-                    "earned_at": 0,
+                    "earned_at": earned_at,
                     "agent_name": name,
                     "agent_name_ko": name_ko,
                     "avatar_emoji": emoji,
