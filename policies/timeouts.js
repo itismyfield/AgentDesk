@@ -359,6 +359,80 @@ var timeouts = {
         agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [activeKeys[ak].key]);
       }
     }
+  },
+
+  // ─── [I] 컨텍스트 윈도우 자동 관리 ─────────────────────
+  // onTick에서 세션 토큰 사용량을 모니터링하고 compact/clear 자동 호출
+  onContextCheck: function() {
+    var CONTEXT_WINDOW = 1000000; // 1M tokens
+    var compactPercent = parseInt(agentdesk.config.get("context_compact_percent") || "60", 10);
+    var clearPercent = parseInt(agentdesk.config.get("context_clear_percent") || "40", 10);
+    var clearIdleMin = parseInt(agentdesk.config.get("context_clear_idle_minutes") || "60", 10);
+
+    var sessions = agentdesk.db.query(
+      "SELECT session_key, agent_id, tokens, status, last_heartbeat FROM sessions WHERE status != 'disconnected' AND tokens > 0"
+    );
+
+    var now = Date.now();
+
+    for (var i = 0; i < sessions.length; i++) {
+      var s = sessions[i];
+      if (!s.session_key) continue;
+
+      var pct = (s.tokens / CONTEXT_WINDOW) * 100;
+
+      // Skip working sessions — don't interrupt active work
+      if (s.status === "working") continue;
+
+      // Compact: >= compactPercent
+      if (pct >= compactPercent) {
+        var result = JSON.parse(agentdesk.session.sendCommand(s.session_key, "/compact"));
+        if (result.ok) {
+          agentdesk.log.info("[context] Auto-compact: " + s.session_key + " (" + Math.round(pct) + "%)");
+          // Discord notification
+          var agent = agentdesk.db.query("SELECT discord_channel_id FROM agents WHERE id = ?", [s.agent_id]);
+          if (agent.length > 0 && agent[0].discord_channel_id) {
+            sendNotifyAlert(
+              "channel:" + agent[0].discord_channel_id,
+              "⚡ 컨텍스트 자동 compact 실행 (" + Math.round(pct) + "% → " + s.session_key + ")"
+            );
+          }
+        }
+        continue; // Don't also clear in same tick
+      }
+
+      // Clear: >= clearPercent AND idle for clearIdleMin
+      if (pct >= clearPercent && s.last_heartbeat) {
+        var lastHb = new Date(s.last_heartbeat).getTime();
+        var idleMs = now - lastHb;
+        var idleMin = idleMs / 60000;
+
+        if (idleMin >= clearIdleMin) {
+          var result2 = JSON.parse(agentdesk.session.sendCommand(s.session_key, "/clear"));
+          if (result2.ok) {
+            agentdesk.log.info("[context] Auto-clear: " + s.session_key + " (" + Math.round(pct) + "%, idle " + Math.round(idleMin) + "min)");
+            var agent2 = agentdesk.db.query("SELECT discord_channel_id FROM agents WHERE id = ?", [s.agent_id]);
+            if (agent2.length > 0 && agent2[0].discord_channel_id) {
+              sendNotifyAlert(
+                "channel:" + agent2[0].discord_channel_id,
+                "🧹 컨텍스트 자동 clear 실행 (" + Math.round(pct) + "%, idle " + Math.round(idleMin) + "분 → " + s.session_key + ")"
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+};
+
+// Wire onContextCheck into onTick
+var _origOnTick = timeouts.onTick;
+timeouts.onTick = function() {
+  _origOnTick.call(this);
+  if (timeouts.onContextCheck) {
+    try { timeouts.onContextCheck(); } catch(e) {
+      agentdesk.log.warn("[context] onContextCheck error: " + e);
+    }
   }
 };
 

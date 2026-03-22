@@ -726,5 +726,29 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     "#,
     )?;
 
+    // agentdesk.session.sendCommand(sessionKey, command) — inject a slash command into a tmux session
+    let session_obj = rquickjs::Object::new(ctx.clone())?;
+    session_obj.set(
+        "sendCommand",
+        rquickjs::Function::new(ctx.clone(), |session_key: String, command: String| -> String {
+            let result = std::process::Command::new("tmux")
+                .args(["send-keys", "-t", &session_key, &command, "Enter"])
+                .output();
+            match result {
+                Ok(out) if out.status.success() => {
+                    format!(r#"{{"ok":true,"session":"{}","command":"{}"}}"#, session_key, command)
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    format!(r#"{{"ok":false,"error":"tmux: {}"}}"#, stderr.trim())
+                }
+                Err(e) => {
+                    format!(r#"{{"ok":false,"error":"{}"}}"#, e)
+                }
+            }
+        }),
+    )?;
+    ad.set("session", session_obj)?;
+
     Ok(())
 }

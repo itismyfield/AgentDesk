@@ -205,6 +205,9 @@ fn runtime_config_defaults() -> serde_json::Value {
         "rateLimitDangerPct": 95,
         "githubRepoCacheSec": 300,
         "rateLimitStaleSec": 600,
+        "context_compact_percent": 60,
+        "context_clear_percent": 40,
+        "context_clear_idle_minutes": 60,
     })
 }
 
