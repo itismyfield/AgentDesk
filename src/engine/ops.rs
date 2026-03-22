@@ -289,13 +289,26 @@ fn register_http_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
             if !url.starts_with("http://127.0.0.1") {
                 return r#"{"error":"only localhost allowed"}"#.to_string();
             }
-            match ureq::post(&url)
-                .set("Content-Type", "application/json")
-                .send_string(&body_json)
-            {
-                Ok(resp) => resp.into_string().unwrap_or_else(|_| "{}".to_string()),
-                Err(e) => format!(r#"{{"error":"{}"}}"#, e),
-            }
+            // Run on a dedicated thread to avoid blocking the tokio I/O
+            // driver.  ureq is synchronous — if called directly on a tokio
+            // worker it can self-deadlock when the target is our own HTTP
+            // server (the worker blocks on recv while no other worker is
+            // available to handle the incoming request).
+            let handle = std::thread::spawn(move || {
+                match ureq::AgentBuilder::new()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .post(&url)
+                    .set("Content-Type", "application/json")
+                    .send_string(&body_json)
+                {
+                    Ok(resp) => resp.into_string().unwrap_or_else(|_| "{}".to_string()),
+                    Err(e) => format!(r#"{{"error":"{}"}}"#, e),
+                }
+            });
+            handle
+                .join()
+                .unwrap_or_else(|_| r#"{"error":"thread panic"}"#.to_string())
         })?,
     )?;
 
