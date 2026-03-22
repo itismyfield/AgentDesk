@@ -32,11 +32,15 @@ var reviewAutomation = {
     if (cards.length === 0) return;
     var card = cards[0];
 
-    // Check if review is enabled
+    // Check if review is enabled — if not, route to PM decision (not silent done)
     var reviewEnabled = agentdesk.config.get("review_enabled");
     if (reviewEnabled === "false" || reviewEnabled === false) {
-      agentdesk.kanban.setStatus(card.id, "done");
-      agentdesk.log.info("[review] Review disabled, card " + card.id + " → done");
+      agentdesk.kanban.setStatus(card.id, "pending_decision");
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET blocked_reason = 'Review disabled — PM decision needed to proceed' WHERE id = ?",
+        [card.id]
+      );
+      agentdesk.log.info("[review] Review disabled, card " + card.id + " → pending_decision");
       return;
     }
 
@@ -47,30 +51,27 @@ var reviewAutomation = {
       [newRound, card.id]
     );
 
-    // Check review round limit
+    // Check review round limit — exceed → pending_decision with PMD notification
     var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
     if (newRound > maxRounds) {
+      agentdesk.kanban.setStatus(card.id, "pending_decision");
       agentdesk.db.execute(
-        "UPDATE kanban_cards SET review_status = 'dilemma_pending', updated_at = datetime('now') WHERE id = ?",
-        [card.id]
+        "UPDATE kanban_cards SET review_status = 'dilemma_pending', blocked_reason = ? WHERE id = ?",
+        ["Max review rounds (" + maxRounds + ") exceeded — PM decision needed", card.id]
       );
-      agentdesk.log.warn("[review] Max review rounds (" + maxRounds + ") reached for " + card.id);
-      // Notify PMD about dilemma
-      var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
-      if (pmdChannel) {
-        sendDiscordReview(
-          "channel:" + pmdChannel,
-          "[Review Dilemma] " + card.id + " — 리뷰 라운드 " + maxRounds + "회 초과. 수동 결정 필요.",
-          "announce"
-        );
-      }
+      agentdesk.log.warn("[review] Max review rounds (" + maxRounds + ") reached for " + card.id + " → pending_decision");
       return;
     }
 
     // Counter-model review: send to alternate channel (Claude↔Codex pair)
     var counterModelEnabled = agentdesk.config.get("counter_model_review_enabled");
     if (counterModelEnabled === false || counterModelEnabled === "false") {
-      agentdesk.log.info("[review] Counter-model disabled, manual review for " + card.id);
+      agentdesk.kanban.setStatus(card.id, "pending_decision");
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET blocked_reason = 'Counter-model review disabled — PM decision needed' WHERE id = ?",
+        [card.id]
+      );
+      agentdesk.log.info("[review] Counter-model disabled, card " + card.id + " → pending_decision");
       return;
     }
 
@@ -82,9 +83,13 @@ var reviewAutomation = {
       [card.assigned_agent_id]
     );
     if (agentRow.length === 0 || !agentRow[0].discord_channel_alt) {
-      // No alt channel → skip counter-model review, go directly to done
-      agentdesk.kanban.setStatus(card.id, "done");
-      agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + ", review skipped → done");
+      // No alt channel → PM decision (not silent done skip)
+      agentdesk.kanban.setStatus(card.id, "pending_decision");
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET blocked_reason = 'No alt channel for counter-model review — PM decision needed' WHERE id = ?",
+        [card.id]
+      );
+      agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + " → pending_decision");
       return;
     }
 
