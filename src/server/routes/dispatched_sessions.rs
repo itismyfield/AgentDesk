@@ -245,6 +245,16 @@ pub async fn hook_session(
                         "[session] Auto-completed dispatch {} on idle session update",
                         did
                     );
+                    // Send any follow-up dispatch (e.g. review dispatch) that was
+                    // created by hooks during complete_dispatch to Discord.
+                    let db_clone = state.db.clone();
+                    let did_owned = did.clone();
+                    tokio::spawn(async move {
+                        super::dispatches::handle_completed_dispatch_followups(
+                            &db_clone, &did_owned,
+                        )
+                        .await;
+                    });
                 }
             }
 
