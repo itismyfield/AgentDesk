@@ -1006,6 +1006,8 @@ pub struct OrderBody {
     /// Ordered list of GitHub issue numbers (or card IDs)
     pub order: Vec<serde_json::Value>,
     pub rationale: Option<String>,
+    /// Alias for rationale (compatibility)
+    pub reasoning: Option<String>,
 }
 
 /// POST /api/auto-queue/runs/:id/order
@@ -1080,7 +1082,9 @@ pub async fn submit_order(
     }
 
     // Update run: pending → active, set rationale
-    let rationale = body.rationale.as_deref().unwrap_or("PMD 분석 완료");
+    let rationale = body.rationale.as_deref()
+        .or(body.reasoning.as_deref())
+        .unwrap_or("PMD 분석 완료");
     conn.execute(
         "UPDATE auto_queue_runs SET status = 'active', ai_rationale = ?1 WHERE id = ?2",
         rusqlite::params![rationale, run_id],
