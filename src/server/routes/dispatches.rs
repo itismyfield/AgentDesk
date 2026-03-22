@@ -468,14 +468,64 @@ pub(super) async fn send_dispatch_to_discord(
         channel_id_num
     );
     let client = reqwest::Client::new();
-    match client
+    let resp = client
         .post(&url)
         .header("Authorization", format!("Bot {}", token))
         .json(&serde_json::json!({"content": message}))
         .send()
-        .await
-    {
+        .await;
+
+    match resp {
         Ok(resp) if resp.status().is_success() => {
+            // Try to create a thread from the dispatch message
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                let message_id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if !message_id.is_empty() {
+                    // Create thread from this message
+                    let thread_name = if let Some(num) = issue_number {
+                        format!("#{} {}", num, &title[..title.len().min(90)])
+                    } else {
+                        title[..title.len().min(100)].to_string()
+                    };
+
+                    let thread_url = format!(
+                        "https://discord.com/api/v10/channels/{}/messages/{}/threads",
+                        channel_id_num, message_id
+                    );
+                    let thread_resp = client
+                        .post(&thread_url)
+                        .header("Authorization", format!("Bot {}", token))
+                        .json(&serde_json::json!({
+                            "name": thread_name,
+                            "auto_archive_duration": 1440, // 24h
+                        }))
+                        .send()
+                        .await;
+
+                    if let Ok(tr) = thread_resp {
+                        if tr.status().is_success() {
+                            if let Ok(thread_body) = tr.json::<serde_json::Value>().await {
+                                let thread_id = thread_body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                if !thread_id.is_empty() {
+                                    // Save thread_id to dispatch
+                                    if let Ok(conn) = db.lock() {
+                                        conn.execute(
+                                            "UPDATE task_dispatches SET context = json_set(COALESCE(context, '{}'), '$.thread_id', ?1) WHERE id = ?2",
+                                            rusqlite::params![thread_id, dispatch_id],
+                                        ).ok();
+                                    }
+                                    tracing::info!(
+                                        "[dispatch] Created thread {} for dispatch {dispatch_id}",
+                                        thread_id
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::warn!("[dispatch] Thread creation failed: {}", tr.status());
+                        }
+                    }
+                }
+            }
             tracing::info!("[dispatch] Sent message to {agent_id} (channel {channel_id})");
         }
         Ok(resp) => {
