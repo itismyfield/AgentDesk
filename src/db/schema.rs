@@ -134,18 +134,18 @@ pub fn migrate(conn: &Connection) -> Result<()> {
                      AND kc3.id != kc.id
                  )
              );
-             UPDATE review_decisions SET card_id = (
+             UPDATE review_decisions SET kanban_card_id = (
                  SELECT kc2.id FROM kanban_cards kc2
                  WHERE kc2.github_issue_number = (
-                     SELECT github_issue_number FROM kanban_cards WHERE id = review_decisions.card_id
+                     SELECT github_issue_number FROM kanban_cards WHERE id = review_decisions.kanban_card_id
                  )
                  AND kc2.repo_id = (
-                     SELECT repo_id FROM kanban_cards WHERE id = review_decisions.card_id
+                     SELECT repo_id FROM kanban_cards WHERE id = review_decisions.kanban_card_id
                  )
                  ORDER BY kc2.updated_at DESC, kc2.created_at DESC
                  LIMIT 1
              )
-             WHERE card_id IN (
+             WHERE kanban_card_id IN (
                  SELECT id FROM kanban_cards kc
                  WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL
                  AND EXISTS (
