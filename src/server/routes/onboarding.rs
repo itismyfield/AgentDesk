@@ -255,7 +255,7 @@ pub async fn complete(
              ON CONFLICT(id) DO UPDATE SET \
                name = COALESCE(excluded.name, agents.name), \
                discord_channel_id = excluded.discord_channel_id",
-            rusqlite::params![mapping.role_id, mapping.role_id, mapping.channel_name],
+            rusqlite::params![mapping.role_id, mapping.role_id, mapping.channel_id],
         ).ok();
         created += 1;
     }
@@ -303,6 +303,36 @@ pub async fn complete(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_complete', 'true')",
         [],
     ).ok();
+    drop(conn);
+
+    // Write bot token to agentdesk.yaml so dcserver can use it
+    if let Some(root) = crate::cli::agentdesk_runtime_root() {
+        let yaml_path = root.join("agentdesk.yaml");
+        let mut yaml_content = std::fs::read_to_string(&yaml_path).unwrap_or_default();
+
+        // Update or add bot token in discord.bots section
+        if yaml_content.contains("command:") {
+            // Replace existing command bot token
+            if let Some(start) = yaml_content.find("command:") {
+                if let Some(token_line) = yaml_content[start..].find("token:") {
+                    let abs_pos = start + token_line;
+                    if let Some(end) = yaml_content[abs_pos..].find('\n') {
+                        let old_line = &yaml_content[abs_pos..abs_pos + end];
+                        let new_line = format!("token: \"{}\"", body.token);
+                        yaml_content = yaml_content.replace(old_line, &new_line);
+                    }
+                }
+            }
+        } else {
+            // Append minimal discord config
+            yaml_content.push_str(&format!(
+                "\ndiscord:\n  bots:\n    command:\n      bot_id: \"{}\"\n      token: \"{}\"\n",
+                "", body.token
+            ));
+        }
+
+        std::fs::write(&yaml_path, &yaml_content).ok();
+    }
 
     (StatusCode::OK, Json(json!({
         "ok": true,
