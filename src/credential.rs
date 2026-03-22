@@ -8,7 +8,7 @@ fn agentdesk_root() -> Option<PathBuf> {
             return Some(PathBuf::from(trimmed));
         }
     }
-    dirs::home_dir().map(|h| h.join(".agentdesk"))
+    dirs::home_dir().map(|h| h.join(".adk").join("release"))
 }
 
 /// Read a bot token from `<AGENTDESK_ROOT>/credential/<name>_bot_token`.

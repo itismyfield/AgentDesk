@@ -196,7 +196,8 @@ fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
     let bin_str = agentdesk_bin.display();
     let label = dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL;
     // Use AGENTDESK_ROOT_DIR if set, otherwise default to ~/.adk/release
-    let root_dir = dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
+    let root_dir =
+        dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
     let root_str = root_dir.display();
     let logs_dir = root_dir.join("logs");
     let logs_str = logs_dir.display();
@@ -282,7 +283,7 @@ pub fn handle_init(reconfigure: bool) {
         std::process::exit(1);
     });
 
-    if !reconfigure && root.join("bot_settings.json").exists() {
+    if !reconfigure && root.join("config").join("bot_settings.json").exists() {
         println!("기존 설정이 발견되었습니다: {}", root.display());
         println!("재설정하려면 --reconfigure를 사용하세요.");
         return;
@@ -434,9 +435,11 @@ pub fn handle_init(reconfigure: bool) {
     // Generate configs
     println!("\nStep 5/5: 설정 파일 생성\n");
     fs::create_dir_all(&root).unwrap();
+    let config_dir = root.join("config");
+    fs::create_dir_all(&config_dir).unwrap();
 
     // org.yaml — fresh install uses template, reconfigure preserves existing
-    let org_path = root.join("org.yaml");
+    let org_path = config_dir.join("org.yaml");
     let org_yaml = if reconfigure && org_path.exists() {
         // Preserve existing org.yaml, only update channels.by_id entries
         let mut existing = fs::read_to_string(&org_path).unwrap_or_default();
@@ -465,7 +468,7 @@ pub fn handle_init(reconfigure: bool) {
     println!("  [OK] {}", org_path.display());
 
     // bot_settings.json
-    let bs_path = root.join("bot_settings.json");
+    let bs_path = config_dir.join("bot_settings.json");
     let bot_settings = generate_bot_settings(&bs_path, &token, provider, owner_id);
     write_with_backup(&bs_path, &bot_settings, reconfigure);
     println!("  [OK] {}", bs_path.display());
@@ -527,10 +530,10 @@ pub fn handle_init(reconfigure: bool) {
         println!("  초기 설정 완료!");
         println!("═══════════════════════════════════════");
         println!("\n생성된 파일:");
-        println!("  {} (org.yaml)", root.join("org.yaml").display());
+        println!("  {} (org.yaml)", config_dir.join("org.yaml").display());
         println!(
             "  {} (bot_settings.json)",
-            root.join("bot_settings.json").display()
+            config_dir.join("bot_settings.json").display()
         );
         println!("  {} (prompts)", root.join("prompts").display());
         println!("\n다음 단계:");

@@ -44,7 +44,7 @@ pub fn handle_discord_sendmessage(message: &str, channel_id: u64, hash_key: Opti
     };
 
     if tokens.is_empty() {
-        eprintln!("Error: no Discord bot tokens found in ~/.agentdesk/bot_settings.json");
+        eprintln!("Error: no Discord bot tokens found in ~/.adk/release/config/bot_settings.json");
         std::process::exit(1);
     }
 
@@ -91,7 +91,7 @@ pub fn handle_discord_senddm(message: &str, user_id: u64, hash_key: Option<&str>
     };
 
     if tokens.is_empty() {
-        eprintln!("Error: no Discord bot tokens found in ~/.agentdesk/bot_settings.json");
+        eprintln!("Error: no Discord bot tokens found in ~/.adk/release/config/bot_settings.json");
         std::process::exit(1);
     }
 

@@ -12,7 +12,7 @@ struct ProviderEntry {
     shared: Arc<SharedData>,
 }
 
-/// Registry that providers register with so the health server can query all of them.
+/// Registry that providers register with so the unified axum API can query all of them.
 /// Also holds Discord HTTP clients for agent-to-agent message routing.
 pub struct HealthRegistry {
     providers: tokio::sync::Mutex<Vec<ProviderEntry>>,
@@ -89,8 +89,8 @@ pub async fn build_health_json(registry: &HealthRegistry) -> String {
 
     for entry in providers.iter() {
         // Use try_lock to avoid blocking the health endpoint when core is
-        // held by a long-running turn.  Fall back to atomic counters so the
-        // health server always responds promptly.
+        // held by a long-running turn. Fall back to atomic counters so the
+        // unified API route always responds promptly.
         let (active_turns, queue_depth, session_count) = match entry.shared.core.try_lock() {
             Ok(data) => {
                 let at = data.cancel_tokens.len();

@@ -611,7 +611,7 @@ pub fn handle_restart_dcserver(
         })
         .expect("Cannot determine runtime root");
 
-    // Use production binary at ~/.agentdesk/bin/agentdesk (trunk-based: separate from build output)
+    // Use production binary at ~/.adk/release/bin/agentdesk (trunk-based: separate from build output)
     let prod_bin = agentdesk_runtime_root()
         .map(|root| root.join("bin").join("agentdesk"))
         .expect("Cannot determine runtime root");

@@ -39,7 +39,8 @@ pub struct DiscordConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BotConfig {
-    pub token: String,
+    #[serde(default)]
+    pub token: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -249,6 +250,6 @@ impl Settings {
                 return Some(std::path::PathBuf::from(trimmed));
             }
         }
-        dirs::home_dir().map(|h| h.join(".agentdesk"))
+        dirs::home_dir().map(|h| h.join(".adk").join("release"))
     }
 }

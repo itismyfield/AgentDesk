@@ -367,7 +367,7 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 if (result.error) throw new Error(result.error);
                 // Discord notification is handled by the Rust handler after fire_hook returns
                 // (async via send_dispatch_to_discord). Do NOT call ureq from QuickJS — it
-                // deadlocks the tokio runtime because the health server shares the same runtime.
+                // deadlocks the tokio runtime because the unified axum API shares the same runtime.
                 return result.dispatch_id;
             };
         })();

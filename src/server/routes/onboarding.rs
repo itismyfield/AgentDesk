@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
 use serde_json::json;
@@ -289,6 +291,133 @@ pub struct ChannelMapping {
     pub system_prompt: Option<String>,
 }
 
+fn upsert_bot_settings_entry(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    token: &str,
+    provider: &str,
+    owner_id: Option<&str>,
+) {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let key = crate::services::discord::settings::discord_token_hash(trimmed);
+    let mut entry = json!({
+        "token": trimmed,
+        "provider": provider,
+    });
+    if let Some(owner_id) = owner_id.filter(|value| !value.trim().is_empty()) {
+        entry["owner_user_id"] = json!(owner_id.trim());
+    }
+    object.insert(key, entry);
+}
+
+fn write_bot_settings(
+    runtime_root: &Path,
+    primary_token: &str,
+    primary_provider: &str,
+    secondary_token: Option<&str>,
+    owner_id: Option<&str>,
+) -> Result<(), String> {
+    let config_dir = runtime_root.join("config");
+    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    let path = config_dir.join("bot_settings.json");
+
+    let mut root: serde_json::Value = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| json!({}))
+    } else {
+        json!({})
+    };
+
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| "bot_settings.json root must be a JSON object".to_string())?;
+
+    upsert_bot_settings_entry(obj, primary_token, primary_provider, owner_id);
+
+    if let Some(token) = secondary_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let secondary_provider = if primary_provider == "codex" {
+            "claude"
+        } else {
+            "codex"
+        };
+        upsert_bot_settings_entry(obj, token, secondary_provider, owner_id);
+    }
+
+    let content = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+fn write_credential_token(
+    runtime_root: &Path,
+    bot_name: &str,
+    token: Option<&str>,
+) -> Result<(), String> {
+    let credential_dir = runtime_root.join("credential");
+    std::fs::create_dir_all(&credential_dir).map_err(|e| e.to_string())?;
+    let path = credential_dir.join(format!("{bot_name}_bot_token"));
+
+    match token.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => std::fs::write(path, format!("{value}\n")).map_err(|e| e.to_string()),
+        None => {
+            if path.exists() {
+                std::fs::remove_file(path).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn strip_legacy_discord_section(existing: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_discord = false;
+
+    for line in existing.lines() {
+        let is_top_level = !line.starts_with(' ') && !line.starts_with('\t');
+        if !in_discord && is_top_level && line.trim_end() == "discord:" {
+            in_discord = true;
+            continue;
+        }
+
+        if in_discord {
+            if !line.trim().is_empty() && is_top_level {
+                in_discord = false;
+            } else {
+                continue;
+            }
+        }
+
+        lines.push(line.to_string());
+    }
+
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+fn cleanup_legacy_yaml_discord_section(runtime_root: &Path) -> Result<(), String> {
+    let yaml_path = runtime_root.join("agentdesk.yaml");
+    if !yaml_path.exists() {
+        return Ok(());
+    }
+
+    let existing = std::fs::read_to_string(&yaml_path).map_err(|e| e.to_string())?;
+    let stripped = strip_legacy_discord_section(&existing);
+    if stripped != existing {
+        std::fs::write(&yaml_path, stripped).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// POST /api/onboarding/complete
 /// Saves onboarding configuration and sets up agents.
 pub async fn complete(
@@ -410,67 +539,45 @@ pub async fn complete(
     .ok();
     drop(conn);
 
-    // Write bot tokens to agentdesk.yaml
-    if let Some(root) = crate::cli::agentdesk_runtime_root() {
-        let yaml_path = root.join("agentdesk.yaml");
-        let existing = std::fs::read_to_string(&yaml_path).unwrap_or_default();
+    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "cannot determine runtime root"})),
+        );
+    };
 
-        // Parse existing yaml to preserve non-discord sections
-        let mut lines: Vec<String> = Vec::new();
-        let mut in_discord = false;
-        for line in existing.lines() {
-            if line.starts_with("discord:") {
-                in_discord = true;
-                continue;
-            }
-            if in_discord && (line.starts_with(' ') || line.starts_with('\t') || line.is_empty()) {
-                continue; // skip old discord section
-            }
-            in_discord = false;
-            lines.push(line.to_string());
-        }
+    if let Err(e) = write_bot_settings(
+        &root,
+        &body.token,
+        provider,
+        body.command_token_2.as_deref(),
+        body.owner_id.as_deref(),
+    ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to write bot_settings.json: {e}")})),
+        );
+    }
 
-        // Append fresh discord config
-        lines.push("discord:".to_string());
-        lines.push("  bots:".to_string());
+    if let Err(e) = write_credential_token(&root, "announce", body.announce_token.as_deref()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to write announce credential: {e}")})),
+        );
+    }
 
-        // Command bot (claude or codex based on provider)
-        let cmd_label = if provider == "codex" {
-            "codex"
-        } else {
-            "claude"
-        };
-        lines.push(format!("    {}:", cmd_label));
-        lines.push(format!("      token: \"{}\"", body.token));
+    if let Err(e) = write_credential_token(&root, "notify", body.notify_token.as_deref()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to write notify credential: {e}")})),
+        );
+    }
 
-        // Announce bot
-        if let Some(ref ann) = body.announce_token {
-            lines.push("    announce:".to_string());
-            lines.push(format!("      token: \"{}\"", ann));
-        }
-
-        // Notify bot
-        if let Some(ref ntf) = body.notify_token {
-            if !ntf.is_empty() {
-                lines.push("    notify:".to_string());
-                lines.push(format!("      token: \"{}\"", ntf));
-            }
-        }
-
-        // Second command bot (dual provider)
-        if let Some(ref cmd2) = body.command_token_2 {
-            if !cmd2.is_empty() {
-                let cmd2_label = if provider == "codex" {
-                    "claude"
-                } else {
-                    "codex"
-                };
-                lines.push(format!("    {}:", cmd2_label));
-                lines.push(format!("      token: \"{}\"", cmd2));
-            }
-        }
-
-        std::fs::write(&yaml_path, lines.join("\n") + "\n").ok();
+    if let Err(e) = cleanup_legacy_yaml_discord_section(&root) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to clean legacy yaml tokens: {e}")})),
+        );
     }
 
     (
@@ -481,6 +588,59 @@ pub async fn complete(
             "provider": provider,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_legacy_discord_section_removes_top_level_block() {
+        let input = "server:\n  port: 8791\ndiscord:\n  bots:\n    claude:\n      token: \"secret\"\ndata:\n  dir: ./data\n";
+
+        let output = strip_legacy_discord_section(input);
+        assert_eq!(output, "server:\n  port: 8791\ndata:\n  dir: ./data\n");
+    }
+
+    #[test]
+    fn write_bot_and_credential_artifacts_use_runtime_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        write_bot_settings(
+            root,
+            "primary-token",
+            "claude",
+            Some("secondary-token"),
+            Some("42"),
+        )
+        .unwrap();
+        write_credential_token(root, "announce", Some("announce-token")).unwrap();
+        write_credential_token(root, "notify", Some("notify-token")).unwrap();
+
+        let bot_settings =
+            std::fs::read_to_string(root.join("config").join("bot_settings.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&bot_settings).unwrap();
+        let obj = parsed.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+
+        let providers: Vec<String> = obj
+            .values()
+            .filter_map(|entry| entry.get("provider").and_then(|v| v.as_str()))
+            .map(ToString::to_string)
+            .collect();
+        assert!(providers.contains(&"claude".to_string()));
+        assert!(providers.contains(&"codex".to_string()));
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("credential").join("announce_bot_token")).unwrap(),
+            "announce-token\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("credential").join("notify_bot_token")).unwrap(),
+            "notify-token\n"
+        );
+    }
 }
 
 // ── Provider Check ──────────────────────────────────────────

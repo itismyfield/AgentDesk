@@ -22,8 +22,10 @@ pub fn current_tmux_owner_marker() -> String {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| dirs::home_dir().map(|home| home.join(".agentdesk").display().to_string()))
-        .unwrap_or_else(|| ".agentdesk".to_string())
+        .or_else(|| {
+            dirs::home_dir().map(|home| home.join(".adk").join("release").display().to_string())
+        })
+        .unwrap_or_else(|| ".adk/release".to_string())
 }
 
 /// Path to the owner marker file for a tmux session.

@@ -12,7 +12,7 @@ pub(super) fn agentdesk_root() -> Option<PathBuf> {
         }
     }
 
-    dirs::home_dir().map(|h| h.join(".agentdesk"))
+    dirs::home_dir().map(|h| h.join(".adk").join("release"))
 }
 
 pub(super) fn runtime_root() -> Option<PathBuf> {
@@ -20,7 +20,7 @@ pub(super) fn runtime_root() -> Option<PathBuf> {
 }
 
 pub(super) fn workspace_root() -> Option<PathBuf> {
-    agentdesk_root().map(|root| root.join("workspace"))
+    agentdesk_root().map(|root| root.join("workspaces"))
 }
 
 pub(super) fn worktrees_root() -> Option<PathBuf> {
@@ -155,7 +155,7 @@ mod tests {
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, "   ") };
         // Empty/whitespace-only override should fall back to home-based default
         let root = agentdesk_root().expect("should return Some");
-        let expected = dirs::home_dir().unwrap().join(".agentdesk");
+        let expected = dirs::home_dir().unwrap().join(".adk").join("release");
         assert_eq!(root, expected);
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
