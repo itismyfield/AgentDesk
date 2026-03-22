@@ -90,16 +90,33 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
         )
         .ok();
 
+    let completed = has_bots && agent_count > 0;
+
+    // Mask tokens after onboarding is complete to prevent unauthenticated leakage.
+    // Only show full tokens during initial setup (before completion).
+    let mask = |t: Option<String>| -> Option<String> {
+        if !completed {
+            return t;
+        }
+        t.map(|s| {
+            if s.len() > 8 {
+                format!("{}…{}", &s[..4], &s[s.len() - 4..])
+            } else {
+                "***".to_string()
+            }
+        })
+    };
+
     (
         StatusCode::OK,
         Json(json!({
-            "completed": has_bots && agent_count > 0,
+            "completed": completed,
             "agent_count": agent_count,
             "bot_tokens": {
-                "command": bot_token,
-                "announce": announce_token,
-                "notify": notify_token,
-                "command2": command_token_2,
+                "command": mask(bot_token),
+                "announce": mask(announce_token),
+                "notify": mask(notify_token),
+                "command2": mask(command_token_2),
             },
             "guild_id": guild_id,
             "owner_id": owner_id,

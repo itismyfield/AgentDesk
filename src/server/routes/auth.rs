@@ -37,7 +37,6 @@ pub async fn auth_middleware(
     if path == "/health"
         || path == "/auth/session"
         || path.starts_with("/hook/")
-        || path.starts_with("/onboarding/")
     {
         return next.run(req).await;
     }
