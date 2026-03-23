@@ -12,6 +12,8 @@
  * [F] 디스패치 큐 타임아웃 (100분) → 제거
  * [G] 스테일 디스패치 정리 (24시간) → failed
  * [H] Stale dispatched 큐 엔트리 진행
+ * [I-0] 미전송 디스패치 알림 복구 (2분)
+ * [I] 턴 데드락 감지 + 자동 복구 (15분 주기, 최대 3회 연장 후 강제 중단 + 재디스패치)
  */
 
 // Send notification via notify bot (system alerts, not agent communication)
@@ -291,7 +293,10 @@ var timeouts = {
       }
     }
 
-    // ─── [I] 턴 데드락 감지 (15분) ──────────────────────────
+    // ─── [I] 턴 데드락 감지 + 자동 복구 (15분 주기) ─────────
+    // 판별: sessions.last_heartbeat 기반 — 15분 무응답 시 데드락 의심
+    // 연장: 15분 단위로 최대 MAX_EXTENSIONS회 (실제 작업 진행 시 자연 리셋)
+    // 확정: 연장 상한 초과 시 강제 중단 + 재디스패치
     var DEADLOCK_MINUTES = 15;
     var MAX_EXTENSIONS = 3;
     var staleSessions = agentdesk.db.query(
@@ -313,19 +318,92 @@ var timeouts = {
       }
 
       if (extensions >= MAX_EXTENSIONS) {
-        // Max extensions reached — force alert for manual intervention
+        // ── 데드락 확정: 강제 중단 + 자동 복구 ──
+        var totalMin = DEADLOCK_MINUTES * (MAX_EXTENSIONS + 1);
         agentdesk.log.warn("[deadlock] Session " + sess.session_key +
-          " — max extensions (" + MAX_EXTENSIONS + ") reached. Manual intervention needed.");
-        sendNotifyAlert(getPMDChannel(),
-          "🔴 [Deadlock] " + sess.agent_id + " 세션 " + sess.session_key +
-          " — " + (DEADLOCK_MINUTES * (MAX_EXTENSIONS + 1)) + "분 이상 무응답. 수동 개입 필요.");
-        // Reset counter to avoid spam
+          " — max extensions (" + MAX_EXTENSIONS + ") reached. Force cancelling + re-dispatch.");
+
+        // 1) tmux 세션 강제 종료 (cancel_token 대체 — JS에서 직접 kill)
+        var tmuxName = (sess.session_key.indexOf(":") >= 0)
+          ? sess.session_key.split(":")[1] : sess.session_key;
+        try {
+          agentdesk.exec("tmux", ["kill-session", "-t", tmuxName]);
+          agentdesk.log.info("[deadlock] Killed tmux session: " + tmuxName);
+        } catch (e) {
+          agentdesk.log.warn("[deadlock] tmux kill failed (may already be dead): " + e);
+        }
+
+        // 2) 세션 상태 disconnected
         agentdesk.db.execute(
-          "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, '-1')",
-          [deadlockKey]
+          "UPDATE sessions SET status = 'disconnected', last_heartbeat = datetime('now') WHERE session_key = ?",
+          [sess.session_key]
         );
+
+        // 3) 현재 디스패치 실패 + 재디스패치
+        var redispatched = false;
+        if (sess.active_dispatch_id) {
+          var dispInfo = agentdesk.db.query(
+            "SELECT kanban_card_id, to_agent_id, dispatch_type, title " +
+            "FROM task_dispatches WHERE id = ?",
+            [sess.active_dispatch_id]
+          );
+          agentdesk.db.execute(
+            "UPDATE task_dispatches SET status = 'failed', " +
+            "result = 'Deadlock auto-recovery: " + totalMin + "min timeout', " +
+            "updated_at = datetime('now') WHERE id = ? AND status IN ('pending','dispatched')",
+            [sess.active_dispatch_id]
+          );
+
+          if (dispInfo.length > 0) {
+            var di = dispInfo[0];
+            try {
+              agentdesk.dispatch.create(
+                di.kanban_card_id,
+                di.to_agent_id,
+                di.dispatch_type || "implementation",
+                "[Retry] " + (di.title || "deadlock recovery")
+              );
+              redispatched = true;
+              agentdesk.log.info("[deadlock] Re-dispatched card " +
+                di.kanban_card_id + " → " + di.to_agent_id);
+            } catch (e) {
+              // 재디스패치 실패 시 PMD 판단으로 이관
+              agentdesk.kanban.setStatus(di.kanban_card_id, "pending_decision");
+              agentdesk.db.execute(
+                "UPDATE kanban_cards SET blocked_reason = ? WHERE id = ?",
+                ["Deadlock recovery re-dispatch failed: " + e, di.kanban_card_id]
+              );
+              agentdesk.log.error("[deadlock] Re-dispatch failed for " +
+                di.kanban_card_id + ": " + e + " → pending_decision");
+            }
+          }
+        }
+
+        // 4) PMD 알림
+        sendNotifyAlert(getPMDChannel(),
+          "🔴 [Deadlock 복구] " + sess.agent_id + " 세션 " + sess.session_key +
+          " — " + totalMin + "분 무응답 → 강제 중단" +
+          (redispatched ? " + 재디스패치 완료" : " (재디스패치 실패 — pending_decision)"));
+
+        // 5) 이력 기록
+        agentdesk.db.execute(
+          "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+          ["deadlock_history:" + sess.session_key + ":" + Date.now(),
+           JSON.stringify({
+             session_key: sess.session_key,
+             agent_id: sess.agent_id,
+             dispatch_id: sess.active_dispatch_id,
+             extensions: extensions,
+             action: redispatched ? "force_cancel_and_redispatch" : "force_cancel_pending_decision",
+             ts: new Date().toISOString()
+           })]
+        );
+
+        // 카운터 삭제 (다음 세션은 새 카운터)
+        agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
+
       } else if (extensions >= 0) {
-        // Extend timeout + alert
+        // ── 데드락 의심: 타임아웃 15분 연장 ──
         agentdesk.db.execute(
           "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
           [deadlockKey, String(extensions + 1)]
@@ -342,10 +420,10 @@ var timeouts = {
           "⚠️ [Deadlock 의심] " + sess.agent_id + " 세션 — " +
           DEADLOCK_MINUTES + "분 무응답 (연장 " + (extensions + 1) + "/" + MAX_EXTENSIONS + ")");
       }
-      // extensions == -1 means already force-alerted, skip
+      // extensions < 0: 이전 세션의 잔여 카운터 — 무시
     }
 
-    // Clean up deadlock counters for sessions that are no longer working
+    // Clean up deadlock counters for sessions no longer working
     var activeKeys = agentdesk.db.query(
       "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_check:%'"
     );
@@ -357,6 +435,19 @@ var timeouts = {
       );
       if (stillWorking.length > 0 && stillWorking[0].cnt === 0) {
         agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [activeKeys[ak].key]);
+      }
+    }
+
+    // Clean up old deadlock history entries (7일 이상)
+    var historyKeys = agentdesk.db.query(
+      "SELECT key FROM kv_meta WHERE key LIKE 'deadlock_history:%'"
+    );
+    var sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    for (var hk = 0; hk < historyKeys.length; hk++) {
+      var parts = historyKeys[hk].key.split(":");
+      var ts = parseInt(parts[parts.length - 1], 10);
+      if (ts && ts < sevenDaysAgo) {
+        agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [historyKeys[hk].key]);
       }
     }
   },
