@@ -118,11 +118,26 @@ pub fn complete_dispatch(
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
 
     let changed = conn.execute(
-        "UPDATE task_dispatches SET status = 'completed', result = ?1, updated_at = datetime('now') WHERE id = ?2",
+        "UPDATE task_dispatches SET status = 'completed', result = ?1, updated_at = datetime('now') WHERE id = ?2 AND status != 'completed'",
         rusqlite::params![result_str, dispatch_id],
     )?;
 
     if changed == 0 {
+        // Either not found or already completed — skip hook firing
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if exists {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ⏭ complete_dispatch: {dispatch_id} already completed, skipping hooks");
+            let dispatch = query_dispatch_row(&conn, dispatch_id)?;
+            drop(conn);
+            return Ok(dispatch);
+        }
         return Err(anyhow::anyhow!("Dispatch not found: {dispatch_id}"));
     }
 
