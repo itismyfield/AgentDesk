@@ -49,6 +49,9 @@ pub struct SubmitVerdictBody {
     /// The commit SHA that was actually reviewed. When provided, the
     /// review-passed marker stamps this commit instead of the current HEAD.
     pub commit: Option<String>,
+    /// Provider identifier (e.g. "claude", "codex") of the verdict submitter.
+    /// Used for cross-provider validation in counter-model reviews.
+    pub provider: Option<String>,
 }
 
 /// POST /api/review-verdict
@@ -109,16 +112,53 @@ pub async fn submit_verdict(
         }
     }
 
-    // B: Validate reviewed commit — the dispatch context stores the HEAD that was
-    //    actually sent for review. Reject mismatched commits to prevent arbitrary SHA injection.
-    let stored_reviewed_commit: Option<String> = conn
+    // B: Cross-provider validation for counter-model reviews.
+    //    When a review dispatch has from_provider/target_provider in context,
+    //    reject same-provider verdict submissions (self-review).
+    let dispatch_context_str: Option<String> = conn
         .query_row(
-            "SELECT json_extract(context, '$.reviewed_commit') FROM task_dispatches WHERE id = ?1",
+            "SELECT context FROM task_dispatches WHERE id = ?1",
             [&body.dispatch_id],
-            |row| row.get::<_, Option<String>>(0),
+            |row| row.get(0),
         )
         .ok()
         .flatten();
+
+    let dispatch_context: serde_json::Value = dispatch_context_str
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(json!({}));
+
+    let from_provider = dispatch_context
+        .get("from_provider")
+        .and_then(|v| v.as_str());
+    let target_provider = dispatch_context
+        .get("target_provider")
+        .and_then(|v| v.as_str());
+
+    if let (Some(from_p), Some(_target_p)) = (from_provider, target_provider) {
+        // This is a counter-model review dispatch with provider tracking
+        if let Some(ref submitter) = body.provider {
+            if submitter == from_p {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!(
+                            "self-review rejected: submitting provider '{}' matches implementing provider",
+                            submitter
+                        )
+                    })),
+                );
+            }
+        }
+    }
+
+    // C: Validate reviewed commit — the dispatch context stores the HEAD that was
+    //    actually sent for review. Reject mismatched commits to prevent arbitrary SHA injection.
+    let stored_reviewed_commit: Option<String> = dispatch_context
+        .get("reviewed_commit")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let effective_commit: Option<String> = match (&body.commit, &stored_reviewed_commit) {
         (Some(submitted), Some(stored)) => {
@@ -485,6 +525,7 @@ mod tests {
                 notes: None,
                 feedback: None,
                 commit: None,
+                provider: None,
             }),
         )
         .await;
@@ -532,6 +573,7 @@ mod tests {
                 notes: Some("Please tighten validation".to_string()),
                 feedback: None,
                 commit: None,
+                provider: None,
             }),
         )
         .await;
@@ -585,6 +627,7 @@ mod tests {
                 notes: None,
                 feedback: None,
                 commit: None,
+                provider: None,
             }),
         )
         .await;
@@ -629,6 +672,7 @@ mod tests {
                 notes: None,
                 feedback: None,
                 commit: None,
+                provider: None,
             }),
         )
         .await;
@@ -672,6 +716,7 @@ mod tests {
                 notes: None,
                 feedback: None,
                 commit: None,
+                provider: None,
             }),
         )
         .await;
@@ -739,5 +784,144 @@ mod tests {
         assert_eq!(card_status, "done", "card should be done after dismiss");
         assert_eq!(review_status, None, "review_status should be cleared after dismiss");
         assert_eq!(dispatch_status, "cancelled", "pending review-decision dispatch should be cancelled");
+    }
+
+    /// Seed a review dispatch with provider tracking in context (counter-model review).
+    fn seed_counter_model_review(db: &Db, dispatch_id: &str, from_provider: &str, target_provider: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-cm', 'Agent CM', 'ch-cc', 'ch-cdx')",
+            [],
+        ).unwrap();
+        let context = serde_json::json!({
+            "from_provider": from_provider,
+            "target_provider": target_provider,
+        }).to_string();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-cm', 'Counter Model Test', 'review', 'agent-cm', ?1, 'reviewing', datetime('now'), datetime('now'))",
+            [dispatch_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+             VALUES (?1, 'card-cm', 'agent-cm', 'review', 'pending', '[Review R1] card-cm', ?2, datetime('now'), datetime('now'))",
+            rusqlite::params![dispatch_id, context],
+        ).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cross_provider_verdict_allowed() {
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-cross", "claude", "codex");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        // CDX (codex) submitting verdict for a review where from=claude, target=codex → allowed
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-cross".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: Some("codex".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn same_provider_verdict_rejected() {
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-self-prov", "claude", "codex");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        // CC (claude) submitting verdict for own work → self-review rejection
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-self-prov".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: Some("claude".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("self-review"));
+    }
+
+    #[tokio::test]
+    async fn verdict_without_provider_allowed_for_backwards_compat() {
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-no-prov", "claude", "codex");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        // No provider specified → allowed for backwards compatibility
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-no-prov".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn reverse_cross_provider_verdict_allowed() {
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-rev-cross", "codex", "claude");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        // CC (claude) submitting verdict where from=codex, target=claude → allowed
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-rev-cross".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: Some("claude".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
     }
 }

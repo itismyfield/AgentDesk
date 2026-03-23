@@ -406,7 +406,7 @@ fn dispatch_create_raw(
         );
     }
 
-    // Build context — for review dispatches, record the HEAD commit as source of truth
+    // Build context — for review dispatches, record the HEAD commit and provider info
     let context_str = if dispatch_type == "review" {
         let repo_dir = std::env::var("AGENTDESK_REPO_DIR")
             .unwrap_or_else(|_| format!("{}/AgentDesk", env!("HOME")));
@@ -417,10 +417,34 @@ fn dispatch_create_raw(
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        match head {
-            Some(commit) => format!(r#"{{"reviewed_commit":"{}"}}"#, commit),
-            None => "{}".to_string(),
+
+        // Determine from_provider (implementer) and target_provider (reviewer)
+        // based on agent channel suffixes: -cc → claude, -cdx → codex
+        let channels: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?1",
+                [agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        let from_provider = channels
+            .as_ref()
+            .and_then(|(ch, _)| provider_from_channel_suffix(ch.as_deref()));
+        let target_provider = channels
+            .as_ref()
+            .and_then(|(_, alt)| provider_from_channel_suffix(alt.as_deref()));
+
+        let mut ctx = serde_json::json!({});
+        if let Some(commit) = head {
+            ctx["reviewed_commit"] = serde_json::json!(commit);
         }
+        if let Some(fp) = from_provider {
+            ctx["from_provider"] = serde_json::json!(fp);
+        }
+        if let Some(tp) = target_provider {
+            ctx["target_provider"] = serde_json::json!(tp);
+        }
+        serde_json::to_string(&ctx).unwrap_or_else(|_| "{}".to_string())
     } else {
         "{}".to_string()
     };
@@ -467,6 +491,19 @@ fn dispatch_create_raw(
             .map(|u| format!("\"{}\"", u))
             .unwrap_or_else(|| "null".to_string()),
     )
+}
+
+/// Determine provider from a Discord channel name suffix.
+/// Returns "claude" for `-cc` suffix, "codex" for `-cdx` suffix.
+fn provider_from_channel_suffix(channel: Option<&str>) -> Option<&'static str> {
+    let ch = channel?;
+    if ch.ends_with("-cc") {
+        Some("claude")
+    } else if ch.ends_with("-cdx") {
+        Some("codex")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
