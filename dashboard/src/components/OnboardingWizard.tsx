@@ -561,7 +561,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   // Discord permission bit values
   const PERMS = {
     // Command bot: Send Messages + Read Message History + Manage Messages
-    command: (2048 + 65536 + 8192).toString(),
+    //   + Create Public Threads + Send Messages in Threads
+    command: (2048 + 65536 + 8192 + 17179869184 + 274877906944).toString(),
     // Announce bot: Administrator (simplest — covers channel creation, role management, etc.)
     announce: "8",
     // Notify bot: Send Messages only
@@ -732,8 +733,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 )}
                 <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
                   {tr(
-                    `자동 설정 권한: Send Messages, Read Message History, Manage Messages`,
-                    `Auto-configured: Send Messages, Read Message History, Manage Messages`,
+                    `자동 설정 권한: Send Messages, Read Message History, Manage Messages, Create Public Threads, Send Messages in Threads`,
+                    `Auto-configured: Send Messages, Read Message History, Manage Messages, Create Public Threads, Send Messages in Threads`,
                   )}
                 </div>
               </div>
