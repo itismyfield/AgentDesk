@@ -625,13 +625,14 @@ pub(super) async fn handle_text_message(
             let mut workspace = settings::resolve_workspace(channel_id, ch_name.as_deref());
             // Fallback: if this is a thread, try resolving workspace from parent channel
             if workspace.is_none() {
-                if let Some((parent_id, _parent_name)) = super::resolve_thread_parent(ctx, channel_id).await {
-                    let parent_ch_name = {
-                        let data = shared.core.lock().await;
+                if let Some((parent_id, parent_name)) = super::resolve_thread_parent(ctx, channel_id).await {
+                    // Use parent name from Discord API first, fall back to session map
+                    let parent_ch_name = parent_name.or_else(|| {
+                        let data = shared.core.try_lock().ok()?;
                         data.sessions
                             .get(&parent_id)
                             .and_then(|s| s.channel_name.clone())
-                    };
+                    });
                     workspace = settings::resolve_workspace(parent_id, parent_ch_name.as_deref());
                     if workspace.is_some() {
                         let ts = chrono::Local::now().format("%H:%M:%S");
