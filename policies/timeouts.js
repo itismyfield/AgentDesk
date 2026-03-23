@@ -255,11 +255,6 @@ var timeouts = {
     );
     for (var un = 0; un < unnotifiedDispatches.length; un++) {
       var ud = unnotifiedDispatches[un];
-      // Mark as notified to avoid spam
-      agentdesk.db.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-        ["dispatch_notified:" + ud.id, ud.id]
-      );
 
       // Determine channel
       var agentChannel = agentdesk.db.query(
@@ -281,15 +276,25 @@ var timeouts = {
 
       try {
         var port = agentdesk.config.get("server_port") || 8791;
-        agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
+        var sendResult = agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
           target: "channel:" + channelId,
           content: prefix + issueLink,
           source: "timeouts",
           bot: "announce"
         });
-        agentdesk.log.info("[notify-recovery] Resent dispatch notification: " + ud.id + " → " + channelId);
+        // Mark as notified only after confirmed send success
+        if (sendResult && !sendResult.error) {
+          agentdesk.db.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+            ["dispatch_notified:" + ud.id, ud.id]
+          );
+          agentdesk.log.info("[notify-recovery] Resent dispatch notification: " + ud.id + " → " + channelId);
+        } else {
+          agentdesk.log.warn("[notify-recovery] /api/send returned error for " + ud.id + ": " +
+            (sendResult ? sendResult.error : "null response") + " — will retry next tick");
+        }
       } catch(e) {
-        agentdesk.log.warn("[notify-recovery] Failed: " + e);
+        agentdesk.log.warn("[notify-recovery] Failed: " + e + " — will retry next tick");
       }
     }
 
