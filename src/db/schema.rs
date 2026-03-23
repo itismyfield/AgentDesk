@@ -196,6 +196,34 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     // Remove stale kv_meta key that is no longer used (replaced by kanban_manager_channel_id)
     let _ = conn.execute("DELETE FROM kv_meta WHERE key = 'pmd_channel_id'", []);
 
+    // Clean up stale review_status on done cards (fix for #80 — dismiss review loop)
+    let cleaned = conn
+        .execute(
+            "UPDATE kanban_cards SET review_status = NULL WHERE status = 'done' AND review_status IS NOT NULL",
+            [],
+        )
+        .unwrap_or(0);
+    if cleaned > 0 {
+        tracing::info!(
+            "Cleaned {cleaned} done cards with stale review_status (fix #80)"
+        );
+    }
+    // Cancel stale pending review/review-decision dispatches for done cards
+    let cancelled = conn
+        .execute(
+            "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') \
+             WHERE status IN ('pending', 'dispatched') \
+             AND dispatch_type IN ('review', 'review-decision') \
+             AND kanban_card_id IN (SELECT id FROM kanban_cards WHERE status = 'done')",
+            [],
+        )
+        .unwrap_or(0);
+    if cancelled > 0 {
+        tracing::info!(
+            "Cancelled {cancelled} stale review dispatches for done cards (fix #80)"
+        );
+    }
+
     // Audit logs table for analytics dashboard
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS audit_logs (

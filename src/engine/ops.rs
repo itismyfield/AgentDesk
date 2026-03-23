@@ -391,6 +391,21 @@ fn dispatch_create_raw(
         Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
     };
 
+    // Guard: reject dispatch creation for done cards — prevents stale review loops
+    let card_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok();
+    if card_status.as_deref() == Some("done") {
+        return format!(
+            r#"{{"error":"Cannot create dispatch for done card {}"}}"#,
+            card_id
+        );
+    }
+
     // Build context — for review dispatches, record the HEAD commit as source of truth
     let context_str = if dispatch_type == "review" {
         let repo_dir = std::env::var("AGENTDESK_REPO_DIR")

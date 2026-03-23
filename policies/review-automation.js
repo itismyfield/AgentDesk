@@ -187,9 +187,14 @@ var reviewAutomation = {
     // check the review comments and decide the verdict (agent-in-the-loop).
     if (!verdict && result.auto_completed) {
       var cards = agentdesk.db.query(
-        "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?",
+        "SELECT assigned_agent_id, title, github_issue_number, status FROM kanban_cards WHERE id = ?",
         [dispatch.kanban_card_id]
       );
+      // Guard: skip dispatch creation for done cards — prevents stale review loops after dismiss
+      if (cards.length > 0 && cards[0].status === "done") {
+        agentdesk.log.info("[review] Card " + dispatch.kanban_card_id + " already done — skipping review-decision dispatch");
+        return;
+      }
       if (cards.length > 0 && cards[0].assigned_agent_id) {
         var card = cards[0];
         var issueNum = card.github_issue_number || "?";

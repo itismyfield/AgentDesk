@@ -383,10 +383,31 @@ pub async fn submit_review_decision(
             );
         }
         "dismiss" => {
-            // Agent dismisses review → go to done
+            // Agent dismisses review → transition to done, then clean up stale state.
+            // Order matters: transition_status requires an active dispatch, so we must
+            // transition BEFORE cancelling pending dispatches.
             drop(conn);
             let _ =
                 crate::kanban::transition_status(&state.db, &state.engine, &body.card_id, "done");
+
+            // Post-transition cleanup: cancel remaining pending review dispatches to prevent
+            // stale dispatches from re-triggering review loops after dismiss.
+            if let Ok(conn) = state.db.lock() {
+                conn.execute(
+                    "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') \
+                     WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
+                     AND dispatch_type IN ('review', 'review-decision')",
+                    [&body.card_id],
+                )
+                .ok();
+                // Belt-and-suspenders: ensure review_status is cleared even if transition_status
+                // failed silently (the `let _ =` above discards errors).
+                conn.execute(
+                    "UPDATE kanban_cards SET review_status = NULL WHERE id = ?1",
+                    [&body.card_id],
+                )
+                .ok();
+            }
         }
         _ => {}
     }
@@ -657,5 +678,66 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.0["error"].as_str().unwrap().contains("review-decision"));
+    }
+
+    #[tokio::test]
+    async fn dismiss_clears_review_status_and_cancels_pending_dispatches() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-d', 'D', '555', '666')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+             VALUES ('card-d', 'Dismiss Test', 'review', 'agent-d', 'dispatch-rd', 'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        // Pending review-decision dispatch (should be cancelled on dismiss)
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-rd', 'card-d', 'agent-d', 'review-decision', 'pending', '[Decision] card-d', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        drop(conn);
+
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_review_decision(
+            State(state),
+            Json(ReviewDecisionBody {
+                card_id: "card-d".to_string(),
+                decision: "dismiss".to_string(),
+                comment: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["decision"].as_str().unwrap(), "dismiss");
+
+        let conn = db.lock().unwrap();
+        let (card_status, review_status): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, review_status FROM kanban_cards WHERE id = 'card-d'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-rd'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(card_status, "done", "card should be done after dismiss");
+        assert_eq!(review_status, None, "review_status should be cleared after dismiss");
+        assert_eq!(dispatch_status, "cancelled", "pending review-decision dispatch should be cancelled");
     }
 }
