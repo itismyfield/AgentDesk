@@ -213,6 +213,21 @@ fn extract_explicit_review_verdict(full_response: &str) -> Option<&'static str> 
     }
 }
 
+fn build_verdict_payload(
+    dispatch_id: &str,
+    verdict: &str,
+    full_response: &str,
+    provider: &str,
+) -> serde_json::Value {
+    let feedback = truncate_str(full_response.trim(), 4000).to_string();
+    serde_json::json!({
+        "dispatch_id": dispatch_id,
+        "overall": verdict,
+        "feedback": feedback,
+        "provider": provider,
+    })
+}
+
 async fn submit_review_verdict_fallback(
     api_port: u16,
     dispatch_id: &str,
@@ -220,16 +235,11 @@ async fn submit_review_verdict_fallback(
     full_response: &str,
     provider: &str,
 ) -> Result<(), String> {
-    let feedback = truncate_str(full_response.trim(), 4000).to_string();
+    let payload = build_verdict_payload(dispatch_id, verdict, full_response, provider);
     let url = format!("http://127.0.0.1:{api_port}/api/review-verdict");
     let resp = reqwest::Client::new()
         .post(url)
-        .json(&serde_json::json!({
-            "dispatch_id": dispatch_id,
-            "overall": verdict,
-            "feedback": feedback,
-            "provider": provider,
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1201,7 +1211,7 @@ pub(super) fn spawn_turn_bridge(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_explicit_review_verdict, extract_review_decision, should_resume_watcher_after_turn};
+    use super::{build_verdict_payload, extract_explicit_review_verdict, extract_review_decision, should_resume_watcher_after_turn};
 
     #[test]
     fn chained_batch_mid_turn_keeps_watcher_paused() {
@@ -1299,5 +1309,23 @@ mod tests {
         let padding = "가".repeat(200); // 600 bytes of Korean text
         let response = format!("{padding}\ndismiss");
         assert_eq!(extract_review_decision(&response), Some("dismiss"));
+    }
+
+    #[test]
+    fn verdict_fallback_payload_includes_provider() {
+        let payload = build_verdict_payload("d-123", "pass", "LGTM", "codex");
+        assert_eq!(payload["dispatch_id"], "d-123");
+        assert_eq!(payload["overall"], "pass");
+        assert_eq!(payload["feedback"], "LGTM");
+        assert_eq!(payload["provider"], "codex");
+    }
+
+    #[test]
+    fn verdict_fallback_payload_truncates_long_feedback() {
+        let long_response = "x".repeat(5000);
+        let payload = build_verdict_payload("d-456", "improve", &long_response, "claude");
+        assert_eq!(payload["provider"], "claude");
+        let feedback = payload["feedback"].as_str().unwrap();
+        assert!(feedback.len() <= 4003); // 4000 + "..." ellipsis
     }
 }
