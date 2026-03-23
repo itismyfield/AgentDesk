@@ -104,6 +104,111 @@ fn should_resume_watcher_after_turn(
     !defer_watcher_resume && !(has_local_queued_turns && can_chain_locally)
 }
 
+#[derive(Debug)]
+struct DispatchSnapshot {
+    dispatch_type: String,
+    status: String,
+}
+
+async fn fetch_dispatch_snapshot(api_port: u16, dispatch_id: &str) -> Option<DispatchSnapshot> {
+    let url = format!("http://127.0.0.1:{api_port}/api/dispatches/{dispatch_id}");
+    let resp = reqwest::Client::new().get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.json::<serde_json::Value>().await.ok()?;
+    let dispatch = body.get("dispatch")?;
+    Some(DispatchSnapshot {
+        dispatch_type: dispatch.get("dispatch_type")?.as_str()?.to_string(),
+        status: dispatch.get("status")?.as_str()?.to_string(),
+    })
+}
+
+fn extract_explicit_review_verdict(full_response: &str) -> Option<&'static str> {
+    let pattern = regex::Regex::new(
+        r"(?im)^\s*(?:final\s+)?(?:verdict|overall)\s*:\s*\**\s*(pass|improve|reject|rework|approved)\b",
+    )
+    .ok()?;
+    let verdict = pattern
+        .captures(full_response)?
+        .get(1)?
+        .as_str()
+        .to_ascii_lowercase();
+    match verdict.as_str() {
+        "pass" => Some("pass"),
+        "improve" => Some("improve"),
+        "reject" => Some("reject"),
+        "rework" => Some("rework"),
+        "approved" => Some("approved"),
+        _ => None,
+    }
+}
+
+async fn submit_review_verdict_fallback(
+    api_port: u16,
+    dispatch_id: &str,
+    verdict: &str,
+    full_response: &str,
+) -> Result<(), String> {
+    let feedback = truncate_str(full_response.trim(), 4000).to_string();
+    let url = format!("http://127.0.0.1:{api_port}/api/review-verdict");
+    let resp = reqwest::Client::new()
+        .post(url)
+        .json(&serde_json::json!({
+            "dispatch_id": dispatch_id,
+            "overall": verdict,
+            "feedback": feedback,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("HTTP {status}: {body}"))
+    }
+}
+
+async fn guard_review_dispatch_completion(
+    api_port: u16,
+    dispatch_id: Option<&str>,
+    full_response: &str,
+) -> Option<String> {
+    let dispatch_id = dispatch_id?;
+    let snapshot = fetch_dispatch_snapshot(api_port, dispatch_id).await?;
+    if snapshot.status != "pending" {
+        return None;
+    }
+
+    match snapshot.dispatch_type.as_str() {
+        "review" => {
+            if let Some(verdict) = extract_explicit_review_verdict(full_response) {
+                match submit_review_verdict_fallback(api_port, dispatch_id, verdict, full_response)
+                    .await
+                {
+                    Ok(()) => return None,
+                    Err(err) => {
+                        return Some(format!(
+                            "⚠️ review verdict 자동 제출 실패: {err}\n`review-verdict` API를 다시 호출해야 파이프라인이 진행됩니다."
+                        ));
+                    }
+                }
+            }
+            Some(
+                "⚠️ review dispatch가 아직 pending입니다. 응답 첫 줄에 `VERDICT: pass|improve|reject|rework`를 적고 `review-verdict` API를 호출해야 완료됩니다."
+                    .to_string(),
+            )
+        }
+        "review-decision" => Some(
+            "⚠️ review-decision dispatch가 아직 pending입니다. `review-decision` API를 호출해야 카드가 다음 단계로 이동합니다."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
     pub(super) channel_id: ChannelId,
@@ -524,6 +629,18 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
+        let is_prompt_too_long = full_response.contains("__prompt too long__");
+        let review_dispatch_warning = if !cancelled && !is_prompt_too_long {
+            guard_review_dispatch_completion(
+                shared_owned.api_port,
+                dispatch_id.as_deref(),
+                &full_response,
+            )
+            .await
+        } else {
+            None
+        };
+
         post_adk_session_status(
             adk_session_key.as_deref(),
             adk_session_name.as_deref(),
@@ -590,8 +707,6 @@ pub(super) fn spawn_turn_bridge(
         if !tmux_handoff_path {
             remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
         }
-
-        let is_prompt_too_long = full_response.contains("__prompt too long__");
 
         if cancelled {
             if let Ok(guard) = cancel_token.child_pid.lock() {
@@ -716,6 +831,11 @@ pub(super) fn spawn_turn_bridge(
             println!("  [{ts}] ▶ Response sent");
             if let Ok(mut last) = shared_owned.last_turn_at.lock() {
                 *last = Some(chrono::Local::now().to_rfc3339());
+            }
+
+            if let Some(warning) = review_dispatch_warning.as_deref() {
+                rate_limit_wait(&shared_owned, channel_id).await;
+                let _ = channel_id.say(&http, warning).await;
             }
 
             // Record turn metrics
@@ -980,7 +1100,7 @@ pub(super) fn spawn_turn_bridge(
 
 #[cfg(test)]
 mod tests {
-    use super::should_resume_watcher_after_turn;
+    use super::{extract_explicit_review_verdict, should_resume_watcher_after_turn};
 
     #[test]
     fn chained_batch_mid_turn_keeps_watcher_paused() {
@@ -995,5 +1115,25 @@ mod tests {
     #[test]
     fn final_turn_without_remaining_queue_resumes_watcher() {
         assert!(should_resume_watcher_after_turn(false, false, true));
+    }
+
+    #[test]
+    fn explicit_review_verdict_parser_accepts_structured_marker() {
+        assert_eq!(
+            extract_explicit_review_verdict("VERDICT: pass\nNo findings."),
+            Some("pass")
+        );
+        assert_eq!(
+            extract_explicit_review_verdict("overall: improve\nNeeds work."),
+            Some("improve")
+        );
+    }
+
+    #[test]
+    fn explicit_review_verdict_parser_ignores_unstructured_text() {
+        assert_eq!(
+            extract_explicit_review_verdict("검토 완료. 전반적으로 좋아 보입니다."),
+            None
+        );
     }
 }

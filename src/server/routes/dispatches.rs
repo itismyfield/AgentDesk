@@ -469,7 +469,9 @@ pub(super) async fn send_dispatch_to_discord(
     let token = match crate::credential::read_bot_token("announce") {
         Some(t) => t,
         None => {
-            tracing::warn!("[dispatch] No announce bot token (missing credential/announce_bot_token)");
+            tracing::warn!(
+                "[dispatch] No announce bot token (missing credential/announce_bot_token)"
+            );
             return;
         }
     };
@@ -510,7 +512,8 @@ pub(super) async fn send_dispatch_to_discord(
                         conn.execute(
                             "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
                             rusqlite::params![thread_id, dispatch_id],
-                        ).ok();
+                        )
+                        .ok();
                     }
                     // Send dispatch message into the thread
                     let thread_msg_url = format!(
@@ -532,7 +535,9 @@ pub(super) async fn send_dispatch_to_discord(
         Ok(tr) => {
             // Thread creation failed — fall back to sending directly to the channel
             let status = tr.status();
-            tracing::warn!("[dispatch] Thread creation failed ({status}), falling back to channel message");
+            tracing::warn!(
+                "[dispatch] Thread creation failed ({status}), falling back to channel message"
+            );
             let url = format!(
                 "https://discord.com/api/v10/channels/{}/messages",
                 channel_id_num
@@ -545,7 +550,9 @@ pub(super) async fn send_dispatch_to_discord(
                 .await
             {
                 Ok(r) if r.status().is_success() => {
-                    tracing::info!("[dispatch] Sent fallback message to {agent_id} (channel {channel_id})");
+                    tracing::info!(
+                        "[dispatch] Sent fallback message to {agent_id} (channel {channel_id})"
+                    );
                 }
                 Ok(r) => {
                     let st = r.status();
@@ -785,7 +792,9 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
         if verdict != "unknown" {
             send_review_result_to_primary(db, &card_id, &verdict).await;
         } else {
-            println!("  [{ts}] ⏭ REVIEW-FOLLOWUP: skipping send_review_result_to_primary (verdict=unknown)");
+            println!(
+                "  [{ts}] ⏭ REVIEW-FOLLOWUP: skipping send_review_result_to_primary (verdict=unknown)"
+            );
         }
     }
 
@@ -880,10 +889,12 @@ fn format_dispatch_message(
             .unwrap_or_default();
         message.push_str(&format!(
             "\n---\n\
+             응답 첫 줄에 반드시 `VERDICT: pass|improve|reject|rework` 중 하나를 적으세요.\n\
+             verdict API가 200 OK로 호출되기 전까지 리뷰는 완료로 간주되지 않습니다.\n\
              리뷰 완료 후 verdict API를 호출하세요:\n\
              `curl -sf -X POST http://127.0.0.1:8791/api/review-verdict \
              -H \"Content-Type: application/json\" \
-             -d '{{\"dispatch_id\":\"{dispatch_id}\",\"overall\":\"pass 또는 improve\"{commit_arg}}}'`"
+             -d '{{\"dispatch_id\":\"{dispatch_id}\",\"overall\":\"pass|improve|reject|rework\"{commit_arg}}}'`"
         ));
         message
     } else if !issue_link.is_empty() {
@@ -990,6 +1001,7 @@ mod tests {
         ));
         // Verdict API instructions must be present for counter-model reviewers
         assert!(message.contains("review-verdict"));
+        assert!(message.contains("VERDICT: pass|improve|reject|rework"));
         assert!(message.contains("dispatch-1"));
         assert!(message.contains("abc123"));
     }

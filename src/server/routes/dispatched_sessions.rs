@@ -237,7 +237,7 @@ pub async fn hook_session(
             )
             .ok()
             .and_then(|(dtype, dstatus)| {
-                ((dtype == "implementation" || dtype == "rework" || dtype == "review" || dtype == "review-decision") && dstatus == "pending")
+                ((dtype == "implementation" || dtype == "rework") && dstatus == "pending")
                     .then_some(did.clone())
             })
         })
@@ -391,10 +391,7 @@ pub async fn cleanup_sessions(
         }
     };
 
-    match conn.execute(
-        "DELETE FROM sessions WHERE status = 'disconnected'",
-        [],
-    ) {
+    match conn.execute("DELETE FROM sessions WHERE status = 'disconnected'", []) {
         Ok(n) => (StatusCode::OK, Json(json!({"ok": true, "deleted": n}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -605,6 +602,210 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_hook_does_not_auto_complete_pending_review_dispatch() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        let card_id = "card-review";
+        let dispatch_id = "dispatch-review";
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+                 VALUES (?1, 'Review Card', 'review', ?2, datetime('now'), datetime('now'))",
+                rusqlite::params![card_id, dispatch_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+                 VALUES (?1, ?2, 'project-agentdesk', 'review', 'pending', '[Review R1] Review Card', '{}', datetime('now'), datetime('now'))",
+                rusqlite::params![dispatch_id, card_id],
+            )
+            .unwrap();
+        }
+
+        let (working_status, _) = hook_session(
+            State(state.clone()),
+            Json(HookSessionBody {
+                session_key: "session-review".to_string(),
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("working".to_string()),
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: Some(dispatch_id.to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(working_status, StatusCode::OK);
+
+        let (idle_status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: "session-review".to_string(),
+                status: Some("idle".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("idle".to_string()),
+                name: None,
+                model: None,
+                tokens: Some(11),
+                cwd: None,
+                dispatch_id: Some(dispatch_id.to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(idle_status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatch_result: Option<String> = conn
+            .query_row(
+                "SELECT result FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let active_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-review'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(card_status, "review");
+        assert_eq!(dispatch_status, "pending");
+        assert_eq!(dispatch_result, None);
+        assert_eq!(active_dispatch_id, None);
+    }
+
+    #[tokio::test]
+    async fn idle_hook_does_not_auto_complete_pending_review_decision_dispatch() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        let card_id = "card-review-decision";
+        let dispatch_id = "dispatch-review-decision";
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, review_status, created_at, updated_at)
+                 VALUES (?1, 'Review Decision Card', 'suggestion_pending', ?2, 'reviewed', datetime('now'), datetime('now'))",
+                rusqlite::params![card_id, dispatch_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+                 VALUES (?1, ?2, 'project-agentdesk', 'review-decision', 'pending', '[Review Decision] Review Decision Card', '{}', datetime('now'), datetime('now'))",
+                rusqlite::params![dispatch_id, card_id],
+            )
+            .unwrap();
+        }
+
+        let (working_status, _) = hook_session(
+            State(state.clone()),
+            Json(HookSessionBody {
+                session_key: "session-review-decision".to_string(),
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("working".to_string()),
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: Some(dispatch_id.to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(working_status, StatusCode::OK);
+
+        let (idle_status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: "session-review-decision".to_string(),
+                status: Some("idle".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("idle".to_string()),
+                name: None,
+                model: None,
+                tokens: Some(17),
+                cwd: None,
+                dispatch_id: Some(dispatch_id.to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(idle_status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let review_status: Option<String> = conn
+            .query_row(
+                "SELECT review_status FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatch_result: Option<String> = conn
+            .query_row(
+                "SELECT result FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let active_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-review-decision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(card_status, "suggestion_pending");
+        assert_eq!(review_status.as_deref(), Some("reviewed"));
+        assert_eq!(dispatch_status, "pending");
+        assert_eq!(dispatch_result, None);
+        assert_eq!(active_dispatch_id, None);
+    }
+
+    #[tokio::test]
     async fn stale_local_tmux_session_is_filtered_from_active_dispatch_list() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -622,10 +823,7 @@ mod tests {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "localhost".to_string());
-        let session_key = format!(
-            "{hostname}:AgentDesk-stale-test-{}",
-            std::process::id()
-        );
+        let session_key = format!("{hostname}:AgentDesk-stale-test-{}", std::process::id());
 
         {
             let conn = db.lock().unwrap();
