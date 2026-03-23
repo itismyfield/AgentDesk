@@ -33,6 +33,14 @@ pub async fn run(config: Config, db: Db, engine: PolicyEngine, health_registry: 
         });
     }
 
+    // Spawn periodic rate-limit cache sync (every 120s)
+    {
+        let rl_db = db.clone();
+        tokio::spawn(async move {
+            rate_limit_sync_loop(rl_db).await;
+        });
+    }
+
     // Resolve dashboard dist path relative to runtime root or binary location
     let dashboard_dir = crate::cli::agentdesk_runtime_root()
         .map(|r| r.join("dashboard/dist"))
@@ -95,6 +103,73 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
                     [],
                 )
                 .ok();
+            }
+        }
+    }
+}
+
+/// Background task that periodically fetches rate-limit data from external providers
+/// and caches it in the `rate_limit_cache` table for the dashboard API.
+async fn rate_limit_sync_loop(db: Db) {
+    use std::time::Duration;
+
+    let interval = Duration::from_secs(120);
+    // Run immediately on startup, then every 2 minutes
+    let mut first = true;
+
+    loop {
+        if !first {
+            tokio::time::sleep(interval).await;
+        }
+        first = false;
+
+        // --- GitHub rate limits ---
+        if crate::github::gh_available() {
+            match tokio::task::spawn_blocking(|| {
+                crate::github::run_gh(&["api", "rate_limit"])
+            })
+            .await
+            {
+                Ok(Ok(json_str)) => {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        if let Some(resources) = parsed.get("resources").and_then(|r| r.as_object())
+                        {
+                            let buckets: Vec<serde_json::Value> = resources
+                                .iter()
+                                .map(|(name, v)| {
+                                    serde_json::json!({
+                                        "name": name,
+                                        "limit": v.get("limit").and_then(|x| x.as_i64()).unwrap_or(0),
+                                        "used": v.get("used").and_then(|x| x.as_i64()).unwrap_or(0),
+                                        "remaining": v.get("remaining").and_then(|x| x.as_i64()).unwrap_or(0),
+                                        "reset": v.get("reset").and_then(|x| x.as_i64()).unwrap_or(0),
+                                    })
+                                })
+                                .collect();
+
+                            let data =
+                                serde_json::json!({ "buckets": buckets }).to_string();
+                            let now = chrono::Utc::now().timestamp();
+                            if let Ok(conn) = db.lock() {
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO rate_limit_cache (provider, data, fetched_at) VALUES (?1, ?2, ?3)",
+                                    rusqlite::params!["github", data, now],
+                                )
+                                .ok();
+                            }
+                            tracing::debug!(
+                                "[rate-limit-sync] GitHub: {} buckets cached",
+                                buckets.len()
+                            );
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!("[rate-limit-sync] GitHub rate_limit fetch failed: {e}");
+                }
+                Err(e) => {
+                    tracing::debug!("[rate-limit-sync] GitHub spawn_blocking error: {e}");
+                }
             }
         }
     }

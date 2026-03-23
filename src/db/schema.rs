@@ -225,6 +225,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );
     }
 
+    // Rate limit cache table (provider → cached rate-limit JSON)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS rate_limit_cache (
+            provider   TEXT PRIMARY KEY,
+            data       TEXT,
+            fetched_at INTEGER
+        );",
+    )?;
+
     // Audit logs table for analytics dashboard
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS audit_logs (

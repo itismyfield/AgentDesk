@@ -459,7 +459,7 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
             "analytics",
             "Machine online status",
         ),
-        ep("GET", "/api/rate-limits", "analytics", "Rate limits (stub)"),
+        ep("GET", "/api/rate-limits", "analytics", "Cached rate limits per provider"),
         ep(
             "GET",
             "/api/skills-trend",
