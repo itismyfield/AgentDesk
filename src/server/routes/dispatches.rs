@@ -454,6 +454,14 @@ fn clear_thread_for_channel(conn: &rusqlite::Connection, card_id: &str, channel_
     }
 }
 
+/// Parse a channel identifier (numeric ID or alias like "adk-cc") to u64.
+fn parse_channel_id(channel: &str) -> Option<u64> {
+    channel
+        .parse::<u64>()
+        .ok()
+        .or_else(|| resolve_channel_alias(channel))
+}
+
 /// Clear ALL thread mappings (card done).
 fn clear_all_threads(conn: &rusqlite::Connection, card_id: &str) {
     conn.execute(
@@ -921,16 +929,13 @@ pub(super) async fn send_review_result_to_primary(
     let client = reqwest::Client::new();
 
     // Look up thread for primary channel (review results go to primary)
+    let channel_id_num = parse_channel_id(&channel_id);
     let active_thread_id: Option<String> = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
         };
-        if let Ok(ch_num) = channel_id.parse::<u64>() {
-            get_thread_for_channel(&conn, card_id, ch_num)
-        } else {
-            None
-        }
+        channel_id_num.and_then(|ch_num| get_thread_for_channel(&conn, card_id, ch_num))
     };
 
     // Determine target: existing thread from primary channel (if valid) or main channel.
@@ -978,29 +983,25 @@ pub(super) async fn send_review_result_to_primary(
             if unarchive_ok {
                 tid.clone()
             } else {
-                // Unarchive failed — clear stale mapping and fall back to channel
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "UPDATE kanban_cards SET active_thread_id = NULL WHERE id = ?1",
-                        [card_id],
-                    )
-                    .ok();
+                // Unarchive failed — clear stale channel-thread mapping and fall back to channel
+                if let Some(ch_num) = channel_id_num {
+                    if let Ok(conn) = db.lock() {
+                        clear_thread_for_channel(&conn, card_id, ch_num);
+                    }
                 }
-                format!("{}", channel_id_num)
+                channel_id.clone()
             }
         } else {
-            // Thread is locked or inaccessible — clear stale mapping and fall back to channel
-            if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "UPDATE kanban_cards SET active_thread_id = NULL WHERE id = ?1",
-                    [card_id],
-                )
-                .ok();
+            // Thread is locked or inaccessible — clear stale channel-thread mapping and fall back to channel
+            if let Some(ch_num) = channel_id_num {
+                if let Ok(conn) = db.lock() {
+                    clear_thread_for_channel(&conn, card_id, ch_num);
+                }
             }
-            format!("{}", channel_id_num)
+            channel_id.clone()
         }
     } else {
-        format!("{}", channel_id_num)
+        channel_id.clone()
     };
     let sending_to_thread = active_thread_id
         .as_ref()
@@ -1533,7 +1534,7 @@ pub async fn get_card_thread(
             };
             // Look up channel-specific thread
             let thread_id = target_channel
-                .and_then(|ch| ch.parse::<u64>().ok())
+                .and_then(|ch| parse_channel_id(ch))
                 .and_then(|ch_num| get_thread_for_channel(&conn, &card_id, ch_num));
 
             (
