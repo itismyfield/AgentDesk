@@ -929,14 +929,16 @@ pub(super) async fn send_review_result_to_primary(
     let client = reqwest::Client::new();
 
     // Look up thread for primary channel (review results go to primary)
-    let channel_id_num = parse_channel_id(&channel_id);
+    // channel_id_num (u64) was already resolved above from the alias
     let active_thread_id: Option<String> = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
         };
-        channel_id_num.and_then(|ch_num| get_thread_for_channel(&conn, card_id, ch_num))
+        get_thread_for_channel(&conn, card_id, channel_id_num)
     };
+    // Use resolved numeric channel ID for Discord API calls
+    let channel_id = channel_id_num.to_string();
 
     // Determine target: existing thread from primary channel (if valid) or main channel.
     let target_channel = if let Some(ref tid) = active_thread_id {
@@ -984,19 +986,15 @@ pub(super) async fn send_review_result_to_primary(
                 tid.clone()
             } else {
                 // Unarchive failed — clear stale channel-thread mapping and fall back to channel
-                if let Some(ch_num) = channel_id_num {
-                    if let Ok(conn) = db.lock() {
-                        clear_thread_for_channel(&conn, card_id, ch_num);
-                    }
+                if let Ok(conn) = db.lock() {
+                    clear_thread_for_channel(&conn, card_id, channel_id_num);
                 }
                 channel_id.clone()
             }
         } else {
             // Thread is locked or inaccessible — clear stale channel-thread mapping and fall back to channel
-            if let Some(ch_num) = channel_id_num {
-                if let Ok(conn) = db.lock() {
-                    clear_thread_for_channel(&conn, card_id, ch_num);
-                }
+            if let Ok(conn) = db.lock() {
+                clear_thread_for_channel(&conn, card_id, channel_id_num);
             }
             channel_id.clone()
         }
