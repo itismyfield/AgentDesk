@@ -118,28 +118,7 @@ pub async fn get_config_entries(
             "label_ko": label_ko, "label_en": label_en,
         }));
     }
-    let mut stmt = conn
-        .prepare(
-            "SELECT key, value FROM kv_meta WHERE key NOT LIKE 'triage_%' \
-         AND key NOT LIKE 'meeting%' AND key NOT LIKE 'dispatch_notified%' \
-         AND key NOT LIKE 'deadlock%' AND key != 'settings' AND key != 'runtime-config' \
-         AND key != 'schema_version' ORDER BY key",
-        )
-        .unwrap();
-    let extra: Vec<(String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
-    for (key, value) in extra {
-        if CONFIG_KEYS.iter().any(|(k, _, _, _)| *k == key.as_str()) {
-            continue;
-        }
-        entries.push(json!({
-            "key": key, "value": value, "category": "other",
-            "label_ko": key, "label_en": key,
-        }));
-    }
+    // Only return whitelisted CONFIG_KEYS — unknown kv_meta keys are not exposed.
     (StatusCode::OK, Json(json!({"entries": entries})))
 }
 

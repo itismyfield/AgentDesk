@@ -368,14 +368,13 @@ export default function SettingsView({
           <p className="text-sm" style={{ color: "var(--th-text-muted)" }}>{tr("설정 로딩 중...", "Loading config...")}</p>
         ) : (
           <>
-            {["pipeline", "review", "system", "other"].map((cat) => {
+            {["pipeline", "review", "system"].map((cat) => {
               const items = configEntries.filter((e) => e.category === cat);
               if (items.length === 0) return null;
               const catLabel: Record<string, string> = {
                 pipeline: tr("파이프라인", "Pipeline"),
                 review: tr("리뷰", "Review"),
                 system: tr("시스템", "System"),
-                other: tr("기타", "Other"),
               };
               return (
                 <div key={cat} className="mb-4">

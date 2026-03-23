@@ -191,6 +191,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         tracing::error!("Failed to create unique index idx_kanban_cards_issue_repo: {e}");
     }
 
+    // Remove stale kv_meta key that is no longer used (replaced by kanban_manager_channel_id)
+    let _ = conn.execute("DELETE FROM kv_meta WHERE key = 'pmd_channel_id'", []);
+
     // Audit logs table for analytics dashboard
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS audit_logs (
