@@ -54,7 +54,11 @@ const BUCKET_LABELS: Record<string, string> = {
 /** Only show these buckets to avoid clutter */
 const VISIBLE_BUCKETS = new Set(["core", "search", "graphql", "code_search"]);
 
-function transformRawData(raw: RawRateLimitData): RateLimitData {
+function transformRawData(
+  raw: RawRateLimitData,
+  warningPct: number,
+  dangerPct: number,
+): RateLimitData {
   return {
     providers: raw.providers.map((rp) => ({
       provider: rp.provider.charAt(0).toUpperCase() + rp.provider.slice(1),
@@ -65,7 +69,7 @@ function transformRawData(raw: RawRateLimitData): RateLimitData {
         .map((b) => {
           const utilization = b.limit > 0 ? Math.round((b.used / b.limit) * 100) : 0;
           const level: "normal" | "warning" | "danger" =
-            utilization >= 90 ? "danger" : utilization >= 70 ? "warning" : "normal";
+            utilization >= dangerPct ? "danger" : utilization >= warningPct ? "warning" : "normal";
           return {
             id: b.name,
             label: BUCKET_LABELS[b.name] ?? b.name,
@@ -178,6 +182,21 @@ interface RateLimitWidgetProps {
 
 export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
   const [data, setData] = useState<RateLimitData | null>(null);
+  const [thresholds, setThresholds] = useState({ warning: 80, danger: 95 });
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/settings", { credentials: "include" });
+        if (!res.ok) return;
+        const s = await res.json();
+        setThresholds({
+          warning: s.rateLimitWarningPct ?? 80,
+          danger: s.rateLimitDangerPct ?? 95,
+        });
+      } catch { /* ignore */ }
+    })();
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -186,13 +205,13 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
         const res = await fetch("/api/rate-limits", { credentials: "include" });
         if (!res.ok) return;
         const raw = (await res.json()) as RawRateLimitData;
-        if (mounted) setData(transformRawData(raw));
+        if (mounted) setData(transformRawData(raw, thresholds.warning, thresholds.danger));
       } catch { /* ignore */ }
     };
     load();
     const timer = setInterval(load, 30_000);
     return () => { mounted = false; clearInterval(timer); };
-  }, []);
+  }, [thresholds]);
 
   if (!data || !data.providers || data.providers.length === 0) return null;
 
