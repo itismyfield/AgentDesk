@@ -79,6 +79,8 @@ export {
   getStalledCards,
   bulkKanbanAction,
   getAgentTimeline,
+  getCardAuditLog,
+  getCardGitHubComments,
 } from "./client";
 
 export type {
@@ -107,6 +109,8 @@ export type {
   GitHubReposResponse,
   KanbanRepoSource,
   KanbanReview,
+  CardAuditLogEntry,
+  GitHubComment,
   ChatMessage,
   RuntimeConfigResponse,
   TimelineEvent,

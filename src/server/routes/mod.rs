@@ -112,6 +112,8 @@ pub fn api_router(db: Db, engine: PolicyEngine, health_registry: Option<Arc<Heal
         )
         .route("/kanban-cards/{id}/defer-dod", patch(kanban::defer_dod))
         .route("/kanban-cards/{id}/reviews", get(kanban::list_card_reviews))
+        .route("/kanban-cards/{id}/audit-log", get(kanban::card_audit_log))
+        .route("/kanban-cards/{id}/comments", get(kanban::card_github_comments))
         // Kanban repos
         .route(
             "/kanban-repos",

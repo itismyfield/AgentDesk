@@ -129,6 +129,8 @@ export default function KanbanTab({
   const [assignBeforeReady, setAssignBeforeReady] = useState<{ cardId: string; agentId: string } | null>(null);
   const [cancelConfirm, setCancelConfirm] = useState<{ cardIds: string[]; source: "bulk" | "single" } | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
+  const [auditLog, setAuditLog] = useState<api.CardAuditLogEntry[]>([]);
+  const [ghComments, setGhComments] = useState<api.GitHubComment[]>([]);
 
   const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const cardsById = useMemo(() => new Map(cards.map((card) => [card.id, card])), [cards]);
@@ -220,6 +222,15 @@ export default function KanbanTab({
     setNewChecklistItem("");
     setReviewData(null);
     setReviewDecisions({});
+    setAuditLog([]);
+    setGhComments([]);
+    // Fetch audit log and GitHub comments for selected card
+    if (selectedCard) {
+      api.getCardAuditLog(selectedCard.id).then(setAuditLog).catch(() => {});
+      if (selectedCard.github_issue_number) {
+        api.getCardGitHubComments(selectedCard.id).then(setGhComments).catch(() => {});
+      }
+    }
     // Fetch review data for suggestion_pending/dilemma_pending cards
     if (selectedCard?.review_status === "suggestion_pending" || selectedCard?.review_status === "dilemma_pending" || selectedCard?.review_status === "decided") {
       api.getKanbanReviews(selectedCard.id).then((reviews) => {
@@ -2164,6 +2175,65 @@ export default function KanbanTab({
                 </div>
               );
             })()}
+
+            {/* State transition history (audit log) */}
+            {auditLog.length > 0 && (
+              <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
+                  {tr("상태 전환 이력", "State Transition History")}
+                  <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
+                    ({auditLog.length})
+                  </span>
+                </h4>
+                <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                  {auditLog.map((log) => (
+                    <div key={log.id} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg" style={{ backgroundColor: "rgba(255,255,255,0.03)" }}>
+                      <span className="shrink-0" style={{ color: "var(--th-text-muted)" }}>
+                        {formatIso(log.created_at, locale)}
+                      </span>
+                      <span style={{ color: TRANSITION_STYLE[log.from_status ?? ""]?.text ?? "var(--th-text-secondary)" }}>
+                        {log.from_status ? labelForStatus(log.from_status as KanbanCardStatus, tr) : "—"}
+                      </span>
+                      <span style={{ color: "var(--th-text-muted)" }}>→</span>
+                      <span style={{ color: TRANSITION_STYLE[log.to_status ?? ""]?.text ?? "var(--th-text-secondary)" }}>
+                        {log.to_status ? labelForStatus(log.to_status as KanbanCardStatus, tr) : "—"}
+                      </span>
+                      <span className="ml-auto px-1.5 py-0.5 rounded text-[10px]" style={{ backgroundColor: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}>
+                        {log.source}
+                      </span>
+                      {log.result && log.result !== "OK" && (
+                        <span className="text-[10px]" style={{ color: "#f87171" }}>{log.result}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* GitHub comments */}
+            {ghComments.length > 0 && (
+              <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
+                  {tr("GitHub 코멘트", "GitHub Comments")}
+                  <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
+                    ({ghComments.length})
+                  </span>
+                </h4>
+                <div className="space-y-3 max-h-96 overflow-y-auto">
+                  {ghComments.map((comment, idx) => (
+                    <div key={idx} className="rounded-xl border p-3 space-y-1" style={{ borderColor: "rgba(148,163,184,0.12)", backgroundColor: "rgba(255,255,255,0.02)" }}>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="font-medium" style={{ color: "#93c5fd" }}>{comment.author?.login ?? "unknown"}</span>
+                        <span style={{ color: "var(--th-text-muted)" }}>{formatIso(comment.createdAt, locale)}</span>
+                      </div>
+                      <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+                        <MarkdownContent content={comment.body} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex gap-2">

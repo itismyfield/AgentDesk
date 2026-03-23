@@ -412,6 +412,34 @@ export async function triggerDecidedRework(reviewId: string): Promise<{ ok: bool
   });
 }
 
+// ── Card Audit Log & Comments ──
+
+export interface CardAuditLogEntry {
+  id: number;
+  card_id: string;
+  from_status: string | null;
+  to_status: string | null;
+  source: string | null;
+  result: string | null;
+  created_at: string | null;
+}
+
+export interface GitHubComment {
+  author: { login: string };
+  body: string;
+  createdAt: string;
+}
+
+export async function getCardAuditLog(cardId: string): Promise<CardAuditLogEntry[]> {
+  const data = await request<{ logs: CardAuditLogEntry[] }>(`/api/kanban-cards/${cardId}/audit-log`);
+  return data.logs;
+}
+
+export async function getCardGitHubComments(cardId: string): Promise<GitHubComment[]> {
+  const data = await request<{ comments: GitHubComment[] }>(`/api/kanban-cards/${cardId}/comments`);
+  return data.comments;
+}
+
 // ── Pipeline ──
 
 export interface PipelineStageInput {

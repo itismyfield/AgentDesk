@@ -74,6 +74,14 @@ pub fn sync_github_issues_for_repo(
                 .collect();
 
             for (card_id, card_status) in &cards {
+                // Sync issue body → card description
+                if let Some(ref body) = issue.body {
+                    let _ = conn.execute(
+                        "UPDATE kanban_cards SET description = ?1, updated_at = datetime('now') WHERE id = ?2",
+                        rusqlite::params![body, card_id],
+                    );
+                }
+
                 if issue.state == "CLOSED" && card_status != "done" && card_status != "cancelled" {
                     cards_to_close.push((card_id.clone(), issue.number));
                 } else if issue.state == "OPEN" && card_status == "done" {

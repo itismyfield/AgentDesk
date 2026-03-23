@@ -14,7 +14,10 @@ const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc.pri
     kc.github_issue_url, kc.github_issue_number, kc.latest_dispatch_id, kc.review_round, kc.metadata, \
     kc.created_at, kc.updated_at, \
     td.status AS d_status, td.dispatch_type AS d_type, td.title AS d_title, td.chain_depth AS d_depth, \
-    td.result AS d_result \
+    td.result AS d_result, \
+    kc.description, kc.blocked_reason, kc.review_notes, kc.review_status, \
+    kc.started_at, kc.requested_at, kc.completed_at, kc.pipeline_stage_id, \
+    kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.sort_order, kc.depth \
     FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id";
 
 // ── Query / Body types ─────────────────────────────────────────
@@ -1186,6 +1189,21 @@ fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> 
         .as_ref()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
 
+    // Extended columns (indices 18-30)
+    let description = row.get::<_, Option<String>>(18).unwrap_or(None);
+    let blocked_reason = row.get::<_, Option<String>>(19).unwrap_or(None);
+    let review_notes = row.get::<_, Option<String>>(20).unwrap_or(None);
+    let review_status = row.get::<_, Option<String>>(21).unwrap_or(None);
+    let started_at = row.get::<_, Option<String>>(22).unwrap_or(None);
+    let requested_at = row.get::<_, Option<String>>(23).unwrap_or(None);
+    let completed_at = row.get::<_, Option<String>>(24).unwrap_or(None);
+    let pipeline_stage_id = row.get::<_, Option<String>>(25).unwrap_or(None);
+    let owner_agent_id = row.get::<_, Option<String>>(26).unwrap_or(None);
+    let requester_agent_id = row.get::<_, Option<String>>(27).unwrap_or(None);
+    let parent_card_id = row.get::<_, Option<String>>(28).unwrap_or(None);
+    let sort_order = row.get::<_, i64>(29).unwrap_or(0);
+    let depth = row.get::<_, i64>(30).unwrap_or(0);
+
     Ok(json!({
         "id": row.get::<_, String>(0)?,
         // existing fields
@@ -1205,20 +1223,21 @@ fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> 
         "github_repo": repo_id,
         "assignee_agent_id": assigned_agent_id,
         "metadata_json": metadata_raw,
-        // additional fields expected by frontend (defaults)
-        "description": null,
-        "owner_agent_id": null,
-        "requester_agent_id": null,
-        "parent_card_id": null,
-        "sort_order": 0,
-        "depth": 0,
-        "blocked_reason": null,
-        "review_notes": null,
-        "pipeline_stage_id": null,
-        "review_status": null,
-        "started_at": null,
-        "requested_at": null,
-        "completed_at": null,
+        // extended fields from DB
+        "description": description,
+        "blocked_reason": blocked_reason,
+        "review_notes": review_notes,
+        "review_status": review_status,
+        "started_at": started_at,
+        "requested_at": requested_at,
+        "completed_at": completed_at,
+        "pipeline_stage_id": pipeline_stage_id,
+        "owner_agent_id": owner_agent_id,
+        "requester_agent_id": requester_agent_id,
+        "parent_card_id": parent_card_id,
+        "sort_order": sort_order,
+        "depth": depth,
+        // dispatch join fields
         "latest_dispatch_status": row.get::<_, Option<String>>(13).unwrap_or(None),
         "latest_dispatch_title": row.get::<_, Option<String>>(15).unwrap_or(None),
         "latest_dispatch_type": row.get::<_, Option<String>>(14).unwrap_or(None),
@@ -1228,6 +1247,117 @@ fn card_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> 
         "latest_dispatch_chain_depth": row.get::<_, Option<i64>>(16).unwrap_or(None),
         "child_count": 0,
     }))
+}
+
+// ── Audit Log API ────────────────────────────────────────────
+
+/// GET /api/kanban-cards/:id/audit-log
+pub async fn card_audit_log(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT id, card_id, from_status, to_status, source, result, created_at \
+         FROM kanban_audit_logs WHERE card_id = ?1 ORDER BY created_at DESC LIMIT 50",
+    ) {
+        Ok(s) => s,
+        Err(_) => {
+            // Table may not exist yet
+            return (StatusCode::OK, Json(json!({"logs": []})));
+        }
+    };
+
+    let logs: Vec<serde_json::Value> = stmt
+        .query_map([&id], |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "card_id": row.get::<_, String>(1)?,
+                "from_status": row.get::<_, Option<String>>(2)?,
+                "to_status": row.get::<_, Option<String>>(3)?,
+                "source": row.get::<_, Option<String>>(4)?,
+                "result": row.get::<_, Option<String>>(5)?,
+                "created_at": row.get::<_, Option<String>>(6)?,
+            }))
+        })
+        .ok()
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    (StatusCode::OK, Json(json!({"logs": logs})))
+}
+
+/// GET /api/kanban-cards/:id/comments
+/// Fetch GitHub comments for the linked issue via `gh` CLI.
+pub async fn card_github_comments(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let (repo_id, issue_number) = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        match conn.query_row(
+            "SELECT repo_id, github_issue_number FROM kanban_cards WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<i64>>(1)?)),
+        ) {
+            Ok(r) => r,
+            Err(_) => return (StatusCode::NOT_FOUND, Json(json!({"error": "card not found"}))),
+        }
+    };
+
+    let repo = match repo_id {
+        Some(r) => r,
+        None => return (StatusCode::OK, Json(json!({"comments": []}))),
+    };
+    let number = match issue_number {
+        Some(n) => n,
+        None => return (StatusCode::OK, Json(json!({"comments": []}))),
+    };
+
+    // Fetch comments via gh CLI in a blocking task
+    let result = tokio::task::spawn_blocking(move || {
+        crate::github::run_gh(&[
+            "issue",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &repo,
+            "--json",
+            "comments",
+        ])
+    })
+    .await;
+
+    match result {
+        Ok(Ok(output)) => {
+            match serde_json::from_str::<serde_json::Value>(&output) {
+                Ok(parsed) => {
+                    let comments = parsed.get("comments").cloned().unwrap_or(json!([]));
+                    (StatusCode::OK, Json(json!({"comments": comments})))
+                }
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("parse: {e}")}))),
+            }
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("join: {e}")}))),
+    }
 }
 
 // ── PM Decision API ──────────────────────────────────────────
