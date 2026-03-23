@@ -28,7 +28,7 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
             serde_json::from_str(&discord_json).unwrap_or(serde_json::json!({}));
         json["db"] = serde_json::json!(db_ok);
 
-        let status = if healthy {
+        let status = if healthy && db_ok {
             StatusCode::OK
         } else {
             StatusCode::SERVICE_UNAVAILABLE
@@ -36,12 +36,17 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         (status, Json(json)).into_response()
     } else {
         // Standalone mode — no Discord providers
+        let status = if db_ok {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
         let json = serde_json::json!({
-            "ok": true,
+            "ok": db_ok,
             "version": env!("CARGO_PKG_VERSION"),
             "db": db_ok
         });
-        (StatusCode::OK, Json(json)).into_response()
+        (status, Json(json)).into_response()
     }
 }
 
