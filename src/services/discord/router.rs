@@ -1,5 +1,13 @@
 use super::*;
 
+fn should_process_turn_message(kind: serenity::model::channel::MessageType) -> bool {
+    matches!(
+        kind,
+        serenity::model::channel::MessageType::Regular
+            | serenity::model::channel::MessageType::InlineReply
+    )
+}
+
 pub(super) async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -34,6 +42,15 @@ pub(super) async fn handle_event(
                     );
                     return Ok(());
                 }
+            }
+
+            if !should_process_turn_message(new_message.kind) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ⏭ MSG-KIND: skipping {:?} message {} in channel {}",
+                    new_message.kind, new_message.id, new_message.channel_id
+                );
+                return Ok(());
             }
 
             // Ignore bot messages, unless the bot is in the allowed_bot_ids list
@@ -671,7 +688,9 @@ pub(super) async fn handle_text_message(
     // When a dispatch message arrives, create a Discord thread for
     // isolated context.  All subsequent agent output goes to the thread.
     // Skip if already inside a thread (threads cannot nest).
-    let is_already_thread = super::resolve_thread_parent(ctx, channel_id).await.is_some();
+    let is_already_thread = super::resolve_thread_parent(ctx, channel_id)
+        .await
+        .is_some();
     let dispatch_id_for_thread = super::adk_session::parse_dispatch_id(user_text);
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
         if is_already_thread {
@@ -2450,4 +2469,25 @@ Any other message is sent to {p}.
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_process_turn_message;
+    use serenity::model::channel::MessageType;
+
+    #[test]
+    fn turn_messages_allow_regular_and_inline_reply() {
+        assert!(should_process_turn_message(MessageType::Regular));
+        assert!(should_process_turn_message(MessageType::InlineReply));
+    }
+
+    #[test]
+    fn system_messages_are_not_processed_as_turns() {
+        assert!(!should_process_turn_message(MessageType::ThreadCreated));
+        assert!(!should_process_turn_message(
+            MessageType::ThreadStarterMessage
+        ));
+        assert!(!should_process_turn_message(MessageType::ChatInputCommand));
+    }
 }
