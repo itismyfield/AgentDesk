@@ -812,6 +812,61 @@ mod tests {
         assert_eq!(dispatch_status, "cancelled", "pending review-decision dispatch should be cancelled");
     }
 
+    /// Regression test: cancelled dispatch must not be promoted to completed via verdict API.
+    #[tokio::test]
+    async fn verdict_on_cancelled_dispatch_rejected() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-c', 'C', '777', '888')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+             VALUES ('card-c', 'Cancelled Test', 'done', 'agent-c', 'dispatch-canc', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-canc', 'card-c', 'agent-c', 'review', 'cancelled', '[Review R1] card-c', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        drop(conn);
+
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-canc".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "cancelled dispatch should not accept verdict");
+        assert!(body.0["error"].as_str().unwrap().contains("cancelled"));
+
+        let conn = db.lock().unwrap();
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-canc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_status, "cancelled", "dispatch must remain cancelled");
+    }
+
     /// Seed a review dispatch with provider tracking in context (counter-model review).
     fn seed_counter_model_review(db: &Db, dispatch_id: &str, from_provider: &str, target_provider: &str) {
         let conn = db.lock().unwrap();
