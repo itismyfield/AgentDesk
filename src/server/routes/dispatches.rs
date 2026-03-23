@@ -461,9 +461,10 @@ pub(super) async fn send_dispatch_to_discord(
     let client = reqwest::Client::new();
 
     let thread_name = if let Some(num) = issue_number {
-        format!("#{} {}", num, &title[..title.len().min(90)])
+        let short: String = title.chars().take(90).collect();
+        format!("#{} {}", num, short)
     } else {
-        title[..title.len().min(100)].to_string()
+        title.chars().take(100).collect()
     };
 
     let thread_url = format!(
