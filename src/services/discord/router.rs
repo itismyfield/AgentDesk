@@ -1,6 +1,6 @@
 use super::*;
 
-fn should_process_turn_message(kind: serenity::model::channel::MessageType) -> bool {
+pub(super) fn should_process_turn_message(kind: serenity::model::channel::MessageType) -> bool {
     matches!(
         kind,
         serenity::model::channel::MessageType::Regular

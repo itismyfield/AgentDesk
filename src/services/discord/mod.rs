@@ -635,6 +635,10 @@ async fn catch_up_missed_messages(
         let queue = data.intervention_queue.entry(channel_id).or_default();
 
         for msg in &messages {
+            // Skip system messages (thread creation, slash commands, etc.)
+            if !router::should_process_turn_message(msg.kind) {
+                continue;
+            }
             // Skip own messages
             if Some(msg.author.id.get()) == bot_user_id {
                 continue;
