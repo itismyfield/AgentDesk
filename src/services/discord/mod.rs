@@ -61,7 +61,7 @@ use settings::{
     RoleBinding, channel_supports_provider, channel_upload_dir, cleanup_old_uploads,
     load_bot_settings, resolve_role_binding, save_bot_settings,
 };
-use shared_memory::load_shared_knowledge;
+use shared_memory::{load_agent_notes, load_shared_knowledge};
 #[cfg(unix)]
 use tmux::{
     cleanup_orphan_tmux_sessions, reap_dead_tmux_sessions, restore_tmux_watchers,

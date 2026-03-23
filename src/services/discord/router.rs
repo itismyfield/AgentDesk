@@ -942,6 +942,11 @@ pub(super) async fn handle_text_message(
         if let Some(knowledge) = load_shared_knowledge() {
             context_chunks.push(knowledge);
         }
+        if let Some(binding) = role_binding.as_ref() {
+            if let Some(notes) = load_agent_notes(&binding.role_id) {
+                context_chunks.push(notes);
+            }
+        }
     }
     if let Some(ref reply_ctx) = reply_context {
         context_chunks.push(reply_ctx.clone());
