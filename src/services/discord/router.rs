@@ -622,7 +622,23 @@ pub(super) async fn handle_text_message(
                     .get(&channel_id)
                     .and_then(|s| s.channel_name.clone())
             };
-            let workspace = settings::resolve_workspace(channel_id, ch_name.as_deref());
+            let mut workspace = settings::resolve_workspace(channel_id, ch_name.as_deref());
+            // Fallback: if this is a thread, try resolving workspace from parent channel
+            if workspace.is_none() {
+                if let Some((parent_id, _parent_name)) = super::resolve_thread_parent(ctx, channel_id).await {
+                    let parent_ch_name = {
+                        let data = shared.core.lock().await;
+                        data.sessions
+                            .get(&parent_id)
+                            .and_then(|s| s.channel_name.clone())
+                    };
+                    workspace = settings::resolve_workspace(parent_id, parent_ch_name.as_deref());
+                    if workspace.is_some() {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!("  [{ts}] 🧵 Thread auto-start: resolved workspace from parent channel {}", parent_id);
+                    }
+                }
+            }
             if let Some(ws_path) = workspace {
                 let ws = std::path::Path::new(&ws_path);
                 if ws.is_dir() {
