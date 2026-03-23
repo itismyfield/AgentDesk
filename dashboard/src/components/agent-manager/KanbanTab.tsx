@@ -33,6 +33,7 @@ import {
   isReviewCard,
   labelForStatus,
   parseCardMetadata,
+  parseGitHubCommentTimeline,
   parseIssueSections,
   priorityLabel,
   stringifyCardMetadata,
@@ -168,6 +169,7 @@ export default function KanbanTab({
   }, [agents]);
 
   const selectedCard = selectedCardId ? cardsById.get(selectedCardId) ?? null : null;
+  const parsedGitHubTimeline = useMemo(() => parseGitHubCommentTimeline(ghComments), [ghComments]);
 
   const STALLED_REVIEW_STATUSES = new Set(["awaiting_dod", "suggestion_pending", "dilemma_pending", "reviewing"]);
   const stalledCards = useMemo(
@@ -325,6 +327,47 @@ export default function KanbanTab({
     const agent = agentMap.get(agentId);
     if (!agent) return agentId;
     return localeName(locale, agent);
+  };
+
+  const getTimelineKindLabel = (kind: "review" | "pm" | "work") => {
+    switch (kind) {
+      case "review":
+        return tr("리뷰", "Review");
+      case "pm":
+        return tr("PM 결정", "PM Decision");
+      case "work":
+        return tr("작업 이력", "Work Log");
+    }
+  };
+
+  const getTimelineStatusLabel = (status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed") => {
+    switch (status) {
+      case "reviewing":
+        return tr("진행 중", "In Progress");
+      case "changes_requested":
+        return tr("수정 필요", "Changes Requested");
+      case "passed":
+        return tr("통과", "Passed");
+      case "decision":
+        return tr("결정", "Decision");
+      case "completed":
+        return tr("완료", "Completed");
+    }
+  };
+
+  const getTimelineStatusStyle = (status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed") => {
+    switch (status) {
+      case "reviewing":
+        return { bg: "rgba(20,184,166,0.16)", text: "#5eead4" };
+      case "changes_requested":
+        return { bg: "rgba(251,113,133,0.16)", text: "#fda4af" };
+      case "passed":
+        return { bg: "rgba(34,197,94,0.18)", text: "#86efac" };
+      case "decision":
+        return { bg: "rgba(244,114,182,0.16)", text: "#f9a8d4" };
+      case "completed":
+        return { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" };
+    }
   };
 
   const repoCards = useMemo(() => {
@@ -2210,11 +2253,69 @@ export default function KanbanTab({
               </div>
             )}
 
+            {/* Parsed GitHub timeline */}
+            {parsedGitHubTimeline.length > 0 && (
+              <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
+                <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
+                  {tr("GitHub 이력 요약", "GitHub Timeline")}
+                  <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
+                    ({parsedGitHubTimeline.length})
+                  </span>
+                </h4>
+                <div className="space-y-3 max-h-80 overflow-y-auto">
+                  {parsedGitHubTimeline.map((entry, idx) => {
+                    const statusStyle = getTimelineStatusStyle(entry.status);
+                    return (
+                      <div
+                        key={`${entry.kind}-${entry.createdAt}-${idx}`}
+                        className="rounded-xl border p-3 space-y-2"
+                        style={{ borderColor: "rgba(148,163,184,0.12)", backgroundColor: "rgba(255,255,255,0.02)" }}
+                      >
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span
+                            className="px-2 py-0.5 rounded-full font-medium"
+                            style={{ backgroundColor: "rgba(148,163,184,0.12)", color: "var(--th-text-secondary)" }}
+                          >
+                            {getTimelineKindLabel(entry.kind)}
+                          </span>
+                          <span
+                            className="px-2 py-0.5 rounded-full font-medium"
+                            style={{ backgroundColor: statusStyle.bg, color: statusStyle.text }}
+                          >
+                            {getTimelineStatusLabel(entry.status)}
+                          </span>
+                          <span className="font-medium" style={{ color: "#93c5fd" }}>{entry.author}</span>
+                          <span style={{ color: "var(--th-text-muted)" }}>{formatIso(entry.createdAt, locale)}</span>
+                        </div>
+                        <div className="space-y-1">
+                          <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
+                            {entry.title}
+                          </div>
+                          {entry.summary && (
+                            <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+                              {entry.summary}
+                            </div>
+                          )}
+                          {entry.details.length > 0 && (
+                            <ul className="space-y-1 pl-4 text-xs list-disc" style={{ color: "var(--th-text-secondary)" }}>
+                              {entry.details.map((detail, detailIdx) => (
+                                <li key={detailIdx}>{detail}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* GitHub comments */}
             {ghComments.length > 0 && (
               <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
                 <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
-                  {tr("GitHub 코멘트", "GitHub Comments")}
+                  {tr("원본 GitHub 코멘트", "Raw GitHub Comments")}
                   <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
                     ({ghComments.length})
                   </span>

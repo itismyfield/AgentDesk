@@ -1,3 +1,4 @@
+import type { GitHubComment } from "../../api";
 import type {
   KanbanCard,
   KanbanCardMetadata,
@@ -225,6 +226,154 @@ export function syncDodToChecklist(
   return dodItems.map((label, i) => {
     const match = existing.get(label);
     return match ?? createChecklistItem(label, i);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Comment Timeline Parser
+// ---------------------------------------------------------------------------
+
+export type GitHubTimelineKind = "review" | "pm" | "work";
+export type GitHubTimelineStatus =
+  | "reviewing"
+  | "changes_requested"
+  | "passed"
+  | "decision"
+  | "completed";
+
+export interface ParsedGitHubComment {
+  kind: GitHubTimelineKind;
+  status: GitHubTimelineStatus;
+  title: string;
+  summary: string | null;
+  details: string[];
+  createdAt: string;
+  author: string;
+}
+
+function cleanMarkdownLine(line: string): string {
+  return line
+    .replace(/^#+\s*/, "")
+    .replace(/^\d+\.\s+/, "")
+    .replace(/^[-*]\s+/, "")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .trim();
+}
+
+function firstMeaningfulLine(body: string): string | null {
+  for (const raw of body.split("\n")) {
+    const line = cleanMarkdownLine(raw);
+    if (!line) continue;
+    if (line === "---") continue;
+    return line;
+  }
+  return null;
+}
+
+function extractListHighlights(body: string, limit = 3): string[] {
+  const results: string[] = [];
+  for (const raw of body.split("\n")) {
+    if (!/^\s*(\d+\.\s+|[-*]\s+)/.test(raw)) continue;
+    const line = cleanMarkdownLine(raw);
+    if (!line) continue;
+    results.push(line);
+    if (results.length >= limit) break;
+  }
+  return results;
+}
+
+function extractSectionHeadings(body: string, limit = 3): string[] {
+  const results: string[] = [];
+  for (const raw of body.split("\n")) {
+    const match = raw.match(/^#{2,6}\s+(.+)$/);
+    if (!match) continue;
+    const line = cleanMarkdownLine(match[1]);
+    if (!line || line.includes("완료 보고")) continue;
+    results.push(line);
+    if (results.length >= limit) break;
+  }
+  return results;
+}
+
+export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGitHubComment[] {
+  return comments.flatMap<ParsedGitHubComment>((comment) => {
+    const body = comment.body.trim();
+    if (!body) return [];
+
+    const firstLine = firstMeaningfulLine(body);
+    const heading = body.match(/^##\s+(.+)$/m)?.[1]?.trim() ?? null;
+    const author = comment.author?.login ?? "unknown";
+
+    if (body.startsWith("🔍 칸반 상태:")) {
+      return [{
+        kind: "review",
+        status: "reviewing",
+        title: "리뷰 진행",
+        summary: cleanMarkdownLine(firstLine ?? body),
+        details: [],
+        createdAt: comment.createdAt,
+        author,
+      }];
+    }
+
+    if (
+      body.includes("코드 리뷰 결과")
+      || body.includes("재검토 결과")
+      || body.includes("blocking finding")
+      || body.includes("추가 결함은 확인하지 못했습니다")
+    ) {
+      const passed =
+        body.includes("추가 blocking finding은 없습니다")
+        || body.includes("머지를 막을 추가 결함은 확인하지 못했습니다")
+        || body.includes("추가 결함은 확인하지 못했습니다");
+      const highlights = extractListHighlights(body, passed ? 1 : 3);
+      return [{
+        kind: "review",
+        status: passed ? "passed" : "changes_requested",
+        title: passed ? "리뷰 통과" : "리뷰 피드백",
+        summary: highlights[0] ?? cleanMarkdownLine(firstLine ?? "리뷰 결과"),
+        details: passed ? [] : highlights.slice(1),
+        createdAt: comment.createdAt,
+        author,
+      }];
+    }
+
+    if (
+      body.includes("PM 결정")
+      || body.includes("PM 판단")
+      || body.includes("프로듀서 결정")
+      || body.includes("PMD 결정")
+    ) {
+      return [{
+        kind: "pm",
+        status: "decision",
+        title: heading ?? "PM 결정",
+        summary: cleanMarkdownLine(firstLine ?? "PM 결정"),
+        details: extractListHighlights(body, 3),
+        createdAt: comment.createdAt,
+        author,
+      }];
+    }
+
+    if (
+      body.includes("완료 보고")
+      || body.startsWith("구현 완료")
+      || body.startsWith("수정 완료")
+      || body.startsWith("배포 완료")
+    ) {
+      return [{
+        kind: "work",
+        status: "completed",
+        title: heading ?? "작업 완료",
+        summary: cleanMarkdownLine(firstLine ?? "작업 완료"),
+        details: extractSectionHeadings(body, 3),
+        createdAt: comment.createdAt,
+        author,
+      }];
+    }
+
+    return [];
   });
 }
 
