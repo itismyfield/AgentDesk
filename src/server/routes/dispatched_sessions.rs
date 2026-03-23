@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_hook_does_not_auto_complete_pending_review_dispatch() {
+    async fn idle_hook_auto_completes_pending_review_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);
         let state = AppState {
@@ -726,13 +726,6 @@ mod tests {
         assert_eq!(idle_status, StatusCode::OK);
 
         let conn = db.lock().unwrap();
-        let card_status: String = conn
-            .query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .unwrap();
         let dispatch_status: String = conn
             .query_row(
                 "SELECT status FROM task_dispatches WHERE id = ?1",
@@ -755,14 +748,18 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(card_status, "review");
-        assert_eq!(dispatch_status, "pending");
-        assert_eq!(dispatch_result, None);
+        // review dispatches are auto-completed on idle (989043b)
+        assert_eq!(dispatch_status, "completed");
+        assert!(
+            dispatch_result
+                .unwrap_or_default()
+                .contains("\"completion_source\":\"session_idle\"")
+        );
         assert_eq!(active_dispatch_id, None);
     }
 
     #[tokio::test]
-    async fn idle_hook_does_not_auto_complete_pending_review_decision_dispatch() {
+    async fn idle_hook_auto_completes_pending_review_decision_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);
         let state = AppState {
@@ -824,20 +821,6 @@ mod tests {
         assert_eq!(idle_status, StatusCode::OK);
 
         let conn = db.lock().unwrap();
-        let card_status: String = conn
-            .query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let review_status: Option<String> = conn
-            .query_row(
-                "SELECT review_status FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .unwrap();
         let dispatch_status: String = conn
             .query_row(
                 "SELECT status FROM task_dispatches WHERE id = ?1",
@@ -860,10 +843,13 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(card_status, "suggestion_pending");
-        assert_eq!(review_status.as_deref(), Some("reviewed"));
-        assert_eq!(dispatch_status, "pending");
-        assert_eq!(dispatch_result, None);
+        // review-decision dispatches are auto-completed on idle (989043b)
+        assert_eq!(dispatch_status, "completed");
+        assert!(
+            dispatch_result
+                .unwrap_or_default()
+                .contains("\"completion_source\":\"session_idle\"")
+        );
         assert_eq!(active_dispatch_id, None);
     }
 
