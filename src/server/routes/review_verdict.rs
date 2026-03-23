@@ -137,9 +137,10 @@ pub async fn submit_verdict(
         .and_then(|v| v.as_str());
 
     if let (Some(from_p), Some(_target_p)) = (from_provider, target_provider) {
-        // This is a counter-model review dispatch with provider tracking
-        if let Some(ref submitter) = body.provider {
-            if submitter == from_p {
+        // This is a counter-model review dispatch with provider tracking.
+        // Require provider field to prevent bypass of self-review check.
+        match body.provider {
+            Some(ref submitter) if submitter == from_p => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({
@@ -150,6 +151,15 @@ pub async fn submit_verdict(
                     })),
                 );
             }
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "provider field is required for counter-model review verdicts"
+                    })),
+                );
+            }
+            _ => {} // cross-provider → allowed
         }
     }
 
@@ -195,9 +205,12 @@ pub async fn submit_verdict(
     });
     let result_str = result_json.to_string();
 
-    // Update dispatch with verdict result
+    // Update dispatch with verdict result — only if still pending/dispatched.
+    // Cancelled dispatches (e.g. after dismiss) must NOT be promoted to completed,
+    // as that would re-trigger OnDispatchCompleted hooks and cause review loops (#80).
     let updated = match conn.execute(
-        "UPDATE task_dispatches SET status = 'completed', result = ?2, updated_at = datetime('now') WHERE id = ?1",
+        "UPDATE task_dispatches SET status = 'completed', result = ?2, updated_at = datetime('now') \
+         WHERE id = ?1 AND status IN ('pending', 'dispatched')",
         rusqlite::params![body.dispatch_id, result_str],
     ) {
         Ok(n) => n,
@@ -210,9 +223,22 @@ pub async fn submit_verdict(
     };
 
     if updated == 0 {
+        // Check if dispatch exists but was cancelled/completed
+        let current_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = ?1",
+                [&body.dispatch_id],
+                |row| row.get(0),
+            )
+            .ok();
+        let msg = match current_status.as_deref() {
+            Some("cancelled") => "dispatch was cancelled (card may have been dismissed)",
+            Some("completed") => "dispatch already completed",
+            _ => "dispatch not found",
+        };
         return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "dispatch not found"})),
+            StatusCode::CONFLICT,
+            Json(json!({"error": msg})),
         );
     }
 
@@ -868,7 +894,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verdict_without_provider_allowed_for_backwards_compat() {
+    async fn verdict_without_provider_rejected_for_counter_model_dispatch() {
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-no-prov", "claude", "codex");
         let state = AppState {
@@ -877,7 +903,7 @@ mod tests {
             health_registry: None,
         };
 
-        // No provider specified → allowed for backwards compatibility
+        // No provider specified on counter-model dispatch → rejected to prevent bypass
         let (status, body) = submit_verdict(
             State(state),
             Json(SubmitVerdictBody {
@@ -892,8 +918,8 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("provider field is required"));
     }
 
     #[tokio::test]
@@ -917,6 +943,36 @@ mod tests {
                 feedback: None,
                 commit: None,
                 provider: Some("claude".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn legacy_dispatch_without_provider_tracking_allows_no_provider() {
+        // Legacy dispatches without from_provider/target_provider in context
+        // should still allow verdicts without provider field
+        let db = test_db();
+        seed_review_card(&db, "dispatch-legacy");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-legacy".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: None,
             }),
         )
         .await;
