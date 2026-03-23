@@ -181,6 +181,52 @@ pub(super) async fn handle_event(
                 }
             }
 
+            // ── Dispatch-thread guard ─────────────────────────────────
+            // When a dispatch thread is active for this channel, bot messages
+            // to the parent channel are queued so they don't start a parallel
+            // turn (the thread's cancel_token is keyed by thread_id, leaving
+            // the parent channel "unlocked").
+            if new_message.author.bot {
+                if let Some(thread_id) = data.shared.dispatch_thread_parents.get(&channel_id) {
+                    // Thread still has an active turn?
+                    let thread_active = {
+                        let d = data.shared.core.lock().await;
+                        d.cancel_tokens.contains_key(thread_id.value())
+                    };
+                    if thread_active {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!(
+                            "  [{ts}] 🔀 THREAD-GUARD: bot message to parent {} queued (dispatch thread {} active)",
+                            channel_id, *thread_id
+                        );
+                        let mut d = data.shared.core.lock().await;
+                        let queue = d.intervention_queue.entry(channel_id).or_default();
+                        enqueue_intervention(
+                            queue,
+                            Intervention {
+                                author_id: user_id,
+                                message_id: new_message.id,
+                                text: text.to_string(),
+                                mode: InterventionMode::Soft,
+                                created_at: Instant::now(),
+                            },
+                        );
+                        if let Some(q) = d.intervention_queue.get(&channel_id) {
+                            save_channel_queue(&data.provider, channel_id, q);
+                        }
+                        drop(d);
+                        add_reaction(ctx, channel_id, new_message.id, '📬').await;
+                        data.shared
+                            .last_message_ids
+                            .insert(channel_id, new_message.id.get());
+                        return Ok(());
+                    } else {
+                        // Thread turn finished — clean up stale mapping
+                        data.shared.dispatch_thread_parents.remove(&channel_id);
+                    }
+                }
+            }
+
             // Queue messages while AI is in progress (executed as next turn after current finishes)
             {
                 let mut d = data.shared.core.lock().await;
@@ -635,6 +681,9 @@ pub(super) async fn handle_text_message(
                     );
                     // Bootstrap session for the thread from parent channel
                     super::bootstrap_thread_session(shared, thread.id, &current_path, ctx).await;
+                    // Record parent→thread mapping so subsequent bot messages
+                    // to the parent are queued instead of starting parallel turns.
+                    shared.dispatch_thread_parents.insert(channel_id, thread.id);
                     thread.id
                 }
                 Err(e) => {

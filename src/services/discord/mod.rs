@@ -321,6 +321,11 @@ pub(super) struct SharedData {
     /// when duplicate bot dispatches arrive nearly simultaneously.
     /// Key: dedup key (dispatch_id or channel+author+text hash), Value: first-seen Instant.
     pub(super) intake_dedup: dashmap::DashMap<String, std::time::Instant>,
+    /// Maps parent channel → active dispatch thread channel.
+    /// When a dispatch creates a thread, the parent is recorded here so that
+    /// subsequent bot messages to the parent are queued instead of starting
+    /// a parallel turn.  Cleared when the dispatch thread turn completes.
+    pub(super) dispatch_thread_parents: dashmap::DashMap<ChannelId, ChannelId>,
     /// Set to true after Discord gateway ready event fires.
     pub(super) bot_connected: std::sync::atomic::AtomicBool,
     /// ISO 8601 timestamp of the last completed turn (for health reporting).
@@ -1217,6 +1222,7 @@ pub async fn run_bot(
         shutdown_remaining,
         shutdown_counted: std::sync::atomic::AtomicBool::new(false),
         intake_dedup: dashmap::DashMap::new(),
+        dispatch_thread_parents: dashmap::DashMap::new(),
         bot_connected: std::sync::atomic::AtomicBool::new(false),
         last_turn_at: std::sync::Mutex::new(None),
         model_overrides: dashmap::DashMap::new(),

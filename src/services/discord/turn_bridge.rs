@@ -564,6 +564,11 @@ pub(super) fn spawn_turn_bridge(
                     .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
             data.active_request_owner.remove(&channel_id);
+            // Clean up dispatch-thread parent mapping when the thread turn ends.
+            // Iterate and remove entries whose thread matches this channel_id.
+            shared_owned
+                .dispatch_thread_parents
+                .retain(|_, thread| *thread != channel_id);
             let mut remove_queue = false;
             let has_pending = if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
                 let has_pending = super::has_soft_intervention(queue);
