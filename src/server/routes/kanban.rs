@@ -1356,13 +1356,13 @@ pub async fn card_github_comments(
                     let body = parsed.get("body").and_then(|v| v.as_str()).unwrap_or("");
 
                     // On-demand sync: update card description from latest issue body
-                    if !body.is_empty() {
-                        if let Ok(conn) = db.lock() {
-                            let _ = conn.execute(
-                                "UPDATE kanban_cards SET description = ?1, updated_at = datetime('now') WHERE id = ?2",
-                                rusqlite::params![body, card_id],
-                            );
-                        }
+                    // Only UPDATE when the value actually changed to avoid polluting updated_at
+                    if let Ok(conn) = db.lock() {
+                        let _ = conn.execute(
+                            "UPDATE kanban_cards SET description = ?1, updated_at = datetime('now') \
+                             WHERE id = ?2 AND (description IS NOT ?1 OR description IS NULL)",
+                            rusqlite::params![body, card_id],
+                        );
                     }
 
                     (StatusCode::OK, Json(json!({"comments": comments, "body": body})))
