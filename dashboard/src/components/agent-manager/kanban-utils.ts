@@ -412,6 +412,16 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       }];
     }
 
+    // Pre-compute work heading to guard secondary review heuristic
+    const workMarker = heading ?? firstLine ?? "";
+    const isWorkHeading = heading ? matchesAny(heading, WORK_HEADING_PATTERNS) : false;
+    const isWorkLead =
+      (!heading && (workMarker.includes("완료 보고") || /^#\d+\s+작업 완료(?:[:\s]|$)/u.test(workMarker)))
+      || workMarker.startsWith("구현 완료")
+      || workMarker.startsWith("수정 완료")
+      || workMarker.startsWith("배포 완료");
+    const isWorkComment = isWorkHeading || isWorkLead;
+
     const passed = REVIEW_PASS_PATTERNS.some((pattern) => leadText.includes(pattern))
       && !matchesAny(leadText, REVIEW_BLOCKING_PATTERNS);
     const reviewFeedbackExplicit =
@@ -423,7 +433,8 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       || /결함 \d+건/.test(leadText)
       || /문제 \d+건/.test(leadText);
     // Secondary heuristic: review keyword + numbered code-reference list
-    const hasReviewSignal = matchesAny(leadText, REVIEW_SIGNAL_KEYWORDS);
+    // Guard: skip if heading matches work patterns (e.g. "완료 보고" with code refs)
+    const hasReviewSignal = !isWorkComment && matchesAny(leadText, REVIEW_SIGNAL_KEYWORDS);
     const hasNumberedFindings = /^\s*\d+\.\s+/m.test(classificationBody)
       && /`[^`]+\.\w+[:`]/.test(classificationBody); // file reference like `foo.rs:123`
     const reviewFeedback = reviewFeedbackExplicit
@@ -458,14 +469,7 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       }];
     }
 
-    const workMarker = heading ?? firstLine ?? "";
-    const isWorkHeading = heading ? matchesAny(heading, WORK_HEADING_PATTERNS) : false;
-    const isWorkLead =
-      (!heading && (workMarker.includes("완료 보고") || /^#\d+\s+작업 완료(?:[:\s]|$)/u.test(workMarker)))
-      || workMarker.startsWith("구현 완료")
-      || workMarker.startsWith("수정 완료")
-      || workMarker.startsWith("배포 완료");
-    if (isWorkHeading || isWorkLead) {
+    if (isWorkComment) {
       return [{
         kind: "work",
         status: "completed",

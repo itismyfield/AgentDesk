@@ -250,6 +250,23 @@ assign_issue 경로가 description을 metadata에만 저장합니다.
     });
   });
 
+  it("완료 보고에 리뷰 키워드 + 코드 참조가 있어도 work로 유지한다", () => {
+    const [entry] = parseGitHubCommentTimeline([
+      makeComment(`## #65 완료 보고
+
+코드 리뷰 반영 완료했습니다.
+
+1. \`src/server/routes/kanban.rs:1114-1159\` 수정
+2. \`dashboard/src/api/client.ts:438\` 에러 핸들링 추가`),
+    ]);
+
+    expect(entry).toMatchObject({
+      kind: "work",
+      status: "completed",
+      title: "#65 완료 보고",
+    });
+  });
+
   it("이슈 번호 작업 완료 헤더를 work 타입으로 파싱한다", () => {
     const [entry] = parseGitHubCommentTimeline([
       makeComment(`## #53 작업 완료
