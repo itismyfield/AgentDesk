@@ -46,18 +46,26 @@ xattr -d com.apple.provenance "$ADK_REL/bin/agentdesk" 2>/dev/null || true
 codesign -f -s - "$ADK_REL/bin/agentdesk" 2>/dev/null || true
 
 # Copy dashboard from dev (with fallback to workspace source)
+# Stage into a temp dir first, then swap — never delete existing dist before new one is ready
 echo "▸ Copying dashboard from dev..."
 mkdir -p "$ADK_REL/dashboard"
-rm -rf "$ADK_REL/dashboard/dist"
+DIST_STAGED="$ADK_REL/dashboard/dist.new"
+rm -rf "$DIST_STAGED"
 if [ -d "$ADK_DEV/dashboard/dist" ] && [ -f "$ADK_DEV/dashboard/dist/index.html" ]; then
-    cp -r "$ADK_DEV/dashboard/dist" "$ADK_REL/dashboard/dist"
+    cp -r "$ADK_DEV/dashboard/dist" "$DIST_STAGED"
 elif [ -d "$HOME/AgentDesk/dashboard/dist" ] && [ -f "$HOME/AgentDesk/dashboard/dist/index.html" ]; then
     echo "  ⚠ Dev dist missing, falling back to workspace source"
-    cp -r "$HOME/AgentDesk/dashboard/dist" "$ADK_REL/dashboard/dist"
+    cp -r "$HOME/AgentDesk/dashboard/dist" "$DIST_STAGED"
 else
-    echo "  ⚠ Dashboard dist not found in dev or workspace — dashboard will be unavailable"
+    echo "✗ Dashboard dist not found in dev or workspace — aborting promotion"
     echo "  Run 'cd ~/AgentDesk/dashboard && npm run build' to generate it"
+    exit 1
 fi
+# Atomic swap: old → .old, staged → dist, cleanup
+rm -rf "$ADK_REL/dashboard/dist.old"
+[ -d "$ADK_REL/dashboard/dist" ] && mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"
+mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"
+rm -rf "$ADK_REL/dashboard/dist.old"
 
 # Initialize release database if it doesn't exist (never overwrite release data)
 if [ ! -f "$ADK_REL/data/agentdesk.sqlite" ]; then
@@ -73,12 +81,17 @@ xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/d
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"
 sleep 3
 
-# Health check
+# Health check (server health + dashboard availability)
 REL_PORT="${AGENTDESK_REL_PORT:-8791}"
-if curl -s --max-time 5 "http://127.0.0.1:${REL_PORT}/api/health" | grep -q '"status":"healthy"'; then
+HEALTH_JSON=$(curl -s --max-time 5 "http://127.0.0.1:${REL_PORT}/api/health")
+if echo "$HEALTH_JSON" | grep -q '"status":"healthy"'; then
     echo "✓ Release is healthy on :${REL_PORT}"
 else
     echo "✗ Release health check failed — check logs: $ADK_REL/logs/"
+    exit 1
+fi
+if ! echo "$HEALTH_JSON" | grep -q '"dashboard":true'; then
+    echo "✗ Dashboard not available after promotion — check dist copy"
     exit 1
 fi
 
