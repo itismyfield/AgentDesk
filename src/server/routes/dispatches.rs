@@ -476,7 +476,7 @@ fn clear_all_threads(conn: &rusqlite::Connection, card_id: &str) {
 /// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
 /// The `DISPATCH:<uuid>` prefix is required for the dcserver to link the
 /// resulting Claude session back to the kanban card (via `parse_dispatch_id`).
-pub(super) async fn send_dispatch_to_discord(
+pub(crate) async fn send_dispatch_to_discord(
     db: &crate::db::Db,
     agent_id: &str,
     title: &str,

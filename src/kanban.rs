@@ -371,90 +371,26 @@ fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Op
         })
         .unwrap_or_default();
 
-    // Filter out review/review-decision/rework dispatches — these are notified by
-    // handle_completed_dispatch_followups / send_review_result_to_primary.
-    // Rework dispatches are created by review-automation.js processVerdict() and
-    // already have their own notification paths.
-    let pending_dispatches: Vec<_> = pending_dispatches
-        .into_iter()
-        .filter(|(_, _, dtype, _, _, _)| {
-            dtype != "review" && dtype != "review-decision" && dtype != "rework"
-        })
-        .collect();
-
     if pending_dispatches.is_empty() {
         return;
     }
 
-    // Collect notification data before spawning async task
-    let token = match crate::credential::read_bot_token("announce") {
-        Some(t) => t,
-        None => return,
-    };
-
-    let mut notifications: Vec<(u64, String)> = Vec::new();
-    for (dispatch_id, agent_id, dispatch_type, title, issue_url, issue_num) in &pending_dispatches {
-        // Determine channel: review → alt, implementation → primary
-        let use_alt = dispatch_type == "review" || dispatch_type == "review-decision";
-        let col = if use_alt {
-            "discord_channel_alt"
-        } else {
-            "discord_channel_id"
-        };
-
-        let channel_id: Option<String> = db.lock().ok().and_then(|conn| {
-            conn.query_row(
-                &format!("SELECT {col} FROM agents WHERE id = ?1"),
-                [agent_id],
-                |row| row.get(0),
-            )
-            .ok()
-        });
-
-        let Some(channel_id) = channel_id else {
-            continue;
-        };
-        let channel_num: Option<u64> = channel_id
-            .parse()
-            .ok()
-            .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(&channel_id));
-        let Some(ch) = channel_num else { continue };
-
-        let issue_link = if let (Some(num), false) = (issue_num, issue_url.is_empty()) {
-            format!("\n[{title} #{num}](<{issue_url}>)")
-        } else {
-            String::new()
-        };
-
-        let message = if use_alt {
-            format!(
-                "DISPATCH:{dispatch_id} - {title}\n\
-                 ⚠️ 검토 전용 — 작업 착수 금지\n\
-                 코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요.{issue_link}"
-            )
-        } else {
-            format!("DISPATCH:{dispatch_id} - {title}{issue_link}")
-        };
-
-        notifications.push((ch, message));
-    }
-
-    // Use tokio Handle::current() to spawn async notifications from sync context
+    // Delegate all dispatch types to send_dispatch_to_discord which handles:
+    // - Thread creation/reuse
+    // - dispatch_notified guard (dedup)
+    // - Proper channel routing (primary vs alt for review)
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        let token = token.clone();
-        handle.spawn(async move {
-            let client = reqwest::Client::new();
-            for (ch, message) in notifications {
-                let _ = client
-                    .post(format!(
-                        "https://discord.com/api/v10/channels/{ch}/messages"
-                    ))
-                    .header("Authorization", format!("Bot {}", token))
-                    .json(&serde_json::json!({"content": message}))
-                    .send()
-                    .await;
-            }
-        });
+        let db_clone = db.clone();
+        for (dispatch_id, agent_id, _, title, _, _) in pending_dispatches {
+            let db_c = db_clone.clone();
+            let card_id = card_id.to_string();
+            handle.spawn(async move {
+                crate::server::routes::dispatches::send_dispatch_to_discord(
+                    &db_c, &agent_id, &title, &card_id, &dispatch_id,
+                )
+                .await;
+            });
+        }
     }
 }
 
