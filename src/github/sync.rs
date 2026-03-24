@@ -76,9 +76,10 @@ pub fn sync_github_issues_for_repo(
             for (card_id, card_status) in &cards {
                 // Sync issue body → card description (only if changed)
                 if let Some(ref body) = issue.body {
+                    let trimmed = body.trim_end();
                     let _ = conn.execute(
                         "UPDATE kanban_cards SET description = ?1 WHERE id = ?2 AND (description IS NULL OR description != ?1)",
-                        rusqlite::params![body, card_id],
+                        rusqlite::params![trimmed, card_id],
                     );
                 }
 
