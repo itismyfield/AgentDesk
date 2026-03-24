@@ -435,9 +435,14 @@ export async function getCardAuditLog(cardId: string): Promise<CardAuditLogEntry
   return data.logs;
 }
 
-export async function getCardGitHubComments(cardId: string): Promise<GitHubComment[]> {
-  const data = await request<{ comments: GitHubComment[] }>(`/api/kanban-cards/${cardId}/comments`);
-  return data.comments;
+export interface CardGitHubCommentsResult {
+  comments: GitHubComment[];
+  body: string;
+}
+
+export async function getCardGitHubComments(cardId: string): Promise<CardGitHubCommentsResult> {
+  const data = await request<{ comments: GitHubComment[]; body?: string }>(`/api/kanban-cards/${cardId}/comments`);
+  return { comments: data.comments, body: data.body ?? "" };
 }
 
 // ── Pipeline ──

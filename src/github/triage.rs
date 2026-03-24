@@ -44,8 +44,8 @@ pub fn triage_new_issues(db: &Db, repo: &str, issues: &[GhIssue]) -> Result<usiz
         let priority = infer_priority(&issue.labels);
 
         conn.execute(
-            "INSERT OR IGNORE INTO kanban_cards (id, repo_id, title, status, priority, github_issue_url, github_issue_number, metadata, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'backlog', ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))",
+            "INSERT OR IGNORE INTO kanban_cards (id, repo_id, title, status, priority, github_issue_url, github_issue_number, description, metadata, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'backlog', ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
             rusqlite::params![
                 card_id,
                 repo,
@@ -53,6 +53,7 @@ pub fn triage_new_issues(db: &Db, repo: &str, issues: &[GhIssue]) -> Result<usiz
                 priority,
                 github_url,
                 issue.number,
+                issue.body,
                 if labels_str.is_empty() {
                     None
                 } else {
@@ -145,17 +146,28 @@ mod tests {
             .unwrap();
         assert_eq!(card_count, 2);
 
-        // Check first card details
-        let (title, status, issue_num): (String, String, i64) = conn
+        // Check first card details (with body)
+        let (title, status, issue_num, desc): (String, String, i64, Option<String>) = conn
             .query_row(
-                "SELECT title, status, github_issue_number FROM kanban_cards WHERE github_issue_number = 1",
+                "SELECT title, status, github_issue_number, description FROM kanban_cards WHERE github_issue_number = 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert_eq!(title, "Bug fix needed");
         assert_eq!(status, "backlog");
         assert_eq!(issue_num, 1);
+        assert_eq!(desc.as_deref(), Some("Description"));
+
+        // Check second card (no body)
+        let desc2: Option<String> = conn
+            .query_row(
+                "SELECT description FROM kanban_cards WHERE github_issue_number = 2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(desc2.is_none());
     }
 
     #[test]

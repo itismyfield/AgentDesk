@@ -1332,7 +1332,9 @@ pub async fn card_github_comments(
         None => return (StatusCode::OK, Json(json!({"comments": []}))),
     };
 
-    // Fetch comments via gh CLI in a blocking task
+    // Fetch comments AND body via gh CLI in a blocking task
+    let card_id = id.clone();
+    let db = state.db.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::github::run_gh(&[
             "issue",
@@ -1341,7 +1343,7 @@ pub async fn card_github_comments(
             "--repo",
             &repo,
             "--json",
-            "comments",
+            "comments,body",
         ])
     })
     .await;
@@ -1351,7 +1353,19 @@ pub async fn card_github_comments(
             match serde_json::from_str::<serde_json::Value>(&output) {
                 Ok(parsed) => {
                     let comments = parsed.get("comments").cloned().unwrap_or(json!([]));
-                    (StatusCode::OK, Json(json!({"comments": comments})))
+                    let body = parsed.get("body").and_then(|v| v.as_str()).unwrap_or("");
+
+                    // On-demand sync: update card description from latest issue body
+                    if !body.is_empty() {
+                        if let Ok(conn) = db.lock() {
+                            let _ = conn.execute(
+                                "UPDATE kanban_cards SET description = ?1, updated_at = datetime('now') WHERE id = ?2",
+                                rusqlite::params![body, card_id],
+                            );
+                        }
+                    }
+
+                    (StatusCode::OK, Json(json!({"comments": comments, "body": body})))
                 }
                 Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("parse: {e}")}))),
             }

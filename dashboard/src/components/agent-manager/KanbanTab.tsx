@@ -141,7 +141,7 @@ export default function KanbanTab({
   const [ghComments, setGhComments] = useState<api.GitHubComment[]>([]);
   const [timelineFilter, setTimelineFilter] = useState<"review" | "pm" | "work" | "general" | null>(null);
   const [activityRefreshTick, setActivityRefreshTick] = useState(0);
-  const ghCommentsCache = useRef<Map<string, { comments: api.GitHubComment[]; ts: number }>>(new Map());
+  const ghCommentsCache = useRef<Map<string, { comments: api.GitHubComment[]; body: string; ts: number }>>(new Map());
   const detailRequestSeq = useRef(0);
 
   const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
@@ -258,12 +258,16 @@ export default function KanbanTab({
         const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
         const cached = ghCommentsCache.current.get(selectedCard.id);
         if (cached && Date.now() - cached.ts < CACHE_TTL) {
-          if (isCurrentRequest()) setGhComments(cached.comments);
+          if (isCurrentRequest()) {
+            setGhComments(cached.comments);
+            if (cached.body) setEditor((prev) => ({ ...prev, description: cached.body }));
+          }
         } else {
-          api.getCardGitHubComments(selectedCard.id).then((comments) => {
+          api.getCardGitHubComments(selectedCard.id).then((result) => {
             if (!isCurrentRequest()) return;
-            ghCommentsCache.current.set(selectedCard.id, { comments, ts: Date.now() });
-            setGhComments(comments);
+            ghCommentsCache.current.set(selectedCard.id, { comments: result.comments, body: result.body, ts: Date.now() });
+            setGhComments(result.comments);
+            if (result.body) setEditor((prev) => ({ ...prev, description: result.body }));
           }).catch(() => {});
         }
       }
