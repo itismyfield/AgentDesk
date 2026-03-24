@@ -741,15 +741,27 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
     ad.set("kanban", kanban_obj)?;
 
-    // JS wrapper that parses JSON + fires hooks via engine callback
+    // JS wrapper that parses JSON and accumulates transitions for post-hook processing.
+    // setStatus only updates the DB — transition hooks (OnCardTransition, OnReviewEnter,
+    // OnCardTerminal) cannot fire from within a hook because the engine is not reentrant.
+    // Instead, transitions are collected in __pendingTransitions and the Rust caller
+    // processes them after the hook returns via drain_pending_transitions().
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
             var raw = agentdesk.kanban.__setStatusRaw;
             var getRaw = agentdesk.kanban.__getCardRaw;
+            agentdesk.kanban.__pendingTransitions = [];
             agentdesk.kanban.setStatus = function(cardId, newStatus) {
                 var result = JSON.parse(raw(cardId, newStatus));
                 if (result.error) throw new Error(result.error);
+                if (result.changed) {
+                    agentdesk.kanban.__pendingTransitions.push({
+                        card_id: result.card_id,
+                        from: result.from,
+                        to: result.to
+                    });
+                }
                 return result;
             };
             agentdesk.kanban.getCard = function(cardId) {

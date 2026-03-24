@@ -176,6 +176,38 @@ impl PolicyEngine {
         })
     }
 
+    /// Drain pending card transitions accumulated by `agentdesk.kanban.setStatus()`
+    /// during hook execution. Each entry is `(card_id, old_status, new_status)`.
+    /// Call this after `fire_hook` to process transitions that need follow-up hooks.
+    pub fn drain_pending_transitions(&self) -> Vec<(String, String, String)> {
+        let inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        inner.context.with(|ctx| {
+            let code = r#"
+                var arr = agentdesk.kanban.__pendingTransitions || [];
+                agentdesk.kanban.__pendingTransitions = [];
+                JSON.stringify(arr);
+            "#;
+            let result: rquickjs::Result<String> = ctx.eval(code);
+            match result {
+                Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|v| {
+                        Some((
+                            v.get("card_id")?.as_str()?.to_string(),
+                            v.get("from")?.as_str()?.to_string(),
+                            v.get("to")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        })
+    }
+
     /// List loaded policies (for API endpoint).
     pub fn list_policies(&self) -> Vec<PolicyInfo> {
         let inner = match self.inner.lock() {

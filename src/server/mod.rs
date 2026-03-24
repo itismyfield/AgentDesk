@@ -142,6 +142,21 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
                 .ok();
             }
         }
+
+        // Process card transitions accumulated during hook execution.
+        // setStatus() only updates the DB — transition hooks (OnReviewEnter, etc.)
+        // must fire here, outside the original hook context.
+        // Loop because transition hooks may themselves call setStatus (e.g., OnReviewEnter
+        // might set pending_decision), generating more pending transitions.
+        loop {
+            let transitions = engine.drain_pending_transitions();
+            if transitions.is_empty() {
+                break;
+            }
+            for (card_id, old_status, new_status) in &transitions {
+                crate::kanban::fire_transition_hooks(&db, &engine, card_id, old_status, new_status);
+            }
+        }
     }
 }
 

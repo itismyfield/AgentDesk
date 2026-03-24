@@ -608,7 +608,6 @@ var timeouts = {
       // 1) Dispatch를 completed로 마크
       agentdesk.db.execute(
         "UPDATE task_dispatches SET status = 'completed', " +
-        "completed_at = datetime('now'), " +
         "result = '{\"auto_completed\":true,\"completion_source\":\"orphan_recovery\"}', " +
         "updated_at = datetime('now') WHERE id = ? AND status = 'pending'",
         [od.dispatch_id]

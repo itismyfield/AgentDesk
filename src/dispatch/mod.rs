@@ -191,8 +191,8 @@ pub fn complete_dispatch(
         )
         .ok();
 
-    // Capture card status BEFORE hooks fire (so we can detect changes after)
-    let old_status: String = kanban_card_id
+    // Capture card status BEFORE hooks fire (used for audit/logging if needed)
+    let _old_status: String = kanban_card_id
         .as_ref()
         .and_then(|cid| {
             conn.query_row(
@@ -222,23 +222,16 @@ pub fn complete_dispatch(
     // The kanban.setStatus wrapper handles OnCardTransition, OnCardTerminal, OnReviewEnter.
     // However, if the policy used setStatus, the hooks already fired during the hook execution.
     // We still check for review/done to handle edge cases where hooks create new dispatches.
-    // After OnDispatchCompleted, policies change card status via kanban.setStatus (DB only).
-    // We need to fire transition hooks for the new status since setStatus can't call
-    // engine.fire_hook (it runs inside a hook, no engine reference).
-    if let Some(ref card_id) = kanban_card_id {
-        let new_status: Option<String> = {
-            let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-            conn.query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .ok()
-        };
-        if let Some(ref new_s) = new_status {
-            if new_s != &old_status {
-                crate::kanban::fire_transition_hooks(db, engine, card_id, &old_status, new_s);
-            }
+    // After OnDispatchCompleted, policies may have changed card status via setStatus().
+    // Drain pending transitions and fire follow-up hooks (OnReviewEnter, etc.).
+    // Loop because transition hooks may generate further transitions.
+    loop {
+        let transitions = engine.drain_pending_transitions();
+        if transitions.is_empty() {
+            break;
+        }
+        for (card_id, old_s, new_s) in &transitions {
+            crate::kanban::fire_transition_hooks(db, engine, card_id, old_s, new_s);
         }
     }
 
