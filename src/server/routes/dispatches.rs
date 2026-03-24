@@ -483,6 +483,24 @@ pub(super) async fn send_dispatch_to_discord(
     card_id: &str,
     dispatch_id: &str,
 ) {
+    // Guard: skip if already notified (prevents duplicate Discord messages)
+    {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let already_notified: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM kv_meta WHERE key = ?1",
+                [&format!("dispatch_notified:{dispatch_id}")],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if already_notified {
+            return;
+        }
+    }
+
     // Determine dispatch type to choose the right channel
     let dispatch_type: Option<String> = {
         let conn = match db.lock() {
