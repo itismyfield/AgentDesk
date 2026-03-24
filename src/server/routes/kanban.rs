@@ -1521,14 +1521,32 @@ pub struct ForceTransitionBody {
 /// POST /api/kanban-cards/:id/force-transition
 ///
 /// PMD-only endpoint. Bypasses dispatch validation.
-/// Requires `X-Channel-Id` header matching the configured `kanban_manager_channel_id`.
+/// Two-factor auth: Bearer token (no same-origin bypass) + X-Channel-Id must match
+/// the configured `kanban_manager_channel_id`.
 pub async fn force_transition(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<ForceTransitionBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Verify caller is the kanban manager (PMD)
+    // 1. Explicit Bearer token check (bypasses same-origin exemption in auth middleware)
+    let config = crate::config::load_graceful();
+    if let Some(expected_token) = config.server.auth_token.as_deref() {
+        if !expected_token.is_empty() {
+            let provided = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "));
+            if provided != Some(expected_token) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "force-transition requires explicit Bearer token"})),
+                );
+            }
+        }
+    }
+
+    // 2. Verify caller is the kanban manager (PMD) via channel identity
     let caller_channel = headers
         .get("x-channel-id")
         .and_then(|v| v.to_str().ok())

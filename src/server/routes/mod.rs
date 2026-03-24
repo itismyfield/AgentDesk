@@ -1897,4 +1897,101 @@ mod tests {
         assert_eq!(stages.len(), 1);
         assert_eq!(stages[0]["stage_name"], "test");
     }
+
+    // ── force-transition auth tests ──
+
+    fn seed_card_with_status(db: &Db, card_id: &str, status: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kanban_cards (id, title, status, priority, created_at, updated_at) \
+             VALUES (?1, 'test', ?2, 'medium', datetime('now'), datetime('now'))",
+            rusqlite::params![card_id, status],
+        )
+        .unwrap();
+    }
+
+    fn set_pmd_channel(db: &Db, channel_id: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('kanban_manager_channel_id', ?1)",
+            [channel_id],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn force_transition_rejects_without_channel_header() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card_with_status(&db, "card-ft1", "backlog");
+        set_pmd_channel(&db, "pmd-chan-123");
+
+        let app = api_router(db, engine, None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/kanban-cards/card-ft1/force-transition")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"status":"ready"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn force_transition_rejects_wrong_channel() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card_with_status(&db, "card-ft2", "backlog");
+        set_pmd_channel(&db, "pmd-chan-123");
+
+        let app = api_router(db, engine, None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/kanban-cards/card-ft2/force-transition")
+                    .header("content-type", "application/json")
+                    .header("x-channel-id", "wrong-channel")
+                    .body(Body::from(r#"{"status":"ready"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn force_transition_succeeds_with_correct_channel() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card_with_status(&db, "card-ft3", "requested");
+        set_pmd_channel(&db, "pmd-chan-123");
+
+        let app = api_router(db, engine, None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/kanban-cards/card-ft3/force-transition")
+                    .header("content-type", "application/json")
+                    .header("x-channel-id", "pmd-chan-123")
+                    .body(Body::from(r#"{"status":"done"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["forced"], true);
+    }
 }
