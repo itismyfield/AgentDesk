@@ -1052,6 +1052,7 @@ pub(super) async fn handle_text_message(
         role_binding.as_ref(),
         reply_to_user_message,
         dispatch_profile,
+        dispatch_type_str.as_deref(),
     );
 
     // Create cancel token — with second check to close the TOCTOU race window.

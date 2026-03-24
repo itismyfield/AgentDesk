@@ -37,6 +37,7 @@ pub(super) fn build_system_prompt(
     role_binding: Option<&RoleBinding>,
     queued_turn: bool,
     profile: DispatchProfile,
+    dispatch_type: Option<&str>,
 ) -> String {
     let mut system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
@@ -70,14 +71,24 @@ pub(super) fn build_system_prompt(
     );
 
     if let Some(binding) = role_binding {
-        // ReviewLite: inject minimal review rules instead of full shared prompt
+        // ReviewLite: inject minimal review rules instead of full shared prompt.
+        // review and review-decision have different contracts:
+        //   review          → read code, post review comment, submit verdict via /api/review-verdict
+        //   review-decision → read counter-review feedback, submit accept/dispute/dismiss via /api/review-decision
         if profile == DispatchProfile::ReviewLite {
-            system_prompt_owned.push_str(
-                "\n\n[Review Rules]\n\
-                 - 한국어로 소통한다\n\
-                 - 리뷰 결과는 GitHub issue 코멘트로 남긴다\n\
-                 - 리뷰 verdict 제출 후 dispatch를 완료한다",
-            );
+            system_prompt_owned.push_str(&match dispatch_type {
+                Some("review-decision") => "\n\n[Review Decision Rules]\n\
+                     - 한국어로 소통한다\n\
+                     - 카운터 리뷰 피드백을 읽고 accept/dispute/dismiss 중 결정한다\n\
+                     - POST /api/review-decision {card_id, decision, comment}로 결정을 제출한다\n\
+                     - decision: accept(피드백 수용→rework), dispute(반박→재리뷰), dismiss(무시→done)"
+                        .to_string(),
+                _ => "\n\n[Review Rules]\n\
+                     - 한국어로 소통한다\n\
+                     - 리뷰 결과는 GitHub issue 코멘트로 남긴다\n\
+                     - 리뷰 verdict 제출 후 dispatch를 완료한다"
+                        .to_string(),
+            });
         } else if let Some(shared_prompt) = load_shared_prompt() {
             // Full profile: inject complete shared agent prompt (AGENTS.md)
             system_prompt_owned.push_str("\n\n[Shared Agent Rules]\n");
@@ -177,6 +188,7 @@ mod tests {
             None,  // role_binding
             false, // queued_turn
             DispatchProfile::Full,
+            None, // dispatch_type
         )
     }
 
@@ -256,16 +268,42 @@ mod tests {
         let with_skills = build_system_prompt(
             "ctx", "/tmp", ChannelId::new(1), "tok", "",
             "\n\nAvailable skills:\n  - /commit: Commit changes",
-            None, false, DispatchProfile::Full,
+            None, false, DispatchProfile::Full, None,
         );
         let without_skills = build_system_prompt(
             "ctx", "/tmp", ChannelId::new(1), "tok", "",
             "\n\nAvailable skills:\n  - /commit: Commit changes",
-            None, false, DispatchProfile::ReviewLite,
+            None, false, DispatchProfile::ReviewLite, Some("review"),
         );
         assert!(with_skills.contains("Available skills"));
         assert!(!without_skills.contains("Available skills"));
         // ReviewLite prompt should be shorter
         assert!(without_skills.len() < with_skills.len());
+    }
+
+    #[test]
+    fn test_review_decision_gets_decision_rules() {
+        use super::super::settings::RoleBinding;
+        let binding = RoleBinding {
+            role_id: "test-agent".to_string(),
+            prompt_file: "/nonexistent".to_string(),
+            provider: None,
+            model: None,
+        };
+        let review_prompt = build_system_prompt(
+            "ctx", "/tmp", ChannelId::new(1), "tok", "", "",
+            Some(&binding), false, DispatchProfile::ReviewLite, Some("review"),
+        );
+        let decision_prompt = build_system_prompt(
+            "ctx", "/tmp", ChannelId::new(1), "tok", "", "",
+            Some(&binding), false, DispatchProfile::ReviewLite, Some("review-decision"),
+        );
+        // review should NOT contain decision API
+        assert!(!review_prompt.contains("/api/review-decision"));
+        assert!(review_prompt.contains("[Review Rules]"));
+        // review-decision should contain decision API and options
+        assert!(decision_prompt.contains("/api/review-decision"));
+        assert!(decision_prompt.contains("accept/dispute/dismiss"));
+        assert!(decision_prompt.contains("[Review Decision Rules]"));
     }
 }
