@@ -33,6 +33,12 @@ pub(super) struct InflightTurnState {
     /// Restart generation at which this turn was born.
     #[serde(default)]
     pub born_generation: u64,
+    /// Whether any tool_use was seen during this turn (persisted for restart recovery).
+    #[serde(default)]
+    pub any_tool_used: bool,
+    /// Whether text was streamed after the last tool_use (persisted for restart recovery).
+    #[serde(default)]
+    pub has_post_tool_text: bool,
 }
 
 impl InflightTurnState {
@@ -72,6 +78,8 @@ impl InflightTurnState {
             started_at: now.clone(),
             updated_at: now,
             born_generation: super::runtime_store::load_generation(),
+            any_tool_used: false,
+            has_post_tool_text: false,
         }
     }
 

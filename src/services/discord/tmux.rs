@@ -548,6 +548,10 @@ pub(super) struct WatcherToolState {
     pub thinking_buffer: String,
     /// Whether we are currently inside a thinking block
     pub in_thinking: bool,
+    /// Whether any tool_use block has been seen in this turn
+    pub any_tool_used: bool,
+    /// Whether a text block was streamed after the last tool_use
+    pub has_post_tool_text: bool,
 }
 
 impl WatcherToolState {
@@ -556,6 +560,8 @@ impl WatcherToolState {
             current_tool_line: None,
             thinking_buffer: String::new(),
             in_thinking: false,
+            any_tool_used: false,
+            has_post_tool_text: false,
         }
     }
 }
@@ -597,9 +603,14 @@ pub(super) fn process_watcher_lines(
                                             block.get("text").and_then(|t| t.as_str())
                                         {
                                             full_response.push_str(text);
+                                            if tool_state.any_tool_used {
+                                                tool_state.has_post_tool_text = true;
+                                            }
                                             tool_state.current_tool_line = None;
                                         }
                                     } else if block_type == Some("tool_use") {
+                                        tool_state.any_tool_used = true;
+                                        tool_state.has_post_tool_text = false;
                                         let name = block
                                             .get("name")
                                             .and_then(|n| n.as_str())
@@ -631,6 +642,8 @@ pub(super) fn process_watcher_lines(
                             tool_state.thinking_buffer.clear();
                             tool_state.current_tool_line = Some("💭 Thinking...".to_string());
                         } else if cb_type == Some("tool_use") {
+                            tool_state.any_tool_used = true;
+                            tool_state.has_post_tool_text = false;
                             let name = cb.get("name").and_then(|n| n.as_str()).unwrap_or("Tool");
                             tool_state.current_tool_line = Some(format!("⚙ {}", name));
                         }
@@ -647,6 +660,9 @@ pub(super) fn process_watcher_lines(
                             }
                         } else if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                             full_response.push_str(text);
+                            if tool_state.any_tool_used {
+                                tool_state.has_post_tool_text = true;
+                            }
                             tool_state.current_tool_line = None;
                         }
                     }
@@ -698,9 +714,17 @@ pub(super) fn process_watcher_lines(
                         }
                     }
 
-                    // Extract text from result if full_response is still empty
-                    if full_response.is_empty() && !is_prompt_too_long && !is_auth_error {
-                        full_response.push_str(result_str);
+                    // Use result text when streaming didn't capture the final response:
+                    // 1. full_response is empty — no text was streamed at all
+                    // 2. tools were used but no text was streamed after the last tool
+                    //    (accumulated text is stale pre-tool narration)
+                    if !is_prompt_too_long && !is_auth_error && !result_str.is_empty() {
+                        if full_response.is_empty()
+                            || (tool_state.any_tool_used && !tool_state.has_post_tool_text)
+                        {
+                            full_response.clear();
+                            full_response.push_str(result_str);
+                        }
                     }
                     state.final_result = Some(String::new());
                     found_result = true;

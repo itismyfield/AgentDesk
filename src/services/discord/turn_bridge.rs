@@ -372,8 +372,8 @@ pub(super) fn spawn_turn_bridge(
         let mut accumulated_output_tokens: u64 = 0;
         let mut spin_idx: usize = 0;
         let mut restart_followup_pending = false;
-        let mut any_tool_used = false;
-        let mut has_post_tool_text = false;
+        let mut any_tool_used = bridge.inflight_state.any_tool_used;
+        let mut has_post_tool_text = bridge.inflight_state.has_post_tool_text;
         let mut tmux_handed_off = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
         let current_msg_id = bridge.current_msg_id;
@@ -446,6 +446,7 @@ pub(super) fn spawn_turn_bridge(
                             full_response.push_str(&content);
                             if any_tool_used {
                                 has_post_tool_text = true;
+                                inflight_state.has_post_tool_text = true;
                             }
                             current_tool_line = None;
                             last_tool_name = None;
@@ -466,6 +467,8 @@ pub(super) fn spawn_turn_bridge(
                         StreamMessage::ToolUse { name, input } => {
                             any_tool_used = true;
                             has_post_tool_text = false;
+                            inflight_state.any_tool_used = true;
+                            inflight_state.has_post_tool_text = false;
                             let summary = format_tool_input(&name, &input);
                             let display_summary = if summary.trim().is_empty() {
                                 "…".to_string()
