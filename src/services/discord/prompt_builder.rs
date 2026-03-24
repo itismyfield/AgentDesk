@@ -70,8 +70,16 @@ pub(super) fn build_system_prompt(
     );
 
     if let Some(binding) = role_binding {
-        // Inject shared agent prompt (AGENTS.md) before role-specific identity
-        if let Some(shared_prompt) = load_shared_prompt() {
+        // ReviewLite: inject minimal review rules instead of full shared prompt
+        if profile == DispatchProfile::ReviewLite {
+            system_prompt_owned.push_str(
+                "\n\n[Review Rules]\n\
+                 - 한국어로 소통한다\n\
+                 - 리뷰 결과는 GitHub issue 코멘트로 남긴다\n\
+                 - 리뷰 verdict 제출 후 dispatch를 완료한다",
+            );
+        } else if let Some(shared_prompt) = load_shared_prompt() {
+            // Full profile: inject complete shared agent prompt (AGENTS.md)
             system_prompt_owned.push_str("\n\n[Shared Agent Rules]\n");
             system_prompt_owned.push_str(&shared_prompt);
             eprintln!(
