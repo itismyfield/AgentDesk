@@ -600,7 +600,11 @@ pub fn handle_restart_dcserver(
     const DEFERRED_TIMEOUT: Duration = Duration::from_secs(120);
     if let Some(root) = agentdesk_runtime_root() {
         let marker = root.join("restart_pending");
-        let _ = fs::write(&marker, VERSION);
+        if let Err(e) = fs::write(&marker, VERSION) {
+            eprintln!("   ⚠ Failed to write restart marker {}: {e} — falling back to force-kill", marker.display());
+            kill_existing_dcserver_processes();
+            return;
+        }
         println!(
             "   ⏳ Deferred restart requested — waiting for active turns to complete (max {}s)",
             DEFERRED_TIMEOUT.as_secs()

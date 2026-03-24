@@ -266,10 +266,10 @@ fn generate_bot_settings(
 
     // Read existing file and merge, preserving all other keys
     let mut root: serde_json::Value = if existing_path.exists() {
-        fs::read_to_string(existing_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| serde_json::json!({}))
+        let content = fs::read_to_string(existing_path)
+            .map_err(|e| format!("Failed to read {}: {e}", existing_path.display()))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse {}: {e}", existing_path.display()))?
     } else {
         serde_json::json!({})
     };
@@ -575,7 +575,10 @@ pub fn handle_init(reconfigure: bool) {
         }
 
         // Platform-specific service installation (auto-detected)
-        install_service(&home, &agentdesk_bin, reconfigure);
+        if let Err(e) = install_service(&home, &agentdesk_bin, reconfigure) {
+            eprintln!("서비스 등록 실패: {e}");
+            return;
+        }
 
         println!("\n═══════════════════════════════════════");
         println!("  초기 설정 완료!");
@@ -594,31 +597,22 @@ pub fn handle_init(reconfigure: bool) {
 }
 
 #[cfg(target_os = "macos")]
-fn install_service(home: &Path, agentdesk_bin: &Path, reconfigure: bool) {
+fn install_service(home: &Path, agentdesk_bin: &Path, reconfigure: bool) -> Result<(), String> {
     let plist_content = generate_launchd_plist(home, agentdesk_bin);
     let launch_agents = home.join("Library").join("LaunchAgents");
-    if let Err(e) = fs::create_dir_all(&launch_agents) {
-        eprintln!("Failed to create LaunchAgents directory: {}", e);
-        return;
-    }
+    fs::create_dir_all(&launch_agents)
+        .map_err(|e| format!("Failed to create LaunchAgents directory: {e}"))?;
     let plist_filename = format!("{}.plist", dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL);
     let plist_path = launch_agents.join(&plist_filename);
-    if let Err(e) = write_with_backup(&plist_path, &plist_content, reconfigure) {
-        eprintln!("Failed to write plist {}: {}", plist_path.display(), e);
-        return;
-    }
+    write_with_backup(&plist_path, &plist_content, reconfigure)
+        .map_err(|e| format!("Failed to write plist {}: {e}", plist_path.display()))?;
     println!("  [OK] {}", plist_path.display());
 
     let load_answer = prompt_line("\ndcserver를 지금 시작할까요? (Y/n): ");
     if load_answer.is_empty() || load_answer.to_lowercase().starts_with('y') {
         let label = dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL;
-        let uid = match get_uid() {
-            Ok(uid) => uid,
-            Err(e) => {
-                eprintln!("  [WARN] UID를 가져올 수 없습니다: {} — 수동으로 launchctl을 실행하세요", e);
-                return;
-            }
-        };
+        let uid = get_uid()
+            .map_err(|e| format!("UID를 가져올 수 없습니다: {e} — 수동으로 launchctl을 실행하세요"))?;
         if dcserver::is_launchd_job_loaded(label) {
             let _ = std::process::Command::new("launchctl")
                 .args([
@@ -643,18 +637,17 @@ fn install_service(home: &Path, agentdesk_bin: &Path, reconfigure: bool) {
             ),
         }
     }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
+fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) -> Result<(), String> {
     let service_name = "agentdesk-dcserver";
     let root_dir =
         dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
     let logs_dir = root_dir.join("logs");
-    if let Err(e) = fs::create_dir_all(&logs_dir) {
-        eprintln!("Failed to create logs directory: {}", e);
-        return;
-    }
+    fs::create_dir_all(&logs_dir)
+        .map_err(|e| format!("Failed to create logs directory: {e}"))?;
     let unit_content = format!(
         "[Unit]\n\
          Description=AgentDesk Discord Control Server\n\
@@ -675,15 +668,11 @@ fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
     );
 
     let user_systemd = home.join(".config").join("systemd").join("user");
-    if let Err(e) = fs::create_dir_all(&user_systemd) {
-        eprintln!("Failed to create systemd user directory: {}", e);
-        return;
-    }
+    fs::create_dir_all(&user_systemd)
+        .map_err(|e| format!("Failed to create systemd user directory: {e}"))?;
     let unit_path = user_systemd.join(format!("{service_name}.service"));
-    if let Err(e) = fs::write(&unit_path, &unit_content) {
-        eprintln!("Failed to write systemd unit {}: {}", unit_path.display(), e);
-        return;
-    }
+    fs::write(&unit_path, &unit_content)
+        .map_err(|e| format!("Failed to write systemd unit {}: {e}", unit_path.display()))?;
     println!("  [OK] {}", unit_path.display());
 
     let load_answer = prompt_line("\ndcserver를 지금 시작할까요? (Y/n): ");
@@ -701,23 +690,21 @@ fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
             ),
         }
     }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
+fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) -> Result<(), String> {
     let service_name = "AgentDeskDcserver";
     let root_dir = dcserver::agentdesk_runtime_root().unwrap_or_else(|| {
-        let home = dirs::home_dir().unwrap_or_else(|| {
-            eprintln!("Error: cannot determine home directory");
-            std::process::exit(1);
-        });
-        home.join(".adk").join("release")
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".adk")
+            .join("release")
     });
     let logs_dir = root_dir.join("logs");
-    if let Err(e) = fs::create_dir_all(&logs_dir) {
-        eprintln!("Failed to create logs directory: {}", e);
-        return;
-    }
+    fs::create_dir_all(&logs_dir)
+        .map_err(|e| format!("Failed to create logs directory: {e}"))?;
 
     println!("  Windows 서비스 등록:");
     println!("  NSSM 사용 시:");
@@ -780,12 +767,14 @@ fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
             _ => println!("  [WARN] NSSM 등록 실패 — nssm이 설치되어 있는지 확인하세요"),
         }
     }
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
+fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) -> Result<(), String> {
     println!("  이 플랫폼에서는 자동 서비스 등록이 지원되지 않습니다.");
     println!("  수동으로 실행: {} --dcserver", agentdesk_bin.display());
+    Ok(())
 }
 
 fn write_with_backup(path: &Path, content: &str, reconfigure: bool) -> Result<(), io::Error> {
