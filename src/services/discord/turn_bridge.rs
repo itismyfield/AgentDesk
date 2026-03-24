@@ -5,6 +5,31 @@ use super::*;
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 use crate::utils::format::{safe_suffix, tail_with_ellipsis};
 
+/// Decide the final response text when a Done event arrives.
+///
+/// Returns the text that should be used as `full_response`.
+/// - If streaming accumulated post-tool text, keep the streamed `full_response`.
+/// - If streaming only accumulated pre-tool narration (tools used, no post-tool
+///   text), replace with the authoritative `result` from the Done event.
+/// - If streaming produced nothing, use `result` directly.
+fn resolve_done_response(
+    full_response: &str,
+    result: &str,
+    any_tool_used: bool,
+    has_post_tool_text: bool,
+) -> Option<String> {
+    if result.is_empty() {
+        return None;
+    }
+    if full_response.trim().is_empty() {
+        return Some(result.to_string());
+    }
+    if any_tool_used && !has_post_tool_text {
+        return Some(result.to_string());
+    }
+    None
+}
+
 pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, reason: &str) {
     token.cancelled.store(true, Ordering::Relaxed);
 
@@ -558,21 +583,14 @@ pub(super) fn spawn_turn_bridge(
                             result,
                             session_id: sid,
                         } => {
-                            if !result.is_empty() {
-                                if full_response.trim().is_empty() {
-                                    // No streaming text — use result directly.
-                                    full_response = result;
-                                    inflight_state.full_response = full_response.clone();
-                                } else if any_tool_used && !has_post_tool_text {
-                                    // Tools were used but no text was streamed after
-                                    // the last tool call.  The accumulated text is
-                                    // pre-tool intermediate narration (e.g. "이슈를
-                                    // 생성합니다").  Replace with the authoritative
-                                    // result to prevent stale progress text from
-                                    // lingering as the final response.
-                                    full_response = result;
-                                    inflight_state.full_response = full_response.clone();
-                                }
+                            if let Some(resolved) = resolve_done_response(
+                                &full_response,
+                                &result,
+                                any_tool_used,
+                                has_post_tool_text,
+                            ) {
+                                full_response = resolved;
+                                inflight_state.full_response = full_response.clone();
                             }
                             if let Some(s) = sid {
                                 new_session_id = Some(s.clone());
@@ -1345,5 +1363,54 @@ mod tests {
         assert_eq!(payload["provider"], "claude");
         let feedback = payload["feedback"].as_str().unwrap();
         assert!(feedback.len() <= 4003); // 4000 + "..." ellipsis
+    }
+
+    // ========== resolve_done_response tests ==========
+
+    use super::resolve_done_response;
+
+    #[test]
+    fn done_replaces_stale_pre_tool_text_with_result() {
+        // Text → ToolUse → Done(result): intermediate text should be replaced
+        let res = resolve_done_response("이슈를 생성합니다.\n\n", "이슈 #90 생성 완료", true, false);
+        assert_eq!(res, Some("이슈 #90 생성 완료".to_string()));
+    }
+
+    #[test]
+    fn done_keeps_full_response_when_post_tool_text_exists() {
+        // Text → ToolUse → Text → Done(result): streaming captured everything
+        let res = resolve_done_response(
+            "진행 중...\n\n이슈 #90 생성 완료",
+            "이슈 #90 생성 완료",
+            true,
+            true,
+        );
+        assert_eq!(res, None); // keep full_response as-is
+    }
+
+    #[test]
+    fn done_uses_result_when_full_response_empty() {
+        let res = resolve_done_response("", "최종 응답", false, false);
+        assert_eq!(res, Some("최종 응답".to_string()));
+    }
+
+    #[test]
+    fn done_uses_result_when_full_response_whitespace_only() {
+        let res = resolve_done_response("  \n\n  ", "최종 응답", true, false);
+        assert_eq!(res, Some("최종 응답".to_string()));
+    }
+
+    #[test]
+    fn done_keeps_full_response_when_no_tools_used() {
+        // Pure text turn without tools — streaming text IS the final response
+        let res = resolve_done_response("여기 분석 결과입니다...", "여기 분석 결과입니다...", false, false);
+        assert_eq!(res, None);
+    }
+
+    #[test]
+    fn done_noop_when_result_empty() {
+        // Synthetic Done with empty result — nothing to replace with
+        let res = resolve_done_response("중간 텍스트\n\n", "", true, false);
+        assert_eq!(res, None);
     }
 }
