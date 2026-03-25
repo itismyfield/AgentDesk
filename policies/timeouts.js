@@ -65,7 +65,7 @@ var timeouts = {
       "COALESCE(td.retry_count, 0) as retry_count " +
       "FROM kanban_cards kc " +
       "LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id " +
-      "WHERE kc.status = 'requested' AND COALESCE(kc.requested_at, kc.updated_at) < datetime('now', '-45 minutes')"
+      "WHERE kc.status = 'requested' AND kc.requested_at IS NOT NULL AND kc.requested_at < datetime('now', '-45 minutes')"
     );
     for (var i = 0; i < staleRequested.length; i++) {
       var rc = staleRequested[i];
@@ -114,7 +114,7 @@ var timeouts = {
 
     // ─── [B] In-Progress 스테일 (2시간) ────────────────────
     var staleInProgress = agentdesk.db.query(
-      "SELECT id FROM kanban_cards WHERE status = 'in_progress' AND COALESCE(started_at, updated_at) < datetime('now', '-2 hours')"
+      "SELECT id FROM kanban_cards WHERE status = 'in_progress' AND started_at IS NOT NULL AND started_at < datetime('now', '-2 hours')"
     );
     for (var j = 0; j < staleInProgress.length; j++) {
       agentdesk.kanban.setStatus(staleInProgress[j].id, "blocked");
@@ -147,7 +147,7 @@ var timeouts = {
       "JOIN task_dispatches td ON td.kanban_card_id = kc.id " +
       "WHERE kc.status = 'review' AND kc.review_status = 'reviewing' " +
       "AND td.dispatch_type = 'review' AND td.status IN ('completed', 'failed') " +
-      "AND COALESCE(kc.review_entered_at, kc.updated_at) < datetime('now', '-30 minutes')"
+      "AND kc.review_entered_at IS NOT NULL AND kc.review_entered_at < datetime('now', '-30 minutes')"
     );
     for (var k = 0; k < staleReviews.length; k++) {
       agentdesk.kanban.setStatus(staleReviews[k].card_id, "pending_decision");
@@ -159,7 +159,7 @@ var timeouts = {
     var stuckDod = agentdesk.db.query(
       "SELECT id FROM kanban_cards " +
       "WHERE status = 'review' AND review_status = 'awaiting_dod' " +
-      "AND COALESCE(awaiting_dod_at, updated_at) < datetime('now', '-15 minutes')"
+      "AND awaiting_dod_at IS NOT NULL AND awaiting_dod_at < datetime('now', '-15 minutes')"
     );
     for (var d = 0; d < stuckDod.length; d++) {
       agentdesk.kanban.setStatus(stuckDod[d].id, "pending_decision");
@@ -173,7 +173,7 @@ var timeouts = {
     var staleSuggestions = agentdesk.db.query(
       "SELECT id, assigned_agent_id, title FROM kanban_cards " +
       "WHERE review_status = 'suggestion_pending' " +
-      "AND COALESCE(suggestion_pending_at, updated_at) < datetime('now', '-15 minutes')"
+      "AND suggestion_pending_at IS NOT NULL AND suggestion_pending_at < datetime('now', '-15 minutes')"
     );
     for (var s = 0; s < staleSuggestions.length; s++) {
       var sc = staleSuggestions[s];
