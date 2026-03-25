@@ -373,6 +373,32 @@ pub async fn submit_review_decision(
         );
     }
 
+    // Validate that a pending review-decision dispatch exists for this card.
+    // This prevents duplicate accept/dispute/dismiss on the same dispatch.
+    // The dispatch is completed after the decision-specific logic runs, not before,
+    // because transition_status requires an active (pending/dispatched) dispatch.
+    let pending_rd_id: Option<String> = conn
+        .query_row(
+            "SELECT td.id FROM task_dispatches td \
+             JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id \
+             WHERE kc.id = ?1 AND td.dispatch_type = 'review-decision' \
+             AND td.status IN ('pending', 'dispatched')",
+            [&body.card_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if pending_rd_id.is_none() {
+        // No pending review-decision dispatch → stale or duplicate call
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "no pending review-decision dispatch for this card",
+                "card_id": body.card_id,
+            })),
+        );
+    }
+
     match body.decision.as_str() {
         "accept" => {
             // Agent accepts review feedback → dispatch-first rework creation
@@ -409,7 +435,17 @@ pub async fn submit_review_decision(
 
             match rework_result {
                 Ok(ref d) => {
-                    // Dispatch succeeded → safe to transition card
+                    // Dispatch succeeded → complete the consumed review-decision, then transition
+                    if let (Some(rd_id), Ok(conn)) = (&pending_rd_id, state.db.lock()) {
+                        conn.execute(
+                            "UPDATE task_dispatches SET status = 'completed', \
+                             result = ?1, updated_at = datetime('now') WHERE id = ?2",
+                            rusqlite::params![
+                                json!({"decision": "accept", "completion_source": "review_decision_api"}).to_string(),
+                                rd_id,
+                            ],
+                        ).ok();
+                    }
                     let _ = crate::kanban::transition_status(
                         &state.db,
                         &state.engine,
@@ -469,7 +505,17 @@ pub async fn submit_review_decision(
             }
         }
         "dispute" => {
-            // Agent disputes → increment review_round, create new review dispatch to counter-model
+            // Agent disputes → complete the review-decision dispatch, then create new review
+            if let Some(ref rd_id) = pending_rd_id {
+                conn.execute(
+                    "UPDATE task_dispatches SET status = 'completed', \
+                     result = ?1, updated_at = datetime('now') WHERE id = ?2",
+                    rusqlite::params![
+                        json!({"decision": "dispute", "completion_source": "review_decision_api"}).to_string(),
+                        rd_id,
+                    ],
+                ).ok();
+            }
             conn.execute(
                 "UPDATE kanban_cards SET review_status = 'reviewing', updated_at = datetime('now') WHERE id = ?1",
                 [&body.card_id],
@@ -1325,8 +1371,8 @@ mod tests {
         )
         .await;
 
-        // Should fail — done card cannot create rework dispatch
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        // Should fail — no pending review-decision dispatch (already completed by dismiss)
+        assert_eq!(status, StatusCode::CONFLICT);
 
         let conn = db.lock().unwrap();
         let card_status: String = conn
@@ -1337,5 +1383,111 @@ mod tests {
             )
             .unwrap();
         assert_eq!(card_status, "done", "dismissed card must stay done on late accept");
+    }
+
+    #[tokio::test]
+    async fn duplicate_accept_returns_conflict() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+                 VALUES ('card-dup', 'Dup Test', 'review', 'agent-1', 'dispatch-rd', 'suggestion_pending', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+                 VALUES ('dispatch-rd', 'card-dup', 'agent-1', 'review-decision', 'pending', '[Review Decision]', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+        }
+
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        // First accept should succeed
+        let (status1, _) = submit_review_decision(
+            State(state.clone()),
+            Json(ReviewDecisionBody {
+                card_id: "card-dup".to_string(),
+                decision: "accept".to_string(),
+                comment: None,
+            }),
+        )
+        .await;
+        assert_eq!(status1, StatusCode::OK);
+
+        // Second accept should fail — dispatch already consumed
+        let (status2, _) = submit_review_decision(
+            State(state),
+            Json(ReviewDecisionBody {
+                card_id: "card-dup".to_string(),
+                decision: "accept".to_string(),
+                comment: None,
+            }),
+        )
+        .await;
+        assert_eq!(status2, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn accept_then_dispute_returns_conflict() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+                 VALUES ('card-ad', 'AD Test', 'review', 'agent-1', 'dispatch-rd2', 'suggestion_pending', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+                 VALUES ('dispatch-rd2', 'card-ad', 'agent-1', 'review-decision', 'pending', '[Review Decision]', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+        }
+
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        // Accept consumes the dispatch
+        let (status1, _) = submit_review_decision(
+            State(state.clone()),
+            Json(ReviewDecisionBody {
+                card_id: "card-ad".to_string(),
+                decision: "accept".to_string(),
+                comment: None,
+            }),
+        )
+        .await;
+        assert_eq!(status1, StatusCode::OK);
+
+        // Subsequent dispute should be rejected
+        let (status2, _) = submit_review_decision(
+            State(state),
+            Json(ReviewDecisionBody {
+                card_id: "card-ad".to_string(),
+                decision: "dispute".to_string(),
+                comment: None,
+            }),
+        )
+        .await;
+        assert_eq!(status2, StatusCode::CONFLICT);
     }
 }
