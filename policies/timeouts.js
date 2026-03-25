@@ -438,6 +438,30 @@ var timeouts = {
       agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [freshKey]);
     }
 
+    // Fix stale working sessions: if status=working but no inflight file exists,
+    // the turn has ended but DB wasn't updated. Fix to idle.
+    var staleWorkingSessions = agentdesk.db.query(
+      "SELECT session_key FROM sessions WHERE status = 'working' " +
+      "AND last_heartbeat < datetime('now', '-3 minutes')"
+    );
+    for (var sw = 0; sw < staleWorkingSessions.length; sw++) {
+      var swKey = staleWorkingSessions[sw].session_key;
+      var tmuxName = (swKey || "").split(":").pop();
+      // Check if tmux session is still alive and has a running process
+      var tmuxAlive = false;
+      try {
+        var checkOut = agentdesk.exec("tmux", JSON.stringify(["list-panes", "-t", tmuxName, "-F", "#{pane_current_command}"]));
+        tmuxAlive = checkOut && checkOut.indexOf("claude") !== -1;
+      } catch(e) { tmuxAlive = false; }
+      if (!tmuxAlive) {
+        agentdesk.db.execute(
+          "UPDATE sessions SET status = 'idle' WHERE session_key = ? AND status = 'working'",
+          [swKey]
+        );
+        agentdesk.log.info("[deadlock] Fixed stale working session → idle: " + swKey);
+      }
+    }
+
     // 데드락 의심 세션: sessions.last_heartbeat 기반 판별
     var staleSessions = agentdesk.db.query(
       "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat " +
