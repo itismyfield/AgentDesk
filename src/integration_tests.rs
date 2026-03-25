@@ -369,8 +369,8 @@ mod tests {
             .unwrap();
         }
 
-        // Fire onTick
-        let _ = engine.try_fire_hook(Hook::OnTick, serde_json::json!({}));
+        // Fire onTick1min — [A] requested timeout lives in 1min tier (#127)
+        let _ = engine.try_fire_hook(Hook::OnTick1min, serde_json::json!({}));
 
         // Drain transitions
         loop {

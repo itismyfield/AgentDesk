@@ -46,11 +46,19 @@ function sendDeadlockAlert(message) {
   agentdesk.message.queue("channel:" + ch, message, "announce", "system");
 }
 
+// Shared constant used by sections [A] and [J]
+var MAX_DISPATCH_RETRIES = 10;
+
 var timeouts = {
   name: "timeouts",
   priority: 100,
 
-  onTick: function() {
+  // Legacy onTick: no-op, replaced by tiered tick handlers (#127)
+  onTick: function() {},
+
+  // ── Section methods (extracted from onTick for tiered execution) ──
+
+  _section_R: function() {
     // ─── [R] Reconciliation: DB fallback dispatches that need hook chain ──
     // These dispatches were completed/failed via direct DB UPDATE (API retry exhausted).
     // We re-emit the OnDispatchCompleted payload so the full hook chain runs
@@ -181,10 +189,11 @@ var timeouts = {
       agentdesk.kanban.setStatus(card.id, "review");
       agentdesk.log.info("[reconcile] " + card.id + " implementation done → review (via DB fallback)");
     }
+  },
 
+  _section_A: function() {
     // ─── [A] Requested 타임아웃 (45분) ─────────────────────
     // retry_count < 10이면 pending_decision 대신 failed만 마크 → [J]가 30초 후 재시도
-    var MAX_DISPATCH_RETRIES = 10;
     var staleRequested = agentdesk.db.query(
       "SELECT kc.id, kc.assigned_agent_id, kc.latest_dispatch_id, " +
       "COALESCE(td.retry_count, 0) as retry_count " +
@@ -238,7 +247,9 @@ var timeouts = {
         }
       }
     }
+  },
 
+  _section_B: function() {
     // ─── [B] In-Progress 스테일 (2시간) ────────────────────
     var staleInProgress = agentdesk.db.query(
       "SELECT id FROM kanban_cards WHERE status = 'in_progress' AND started_at IS NOT NULL AND started_at < datetime('now', '-2 hours')"
@@ -268,7 +279,9 @@ var timeouts = {
         );
       }
     }
+  },
 
+  _section_C: function() {
     // ─── [C] 스테일 리뷰 (dispatch 완료인데 verdict 없음) ──
     var staleReviews = agentdesk.db.query(
       "SELECT kc.id as card_id " +
@@ -289,7 +302,9 @@ var timeouts = {
       );
       agentdesk.log.warn("[timeout] Stale review → pending_decision: card " + staleReviews[k].card_id);
     }
+  },
 
+  _section_D: function() {
     // ─── [D] DoD 대기 타임아웃 (15분) ──────────────────────
     var stuckDod = agentdesk.db.query(
       "SELECT id FROM kanban_cards " +
@@ -307,7 +322,9 @@ var timeouts = {
       );
       agentdesk.log.warn("[timeout] DoD await timeout → pending_decision: card " + stuckDod[d].id);
     }
+  },
 
+  _section_E: function() {
     // ─── [E] 자동-수용 결정 타임아웃 (suggestion_pending 15분) ──
     // Auto-accept: same effect as manual review-decision accept
     // (status → in_progress, review_status → rework_pending, create rework dispatch)
@@ -353,12 +370,16 @@ var timeouts = {
         agentdesk.log.warn("[timeout] Auto-accepted card " + sc.id + " but no agent assigned — no rework dispatch");
       }
     }
+  },
 
+  _section_F: function() {
     // ─── [F] 디스패치 큐 타임아웃 (100분) ──────────────────
     agentdesk.db.execute(
       "DELETE FROM dispatch_queue WHERE queued_at < datetime('now', '-100 minutes')"
     );
+  },
 
+  _section_G: function() {
     // ─── [G] 스테일 디스패치 정리 (24시간) ──────────────────
     var staleDispatches = agentdesk.db.query(
       "SELECT id, kanban_card_id FROM task_dispatches WHERE status IN ('pending','dispatched') AND created_at < datetime('now', '-24 hours')"
@@ -380,7 +401,9 @@ var timeouts = {
       }
       agentdesk.log.warn("[timeout] Dispatch " + staleDispatches[sd].id + " stale 24h → failed");
     }
+  },
 
+  _section_H: function() {
     // ─── [H] Stale dispatched 큐 엔트리 진행 ───────────────
     var staleQueueEntries = agentdesk.db.query(
       "SELECT dq.id FROM dispatch_queue dq " +
@@ -393,7 +416,9 @@ var timeouts = {
         [staleQueueEntries[se].id]
       );
     }
+  },
 
+  _section_I0: function() {
     // ─── [I-0] 미전송 디스패치 알림 복구 ──────────────────────
     // pending dispatch가 2분 이상 됐는데 알림이 안 갔을 수 있음 → 재전송
     var unnotifiedDispatches = agentdesk.db.query(
@@ -435,7 +460,9 @@ var timeouts = {
       );
       agentdesk.log.info("[notify-recovery] Dispatch " + ud.id + " queued for delivery");
     }
+  },
 
+  _section_J: function() {
     // ─── [J] Failed 디스패치 자동 재시도 (30초 쿨다운, 최대 10회) ──
     // failed 상태의 디스패치 중 retry_count < 10이고 30초+ 경과한 것을 재시도.
     // 실제 cadence는 onTick 60초 간격이므로 ~60-90초.
@@ -505,7 +532,9 @@ var timeouts = {
         );
       }
     }
+  },
 
+  _section_I: function() {
     // ─── [I] 턴 데드락 감지 + 자동 복구 (15분 주기) ─────────
     // 판별: sessions.last_heartbeat 기반 (연속 스톨만 카운트)
     // 연장: 15분 단위로 최대 MAX_EXTENSIONS회 (연속 스톨만 카운트)
@@ -727,7 +756,9 @@ var timeouts = {
         agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [historyKeys[hk].key]);
       }
     }
+  },
 
+  _section_K: function() {
     // ─── [K] 고아 디스패치 복구 (5분) ────────────────────────
     // Card가 in_progress이고 latest dispatch가 pending인데
     // 해당 dispatch_id를 가진 working 세션이 없는 경우 = 고아 디스패치.
@@ -771,7 +802,9 @@ var timeouts = {
         "🔄 [고아 디스패치 복구] " + orphanAgent + " — " + orphanTitle +
         "\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → review 전이");
     }
+  },
 
+  _section_L: function() {
     // ─── [L] 장시간 턴 감지 — inflight started_at 기반 ─────────
     // heartbeat와 독립. 프로세스 살아있어도 턴이 15분 이상이면 알림.
     var LONG_TURN_MINUTES = 15;
@@ -931,15 +964,46 @@ var timeouts = {
   }
 };
 
-// Wire onContextCheck into onTick
-var _origOnTick = timeouts.onTick;
-timeouts.onTick = function() {
-  _origOnTick.call(this);
-  if (timeouts.onContextCheck) {
-    try { timeouts.onContextCheck(); } catch(e) {
-      agentdesk.log.warn("[context] onContextCheck error: " + e);
-    }
-  }
+// ── Tiered tick handlers (#127) ──────────────────────────────────
+// Sections are grouped by criticality and cadence.
+// onTick (legacy, 5min) is kept as no-op for backward compat.
+
+// 30s tier: [J] retry, [I-0] unsent notification recovery
+timeouts.onTick30s = function(ev) {
+  var start = Date.now();
+  try { timeouts._section_I0(); } catch(e) { agentdesk.log.warn("[tick30s] I-0 error: " + e); }
+  try { timeouts._section_J(); } catch(e) { agentdesk.log.warn("[tick30s] J error: " + e); }
+  agentdesk.log.debug("[tick30s] took " + (Date.now() - start) + "ms");
 };
+
+// 1min tier: [A] [C] [D] [E] [K] [L]
+timeouts.onTick1min = function(ev) {
+  var start = Date.now();
+  try { timeouts._section_A(); } catch(e) { agentdesk.log.warn("[tick1min] A error: " + e); }
+  try { timeouts._section_C(); } catch(e) { agentdesk.log.warn("[tick1min] C error: " + e); }
+  try { timeouts._section_D(); } catch(e) { agentdesk.log.warn("[tick1min] D error: " + e); }
+  try { timeouts._section_E(); } catch(e) { agentdesk.log.warn("[tick1min] E error: " + e); }
+  try { timeouts._section_K(); } catch(e) { agentdesk.log.warn("[tick1min] K error: " + e); }
+  try { timeouts._section_L(); } catch(e) { agentdesk.log.warn("[tick1min] L error: " + e); }
+  agentdesk.log.debug("[tick1min] took " + (Date.now() - start) + "ms");
+};
+
+// 5min tier: [R] [B] [F] [G] [H] [I] [ctx]
+timeouts.onTick5min = function(ev) {
+  var start = Date.now();
+  try { timeouts._section_R(); } catch(e) { agentdesk.log.warn("[tick5min] R error: " + e); }
+  try { timeouts._section_B(); } catch(e) { agentdesk.log.warn("[tick5min] B error: " + e); }
+  try { timeouts._section_F(); } catch(e) { agentdesk.log.warn("[tick5min] F error: " + e); }
+  try { timeouts._section_G(); } catch(e) { agentdesk.log.warn("[tick5min] G error: " + e); }
+  try { timeouts._section_H(); } catch(e) { agentdesk.log.warn("[tick5min] H error: " + e); }
+  try { timeouts._section_I(); } catch(e) { agentdesk.log.warn("[tick5min] I error: " + e); }
+  if (timeouts.onContextCheck) {
+    try { timeouts.onContextCheck(); } catch(e) { agentdesk.log.warn("[tick5min] ctx error: " + e); }
+  }
+  agentdesk.log.debug("[tick5min] took " + (Date.now() - start) + "ms");
+};
+
+// Legacy onTick: no-op (tiered hooks handle everything)
+timeouts.onTick = function() {};
 
 agentdesk.registerPolicy(timeouts);

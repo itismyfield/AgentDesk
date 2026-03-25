@@ -129,28 +129,44 @@ pub async fn run(
     Ok(())
 }
 
-/// Background task that fires the OnTick policy hook at regular intervals.
+/// Background task that fires tiered OnTick hooks at different intervals (#127).
+///
+/// 3 tiers to prevent slow sections from blocking time-critical recovery:
+/// - OnTick30s (30s): retry, unsent notification recovery
+/// - OnTick1min (1m): timeouts, orphan recovery, stale detection
+/// - OnTick5min (5m): reconciliation, deadlock detection, context check
+/// - OnTick (legacy, 5m): backward compat for policies that only register onTick
 async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
     use std::time::Duration;
+    use crate::engine::hooks::Hook;
 
-    let interval = Duration::from_secs(300); // 5 minutes — reduced frequency to lower DB contention
-    tracing::info!("[policy-tick] OnTick timer started (every 60s)");
+    tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
+
+    let mut interval_30s = tokio::time::interval(Duration::from_secs(30));
+    let mut count = 0u64;
+
+    // Skip the first immediate tick
+    interval_30s.tick().await;
 
     loop {
-        tokio::time::sleep(interval).await;
-        if let Err(e) = engine.try_fire_hook(crate::engine::hooks::Hook::OnTick, serde_json::json!({}))
-        {
-            tracing::warn!("[policy-tick] OnTick hook error: {e}");
-            // Record failure
-            if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_status', 'error')",
-                    [],
-                )
-                .ok();
-            }
-        } else {
-            // Record success
+        interval_30s.tick().await;
+        count += 1;
+
+        // ── 30s tier: every tick ──
+        fire_tick_hook(&engine, &db, Hook::OnTick30s, "30s");
+
+        // ── 1min tier: every 2nd tick (60s) ──
+        if count % 2 == 0 {
+            fire_tick_hook(&engine, &db, Hook::OnTick1min, "1min");
+        }
+
+        // ── 5min tier: every 10th tick (300s) ──
+        if count % 10 == 0 {
+            fire_tick_hook(&engine, &db, Hook::OnTick5min, "5min");
+            // Also fire legacy OnTick for backward compat
+            fire_tick_hook(&engine, &db, Hook::OnTick, "legacy");
+
+            // Record last tick timestamp
             if let Ok(conn) = db.lock() {
                 conn.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
@@ -165,11 +181,7 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
             }
         }
 
-        // Process card transitions accumulated during hook execution.
-        // setStatus() only updates the DB — transition hooks (OnReviewEnter, etc.)
-        // must fire here, outside the original hook context.
-        // Loop because transition hooks may themselves call setStatus (e.g., OnReviewEnter
-        // might set pending_decision), generating more pending transitions.
+        // Drain transitions from all tiers
         loop {
             let transitions = engine.drain_pending_transitions();
             if transitions.is_empty() {
@@ -178,6 +190,28 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
             for (card_id, old_status, new_status) in &transitions {
                 crate::kanban::fire_transition_hooks(&db, &engine, card_id, old_status, new_status);
             }
+        }
+    }
+}
+
+/// Fire a single tick hook and log timing.
+fn fire_tick_hook(engine: &PolicyEngine, db: &Db, hook: crate::engine::hooks::Hook, label: &str) {
+    let start = std::time::Instant::now();
+    if let Err(e) = engine.try_fire_hook(hook, serde_json::json!({})) {
+        tracing::warn!("[policy-tick] {} hook error: {e}", label);
+        if let Ok(conn) = db.lock() {
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_status', 'error')",
+                [],
+            )
+            .ok();
+        }
+    } else {
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 500 {
+            tracing::warn!("[policy-tick] {} took {}ms", label, elapsed.as_millis());
+        } else {
+            tracing::debug!("[policy-tick] {} took {}ms", label, elapsed.as_millis());
         }
     }
 }

@@ -10,6 +10,12 @@ pub enum Hook {
     OnReviewEnter,
     OnReviewVerdict,
     OnTick,
+    /// Fast tick (30s) — retry, unsent notification recovery
+    OnTick30s,
+    /// Normal tick (1m) — timeouts, orphan recovery, stale detection
+    OnTick1min,
+    /// Slow tick (5m) — reconciliation, deadlock, context check
+    OnTick5min,
 }
 
 impl Hook {
@@ -23,6 +29,9 @@ impl Hook {
             Hook::OnReviewEnter => "onReviewEnter",
             Hook::OnReviewVerdict => "onReviewVerdict",
             Hook::OnTick => "onTick",
+            Hook::OnTick30s => "onTick30s",
+            Hook::OnTick1min => "onTick1min",
+            Hook::OnTick5min => "onTick5min",
         }
     }
 
@@ -36,6 +45,9 @@ impl Hook {
             Hook::OnReviewEnter,
             Hook::OnReviewVerdict,
             Hook::OnTick,
+            Hook::OnTick30s,
+            Hook::OnTick1min,
+            Hook::OnTick5min,
         ]
     }
 
