@@ -400,7 +400,7 @@ pub async fn hook_session(
             });
 
             // Fire OnSessionStatusChange hook for policy engines
-            let _ = state.engine.fire_hook(
+            let _ = state.engine.try_fire_hook(
                 crate::engine::hooks::Hook::OnSessionStatusChange,
                 json!({
                     "session_key": body.session_key,

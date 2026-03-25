@@ -116,7 +116,7 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
 
     loop {
         tokio::time::sleep(interval).await;
-        if let Err(e) = engine.fire_hook(crate::engine::hooks::Hook::OnTick, serde_json::json!({}))
+        if let Err(e) = engine.try_fire_hook(crate::engine::hooks::Hook::OnTick, serde_json::json!({}))
         {
             tracing::warn!("[policy-tick] OnTick hook error: {e}");
             // Record failure

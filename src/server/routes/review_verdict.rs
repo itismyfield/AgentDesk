@@ -287,7 +287,7 @@ pub async fn submit_verdict(
 
     // Fire OnReviewVerdict hook — policy engine handles all state transitions
     if let Some(ref cid) = card_id {
-        let _ = state.engine.fire_hook(
+        let _ = state.engine.try_fire_hook(
             Hook::OnReviewVerdict,
             json!({
                 "card_id": cid,
@@ -541,7 +541,7 @@ pub async fn submit_review_decision(
             drop(conn);
 
             // Fire OnReviewEnter to create new review dispatch
-            let _ = state.engine.fire_hook(
+            let _ = state.engine.try_fire_hook(
                 Hook::OnReviewEnter,
                 json!({
                     "card_id": body.card_id,

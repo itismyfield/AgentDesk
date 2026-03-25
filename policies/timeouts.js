@@ -280,28 +280,10 @@ var timeouts = {
         ? "DISPATCH:" + ud.id + " - " + ud.title + "\n⚠️ 검토 전용 — 작업 착수 금지\n코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
         : "DISPATCH:" + ud.id + " - " + ud.title;
 
-      try {
-        var port = agentdesk.config.get("server_port") || 8791;
-        var sendResult = agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
-          target: "channel:" + channelId,
-          content: prefix + issueLink,
-          source: "timeouts",
-          bot: "announce"
-        });
-        // Mark as notified only after confirmed send success
-        if (sendResult && !sendResult.error) {
-          agentdesk.db.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-            ["dispatch_notified:" + ud.id, ud.id]
-          );
-          agentdesk.log.info("[notify-recovery] Resent dispatch notification: " + ud.id + " → " + channelId);
-        } else {
-          agentdesk.log.warn("[notify-recovery] /api/send returned error for " + ud.id + ": " +
-            (sendResult ? sendResult.error : "null response") + " — will retry next tick");
-        }
-      } catch(e) {
-        agentdesk.log.warn("[notify-recovery] Failed: " + e + " — will retry next tick");
-      }
+      // DISABLED: Self-referential HTTP causes deadlock on first onTick.
+      // Dispatch notification is handled by Rust send_dispatch_to_discord
+      // via kanban.rs notify_new_dispatches_after_hooks.
+      agentdesk.log.info("[notify-recovery] Dispatch " + ud.id + " notification deferred to Rust path");
     }
 
     // ─── [J] Failed 디스패치 자동 재시도 (30초 쿨다운, 최대 10회) ──
@@ -353,23 +335,9 @@ var timeouts = {
             var retryPrefix = useAlt
               ? "DISPATCH:" + newDispatchId + " - " + fd.title + "\n⚠️ 검토 전용 — 작업 착수 금지\n코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
               : "DISPATCH:" + newDispatchId + " - " + fd.title;
-            try {
-              var retryPort = agentdesk.config.get("server_port") || 8791;
-              var sendRes = agentdesk.http.post("http://127.0.0.1:" + retryPort + "/api/send", {
-                target: "channel:" + retryChannelId,
-                content: retryPrefix + issueLink,
-                source: "retry",
-                bot: "announce"
-              });
-              if (sendRes && !sendRes.error) {
-                agentdesk.db.execute(
-                  "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-                  ["dispatch_notified:" + newDispatchId, newDispatchId]
-                );
-              }
-            } catch(ne) {
-              agentdesk.log.warn("[retry] Discord notify failed for " + newDispatchId + ": " + ne + " — [I-0] will recover");
-            }
+            // DISABLED: Self-referential HTTP causes deadlock.
+            // Dispatch notification handled by Rust send_dispatch_to_discord.
+            agentdesk.log.info("[retry] Dispatch " + newDispatchId + " notification deferred to Rust path");
           }
         }
       } catch (e) {

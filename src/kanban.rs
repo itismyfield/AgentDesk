@@ -232,7 +232,7 @@ pub fn transition_status_with_opts(
     github_sync_on_transition(db, card_id, new_status);
 
     // Fire hooks
-    let _ = engine.fire_hook(
+    let _ = engine.try_fire_hook(
         Hook::OnCardTransition,
         json!({
             "card_id": card_id,
@@ -242,7 +242,7 @@ pub fn transition_status_with_opts(
     );
 
     if new_status == "done" {
-        let _ = engine.fire_hook(
+        let _ = engine.try_fire_hook(
             Hook::OnCardTerminal,
             json!({
                 "card_id": card_id,
@@ -252,7 +252,7 @@ pub fn transition_status_with_opts(
     }
 
     if new_status == "review" {
-        let _ = engine.fire_hook(
+        let _ = engine.try_fire_hook(
             Hook::OnReviewEnter,
             json!({
                 "card_id": card_id,
@@ -313,7 +313,7 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     // GitHub auto-sync
     github_sync_on_transition(db, card_id, to);
 
-    let _ = engine.fire_hook(
+    let _ = engine.try_fire_hook(
         Hook::OnCardTransition,
         json!({
             "card_id": card_id,
@@ -323,7 +323,7 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     );
 
     if to == "done" {
-        let _ = engine.fire_hook(
+        let _ = engine.try_fire_hook(
             Hook::OnCardTerminal,
             json!({
                 "card_id": card_id,
@@ -333,7 +333,7 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     }
 
     if to == "review" {
-        let _ = engine.fire_hook(
+        let _ = engine.try_fire_hook(
             Hook::OnReviewEnter,
             json!({
                 "card_id": card_id,
@@ -1002,7 +1002,7 @@ mod tests {
         }
 
         // Fire OnDispatchCompleted — should NOT create a new dispatch for stage-2
-        let _ = engine.fire_hook(
+        let _ = engine.try_fire_hook(
             Hook::OnDispatchCompleted,
             json!({ "dispatch_id": dispatch_id }),
         );

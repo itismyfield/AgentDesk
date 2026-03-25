@@ -515,7 +515,7 @@ pub async fn assign_card(
 
     // Fire transition hook
     if old_status != "ready" {
-        let _ = state.engine.fire_hook(
+        let _ = state.engine.try_fire_hook(
             Hook::OnCardTransition,
             json!({
                 "card_id": id,

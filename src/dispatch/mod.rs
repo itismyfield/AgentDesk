@@ -141,8 +141,14 @@ pub fn create_dispatch(
     title: &str,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let (dispatch_id, old_status) =
-        create_dispatch_core(db, kanban_card_id, to_agent_id, dispatch_type, title, context)?;
+    let (dispatch_id, old_status) = create_dispatch_core(
+        db,
+        kanban_card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context,
+    )?;
 
     // Read back the dispatch
     let conn = db
@@ -151,8 +157,10 @@ pub fn create_dispatch(
     let dispatch = query_dispatch_row(&conn, &dispatch_id)?;
     drop(conn);
 
-    // Fire OnCardTransition hook
-    let _ = engine.fire_hook(
+    // Fire OnCardTransition hook — use try_fire_hook to avoid deadlock
+    // with concurrent onTick holding the engine lock. If engine is busy,
+    // the hook is skipped; the card state is already committed to DB.
+    let _ = engine.try_fire_hook(
         Hook::OnCardTransition,
         json!({
             "card_id": kanban_card_id,
@@ -231,12 +239,16 @@ pub fn complete_dispatch(
     // Capture max rowid before hooks fire — any dispatches created by hooks
     // (JS agentdesk.dispatch.create()) will have a higher rowid.
     let pre_hook_max_rowid: i64 = conn
-        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM task_dispatches", [], |row| row.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM task_dispatches",
+            [],
+            |row| row.get(0),
+        )
         .unwrap_or(0);
     drop(conn);
 
-    // Fire OnDispatchCompleted hook
-    let _ = engine.fire_hook(
+    // Fire OnDispatchCompleted hook — try_fire_hook to avoid engine lock deadlock
+    let _ = engine.try_fire_hook(
         Hook::OnDispatchCompleted,
         json!({
             "dispatch_id": dispatch_id,
@@ -308,7 +320,11 @@ fn notify_hook_created_dispatches(db: &Db, pre_hook_max_rowid: i64) {
             let db_c = db_clone.clone();
             handle.spawn(async move {
                 crate::server::routes::dispatches::send_dispatch_to_discord(
-                    &db_c, &agent_id, &title, &card_id, &dispatch_id,
+                    &db_c,
+                    &agent_id,
+                    &title,
+                    &card_id,
+                    &dispatch_id,
                 )
                 .await;
             });

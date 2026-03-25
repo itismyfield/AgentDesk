@@ -113,12 +113,35 @@ impl PolicyEngine {
 
     /// Fire a hook with the given JSON payload. All policies that registered
     /// for this hook are called in priority order.
+    /// Best-effort hook execution: skips if engine is busy (try_lock).
+    /// Prevents deadlock when multiple code paths compete for the engine lock.
+    pub fn try_fire_hook(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {
+        let inner = match self.inner.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                tracing::debug!("try_fire_hook({hook}): engine busy, skipping");
+                return Ok(());
+            }
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                return Err(anyhow::anyhow!("engine lock poisoned: {e}"));
+            }
+        };
+        Self::fire_hook_with_guard(inner, hook, payload)
+    }
+
     pub fn fire_hook(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {
         let inner = self
             .inner
             .lock()
             .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
+        Self::fire_hook_with_guard(inner, hook, payload)
+    }
 
+    fn fire_hook_with_guard(
+        inner: std::sync::MutexGuard<'_, PolicyEngineInner>,
+        hook: Hook,
+        payload: serde_json::Value,
+    ) -> Result<()> {
         // Collect the persistent functions for this hook
         let policies = inner
             .policies

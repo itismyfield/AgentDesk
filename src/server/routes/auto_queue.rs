@@ -712,16 +712,19 @@ pub async fn activate(
 
         drop(conn);
 
-        // Create dispatch first — only mark entry as dispatched on success
-        let dispatch_result = crate::dispatch::create_dispatch(
-            &state.db,
-            &state.engine,
-            card_id,
-            agent_id,
-            "implementation",
-            &title,
-            &json!({"auto_queue": true, "entry_id": entry_id}),
-        );
+        // Create dispatch — use block_in_place to allow tokio to schedule
+        // other tasks while fire_hook executes blocking QuickJS
+        let dispatch_result = tokio::task::block_in_place(|| {
+            crate::dispatch::create_dispatch(
+                &state.db,
+                &state.engine,
+                card_id,
+                agent_id,
+                "implementation",
+                &title,
+                &json!({"auto_queue": true, "entry_id": entry_id}),
+            )
+        });
 
         let conn_reacquired = state.db.lock().unwrap();
         if dispatch_result.is_err() {

@@ -279,7 +279,7 @@ pub async fn update_dispatch(
             .ok();
         drop(conn);
 
-        let _ = state.engine.fire_hook(
+        let _ = state.engine.try_fire_hook(
             Hook::OnDispatchCompleted,
             json!({
                 "dispatch_id": id,
