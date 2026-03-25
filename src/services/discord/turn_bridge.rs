@@ -812,8 +812,9 @@ pub(super) fn spawn_turn_bridge(
             &provider,
             adk_session_info.as_deref(),
             {
-                let total = accumulated_input_tokens + accumulated_output_tokens;
-                (total > 0).then_some(total)
+                // Use input_tokens only — better proxy for context window occupancy.
+                // output_tokens don't contribute to context window size.
+                (accumulated_input_tokens > 0).then_some(accumulated_input_tokens)
             },
             adk_cwd.as_deref(),
             dispatch_id.as_deref(),
