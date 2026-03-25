@@ -49,7 +49,7 @@ transitions:
   - from: ready
     to: requested
     type: gated
-    gates: []
+    gates: [active_dispatch]
 
   - from: requested
     to: in_progress

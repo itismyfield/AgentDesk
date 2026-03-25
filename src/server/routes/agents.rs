@@ -476,7 +476,7 @@ pub async fn agent_signal(
     .ok();
     drop(conn);
 
-    let _ = crate::kanban::transition_status(&state.db, &state.engine, &card_id, "blocked");
+    let _ = crate::kanban::transition_status_with_opts(&state.db, &state.engine, &card_id, "blocked", "agent-signal", true);
 
     (
         StatusCode::OK,
