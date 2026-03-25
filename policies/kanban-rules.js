@@ -12,14 +12,10 @@
 // ── Helpers ──────────────────────────────────────────────────
 
 function sendDiscordNotification(target, content, bot) {
-  try {
-    var port = agentdesk.config.get("server_port") || 8791;
-    var body = { target: target, content: content, source: "kanban-rules" };
-    if (bot) body.bot = bot;
-    agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", body);
-  } catch (e) {
-    agentdesk.log.warn("[kanban] Discord send failed: " + e);
-  }
+  // DISABLED: Self-referential HTTP (/api/send on same server) from within
+  // fire_hook causes deadlock (blocking QuickJS + tokio runtime contention).
+  // PMD notifications are handled by timeouts.js [I-0] recovery instead.
+  agentdesk.log.info("[kanban] notification queued (deferred): " + content.substring(0, 100));
 }
 
 function notifyPMD(cardId, reason) {
