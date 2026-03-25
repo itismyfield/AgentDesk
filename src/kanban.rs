@@ -628,7 +628,7 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
-        Arc::new(Mutex::new(conn))
+        crate::db::wrap_conn(conn)
     }
 
     fn test_engine(db: &Db) -> PolicyEngine {

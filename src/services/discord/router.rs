@@ -1261,10 +1261,7 @@ pub(super) async fn handle_text_message(
             let restored = super::adk_session::fetch_claude_session_id(key, shared.api_port).await;
             if restored.is_some() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ↻ Restored claude_session_id from DB for {}",
-                    key
-                );
+                println!("  [{ts}] ↻ Restored claude_session_id from DB for {}", key);
                 // Also update in-memory session so subsequent turns don't re-fetch
                 let mut data = shared.core.lock().await;
                 if let Some(session) = data.sessions.get_mut(&channel_id) {

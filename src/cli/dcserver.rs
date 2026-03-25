@@ -524,7 +524,8 @@ pub fn handle_restart_dcserver(
             eprintln!("Error: Cannot determine runtime root for bot_settings.json");
             write_restart_report(
                 "failed",
-                "runtime root를 결정할 수 없어서 dcserver restart를 시작하지 못했습니다.".to_string(),
+                "runtime root를 결정할 수 없어서 dcserver restart를 시작하지 못했습니다."
+                    .to_string(),
             );
             return;
         }
@@ -601,7 +602,10 @@ pub fn handle_restart_dcserver(
     if let Some(root) = agentdesk_runtime_root() {
         let marker = root.join("restart_pending");
         if let Err(e) = fs::write(&marker, VERSION) {
-            eprintln!("   ⚠ Failed to write restart marker {}: {e} — falling back to force-kill", marker.display());
+            eprintln!(
+                "   ⚠ Failed to write restart marker {}: {e} — falling back to force-kill",
+                marker.display()
+            );
             kill_existing_dcserver_processes();
             return;
         }

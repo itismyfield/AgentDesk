@@ -7,6 +7,8 @@ pub mod binary_resolver;
 mod dump_tool;
 pub mod shell;
 
-pub use binary_resolver::{resolve_binary, resolve_binary_with_login_shell, async_resolve_binary_with_login_shell};
+pub use binary_resolver::{
+    async_resolve_binary_with_login_shell, resolve_binary, resolve_binary_with_login_shell,
+};
 pub use dump_tool::capture_process_dump;
-pub use shell::{shell_command, async_shell_command};
+pub use shell::{async_shell_command, shell_command};

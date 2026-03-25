@@ -34,8 +34,8 @@ pub fn capture_process_dump(pid: u32, output_path: &str) -> Result<(), String> {
         match std::fs::read_to_string(&stack_path) {
             Ok(stack) => {
                 // Also grab /proc/<pid>/status for thread info
-                let status_info = std::fs::read_to_string(format!("/proc/{}/status", pid))
-                    .unwrap_or_default();
+                let status_info =
+                    std::fs::read_to_string(format!("/proc/{}/status", pid)).unwrap_or_default();
                 let combined = format!(
                     "=== Process {} stack ===\n{}\n=== Process {} status ===\n{}",
                     pid, stack, pid, status_info

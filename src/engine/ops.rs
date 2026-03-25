@@ -107,9 +107,12 @@ fn db_query_raw(db: &Db, sql: &str, params_json: &str) -> String {
     let params: Vec<serde_json::Value> = serde_json::from_str(params_json).unwrap_or_default();
     let bind: Vec<rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect();
 
-    let conn = match db.lock() {
+    // Use a separate read-only connection to avoid blocking the write Mutex.
+    // This prevents deadlock when onTick (holding engine lock) queries DB
+    // while request handlers hold the write lock.
+    let conn = match db.read_conn() {
         Ok(c) => c,
-        Err(e) => return format!(r#"{{"__error":"db lock: {e}"}}"#),
+        Err(e) => return format!(r#"{{"__error":"db read: {e}"}}"#),
     };
 
     let mut stmt = match conn.prepare(sql) {
@@ -148,9 +151,12 @@ fn db_execute_raw(db: &Db, sql: &str, params_json: &str) -> String {
     let params: Vec<serde_json::Value> = serde_json::from_str(params_json).unwrap_or_default();
     let bind: Vec<rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect();
 
-    let conn = match db.lock() {
+    // Use a separate read-write connection to avoid holding the main
+    // Rust Mutex that request handlers need. SQLite WAL serializes
+    // concurrent writers via busy_timeout (5s).
+    let conn = match db.separate_conn() {
         Ok(c) => c,
-        Err(e) => return format!(r#"{{"__error":"db lock: {e}"}}"#),
+        Err(e) => return format!(r#"{{"__error":"db conn: {e}"}}"#),
     };
 
     let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind
@@ -243,7 +249,7 @@ fn register_config_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         Function::new(
             ctx.clone(),
             rquickjs::function::MutFn::from(move |key: String| -> String {
-                let conn = match db_c.lock() {
+                let conn = match db_c.separate_conn() {
                     Ok(c) => c,
                     Err(_) => return "null".to_string(),
                 };
@@ -398,7 +404,7 @@ fn dispatch_create_raw(
     ) {
         Ok((dispatch_id, _old_status)) => {
             // Get issue URL for Discord message
-            let issue_url: Option<String> = db.lock().ok().and_then(|conn| {
+            let issue_url: Option<String> = db.separate_conn().ok().and_then(|conn| {
                 conn.query_row(
                     "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
                     [card_id],
@@ -430,14 +436,14 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
-        Arc::new(Mutex::new(conn))
+        crate::db::wrap_conn(conn)
     }
 
     #[test]
     fn test_engine_db_query_op() {
         let db = test_db();
         {
-            let conn = db.lock().unwrap();
+            let conn = db.separate_conn().unwrap();
             conn.execute(
                 "INSERT INTO agents (id, name, provider, status, xp) VALUES ('a1', 'TestBot', 'claude', 'idle', 0)",
                 [],
@@ -477,7 +483,7 @@ mod tests {
             assert_eq!(changes, 1);
         });
 
-        let conn = db.lock().unwrap();
+        let conn = db.separate_conn().unwrap();
         let name: String = conn
             .query_row("SELECT name FROM agents WHERE id = 'b1'", [], |r| r.get(0))
             .unwrap();
@@ -508,7 +514,7 @@ mod tests {
     fn test_engine_config_get() {
         let db = test_db();
         {
-            let conn = db.lock().unwrap();
+            let conn = db.separate_conn().unwrap();
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('test_key', 'test_value')",
                 [],
@@ -534,7 +540,7 @@ mod tests {
     fn test_engine_db_query_no_params() {
         let db = test_db();
         {
-            let conn = db.lock().unwrap();
+            let conn = db.separate_conn().unwrap();
             conn.execute(
                 "INSERT INTO agents (id, name, provider, status, xp) VALUES ('z1', 'Zero', 'claude', 'idle', 10)",
                 [],
@@ -567,7 +573,7 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     kanban_obj.set(
         "__setStatusRaw",
         Function::new(ctx.clone(), move |card_id: String, new_status: String| -> String {
-            let conn = match db_set.lock() {
+            let conn = match db_set.separate_conn() {
                 Ok(c) => c,
                 Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
             };
@@ -629,7 +635,7 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     kanban_obj.set(
         "__getCardRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
-            let conn = match db_get.lock() {
+            let conn = match db_get.separate_conn() {
                 Ok(c) => c,
                 Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
             };

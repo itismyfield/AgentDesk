@@ -218,7 +218,7 @@ pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -369,7 +369,7 @@ pub async fn generate(
 
             // Kanban manager channel from config (kv_meta)
             let km_channel: Option<String> = {
-                let conn = state.db.lock().ok();
+                let conn = state.db.separate_conn().ok();
                 conn.and_then(|c| {
                     c.query_row(
                         "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
@@ -581,7 +581,7 @@ pub async fn activate(
     State(state): State<AppState>,
     Json(body): Json<ActivateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let mut conn = match state.db.lock() {
+    let mut conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -697,7 +697,7 @@ pub async fn activate(
                 "[auto-queue] Skipping activate for {agent_id}: agent has active cards"
             );
             drop(conn);
-            conn = state.db.lock().unwrap();
+            conn = state.db.separate_conn().unwrap();
             break;
         }
 
@@ -726,13 +726,13 @@ pub async fn activate(
             )
         });
 
-        let conn_reacquired = state.db.lock().unwrap();
+        let conn_reacquired = state.db.separate_conn().unwrap();
         if dispatch_result.is_err() {
             tracing::error!(
                 "[auto-queue] create_dispatch failed for entry {entry_id}, leaving as pending for retry"
             );
             drop(conn_reacquired);
-            conn = state.db.lock().unwrap();
+            conn = state.db.separate_conn().unwrap();
             continue;
         }
 
@@ -765,7 +765,7 @@ pub async fn activate(
             .await;
         });
 
-        let conn_inner = state.db.lock().unwrap();
+        let conn_inner = state.db.separate_conn().unwrap();
         dispatched.push(entry_to_json(&conn_inner, entry_id));
         drop(conn_inner);
 
@@ -773,7 +773,7 @@ pub async fn activate(
     }
 
     // Check if all entries are done
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.separate_conn().unwrap();
     let remaining: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1 AND status = 'pending'",
@@ -801,7 +801,7 @@ pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -909,7 +909,7 @@ pub async fn skip_entry(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -943,7 +943,7 @@ pub async fn update_run(
     Path(id): Path<String>,
     Json(body): Json<UpdateRunBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -982,7 +982,7 @@ pub async fn update_run(
 /// POST /api/auto-queue/reset
 /// Clear all entries and complete all active runs.
 pub async fn reset(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1018,7 +1018,7 @@ pub async fn reorder(
     State(state): State<AppState>,
     Json(body): Json<ReorderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let mut conn = match state.db.lock() {
+    let mut conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1119,7 +1119,7 @@ pub async fn enqueue(
     State(state): State<AppState>,
     Json(body): Json<EnqueueBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1269,7 +1269,7 @@ pub async fn submit_order(
     Path(run_id): Path<String>,
     Json(body): Json<OrderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (

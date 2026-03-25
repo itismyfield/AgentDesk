@@ -611,8 +611,9 @@ fn install_service(home: &Path, agentdesk_bin: &Path, reconfigure: bool) -> Resu
     let load_answer = prompt_line("\ndcserver를 지금 시작할까요? (Y/n): ");
     if load_answer.is_empty() || load_answer.to_lowercase().starts_with('y') {
         let label = dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL;
-        let uid = get_uid()
-            .map_err(|e| format!("UID를 가져올 수 없습니다: {e} — 수동으로 launchctl을 실행하세요"))?;
+        let uid = get_uid().map_err(|e| {
+            format!("UID를 가져올 수 없습니다: {e} — 수동으로 launchctl을 실행하세요")
+        })?;
         if dcserver::is_launchd_job_loaded(label) {
             let _ = std::process::Command::new("launchctl")
                 .args([
@@ -646,8 +647,7 @@ fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) -> Res
     let root_dir =
         dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
     let logs_dir = root_dir.join("logs");
-    fs::create_dir_all(&logs_dir)
-        .map_err(|e| format!("Failed to create logs directory: {e}"))?;
+    fs::create_dir_all(&logs_dir).map_err(|e| format!("Failed to create logs directory: {e}"))?;
     let unit_content = format!(
         "[Unit]\n\
          Description=AgentDesk Discord Control Server\n\
@@ -703,8 +703,7 @@ fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) -> Re
             .join("release")
     });
     let logs_dir = root_dir.join("logs");
-    fs::create_dir_all(&logs_dir)
-        .map_err(|e| format!("Failed to create logs directory: {e}"))?;
+    fs::create_dir_all(&logs_dir).map_err(|e| format!("Failed to create logs directory: {e}"))?;
 
     println!("  Windows 서비스 등록:");
     println!("  NSSM 사용 시:");

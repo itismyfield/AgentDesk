@@ -29,13 +29,23 @@ pub async fn run(
         });
     }
 
-    // Spawn periodic policy tick (fires OnTick every 60s)
+    // Spawn periodic policy tick on a DEDICATED OS thread to avoid
+    // engine lock deadlock with request handler threads.
+    // The std::thread runs its own blocking loop, never competing with
+    // tokio workers for the engine Mutex.
     {
         let tick_engine = engine.clone();
         let tick_db = db.clone();
-        tokio::spawn(async move {
-            policy_tick_loop(tick_engine, tick_db).await;
-        });
+        std::thread::Builder::new()
+            .name("policy-tick".to_string())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("policy-tick runtime");
+                rt.block_on(policy_tick_loop(tick_engine, tick_db));
+            })
+            .expect("policy-tick thread");
     }
 
     // Spawn periodic rate-limit cache sync (every 120s)
@@ -111,7 +121,7 @@ pub async fn run(
 async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
     use std::time::Duration;
 
-    let interval = Duration::from_secs(60);
+    let interval = Duration::from_secs(300); // 5 minutes — reduced frequency to lower DB contention
     tracing::info!("[policy-tick] OnTick timer started (every 60s)");
 
     loop {

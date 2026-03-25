@@ -201,10 +201,7 @@ pub(super) async fn save_claude_session_id(
 
 /// Fetch the stored claude_session_id from DB for a given session_key.
 /// Returns None if no record exists or if the field is NULL.
-pub(super) async fn fetch_claude_session_id(
-    session_key: &str,
-    api_port: u16,
-) -> Option<String> {
+pub(super) async fn fetch_claude_session_id(session_key: &str, api_port: u16) -> Option<String> {
     let url = format!("http://127.0.0.1:{api_port}/api/dispatched-sessions/claude-session-id");
     let resp = reqwest::Client::new()
         .get(&url)

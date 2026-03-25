@@ -17,18 +17,15 @@ pub fn resolve_binary(name: &str) -> Option<String> {
     #[cfg(windows)]
     let output = Command::new("where.exe").arg(name).output();
 
-    output
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            let path = String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if path.is_empty() { None } else { Some(path) }
-        })
+    output.ok().filter(|o| o.status.success()).and_then(|o| {
+        let path = String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if path.is_empty() { None } else { Some(path) }
+    })
 }
 
 /// Resolve a binary using a login shell to pick up the user's full PATH.
@@ -63,7 +60,14 @@ pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
     {
         // On Windows, try PowerShell Get-Command as fallback
         if let Ok(output) = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &format!("(Get-Command {} -ErrorAction SilentlyContinue).Source", name)])
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "(Get-Command {} -ErrorAction SilentlyContinue).Source",
+                    name
+                ),
+            ])
             .output()
         {
             if output.status.success() {

@@ -10,13 +10,9 @@ use std::process::{Command, Output};
 /// - **Windows**: `cmd.exe /C "<cmd>"`
 pub fn shell_command(cmd: &str) -> Result<Output, String> {
     #[cfg(unix)]
-    let result = Command::new("bash")
-        .args(["-c", cmd])
-        .output();
+    let result = Command::new("bash").args(["-c", cmd]).output();
     #[cfg(windows)]
-    let result = Command::new("cmd.exe")
-        .args(["/C", cmd])
-        .output();
+    let result = Command::new("cmd.exe").args(["/C", cmd]).output();
 
     result.map_err(|e| format!("Failed to execute shell command: {}", e))
 }

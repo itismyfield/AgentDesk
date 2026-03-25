@@ -304,12 +304,28 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str,
         );
     }
 
-    // Verify target channel exists in role-map (authorization check)
+    // Verify target channel exists in role-map (authorization check).
+    // If the target is a thread, resolve its parent channel and check that instead.
     if super::settings::resolve_role_binding(channel_id, None).is_none() {
-        return (
-            "403 Forbidden",
-            r#"{"ok":false,"error":"channel not in role-map"}"#.to_string(),
-        );
+        let mut authorized = false;
+        // Try resolving as a thread: fetch channel info and check parent_id
+        if let Ok(http) = resolve_bot_http(registry, bot).await {
+            if let Ok(channel) = channel_id.to_channel(&*http).await {
+                if let Some(guild_channel) = channel.guild() {
+                    if let Some(parent_id) = guild_channel.parent_id {
+                        if super::settings::resolve_role_binding(parent_id, None).is_some() {
+                            authorized = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !authorized {
+            return (
+                "403 Forbidden",
+                r#"{"ok":false,"error":"channel not in role-map"}"#.to_string(),
+            );
+        }
     }
 
     // Select bot: "announce" (default, agents respond) or "notify" (info-only, agents ignore)

@@ -221,10 +221,7 @@ pub fn migrate_config_dir() {
         let new_dir = home.join(".adk");
         if old_dir.exists() && !new_dir.exists() {
             if let Err(e) = std::fs::rename(&old_dir, &new_dir) {
-                eprintln!(
-                    "Warning: failed to migrate ~/.cokacdir to ~/.adk: {}",
-                    e
-                );
+                eprintln!("Warning: failed to migrate ~/.cokacdir to ~/.adk: {}", e);
             }
         }
     }

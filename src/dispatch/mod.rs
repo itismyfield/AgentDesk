@@ -45,7 +45,7 @@ pub fn create_dispatch_core(
             }
             // Inject from_provider/target_provider for cross-provider review validation
             if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
-                if let Ok(conn) = db.lock() {
+                if let Ok(conn) = db.separate_conn() {
                     if let Ok((ch, alt)) = conn.query_row(
                         "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?1",
                         [to_agent_id],
@@ -76,9 +76,11 @@ pub fn create_dispatch_core(
         serde_json::to_string(context)?
     };
 
+    // Use separate_conn to avoid blocking request handlers while
+    // engine/onTick holds the main DB Mutex via QuickJS.
     let conn = db
-        .lock()
-        .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
+        .separate_conn()
+        .map_err(|e| anyhow::anyhow!("DB conn error: {e}"))?;
 
     // Get current card status for the transition hook
     let old_status: String = conn
@@ -152,7 +154,7 @@ pub fn create_dispatch(
 
     // Read back the dispatch
     let conn = db
-        .lock()
+        .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
     let dispatch = query_dispatch_row(&conn, &dispatch_id)?;
     drop(conn);
@@ -183,7 +185,7 @@ pub fn complete_dispatch(
     let result_str = serde_json::to_string(result)?;
 
     let conn = db
-        .lock()
+        .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
 
     let changed = conn.execute(
@@ -286,7 +288,7 @@ pub fn complete_dispatch(
 /// double-notifying dispatches already handled by `notify_new_dispatches_after_hooks`.
 fn notify_hook_created_dispatches(db: &Db, pre_hook_max_rowid: i64) {
     let dispatches: Vec<(String, String, String, String)> = db
-        .lock()
+        .separate_conn()
         .ok()
         .map(|conn| {
             let mut stmt = conn
@@ -383,7 +385,7 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
-        Arc::new(Mutex::new(conn))
+        crate::db::wrap_conn(conn)
     }
 
     fn test_engine(db: &Db) -> PolicyEngine {
@@ -392,7 +394,7 @@ mod tests {
     }
 
     fn seed_card(db: &Db, card_id: &str, status: &str) {
-        let conn = db.lock().unwrap();
+        let conn = db.separate_conn().unwrap();
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, created_at, updated_at) VALUES (?1, 'Test Card', ?2, datetime('now'), datetime('now'))",
             rusqlite::params![card_id, status],
@@ -424,7 +426,7 @@ mod tests {
         assert_eq!(dispatch["title"], "Do the thing");
 
         // Card should be updated
-        let conn = db.lock().unwrap();
+        let conn = db.separate_conn().unwrap();
         let (card_status, latest_dispatch_id): (String, String) = conn
             .query_row(
                 "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
@@ -506,7 +508,7 @@ mod tests {
 
         // Simulate dismiss: cancel the dispatch
         {
-            let conn = db.lock().unwrap();
+            let conn = db.separate_conn().unwrap();
             conn.execute(
                 "UPDATE task_dispatches SET status = 'cancelled' WHERE id = ?1",
                 [&dispatch_id],
@@ -583,7 +585,7 @@ mod tests {
 
         assert_eq!(old_status, "ready");
 
-        let conn = db.lock().unwrap();
+        let conn = db.separate_conn().unwrap();
         let (card_status, latest_dispatch_id): (String, String) = conn
             .query_row(
                 "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-core'",
@@ -669,7 +671,7 @@ mod tests {
         assert_eq!(dispatch_b["kanban_card_id"], "card-b");
 
         // Each card's latest_dispatch_id points to its own dispatch
-        let conn = db.lock().unwrap();
+        let conn = db.separate_conn().unwrap();
         let latest_a: String = conn
             .query_row(
                 "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-a'",
