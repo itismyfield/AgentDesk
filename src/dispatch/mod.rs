@@ -4,22 +4,21 @@ use serde_json::json;
 use crate::db::Db;
 use crate::engine::{PolicyEngine, hooks::Hook};
 
-/// Create a new dispatch for a kanban card.
+/// Core dispatch creation: DB operations only, no hooks fired.
 ///
 /// - Inserts a record into `task_dispatches`
-/// - Updates `kanban_cards.latest_dispatch_id` and sets status to "requested"
-/// - Fires `OnCardTransition` hook (old_status -> requested)
+/// - Updates `kanban_cards.latest_dispatch_id` and sets status to "requested" (non-review)
+/// - Returns `(dispatch_id, old_card_status)`
 ///
-/// Returns the dispatch ID.
-pub fn create_dispatch(
+/// Caller is responsible for firing hooks after this returns.
+pub fn create_dispatch_core(
     db: &Db,
-    engine: &PolicyEngine,
     kanban_card_id: &str,
     to_agent_id: &str,
     dispatch_type: &str,
     title: &str,
     context: &serde_json::Value,
-) -> Result<serde_json::Value> {
+) -> Result<(String, String)> {
     let dispatch_id = uuid::Uuid::new_v4().to_string();
 
     // For review dispatches, inject reviewed_commit (HEAD) and provider info
@@ -124,7 +123,31 @@ pub fn create_dispatch(
         )?;
     }
 
+    Ok((dispatch_id, old_status))
+}
+
+/// Create a new dispatch for a kanban card.
+///
+/// - Delegates DB work to `create_dispatch_core`
+/// - Fires `OnCardTransition` hook (old_status -> requested)
+///
+/// Returns the full dispatch row as JSON.
+pub fn create_dispatch(
+    db: &Db,
+    engine: &PolicyEngine,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+    context: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let (dispatch_id, old_status) =
+        create_dispatch_core(db, kanban_card_id, to_agent_id, dispatch_type, title, context)?;
+
     // Read back the dispatch
+    let conn = db
+        .lock()
+        .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
     let dispatch = query_dispatch_row(&conn, &dispatch_id)?;
     drop(conn);
 
@@ -469,5 +492,130 @@ mod tests {
             result.is_err(),
             "implementation dispatch should be rejected for done card"
         );
+    }
+
+    #[test]
+    fn create_dispatch_core_shares_invariants_with_create_dispatch() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-core", "ready");
+
+        // create_dispatch_core returns (dispatch_id, old_status)
+        let (dispatch_id, old_status) = create_dispatch_core(
+            &db,
+            "card-core",
+            "agent-1",
+            "implementation",
+            "Core dispatch",
+            &json!({"key": "value"}),
+        )
+        .unwrap();
+
+        assert_eq!(old_status, "ready");
+
+        let conn = db.lock().unwrap();
+        let (card_status, latest_dispatch_id): (String, String) = conn
+            .query_row(
+                "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-core'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(card_status, "requested");
+        assert_eq!(latest_dispatch_id, dispatch_id);
+
+        // Dispatch row exists
+        let dispatch = query_dispatch_row(&conn, &dispatch_id).unwrap();
+        assert_eq!(dispatch["status"], "pending");
+        assert_eq!(dispatch["kanban_card_id"], "card-core");
+        drop(conn);
+
+        // create_dispatch delegates to core — verify same invariants
+        seed_card(&db, "card-full", "ready");
+        let full_dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-full",
+            "agent-1",
+            "implementation",
+            "Full dispatch",
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(full_dispatch["status"], "pending");
+    }
+
+    #[test]
+    fn create_dispatch_core_rejects_done_card() {
+        let db = test_db();
+        seed_card(&db, "card-done-core", "done");
+
+        let result = create_dispatch_core(
+            &db,
+            "card-done-core",
+            "agent-1",
+            "implementation",
+            "Should fail",
+            &json!({}),
+        );
+        assert!(result.is_err(), "core should reject done card dispatch");
+    }
+
+    #[test]
+    fn concurrent_dispatches_for_different_cards_have_distinct_ids() {
+        // Regression: concurrent dispatches from different cards must not share
+        // dispatch IDs or card state — each must be independently routable.
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-a", "ready");
+        seed_card(&db, "card-b", "ready");
+
+        let dispatch_a = create_dispatch(
+            &db,
+            &engine,
+            "card-a",
+            "agent-1",
+            "implementation",
+            "Task A",
+            &json!({}),
+        )
+        .unwrap();
+
+        let dispatch_b = create_dispatch(
+            &db,
+            &engine,
+            "card-b",
+            "agent-2",
+            "implementation",
+            "Task B",
+            &json!({}),
+        )
+        .unwrap();
+
+        let id_a = dispatch_a["id"].as_str().unwrap();
+        let id_b = dispatch_b["id"].as_str().unwrap();
+        assert_ne!(id_a, id_b, "dispatch IDs must be unique");
+        assert_eq!(dispatch_a["kanban_card_id"], "card-a");
+        assert_eq!(dispatch_b["kanban_card_id"], "card-b");
+
+        // Each card's latest_dispatch_id points to its own dispatch
+        let conn = db.lock().unwrap();
+        let latest_a: String = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let latest_b: String = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latest_a, id_a);
+        assert_eq!(latest_b, id_b);
+        assert_ne!(latest_a, latest_b, "card dispatch IDs must not cross");
     }
 }

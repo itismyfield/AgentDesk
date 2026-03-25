@@ -345,59 +345,79 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
 }
 
 /// Check if hooks created new dispatches and send Discord notifications.
+///
+/// Uses exact dispatch/card targeting instead of a time-window scan to prevent
+/// cross-card misroute when multiple cards create dispatches concurrently.
 fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Option<&str>) {
-    let info: Option<(String, String, String, Option<i64>)> = db
-        .lock()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT kc.assigned_agent_id, kc.title, COALESCE(kc.latest_dispatch_id, ''), kc.github_issue_number \
-                 FROM kanban_cards kc WHERE kc.id = ?1",
-                [card_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .ok()
-        });
-
-    let Some((agent_id, title, new_dispatch_id, issue_number)) = info else {
-        return;
-    };
-
-    // Only notify if a NEW dispatch was created
-    if new_dispatch_id.is_empty() || Some(new_dispatch_id.as_str()) == pre_dispatch_id {
-        return;
-    }
-
-    // Check for any new pending dispatches created in the last few seconds
-    let pending_dispatches: Vec<(String, String, String, String, String, Option<i64>)> = db
+    // Query pending dispatches for THIS card that are newer than the pre-hook snapshot.
+    // This avoids the old 5-second global scan that could pick up dispatches from
+    // unrelated cards and route them through the wrong thread/issue context.
+    let pending_dispatches: Vec<(String, String, String, String)> = db
         .lock()
         .ok()
         .map(|conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT td.id, td.to_agent_id, td.dispatch_type, kc.title, \
-                     COALESCE(kc.github_issue_url, ''), kc.github_issue_number \
-                     FROM task_dispatches td \
-                     JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
-                     WHERE td.status = 'pending' AND td.created_at > datetime('now', '-5 seconds')",
-                )
-                .ok();
-            stmt.as_mut()
-                .and_then(|s| {
-                    s.query_map([], |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                        ))
+            let sql = if let Some(pre_id) = pre_dispatch_id {
+                // Find dispatches for this card created after the pre-hook dispatch
+                let pre_ts: Option<String> = conn
+                    .query_row(
+                        "SELECT created_at FROM task_dispatches WHERE id = ?1",
+                        [pre_id],
+                        |row| row.get(0),
+                    )
+                    .ok();
+                let ts = pre_ts.unwrap_or_else(|| "1970-01-01".to_string());
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT td.id, td.to_agent_id, td.kanban_card_id, kc.title \
+                         FROM task_dispatches td \
+                         JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
+                         WHERE td.kanban_card_id = ?1 \
+                           AND td.status = 'pending' \
+                           AND td.created_at > ?2",
+                    )
+                    .ok();
+                stmt.as_mut()
+                    .and_then(|s| {
+                        s.query_map(rusqlite::params![card_id, ts], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                        })
+                        .ok()
                     })
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            } else {
+                // No pre-hook dispatch — find any pending dispatch for this card
+                // that matches the current latest_dispatch_id
+                let latest_id: Option<String> = conn
+                    .query_row(
+                        "SELECT latest_dispatch_id FROM kanban_cards WHERE id = ?1",
+                        [card_id],
+                        |row| row.get(0),
+                    )
                     .ok()
-                })
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
+                    .flatten();
+                let Some(lid) = latest_id else {
+                    return Vec::new();
+                };
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT td.id, td.to_agent_id, td.kanban_card_id, kc.title \
+                         FROM task_dispatches td \
+                         JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
+                         WHERE td.id = ?1 AND td.status = 'pending'",
+                    )
+                    .ok();
+                stmt.as_mut()
+                    .and_then(|s| {
+                        s.query_map([&lid], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                        })
+                        .ok()
+                    })
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            };
+            sql
         })
         .unwrap_or_default();
 
@@ -405,18 +425,22 @@ fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Op
         return;
     }
 
-    // Delegate all dispatch types to send_dispatch_to_discord which handles:
+    // Delegate to send_dispatch_to_discord which handles:
     // - Thread creation/reuse
     // - dispatch_notified guard (dedup)
     // - Proper channel routing (primary vs alt for review)
+    // Each dispatch uses its own kanban_card_id for correct thread/issue routing.
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         let db_clone = db.clone();
-        for (dispatch_id, agent_id, _, title, _, _) in pending_dispatches {
+        for (dispatch_id, agent_id, dispatch_card_id, title) in pending_dispatches {
             let db_c = db_clone.clone();
-            let card_id = card_id.to_string();
             handle.spawn(async move {
                 crate::server::routes::dispatches::send_dispatch_to_discord(
-                    &db_c, &agent_id, &title, &card_id, &dispatch_id,
+                    &db_c,
+                    &agent_id,
+                    &title,
+                    &dispatch_card_id,
+                    &dispatch_id,
                 )
                 .await;
             });

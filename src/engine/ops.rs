@@ -385,124 +385,36 @@ fn dispatch_create_raw(
     dispatch_type: &str,
     title: &str,
 ) -> String {
-    let dispatch_id = uuid::Uuid::new_v4().to_string();
-    let conn = match db.lock() {
-        Ok(c) => c,
-        Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
-    };
-
-    // Guard: reject dispatch creation for done cards — prevents stale review loops
-    let card_status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok();
-    if card_status.as_deref() == Some("done") {
-        return format!(
-            r#"{{"error":"Cannot create dispatch for done card {}"}}"#,
-            card_id
-        );
-    }
-
-    // Build context — for review dispatches, record the HEAD commit and provider info
-    let context_str = if dispatch_type == "review" {
-        let repo_dir = std::env::var("AGENTDESK_REPO_DIR")
-            .unwrap_or_else(|_| format!("{}/AgentDesk", env!("HOME")));
-        let head = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&repo_dir)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-
-        // Determine from_provider (implementer) and target_provider (reviewer)
-        // based on agent channel suffixes: -cc → claude, -cdx → codex
-        let channels: Option<(Option<String>, Option<String>)> = conn
-            .query_row(
-                "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?1",
-                [agent_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+    // Delegate to the single authoritative dispatch creation path (no hooks —
+    // hooks are fired by the Rust caller after fire_hook returns).
+    let context = serde_json::json!({});
+    match crate::dispatch::create_dispatch_core(db, card_id, agent_id, dispatch_type, title, &context)
+    {
+        Ok((dispatch_id, _old_status)) => {
+            // Get issue URL for Discord message
+            let issue_url: Option<String> = db
+                .lock()
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
+                        [card_id],
+                        |row| row.get(0),
+                    )
+                    .ok()
+                    .flatten()
+                });
+            format!(
+                r#"{{"dispatch_id":"{}","card_id":"{}","agent_id":"{}","issue_url":{}}}"#,
+                dispatch_id,
+                card_id,
+                agent_id,
+                issue_url
+                    .map(|u| format!("\"{}\"", u))
+                    .unwrap_or_else(|| "null".to_string()),
             )
-            .ok();
-        let from_provider = channels
-            .as_ref()
-            .and_then(|(ch, _)| provider_from_channel_suffix(ch.as_deref()));
-        let target_provider = channels
-            .as_ref()
-            .and_then(|(_, alt)| provider_from_channel_suffix(alt.as_deref()));
-
-        let mut ctx = serde_json::json!({});
-        if let Some(commit) = head {
-            ctx["reviewed_commit"] = serde_json::json!(commit);
         }
-        if let Some(fp) = from_provider {
-            ctx["from_provider"] = serde_json::json!(fp);
-        }
-        if let Some(tp) = target_provider {
-            ctx["target_provider"] = serde_json::json!(tp);
-        }
-        serde_json::to_string(&ctx).unwrap_or_else(|_| "{}".to_string())
-    } else {
-        "{}".to_string()
-    };
-
-    // Insert dispatch
-    if let Err(e) = conn.execute(
-        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, datetime('now'), datetime('now'))",
-        rusqlite::params![dispatch_id, card_id, agent_id, dispatch_type, title, context_str],
-    ) {
-        return format!(r#"{{"error":"INSERT dispatch: {}"}}"#, e);
-    }
-
-    // Update kanban card — only set status to 'requested' for non-review dispatches.
-    // Review/rework dispatches should not change the card status (it stays in 'review').
-    let is_review = dispatch_type == "review"
-        || dispatch_type == "review-decision"
-        || dispatch_type == "rework";
-    let sql = if is_review {
-        "UPDATE kanban_cards SET latest_dispatch_id = ?1, updated_at = datetime('now') WHERE id = ?2"
-    } else {
-        "UPDATE kanban_cards SET latest_dispatch_id = ?1, status = 'requested', requested_at = datetime('now'), updated_at = datetime('now') WHERE id = ?2"
-    };
-    if let Err(e) = conn.execute(sql, rusqlite::params![dispatch_id, card_id]) {
-        return format!(r#"{{"error":"UPDATE card: {}"}}"#, e);
-    }
-
-    // Get issue URL for Discord message
-    let issue_url: Option<String> = conn
-        .query_row(
-            "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
-    format!(
-        r#"{{"dispatch_id":"{}","card_id":"{}","agent_id":"{}","issue_url":{}}}"#,
-        dispatch_id,
-        card_id,
-        agent_id,
-        issue_url
-            .map(|u| format!("\"{}\"", u))
-            .unwrap_or_else(|| "null".to_string()),
-    )
-}
-
-/// Determine provider from a Discord channel name suffix.
-/// Returns "claude" for `-cc` suffix, "codex" for `-cdx` suffix.
-fn provider_from_channel_suffix(channel: Option<&str>) -> Option<&'static str> {
-    let ch = channel?;
-    if ch.ends_with("-cc") {
-        Some("claude")
-    } else if ch.ends_with("-cdx") {
-        Some("codex")
-    } else {
-        None
+        Err(e) => format!(r#"{{"error":"{}"}}"#, e),
     }
 }
 
