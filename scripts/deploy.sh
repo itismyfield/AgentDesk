@@ -20,7 +20,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 AD_HOME="${AGENTDESK_HOME:-$HOME/.adk/release}"
 BIN_DIR="$AD_HOME/bin"
 HEALTH_PORT="${AGENTDESK_SERVER_PORT:-8791}"
-LABEL="com.agentdesk"
+LABEL="com.agentdesk.release"
 
 SKIP_BUILD=false
 SKIP_DASHBOARD=false
@@ -70,8 +70,16 @@ fi
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
 install_launchd() {
-  local PLIST_SRC="$SCRIPT_DIR/com.agentdesk.plist"
-  local PLIST_DST="$HOME/Library/LaunchAgents/com.agentdesk.plist"
+  local PLIST_SRC="$SCRIPT_DIR/com.agentdesk.release.plist"
+  local PLIST_DST="$HOME/Library/LaunchAgents/com.agentdesk.release.plist"
+
+  # Migrate: remove legacy com.agentdesk plist if present
+  local LEGACY_PLIST="$HOME/Library/LaunchAgents/com.agentdesk.plist"
+  if [ -f "$LEGACY_PLIST" ]; then
+    launchctl bootout "gui/$(id -u)/com.agentdesk" 2>/dev/null || true
+    rm -f "$LEGACY_PLIST"
+    info "Removed legacy plist: $LEGACY_PLIST"
+  fi
 
   if [ ! -f "$PLIST_SRC" ]; then
     fail "Plist template not found: $PLIST_SRC"
@@ -98,6 +106,14 @@ install_systemd() {
     fail "Systemd unit template not found: $UNIT_SRC"
   fi
 
+  # Migrate: disable and remove legacy agentdesk.service if present
+  local LEGACY_UNIT="$UNIT_DIR/agentdesk.service"
+  if [ -f "$LEGACY_UNIT" ]; then
+    systemctl --user disable --now agentdesk.service 2>/dev/null || true
+    rm -f "$LEGACY_UNIT"
+    info "Removed legacy unit: $LEGACY_UNIT"
+  fi
+
   mkdir -p "$UNIT_DIR"
   mkdir -p "$AD_HOME/logs"
   cp "$UNIT_SRC" "$UNIT_DST"
@@ -118,7 +134,7 @@ esac
 info "Restarting service..."
 
 restart_launchd() {
-  local PLIST="$HOME/Library/LaunchAgents/com.agentdesk.plist"
+  local PLIST="$HOME/Library/LaunchAgents/com.agentdesk.release.plist"
   if [ ! -f "$PLIST" ]; then
     info "Plist not installed — skipping restart"
     return
@@ -165,8 +181,8 @@ if [ "$HEALTHY" = true ]; then
   ok "Health check passed (HTTP 200 on :$HEALTH_PORT/api/health)"
 else
   fail "Health check failed after $RETRIES attempts. Check logs:"
-  echo "  $AD_HOME/logs/agentdesk.stdout.log"
-  echo "  $AD_HOME/logs/agentdesk.stderr.log"
+  echo "  $AD_HOME/logs/dcserver.stdout.log"
+  echo "  $AD_HOME/logs/dcserver.stderr.log"
 fi
 
 echo ""

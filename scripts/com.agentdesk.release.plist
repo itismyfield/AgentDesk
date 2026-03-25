@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.agentdesk</string>
+    <string>com.agentdesk.release</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>AGENTDESK_BIN</string>
-        <string>dcserver</string>
+        <string>--dcserver</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -30,9 +30,9 @@
     <integer>5</integer>
 
     <key>StandardOutPath</key>
-    <string>AGENTDESK_HOME/logs/agentdesk.stdout.log</string>
+    <string>AGENTDESK_HOME/logs/dcserver.stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>AGENTDESK_HOME/logs/agentdesk.stderr.log</string>
+    <string>AGENTDESK_HOME/logs/dcserver.stderr.log</string>
 </dict>
 </plist>
