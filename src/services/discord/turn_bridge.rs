@@ -373,8 +373,18 @@ async fn fail_dispatch_with_retry(
             }
         }
     }
+    // Fallback: direct DB update to prevent orphan dispatch
     let ts = chrono::Local::now().format("%H:%M:%S");
-    eprintln!("  [{ts}] ❌ Failed to PATCH dispatch {dispatch_id} as failed after 3 retries");
+    eprintln!("  [{ts}] ❌ PATCH failed after 3 retries, falling back to direct DB for {dispatch_id}");
+    if let Some(root) = crate::cli::agentdesk_runtime_root() {
+        let db_path = root.join("data/agentdesk.sqlite");
+        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            let _ = conn.execute(
+                "UPDATE task_dispatches SET status = 'failed', result = ?1, updated_at = datetime('now') WHERE id = ?2 AND status = 'pending'",
+                rusqlite::params![error_msg, dispatch_id],
+            );
+        }
+    }
 }
 
 async fn complete_work_dispatch_on_turn_end(
@@ -435,8 +445,18 @@ async fn complete_work_dispatch_on_turn_end(
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
+    // Fallback: direct DB update to prevent orphan dispatch
     let ts = chrono::Local::now().format("%H:%M:%S");
-    eprintln!("  [{ts}] ❌ Explicit dispatch completion failed after 3 retries: {dispatch_id}");
+    eprintln!("  [{ts}] ❌ Explicit completion failed after 3 retries, falling back to direct DB for {dispatch_id}");
+    if let Some(root) = crate::cli::agentdesk_runtime_root() {
+        let db_path = root.join("data/agentdesk.sqlite");
+        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            let _ = conn.execute(
+                "UPDATE task_dispatches SET status = 'completed', result = '{\"completion_source\":\"turn_bridge_db_fallback\"}', updated_at = datetime('now') WHERE id = ?1 AND status = 'pending'",
+                [dispatch_id],
+            );
+        }
+    }
 }
 
 pub(super) struct TurnBridgeContext {
@@ -715,6 +735,9 @@ pub(super) fn spawn_turn_bridge(
                                 || combined.contains("context window")
                                 || combined.contains("token limit")
                             {
+                                // Prompt too long is not a terminal failure — user can retry
+                                // with a shorter message or /compact. Don't mark as transport error.
+                                transport_error = false;
                                 full_response = "⚠️ __prompt too long__".to_string();
                             } else if !stderr.is_empty() {
                                 full_response = format!(
