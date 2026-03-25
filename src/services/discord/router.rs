@@ -442,7 +442,15 @@ pub(super) async fn handle_event(
                         created_at: Instant::now(),
                     },
                 );
+                // Write-through: persist queue to disk (matches drain-mode contract)
+                if let Some(q) = d.intervention_queue.get(&channel_id) {
+                    save_channel_queue(&data.provider, channel_id, q);
+                }
                 drop(d);
+                // Checkpoint: track last processed message
+                data.shared
+                    .last_message_ids
+                    .insert(channel_id, new_message.id.get());
                 formatting::add_reaction_raw(
                     &ctx.http,
                     channel_id,

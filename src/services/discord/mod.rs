@@ -1487,6 +1487,15 @@ pub async fn run_bot(
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ✓ Reconcile complete — intake open");
 
+                    // Kick off again to drain messages queued during reconcile window
+                    kickoff_idle_queues(
+                        &ctx_for_kickoff,
+                        &shared_for_restart_reports,
+                        &token_for_kickoff,
+                        &provider_for_restore,
+                    )
+                    .await;
+
                     // NOW flush restart reports (recovery is done, safe to delete them)
                     flush_restart_reports(
                         &http_for_restart_reports,
