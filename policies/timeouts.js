@@ -131,7 +131,7 @@ var timeouts = {
         var sessions = agentdesk.db.query(
           "SELECT td.created_at as first_work, MAX(s.last_heartbeat) as last_seen " +
           "FROM task_dispatches td " +
-          "JOIN sessions s ON s.active_dispatch_id = td.id " +
+          "JOIN sessions s ON s.active_dispatch_id = td.id AND s.status = 'working' " +
           "WHERE td.id = ?",
           [di.id]
         );
@@ -143,7 +143,13 @@ var timeouts = {
         }
         if (reasons.length > 0) {
           agentdesk.kanban.setStatus(card.id, "pending_decision");
+          agentdesk.db.execute(
+            "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
+            [card.id]
+          );
           agentdesk.log.warn("[reconcile] Card " + card.id + " → pending_decision: " + reasons.join("; "));
+          // PMD notification (deferred — sendDiscordNotification is disabled)
+          agentdesk.log.info("[reconcile] PMD notification deferred: " + card.id + " — " + reasons.join("; "));
           continue;
         }
       }
