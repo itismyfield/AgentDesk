@@ -89,6 +89,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN active_thread_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN channel_thread_map TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN suggestion_pending_at TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN review_entered_at TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN awaiting_dod_at TEXT;");
 
     // Unique constraint: one kanban card per GitHub issue per repo.
     // Deduplicate existing rows first so CREATE UNIQUE INDEX succeeds.

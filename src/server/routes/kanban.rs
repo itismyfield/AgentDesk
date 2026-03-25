@@ -1471,6 +1471,30 @@ pub async fn pm_decision(
 
     let message = match body.decision.as_str() {
         "resume" => {
+            // Guard: resume requires a live dispatch + working session.
+            // Without one the card would be stranded in in_progress with nothing driving it.
+            let has_live = {
+                if let Ok(conn) = state.db.lock() {
+                    let count: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM task_dispatches td \
+                             JOIN sessions s ON s.active_dispatch_id = td.id AND s.status IN ('working', 'idle') \
+                             WHERE td.kanban_card_id = ?1 AND td.status IN ('pending', 'dispatched')",
+                            [&body.card_id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(0);
+                    count > 0
+                } else {
+                    false
+                }
+            };
+            if !has_live {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "cannot resume: no live dispatch/session for this card. Use 'rework' or 'requeue' instead."})),
+                );
+            }
             let _ = crate::kanban::transition_status_with_opts(
                 &state.db,
                 &state.engine,

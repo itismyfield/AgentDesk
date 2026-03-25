@@ -535,7 +535,7 @@ pub async fn submit_review_decision(
                 .ok();
             }
             conn.execute(
-                "UPDATE kanban_cards SET review_status = 'reviewing', updated_at = datetime('now') WHERE id = ?1",
+                "UPDATE kanban_cards SET review_status = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
                 [&body.card_id],
             ).ok();
             drop(conn);

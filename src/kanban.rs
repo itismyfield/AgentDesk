@@ -202,8 +202,9 @@ pub fn transition_status_with_opts(
     let extra = match new_status {
         "in_progress" => ", started_at = COALESCE(started_at, datetime('now'))",
         "requested" => ", requested_at = datetime('now')",
+        "review" => ", review_entered_at = datetime('now')",
         "done" => {
-            ", completed_at = datetime('now'), review_status = NULL, suggestion_pending_at = NULL"
+            ", completed_at = datetime('now'), review_status = NULL, suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL"
         }
         _ => "",
     };
