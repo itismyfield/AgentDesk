@@ -74,7 +74,7 @@ var timeouts = {
       // Instead, call the same logic that onDispatchCompleted would:
       // 1. Read dispatch info
       var dispInfo = agentdesk.db.query(
-        "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, status, result FROM task_dispatches WHERE id = ?",
+        "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, status, result, context FROM task_dispatches WHERE id = ?",
         [dispatchId]
       );
       if (dispInfo.length === 0) continue;
@@ -101,12 +101,19 @@ var timeouts = {
       // Implementation: run PM gate same as kanban-rules.js onDispatchCompleted
       var xpMap = { "low": 5, "medium": 10, "high": 18, "urgent": 30 };
       var xp = xpMap[card.priority] || 10;
+      xp += Math.min(di.chain_depth || 0, 3) * 2;
       if (di.to_agent_id) {
         agentdesk.db.execute("UPDATE agents SET xp = xp + ? WHERE id = ?", [xp, di.to_agent_id]);
       }
+      // Check skip_gate from dispatch context
+      var dispatchContext = {};
+      try { dispatchContext = JSON.parse(di.context || "{}"); } catch(e) {}
       var pmGateEnabled = agentdesk.config.get("pm_decision_gate_enabled");
-      if (pmGateEnabled !== false && pmGateEnabled !== "false") {
+      if (dispatchContext.skip_gate) {
+        agentdesk.log.info("[reconcile] Skipped PM gate for card " + card.id + " (skip_gate flag)");
+      } else if (pmGateEnabled !== false && pmGateEnabled !== "false") {
         var reasons = [];
+        // Check 1: DoD completion
         if (card.deferred_dod_json) {
           try {
             var dod = JSON.parse(card.deferred_dod_json);
@@ -118,6 +125,21 @@ var timeouts = {
               if (checked < dod.length) reasons.push("DoD 미완료: " + checked + "/" + dod.length);
             }
           } catch (e) {}
+        }
+        // Check 2: Minimum work duration (2 min)
+        var MIN_WORK_SEC = 120;
+        var sessions = agentdesk.db.query(
+          "SELECT td.created_at as first_work, MAX(s.last_heartbeat) as last_seen " +
+          "FROM task_dispatches td " +
+          "JOIN sessions s ON s.active_dispatch_id = td.id " +
+          "WHERE td.id = ?",
+          [di.id]
+        );
+        if (sessions.length > 0 && sessions[0].first_work && sessions[0].last_seen) {
+          var durationSec = (new Date(sessions[0].last_seen) - new Date(sessions[0].first_work)) / 1000;
+          if (durationSec < MIN_WORK_SEC) {
+            reasons.push("작업 시간 부족: " + Math.round(durationSec) + "초 (최소 " + MIN_WORK_SEC + "초)");
+          }
         }
         if (reasons.length > 0) {
           agentdesk.kanban.setStatus(card.id, "pending_decision");
