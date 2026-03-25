@@ -306,6 +306,9 @@ pub(super) struct SharedData {
     /// Set when a `restart_pending` marker is detected. While true, the router
     /// queues new messages instead of starting new turns (drain mode).
     pub(super) restart_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// Set to true after startup reconciliation + recovery is complete (#122).
+    /// Until true, the router queues all incoming messages.
+    pub(super) reconcile_done: Arc<std::sync::atomic::AtomicBool>,
     /// Process-global active turn counter shared across all providers.
     /// Deferred restart checks this instead of provider-local cancel_tokens.len().
     pub(super) global_active: Arc<std::sync::atomic::AtomicUsize>,
@@ -1228,6 +1231,7 @@ pub async fn run_bot(
         finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         current_generation: runtime_store::load_generation(),
         restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         global_active,
         global_finalizing,
         shutdown_remaining,
@@ -1475,6 +1479,13 @@ pub async fn run_bot(
                         &provider_for_restore,
                     )
                     .await;
+
+                    // #122: Reconcile phase complete — open intake
+                    shared_for_restart_reports
+                        .reconcile_done
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ✓ Reconcile complete — intake open");
 
                     // NOW flush restart reports (recovery is done, safe to delete them)
                     flush_restart_reports(

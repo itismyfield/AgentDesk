@@ -424,6 +424,35 @@ pub(super) async fn handle_event(
                 }
             }
 
+            // Reconcile gate (#122): until startup recovery is complete, queue messages.
+            if !data
+                .shared
+                .reconcile_done
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                let mut d = data.shared.core.lock().await;
+                let queue = d.intervention_queue.entry(channel_id).or_default();
+                enqueue_intervention(
+                    queue,
+                    Intervention {
+                        author_id: user_id,
+                        message_id: new_message.id,
+                        text: text.to_string(),
+                        mode: InterventionMode::Soft,
+                        created_at: Instant::now(),
+                    },
+                );
+                drop(d);
+                formatting::add_reaction_raw(
+                    &ctx.http,
+                    channel_id,
+                    new_message.id,
+                    '🔄',
+                )
+                .await;
+                return Ok(());
+            }
+
             // Drain mode: when restart is pending, queue new messages instead of
             // starting new turns. This ensures only existing turns drain to completion.
             if data
