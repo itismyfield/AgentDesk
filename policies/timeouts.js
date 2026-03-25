@@ -482,10 +482,22 @@ var timeouts = {
         if (killResult.ok) {
           agentdesk.log.info("[deadlock] Killed tmux session: " + sess.session_key);
         } else {
-          // kill 실패 시 원래 worker가 아직 살아있을 수 있으므로
-          // disconnect + re-dispatch를 건너뛴다
-          agentdesk.log.warn("[deadlock] tmux kill failed, skipping re-dispatch (worker may still be alive): " + killResult.error);
-          continue;
+          // kill 실패 — tmux 세션이 이미 죽어있는지 확인
+          var tmuxName = sess.session_key.split(":").pop() || sess.session_key;
+          var tmuxExists = false;
+          try {
+            var checkResult = agentdesk.exec("tmux", JSON.stringify(["has-session", "-t", tmuxName]));
+            tmuxExists = (checkResult && checkResult.indexOf("error") === -1);
+          } catch(e) {
+            tmuxExists = false;
+          }
+          if (tmuxExists) {
+            // tmux 세션이 살아있으면 worker가 아직 동작 중 — 건너뜀
+            agentdesk.log.warn("[deadlock] tmux kill failed but session alive, skipping re-dispatch: " + killResult.error);
+            continue;
+          }
+          // tmux 세션이 없으면 고아 상태 — disconnected 전환 + 재디스패치 진행
+          agentdesk.log.warn("[deadlock] tmux session gone (orphan), proceeding with cleanup: " + tmuxName);
         }
 
         // 2) 세션 상태 disconnected (last_heartbeat는 원본 유지 — 인위적 덮어쓰기 방지)
