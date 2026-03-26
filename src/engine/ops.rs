@@ -20,6 +20,18 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
     // Set the global first so JS wrapper code can reference it
     globals.set("agentdesk", ad)?;
 
+    // ── agentdesk.__pendingIntents — intent accumulator for deferred mutations (#121)
+    ctx.eval::<(), _>(r#"agentdesk.__pendingIntents = [];"#)?;
+
+    // ── agentdesk.__generateId — UUID v4 generation from Rust
+    let gen_id = Function::new(ctx.clone(), || -> String {
+        uuid::Uuid::new_v4().to_string()
+    })?;
+    {
+        let ad: Object<'_> = ctx.globals().get("agentdesk")?;
+        ad.set("__generateId", gen_id)?;
+    }
+
     // ── agentdesk.db ─────────────────────────────────────────────
     register_db_ops(ctx, db.clone())?;
 
@@ -42,10 +54,14 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
     register_kv_ops(ctx, db.clone())?;
 
     // ── agentdesk.message ────────────────────────────────────────
+    let db_for_pipeline = db.clone();
     register_message_ops(ctx, db)?;
 
     // ── agentdesk.exec ──────────────────────────────────────────
     register_exec_ops(ctx)?;
+
+    // ── agentdesk.pipeline ────────────────────────────────────────
+    register_pipeline_ops(ctx, db_for_pipeline)?;
 
     Ok(())
 }
@@ -98,6 +114,7 @@ fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 if (/UPDATE\s+kanban_cards\b/i.test(sql) && /(?<![_a-z])status\s*=/i.test(sql)) {
                     throw new Error("Direct kanban_cards status UPDATE is blocked. Use agentdesk.kanban.setStatus(cardId, newStatus) instead.");
                 }
+                // Direct write — intent model (#121) deferred until drain is wired up
                 var json = rawExec(sql, JSON.stringify(params || []));
                 return JSON.parse(json);
             };
@@ -373,17 +390,28 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
     ad.set("dispatch", dispatch_obj)?;
 
-    // JS wrapper
+    // JS wrapper — #121: push CreateDispatch intent with pre-assigned ID
     let _: rquickjs::Value = ctx.eval(r#"
         (function() {
             var raw = agentdesk.dispatch.__create_raw;
             agentdesk.dispatch.create = function(cardId, agentId, dispatchType, title) {
-                var result = JSON.parse(raw(cardId, agentId, dispatchType || "implementation", title || "Dispatch"));
+                var dt = dispatchType || "implementation";
+                var t = title || "Dispatch";
+                // Eager validation: call the raw bridge to check terminal guard etc.
+                // If validation fails, it returns an error that we throw immediately.
+                var result = JSON.parse(raw(cardId, agentId, dt, t));
                 if (result.error) throw new Error(result.error);
-                // Discord notification is handled by the Rust handler after fire_hook returns
-                // (async via send_dispatch_to_discord). Do NOT call ureq from QuickJS — it
-                // deadlocks the tokio runtime because the unified axum API shares the same runtime.
-                return result.dispatch_id;
+                // #121: Push CreateDispatch intent — execution deferred to Rust
+                var dispatchId = result.dispatch_id;
+                agentdesk.__pendingIntents.push({
+                    type: "create_dispatch",
+                    dispatch_id: dispatchId,
+                    card_id: cardId,
+                    agent_id: agentId,
+                    dispatch_type: dt,
+                    title: t
+                });
+                return dispatchId;
             };
         })();
     "#)?;
@@ -391,58 +419,57 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     Ok(())
 }
 
+/// #121: Validation-only dispatch check. Returns a pre-assigned ID if valid,
+/// or an error string. Does NOT write to DB — actual creation is deferred
+/// to intent execution via `intent::execute_create_dispatch`.
 fn dispatch_create_raw(
     db: &Db,
     card_id: &str,
     agent_id: &str,
     dispatch_type: &str,
-    title: &str,
+    _title: &str,
 ) -> String {
-    // Delegate to the single authoritative dispatch creation path (no hooks —
-    // hooks are fired by the Rust caller after fire_hook returns).
-    let context = serde_json::json!({});
-    match crate::dispatch::create_dispatch_core(
-        db,
-        card_id,
-        agent_id,
-        dispatch_type,
-        title,
-        &context,
-    ) {
-        Ok((dispatch_id, _old_status)) => {
-            // #117: Update card_review_state.pending_dispatch_id for review-decision
-            if dispatch_type == "review-decision" {
-                if let Ok(conn) = db.separate_conn() {
-                    conn.execute(
-                        "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at) \
-                         VALUES (?1, 'suggestion_pending', ?2, datetime('now')) \
-                         ON CONFLICT(card_id) DO UPDATE SET pending_dispatch_id = ?2, updated_at = datetime('now')",
-                        rusqlite::params![card_id, dispatch_id],
-                    ).ok();
+    // Validate: card exists and is not in a terminal state
+    let conn = match db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"DB: {e}"}}"#),
+    };
+    let card_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok();
+    match card_status {
+        None => return r#"{"error":"card not found"}"#.to_string(),
+        Some(ref s) => {
+            crate::pipeline::ensure_loaded();
+            if let Some(pipeline) = crate::pipeline::try_get() {
+                if pipeline.is_terminal(s) && dispatch_type != "review-decision" {
+                    return format!(
+                        r#"{{"error":"cannot dispatch to terminal card (status={s})"}}"#
+                    );
                 }
             }
-            // Get issue URL for Discord message
-            let issue_url: Option<String> = db.separate_conn().ok().and_then(|conn| {
-                conn.query_row(
-                    "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
-                    [card_id],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten()
-            });
-            format!(
-                r#"{{"dispatch_id":"{}","card_id":"{}","agent_id":"{}","issue_url":{}}}"#,
-                dispatch_id,
-                card_id,
-                agent_id,
-                issue_url
-                    .map(|u| format!("\"{}\"", u))
-                    .unwrap_or_else(|| "null".to_string()),
-            )
         }
-        Err(e) => format!(r#"{{"error":"{}"}}"#, e),
     }
+    // Validate: agent exists
+    let agent_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM agents WHERE id = ?1",
+            [agent_id],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !agent_exists {
+        return format!(r#"{{"error":"agent not found: {agent_id}"}}"#);
+    }
+    // Generate pre-assigned dispatch ID (actual DB write deferred to intent executor)
+    let dispatch_id = uuid::Uuid::new_v4().to_string();
+    format!(
+        r#"{{"dispatch_id":"{dispatch_id}","card_id":"{card_id}","agent_id":"{agent_id}"}}"#
+    )
 }
 
 #[cfg(test)]
@@ -727,10 +754,18 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
             }
 
             // Pipeline-driven guard and clock fields (#106 P5)
+            // Resolve effective pipeline for this card (repo + agent overrides)
             crate::pipeline::ensure_loaded();
-            let Some(pipeline) = crate::pipeline::try_get() else {
-                return r#"{"error":"pipeline not loaded"}"#.to_string();
-            };
+            let repo_id: Option<String> = conn
+                .query_row("SELECT repo_id FROM kanban_cards WHERE id = ?1", [&card_id], |r| r.get(0))
+                .ok()
+                .flatten();
+            let agent_id: Option<String> = conn
+                .query_row("SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1", [&card_id], |r| r.get(0))
+                .ok()
+                .flatten();
+            let effective = crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref());
+            let pipeline = &effective;
 
             // Guard: prevent reverting terminal cards
             if pipeline.is_terminal(&old_status) && old_status != new_status {
@@ -1146,6 +1181,174 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     )?;
 
     ad.set("session", session_obj)?;
+
+    Ok(())
+}
+
+// ── Pipeline ops ─────────────────────────────────────────────────
+//
+// Exposes pipeline config to JS policies so they can look up transitions,
+// terminal states, etc. instead of hardcoding state names.
+
+fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+    let ad: Object<'js> = ctx.globals().get("agentdesk")?;
+    let pipeline_obj = Object::new(ctx.clone())?;
+
+    // __getConfigRaw(): returns the full default pipeline config as JSON
+    pipeline_obj.set(
+        "__getConfigRaw",
+        Function::new(ctx.clone(), || -> String {
+            crate::pipeline::ensure_loaded();
+            match crate::pipeline::try_get() {
+                Some(p) => serde_json::to_string(&p.to_json()).unwrap_or_else(|_| "null".to_string()),
+                None => "null".to_string(),
+            }
+        })?,
+    )?;
+
+    // __resolveForCardRaw(cardId): returns the effective pipeline for a card
+    let db_resolve = db;
+    pipeline_obj.set(
+        "__resolveForCardRaw",
+        Function::new(ctx.clone(), move |card_id: String| -> String {
+            crate::pipeline::ensure_loaded();
+            let conn = match db_resolve.separate_conn() {
+                Ok(c) => c,
+                Err(_) => {
+                    return crate::pipeline::try_get()
+                        .map(|p| serde_json::to_string(&p.to_json()).unwrap_or_else(|_| "null".to_string()))
+                        .unwrap_or_else(|| "null".to_string());
+                }
+            };
+            let repo_id: Option<String> = conn
+                .query_row("SELECT repo_id FROM kanban_cards WHERE id = ?1", [&card_id], |r| r.get(0))
+                .ok()
+                .flatten();
+            let agent_id: Option<String> = conn
+                .query_row("SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1", [&card_id], |r| r.get(0))
+                .ok()
+                .flatten();
+            let effective = crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref());
+            serde_json::to_string(&effective.to_json()).unwrap_or_else(|_| "null".to_string())
+        })?,
+    )?;
+
+    ad.set("pipeline", pipeline_obj)?;
+
+    // JS wrapper with convenience methods
+    ctx.eval::<(), _>(r#"
+        (function() {
+            var rawConfig = agentdesk.pipeline.__getConfigRaw;
+            var rawResolve = agentdesk.pipeline.__resolveForCardRaw;
+
+            agentdesk.pipeline.getConfig = function() {
+                return JSON.parse(rawConfig());
+            };
+
+            agentdesk.pipeline.resolveForCard = function(cardId) {
+                return JSON.parse(rawResolve(cardId));
+            };
+
+            agentdesk.pipeline.isTerminal = function(state, config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.states) return state === "done";
+                for (var i = 0; i < cfg.states.length; i++) {
+                    if (cfg.states[i].id === state && cfg.states[i].terminal) return true;
+                }
+                return false;
+            };
+
+            agentdesk.pipeline.terminalState = function(config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.states) return "done";
+                for (var i = 0; i < cfg.states.length; i++) {
+                    if (cfg.states[i].terminal) return cfg.states[i].id;
+                }
+                return "done";
+            };
+
+            agentdesk.pipeline.initialState = function(config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.states) return "backlog";
+                for (var i = 0; i < cfg.states.length; i++) {
+                    if (!cfg.states[i].terminal) return cfg.states[i].id;
+                }
+                return "backlog";
+            };
+
+            // kickoffState: the first gated-inbound state (dispatch entry, e.g. "requested").
+            agentdesk.pipeline.kickoffState = function(config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.states || !cfg.transitions) return "requested";
+                for (var si = 0; si < cfg.states.length; si++) {
+                    var s = cfg.states[si];
+                    if (s.terminal) continue;
+                    var hasGatedOut = false, allInboundFree = true;
+                    for (var ti = 0; ti < cfg.transitions.length; ti++) {
+                        var t = cfg.transitions[ti];
+                        if (t.from === s.id && t.type === "gated") hasGatedOut = true;
+                        if (t.to === s.id && t.type !== "free") allInboundFree = false;
+                    }
+                    if (hasGatedOut && allInboundFree) {
+                        for (var ti2 = 0; ti2 < cfg.transitions.length; ti2++) {
+                            var t2 = cfg.transitions[ti2];
+                            if (t2.from === s.id && t2.type === "gated") return t2.to;
+                        }
+                    }
+                }
+                return "requested";
+            };
+
+            agentdesk.pipeline.findTransition = function(from, to, config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.transitions) return null;
+                for (var i = 0; i < cfg.transitions.length; i++) {
+                    var t = cfg.transitions[i];
+                    if (t.from === from && t.to === to) return t;
+                }
+                return null;
+            };
+
+            agentdesk.pipeline.nextGatedTarget = function(from, config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.transitions) return null;
+                for (var i = 0; i < cfg.transitions.length; i++) {
+                    var t = cfg.transitions[i];
+                    if (t.from === from && t.type === "gated") return t.to;
+                }
+                return null;
+            };
+
+            agentdesk.pipeline.nextGatedTargetWithGate = function(from, gateName, config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.transitions) return null;
+                for (var i = 0; i < cfg.transitions.length; i++) {
+                    var t = cfg.transitions[i];
+                    if (t.from === from && t.type === "gated" && t.gates && t.gates.indexOf(gateName) >= 0) {
+                        return t.to;
+                    }
+                }
+                return null;
+            };
+
+            agentdesk.pipeline.forceOnlyTargets = function(from, config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.transitions) return [];
+                var targets = [];
+                for (var i = 0; i < cfg.transitions.length; i++) {
+                    var t = cfg.transitions[i];
+                    if (t.from === from && t.type === "force_only") targets.push(t.to);
+                }
+                return targets;
+            };
+
+            agentdesk.pipeline.getTimeout = function(state, config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.timeouts) return null;
+                return cfg.timeouts[state] || null;
+            };
+        })();
+    "#)?;
 
     Ok(())
 }

@@ -901,8 +901,6 @@ var timeouts = {
   },
 
   _section_L: function() {
-    // ─── [L] 장시간 턴 감지 — agentdesk.inflight.list() 기반 ────
-    // Tiered alerts: 15m, 30m, 60m, 120m. After 120m, no more alerts.
     // Prevents alarm fatigue while still notifying at key thresholds.
     var ALERT_THRESHOLDS = [15, 30, 60, 120]; // minutes
     try {
