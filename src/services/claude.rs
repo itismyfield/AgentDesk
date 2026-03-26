@@ -1995,7 +1995,10 @@ pub(crate) fn read_output_file_until_result(
     ));
 
     // Wait for output file to exist (wrapper might not have created it yet)
+    // Uses exponential backoff: 10ms → 500ms
     let wait_start = std::time::Instant::now();
+    let mut wait_interval = Duration::from_millis(10);
+    let max_wait_interval = Duration::from_millis(500);
     loop {
         if std::fs::metadata(output_path).is_ok() {
             break;
@@ -2010,7 +2013,11 @@ pub(crate) fn read_output_file_until_result(
                 });
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(wait_interval);
+        wait_interval = std::cmp::min(
+            Duration::from_millis((wait_interval.as_millis() as f64 * 1.5) as u64),
+            max_wait_interval,
+        );
     }
 
     let mut file = std::fs::File::open(output_path)
@@ -2040,8 +2047,8 @@ pub(crate) fn read_output_file_until_result(
             Ok(0) => {
                 // No new data — check if session is still alive
                 no_data_count += 1;
-                if no_data_count % 50 == 0 {
-                    // Every ~5 seconds
+                if no_data_count % 25 == 0 {
+                    // Approximately every 3-5 seconds (varies with backoff)
                     if !(probe.is_alive)() {
                         debug_log("Session ended while reading output");
                         // Check for unread data before breaking
@@ -2090,7 +2097,15 @@ pub(crate) fn read_output_file_until_result(
                         consecutive_ready_count = 0;
                     }
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                // Adaptive backoff: start fast (10ms), slow down to 200ms when idle
+                let read_interval = if no_data_count < 5 {
+                    Duration::from_millis(10)
+                } else if no_data_count < 20 {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_millis(200)
+                };
+                std::thread::sleep(read_interval);
             }
             Ok(n) => {
                 no_data_count = 0;

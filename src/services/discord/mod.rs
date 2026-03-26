@@ -84,7 +84,7 @@ const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 ho
 const SESSION_MAX_IDLE: Duration = Duration::from_secs(24 * 60 * 60); // 1 day
 const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minute
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
-const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Minimum interval between Discord placeholder edits for progress status.
 /// Configurable via AGENTDESK_STATUS_INTERVAL_SECS env var. Default: 5 seconds.
@@ -1369,14 +1369,14 @@ pub async fn run_bot(
                     }
                 });
 
-                // Background: hot-reload skills on file changes (10s polling)
+                // Background: hot-reload skills on file changes (30s polling)
                 // Scans home-level AND all active project-level skill directories.
                 let shared_for_skills = shared_for_tmux.clone();
                 let provider_for_skills = provider.clone();
                 tokio::spawn(async move {
                     let mut last_fingerprint: (usize, u64) = (0, 0); // (file_count, max_mtime_epoch)
                     loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                         // Collect unique project paths from active sessions
                         let project_paths: Vec<String> = {
                             let data = shared_for_skills.core.lock().await;

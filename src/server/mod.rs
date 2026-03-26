@@ -715,10 +715,13 @@ async fn message_outbox_loop(db: Db, port: u16) {
 
     // Wait for server to be ready
     tokio::time::sleep(Duration::from_secs(3)).await;
-    tracing::info!("[outbox] Message outbox worker started (polling every 2s)");
+    tracing::info!("[outbox] Message outbox worker started (adaptive backoff 500ms-5s)");
+
+    let mut poll_interval = Duration::from_millis(500);
+    let max_interval = Duration::from_secs(5);
 
     loop {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(poll_interval).await;
 
         // Fetch pending messages
         let pending: Vec<(i64, String, String, String, String)> = {
@@ -746,6 +749,14 @@ async fn message_outbox_loop(db: Db, port: u16) {
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
             .unwrap_or_default()
         };
+
+        if pending.is_empty() {
+            // No work: increase interval (up to max)
+            poll_interval = (poll_interval.mul_f64(1.5)).min(max_interval);
+            continue;
+        }
+        // Work found: reset to fast polling
+        poll_interval = Duration::from_millis(500);
 
         for (id, target, content, bot, source) in pending {
             let body = serde_json::json!({
