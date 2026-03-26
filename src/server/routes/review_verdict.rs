@@ -6,6 +6,79 @@ use super::AppState;
 use crate::engine::hooks::Hook;
 use crate::services::provider::ProviderKind;
 
+/// #119: Convenience wrapper — queries review state and records a tuning outcome.
+/// Called from each decision branch (accept, dispute, dismiss) to avoid
+/// relying on code after the match block that early-returning branches skip.
+fn record_decision_tuning(
+    db: &crate::db::Db,
+    card_id: &str,
+    decision: &str,
+    dispatch_id: Option<&str>,
+) {
+    let (review_round, last_verdict, finding_cats) = db
+        .lock()
+        .ok()
+        .map(|conn| {
+            let round: Option<i64> = conn
+                .query_row(
+                    "SELECT review_round FROM card_review_state WHERE card_id = ?1",
+                    [card_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            let verdict: Option<String> = conn
+                .query_row(
+                    "SELECT last_verdict FROM card_review_state WHERE card_id = ?1",
+                    [card_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+            let cats: Option<String> = conn
+                .query_row(
+                    "SELECT td.result FROM task_dispatches td \
+                     WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' \
+                     AND td.status = 'completed' ORDER BY td.rowid DESC LIMIT 1",
+                    [card_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+                .and_then(|r| {
+                    serde_json::from_str::<serde_json::Value>(&r)
+                        .ok()
+                        .and_then(|v| {
+                            v["items"].as_array().map(|items| {
+                                let cats: Vec<String> = items
+                                    .iter()
+                                    .filter_map(|it| it["category"].as_str().map(|s| s.to_string()))
+                                    .collect();
+                                serde_json::to_string(&cats).unwrap_or_default()
+                            })
+                        })
+                });
+            (round, verdict, cats)
+        })
+        .unwrap_or((None, None, None));
+
+    let outcome = match decision {
+        "accept" => "true_positive",
+        "dismiss" => "false_positive",
+        "dispute" => "disputed",
+        _ => "unknown",
+    };
+    record_tuning_outcome(
+        db,
+        card_id,
+        dispatch_id,
+        review_round,
+        last_verdict.as_deref().unwrap_or("unknown"),
+        Some(decision),
+        outcome,
+        finding_cats.as_deref(),
+    );
+}
+
 /// #119: Record a review tuning outcome for FP/FN aggregation.
 fn record_tuning_outcome(
     db: &crate::db::Db,
@@ -385,10 +458,9 @@ pub async fn submit_verdict(
         });
     }
 
-    // #119: Do NOT record true_negative at pass-verdict time — the pass is unverified
-    // until the card reaches done without post-pass bugs. TN is recorded by the
-    // OnCardTerminal hook path (transition_status → done) after a pass verdict instead.
-    // Recording here would inflate TN counts with unverified assumptions.
+    // #119: TN is recorded when a pass-reviewed card reaches done (see kanban.rs
+    // record_true_negative_if_pass). FN (false_negative = pass but post-pass bug found)
+    // requires an external bug-report signal that does not yet exist in the system.
 
     if body.overall == "pass" || body.overall == "approved" {
         // When review passes, stamp a marker so promote-release.sh can verify
@@ -576,6 +648,10 @@ pub async fn submit_review_decision(
                     // #117: Update canonical review state before returning
                     update_card_review_state(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
 
+                    // #119: Record tuning outcome before returning
+                    record_decision_tuning(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
+                    spawn_aggregate_if_needed(&state.db);
+
                     return (
                         StatusCode::OK,
                         Json(json!({
@@ -648,6 +724,10 @@ pub async fn submit_review_decision(
             // #117: Update canonical review state before returning
             update_card_review_state(&state.db, &body.card_id, "dispute", pending_rd_id.as_deref());
 
+            // #119: Record tuning outcome before returning
+            record_decision_tuning(&state.db, &body.card_id, "dispute", pending_rd_id.as_deref());
+            spawn_aggregate_if_needed(&state.db);
+
             return (
                 StatusCode::OK,
                 Json(json!({
@@ -693,77 +773,8 @@ pub async fn submit_review_decision(
     // #117: Update canonical review state for all decision paths
     update_card_review_state(&state.db, &body.card_id, &body.decision, pending_rd_id.as_deref());
 
-    // #119: Record tuning outcome for all decision types (accept, dismiss, dispute)
-    {
-        let (review_round, last_verdict, finding_cats) = state
-            .db
-            .lock()
-            .ok()
-            .map(|conn| {
-                let round: Option<i64> = conn
-                    .query_row(
-                        "SELECT review_round FROM card_review_state WHERE card_id = ?1",
-                        [&body.card_id],
-                        |row| row.get(0),
-                    )
-                    .ok();
-                let verdict: Option<String> = conn
-                    .query_row(
-                        "SELECT last_verdict FROM card_review_state WHERE card_id = ?1",
-                        [&body.card_id],
-                        |row| row.get(0),
-                    )
-                    .ok()
-                    .flatten();
-                // Extract finding categories from the last review dispatch result
-                let cats: Option<String> = conn
-                    .query_row(
-                        "SELECT td.result FROM task_dispatches td \
-                         WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' \
-                         AND td.status = 'completed' ORDER BY td.rowid DESC LIMIT 1",
-                        [&body.card_id],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
-                    .ok()
-                    .flatten()
-                    .and_then(|r| {
-                        serde_json::from_str::<serde_json::Value>(&r)
-                            .ok()
-                            .and_then(|v| {
-                                v["items"].as_array().map(|items| {
-                                    let cats: Vec<String> = items
-                                        .iter()
-                                        .filter_map(|it| {
-                                            it["category"].as_str().map(|s| s.to_string())
-                                        })
-                                        .collect();
-                                    serde_json::to_string(&cats).unwrap_or_default()
-                                })
-                            })
-                    });
-                (round, verdict, cats)
-            })
-            .unwrap_or((None, None, None));
-
-        let outcome = match body.decision.as_str() {
-            "accept" => "true_positive",  // review correctly found issue
-            "dismiss" => "false_positive", // review incorrectly flagged
-            "dispute" => "disputed",       // agent disagrees, needs re-review
-            _ => "unknown",
-        };
-        record_tuning_outcome(
-            &state.db,
-            &body.card_id,
-            pending_rd_id.as_deref(),
-            review_round,
-            last_verdict.as_deref().unwrap_or("unknown"),
-            Some(&body.decision),
-            outcome,
-            finding_cats.as_deref(),
-        );
-    }
-
-    // #119: Auto-trigger aggregation after each decision to keep guidance fresh
+    // #119: Record tuning outcome (dismiss falls through here; accept/dispute call helper before returning)
+    record_decision_tuning(&state.db, &body.card_id, &body.decision, pending_rd_id.as_deref());
     spawn_aggregate_if_needed(&state.db);
 
     (

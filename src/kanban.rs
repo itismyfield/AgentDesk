@@ -318,6 +318,10 @@ pub fn transition_status_with_opts(
     );
 
     if new_status == "done" {
+        // #119: Record true_negative for cards that passed review and reached done
+        // without post-pass bugs (i.e., the review correctly found no issues).
+        record_true_negative_if_pass(db, card_id);
+
         let _ = engine.try_fire_hook(
             Hook::OnCardTerminal,
             json!({
@@ -399,6 +403,9 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     );
 
     if to == "done" {
+        // #119: Record true_negative for cards that passed review and reached done
+        record_true_negative_if_pass(db, card_id);
+
         let _ = engine.try_fire_hook(
             Hook::OnCardTerminal,
             json!({
@@ -692,6 +699,46 @@ fn log_audit(
         rusqlite::params![card_id, format!("{from}->{to} ({result})"), source],
     )
     .ok();
+}
+
+/// #119: When a card reaches done after a review pass verdict, record a true_negative
+/// tuning outcome. This confirms the review was correct in not finding issues.
+fn record_true_negative_if_pass(db: &Db, card_id: &str) {
+    if let Ok(conn) = db.lock() {
+        // Check if the card's last review verdict was "pass" or "approved"
+        let last_verdict: Option<String> = conn
+            .query_row(
+                "SELECT last_verdict FROM card_review_state WHERE card_id = ?1",
+                [card_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        match last_verdict.as_deref() {
+            Some("pass") | Some("approved") => {
+                let review_round: Option<i64> = conn
+                    .query_row(
+                        "SELECT review_round FROM card_review_state WHERE card_id = ?1",
+                        [card_id],
+                        |row| row.get(0),
+                    )
+                    .ok();
+
+                conn.execute(
+                    "INSERT INTO review_tuning_outcomes \
+                     (card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories) \
+                     VALUES (?1, NULL, ?2, ?3, 'done', 'true_negative', NULL)",
+                    rusqlite::params![card_id, review_round, last_verdict.as_deref().unwrap_or("pass")],
+                )
+                .ok();
+                tracing::info!(
+                    "[review-tuning] #119 recorded true_negative: card={card_id} (pass → done)"
+                );
+            }
+            _ => {} // No review or non-pass verdict — nothing to record
+        }
+    }
 }
 
 #[cfg(test)]

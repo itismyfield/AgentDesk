@@ -94,10 +94,14 @@ pub(super) fn build_system_prompt(
                         .to_string(),
             });
 
-            // #119: Inject review tuning guidance if available
-            if let Some(guidance) = load_review_tuning_guidance() {
-                system_prompt_owned.push_str("\n\n[Review Tuning — 과거 리뷰 정확도 기반 가이던스]\n");
-                system_prompt_owned.push_str(&guidance);
+            // #119: Inject review tuning guidance only for review dispatches (not review-decision).
+            // Injecting into review-decision would bias the labeler's accept/dispute/dismiss judgment,
+            // contaminating the FP/TP dataset that the guidance itself is derived from.
+            if dispatch_type != Some("review-decision") {
+                if let Some(guidance) = load_review_tuning_guidance() {
+                    system_prompt_owned.push_str("\n\n[Review Tuning — 과거 리뷰 정확도 기반 가이던스]\n");
+                    system_prompt_owned.push_str(&guidance);
+                }
             }
         } else if let Some(shared_prompt) = load_shared_prompt() {
             // Full profile: inject complete shared agent prompt (AGENTS.md)
