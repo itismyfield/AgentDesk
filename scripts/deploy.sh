@@ -59,7 +59,7 @@ info "Installing binary..."
 mkdir -p "$BIN_DIR"
 cp "$PROJECT_DIR/target/release/agentdesk" "$BIN_DIR/agentdesk"
 chmod +x "$BIN_DIR/agentdesk"
-codesign -s - --identifier "com.itismyfield.agentdesk" --force "$BIN_DIR/agentdesk" 2>/dev/null || true
+codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$BIN_DIR/agentdesk" 2>/dev/null || true
 ok "Binary: $BIN_DIR/agentdesk (signed as com.itismyfield.agentdesk)"
 
 # Copy dashboard dist if it exists

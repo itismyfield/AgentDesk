@@ -162,7 +162,7 @@ fi
 
 # ── Code signing (macOS) ──────────────────────────────────────────────────────
 if [ "$OS" = "darwin" ]; then
-  codesign -s - --identifier "com.itismyfield.agentdesk" --force "$INSTALL_DIR/bin/agentdesk" 2>/dev/null || true
+  codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$INSTALL_DIR/bin/agentdesk" 2>/dev/null || true
 
   # Register with firewall
   FW=/usr/libexec/ApplicationFirewall/socketfilterfw

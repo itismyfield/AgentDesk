@@ -48,7 +48,7 @@ echo "▸ Copying binary from dev..."
 cp "$ADK_DEV/bin/agentdesk" "$ADK_REL/bin/agentdesk"
 chmod +x "$ADK_REL/bin/agentdesk"
 xattr -d com.apple.provenance "$ADK_REL/bin/agentdesk" 2>/dev/null || true
-codesign -f -s - "$ADK_REL/bin/agentdesk" 2>/dev/null || true
+codesign -f -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime "$ADK_REL/bin/agentdesk" 2>/dev/null || true
 
 # Copy dashboard from dev (with fallback to workspace source)
 # Stage into a temp dir first, then swap — never delete existing dist before new one is ready
