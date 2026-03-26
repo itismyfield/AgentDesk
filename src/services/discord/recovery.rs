@@ -13,6 +13,9 @@ fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Optio
     None
 }
 
+/// Check whether a **successful** result record exists after the given offset.
+/// Error results are not considered completion — they should not trigger the
+/// recovery completed-turn path (✅ reaction, idle dispatch, etc.).
 fn output_has_result_after_offset(output_path: &str, start_offset: u64) -> bool {
     let Ok(bytes) = std::fs::read(output_path) else {
         return false;
@@ -29,16 +32,18 @@ fn output_has_result_after_offset(output_path: &str, start_offset: u64) -> bool 
             if trimmed.is_empty() {
                 return false;
             }
-            serde_json::from_str::<serde_json::Value>(trimmed)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("type")
-                        .and_then(|kind| kind.as_str())
-                        .map(str::to_string)
-                })
-                .as_deref()
-                == Some("result")
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                return false;
+            };
+            let is_result = value
+                .get("type")
+                .and_then(|v| v.as_str())
+                == Some("result");
+            let is_error = value
+                .get("is_error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            is_result && !is_error
         })
 }
 
@@ -835,5 +840,42 @@ mod tests {
 
         let resp = extract_response_from_output_pub(file.path().to_str().unwrap(), offset);
         assert_eq!(resp, "새 턴");
+    }
+
+    // ========== output_has_result_after_offset: error result tests ==========
+
+    #[test]
+    fn error_result_not_treated_as_completion() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","subtype":"error","is_error":true,"errors":["crash"]}"#,
+        ]);
+        assert!(!output_has_result_after_offset(
+            file.path().to_str().unwrap(),
+            0
+        ));
+    }
+
+    #[test]
+    fn success_result_treated_as_completion() {
+        let file = write_jsonl(&[
+            r#"{"type":"result","subtype":"success","result":"done"}"#,
+        ]);
+        assert!(output_has_result_after_offset(
+            file.path().to_str().unwrap(),
+            0
+        ));
+    }
+
+    #[test]
+    fn error_result_before_success_still_completes() {
+        // Error followed by success — the success should be detected
+        let file = write_jsonl(&[
+            r#"{"type":"result","subtype":"error","is_error":true,"errors":["retry"]}"#,
+            r#"{"type":"result","subtype":"success","result":"ok"}"#,
+        ]);
+        assert!(output_has_result_after_offset(
+            file.path().to_str().unwrap(),
+            0
+        ));
     }
 }
