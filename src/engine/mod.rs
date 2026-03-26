@@ -165,15 +165,18 @@ impl PolicyEngine {
             for (id, hook_name, payload_str) in &rows {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!("  [{ts}] 🔄 fire_hook(deferred {hook_name}, id={id})");
-                if let Some(h) = Hook::from_str(hook_name) {
-                    let p: serde_json::Value =
-                        serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
-                    let _ = Self::fire_hook_with_guard(&inner, h, p);
+                let p: serde_json::Value =
+                    serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
+                let fire_result = if let Some(h) = Hook::from_str(hook_name) {
+                    Self::fire_hook_with_guard(&inner, h, p)
+                } else {
+                    Self::fire_dynamic_hook_with_guard(&inner, hook_name, p)
+                };
+                if let Err(e) = &fire_result {
+                    tracing::warn!("deferred hook {hook_name} (id={id}) failed: {e}");
                 }
-            }
-            // Delete processed
-            if let Ok(conn) = self.db.separate_conn() {
-                for (id, _, _) in &rows {
+                // Delete after attempt (success or fail) — deferred hooks are best-effort
+                if let Ok(conn) = self.db.separate_conn() {
                     let _ = conn.execute("DELETE FROM deferred_hooks WHERE id = ?1", [id]);
                 }
             }
