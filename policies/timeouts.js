@@ -427,7 +427,7 @@ var timeouts = {
       "JOIN kanban_cards kc ON td.kanban_card_id = kc.id " +
       "WHERE td.status = 'pending' " +
       "AND td.created_at < datetime('now', '-2 minutes') " +
-      "AND td.id NOT IN (SELECT value FROM kv_meta WHERE key LIKE 'dispatch_notified:%')"
+      "AND NOT EXISTS (SELECT 1 FROM kv_meta WHERE key = 'dispatch_notified:' || td.id)"
     );
     for (var un = 0; un < unnotifiedDispatches.length; un++) {
       var ud = unnotifiedDispatches[un];
