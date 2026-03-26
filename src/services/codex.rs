@@ -37,7 +37,7 @@ use crate::services::tmux_common::{tmux_exact_target, tmux_owner_path, write_tmu
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     let codex_bin = get_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
-    let args = base_exec_args(None, prompt);
+    let args = base_exec_args(None, prompt, None);
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let output = Command::new(codex_bin)
@@ -109,6 +109,7 @@ pub fn execute_command_streaming(
     tmux_session_name: Option<&str>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    model: Option<&str>,
 ) -> Result<(), String> {
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
 
@@ -127,6 +128,7 @@ pub fn execute_command_streaming(
                 return execute_streaming_remote_tmux(
                     profile,
                     &prompt,
+                    model,
                     working_dir,
                     sender,
                     cancel_token,
@@ -140,6 +142,7 @@ pub fn execute_command_streaming(
             profile,
             session_id,
             &prompt,
+            model,
             working_dir,
             sender,
             cancel_token,
@@ -151,6 +154,7 @@ pub fn execute_command_streaming(
         if claude::is_tmux_available() {
             return execute_streaming_local_tmux(
                 &prompt,
+                model,
                 working_dir,
                 sender,
                 cancel_token,
@@ -162,6 +166,7 @@ pub fn execute_command_streaming(
         // ProcessBackend fallback for Codex (no tmux or non-unix)
         return execute_streaming_local_process_codex(
             &prompt,
+            model,
             working_dir,
             sender,
             cancel_token,
@@ -172,6 +177,7 @@ pub fn execute_command_streaming(
     execute_streaming_direct(
         &prompt,
         session_id,
+        model,
         working_dir,
         sender,
         cancel_token,
@@ -216,6 +222,7 @@ Follow them over any generic assistant persona unless the user explicitly asks t
 fn execute_streaming_direct(
     prompt: &str,
     session_id: Option<&str>,
+    model: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -223,7 +230,7 @@ fn execute_streaming_direct(
     report_provider: Option<ProviderKind>,
 ) -> Result<(), String> {
     let codex_bin = get_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
-    let args = base_exec_args(session_id, prompt);
+    let args = base_exec_args(session_id, prompt, model);
 
     let mut command = Command::new(codex_bin);
     command
@@ -322,6 +329,7 @@ fn execute_streaming_remote_direct(
     _profile: &RemoteProfile,
     _session_id: Option<&str>,
     _prompt: &str,
+    _model: Option<&str>,
     _working_dir: &str,
     _sender: Sender<StreamMessage>,
     _cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -333,6 +341,7 @@ fn execute_streaming_remote_direct(
 fn execute_streaming_remote_tmux(
     _profile: &RemoteProfile,
     _prompt: &str,
+    _model: Option<&str>,
     _working_dir: &str,
     _sender: Sender<StreamMessage>,
     _cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -346,6 +355,7 @@ fn execute_streaming_remote_tmux(
 #[cfg(unix)]
 fn execute_streaming_local_tmux(
     prompt: &str,
+    model: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -473,7 +483,7 @@ fn execute_streaming_local_tmux(
         --input-fifo {input_fifo} \\\n  \
         --prompt-file {prompt} \\\n  \
         --cwd {wd} \\\n  \
-        --codex-bin {codex_bin}\n",
+        --codex-bin {codex_bin}{model_arg}\n",
         env = env_lines,
         exe = shell_escape(&exe.display().to_string()),
         output = shell_escape(&output_path),
@@ -481,6 +491,11 @@ fn execute_streaming_local_tmux(
         prompt = shell_escape(&prompt_path),
         wd = shell_escape(working_dir),
         codex_bin = shell_escape(codex_bin),
+        model_arg = model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" \\\n  --codex-model {}", shell_escape(value)))
+            .unwrap_or_default(),
     );
 
     std::fs::write(&script_path, &script_content)
@@ -622,6 +637,7 @@ fn send_followup_to_tmux(
 /// Execute Codex via ProcessBackend (direct child process, no tmux).
 fn execute_streaming_local_process_codex(
     prompt: &str,
+    model: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -713,7 +729,14 @@ fn execute_streaming_local_process_codex(
         agentdesk_exe: exe.display().to_string(),
         output_path: output_path.clone(),
         prompt_path: prompt_path.clone(),
-        wrapper_args: vec!["--codex-bin".to_string(), codex_bin.to_string()],
+        wrapper_args: {
+            let mut args = vec!["--codex-bin".to_string(), codex_bin.to_string()];
+            if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+                args.push("--codex-model".to_string());
+                args.push(model.to_string());
+            }
+            args
+        },
         is_codex: true,
         env_vars: vec![],
     };
@@ -759,8 +782,15 @@ fn execute_streaming_local_process_codex(
     Ok(())
 }
 
-fn base_exec_args(session_id: Option<&str>, prompt: &str) -> Vec<String> {
-    let mut args = vec!["exec".to_string()];
+fn base_exec_args(session_id: Option<&str>, prompt: &str, model: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        args.push("-c".to_string());
+        args.push(r#"model_reasoning_effort="high""#.to_string());
+        args.push("-m".to_string());
+        args.push(model.to_string());
+    }
+    args.push("exec".to_string());
     if let Some(existing_thread_id) = session_id {
         args.push("resume".to_string());
         args.push(existing_thread_id.to_string());
@@ -909,7 +939,9 @@ fn handle_codex_json_line(
 mod tests {
     use std::sync::mpsc;
 
-    use super::{TMUX_PROMPT_B64_PREFIX, compose_codex_prompt, handle_codex_json_line};
+    use super::{
+        TMUX_PROMPT_B64_PREFIX, base_exec_args, compose_codex_prompt, handle_codex_json_line,
+    };
     use crate::services::claude::StreamMessage;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
@@ -1036,5 +1068,17 @@ mod tests {
         );
 
         assert!(!encoded.contains('\n'));
+    }
+
+    #[test]
+    fn test_base_exec_args_includes_model_before_exec() {
+        let args = base_exec_args(None, "hello", Some("gpt-5-codex"));
+        assert!(args.starts_with(&[
+            "-c".to_string(),
+            r#"model_reasoning_effort="high""#.to_string(),
+            "-m".to_string(),
+            "gpt-5-codex".to_string()
+        ]));
+        assert!(args.iter().any(|arg| arg == "exec"));
     }
 }

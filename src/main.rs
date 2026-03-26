@@ -330,9 +330,9 @@ fn main() -> Result<()> {
                 input_fifo,
                 prompt_file,
                 codex_bin,
+                codex_model,
                 cwd,
                 input_mode,
-                ..
             }) => {
                 let mode = match input_mode {
                     InputModeArg::Pipe => services::tmux_wrapper::InputMode::Pipe,
@@ -344,6 +344,7 @@ fn main() -> Result<()> {
                     &prompt_file,
                     &cwd,
                     &codex_bin,
+                    codex_model.as_deref(),
                     mode,
                 );
                 return Ok(());

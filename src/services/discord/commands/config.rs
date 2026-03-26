@@ -5,11 +5,27 @@ use super::super::settings::{resolve_role_binding, save_bot_settings};
 use super::super::{Context, Error, check_auth, check_owner};
 use crate::services::provider::ProviderKind;
 
+fn provider_supports_model_override(provider: &ProviderKind) -> bool {
+    matches!(
+        provider,
+        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Gemini
+    )
+}
+
+fn model_hint(provider: &ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Claude => "예: opus / sonnet / haiku",
+        ProviderKind::Codex => "예: gpt-5-codex / o3 / o4-mini",
+        ProviderKind::Gemini => "예: gemini-2.5-pro / gemini-2.5-flash",
+        ProviderKind::Unsupported(_) => "모델 이름 또는 default",
+    }
+}
+
 /// /model — Set or view the model override for this channel
 #[poise::command(slash_command, rename = "model")]
 pub(in crate::services::discord) async fn cmd_model(
     ctx: Context<'_>,
-    #[description = "Model name (opus/sonnet/haiku) or 'default' to clear"] model: Option<String>,
+    #[description = "Model name or 'default' to clear"] model: Option<String>,
 ) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
@@ -20,10 +36,9 @@ pub(in crate::services::discord) async fn cmd_model(
     let ts = chrono::Local::now().format("%H:%M:%S");
     let channel_id = ctx.channel_id();
 
-    // Model override only applies to Claude provider
-    if !matches!(ctx.data().provider, ProviderKind::Claude) {
+    if !provider_supports_model_override(&ctx.data().provider) {
         println!("  [{ts}] ◀ [{user_name}] /model (unsupported provider)");
-        ctx.say("Model override is only supported for Claude channels.")
+        ctx.say("Model override is only supported for Claude, Codex, and Gemini channels.")
             .await?;
         return Ok(());
     }
@@ -47,7 +62,8 @@ pub(in crate::services::discord) async fn cmd_model(
                 .unwrap_or_else(|| "(default)".to_string());
             println!("  [{ts}] ◀ [{user_name}] /model {m}");
             ctx.say(format!(
-                "Model set to **{display}** for this channel. Takes effect on next turn."
+                "Model set to **{display}** for this channel. Takes effect on next turn.\n{}",
+                model_hint(&ctx.data().provider)
             ))
             .await?;
         }
@@ -78,8 +94,11 @@ pub(in crate::services::discord) async fn cmd_model(
                 "system default"
             };
             println!("  [{ts}] ◀ [{user_name}] /model");
-            ctx.say(format!("Model: **{effective}** (source: {source})"))
-                .await?;
+            ctx.say(format!(
+                "Model: **{effective}** (source: {source})\n{}",
+                model_hint(&ctx.data().provider)
+            ))
+            .await?;
         }
     }
     Ok(())

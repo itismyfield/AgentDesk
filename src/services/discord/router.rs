@@ -1593,6 +1593,7 @@ pub(super) async fn handle_text_message(
                         tmux_session_name.as_deref(),
                         Some(channel_id.get()),
                         Some(provider_for_blocking.clone()),
+                        model_for_turn.as_deref(),
                     ),
                     ProviderKind::Gemini => gemini::execute_command_streaming(
                         &context_prompt,
