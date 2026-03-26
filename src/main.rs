@@ -21,7 +21,7 @@ mod integration_tests;
 // Re-export for crate-level access (used by services::discord::mod.rs)
 pub(crate) use cli::agentdesk_runtime_root;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
@@ -397,24 +397,25 @@ fn main() -> Result<()> {
     // ── Default: start full AgentDesk server ─────────────────
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
+        let directive = "agentdesk=info"
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Failed to parse tracing directive: {e}"))?;
         tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::from_default_env().add_directive("agentdesk=info".parse().unwrap()),
-            )
+            .with_env_filter(EnvFilter::from_default_env().add_directive(directive))
             .init();
 
-        let config = config::load().expect("Failed to load config");
-        let db = db::init(&config).expect("Failed to init DB");
+        let config = config::load().context("Failed to load config")?;
+        let db = db::init(&config).context("Failed to init DB")?;
 
         // Load data-driven pipeline definition (#106)
         let pipeline_path = config.policies.dir.join("default-pipeline.yaml");
         if pipeline_path.exists() {
-            pipeline::load(&pipeline_path).expect("Failed to load pipeline definition");
+            pipeline::load(&pipeline_path).context("Failed to load pipeline definition")?;
             tracing::info!("Pipeline loaded: {}", pipeline_path.display());
         }
 
-        let engine =
-            engine::PolicyEngine::new(&config, db.clone()).expect("Failed to init policy engine");
+        let engine = engine::PolicyEngine::new(&config, db.clone())
+            .context("Failed to init policy engine")?;
 
         tracing::info!(
             "AgentDesk v{} starting on {}:{}",
@@ -423,14 +424,12 @@ fn main() -> Result<()> {
             config.server.port
         );
 
-        tokio::try_join!(server::run(
-            config.clone(),
-            db.clone(),
-            engine.clone(),
-            None
-        ),)
-        .expect("Server error");
-    });
+        server::run(config.clone(), db.clone(), engine.clone(), None)
+            .await
+            .context("Server error")?;
+
+        Ok::<(), anyhow::Error>(())
+    })?;
 
     Ok(())
 }

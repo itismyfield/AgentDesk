@@ -1,12 +1,28 @@
 pub fn handle_ismcptool(tool_names: &[String]) {
-    let cwd = std::env::current_dir().expect("Cannot determine current directory");
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Error: cannot determine current directory: {e}");
+            std::process::exit(1);
+        }
+    };
     let settings_path = cwd.join(".claude").join("settings.json");
 
     let allow_list: Vec<String> = if settings_path.exists() {
-        let content =
-            std::fs::read_to_string(&settings_path).expect("Failed to read .claude/settings.json");
-        let json: serde_json::Value =
-            serde_json::from_str(&content).expect("Failed to parse .claude/settings.json");
+        let content = match std::fs::read_to_string(&settings_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Error: failed to read {}: {e}", settings_path.display());
+                std::process::exit(1);
+            }
+        };
+        let json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Error: failed to parse {}: {e}", settings_path.display());
+                std::process::exit(1);
+            }
+        };
         json.get("permissions")
             .and_then(|p| p.get("allow"))
             .and_then(|a| a.as_array())
@@ -30,33 +46,66 @@ pub fn handle_ismcptool(tool_names: &[String]) {
 }
 
 pub fn handle_addmcptool(tool_names: &[String]) {
-    let cwd = std::env::current_dir().expect("Cannot determine current directory");
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Error: cannot determine current directory: {e}");
+            std::process::exit(1);
+        }
+    };
     let settings_path = cwd.join(".claude").join("settings.json");
 
     // Read existing file or start with empty object
     let mut json: serde_json::Value = if settings_path.exists() {
-        let content =
-            std::fs::read_to_string(&settings_path).expect("Failed to read .claude/settings.json");
-        serde_json::from_str(&content).expect("Failed to parse .claude/settings.json")
+        let content = match std::fs::read_to_string(&settings_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Error: failed to read {}: {e}", settings_path.display());
+                std::process::exit(1);
+            }
+        };
+        match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Error: failed to parse {}: {e}", settings_path.display());
+                std::process::exit(1);
+            }
+        }
     } else {
-        let _ = std::fs::create_dir_all(settings_path.parent().unwrap());
+        if let Some(parent) = settings_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         serde_json::json!({})
     };
 
-    let obj = json
-        .as_object_mut()
-        .expect("settings.json is not a JSON object");
+    let obj = match json.as_object_mut() {
+        Some(o) => o,
+        None => {
+            eprintln!("Error: settings.json root is not a JSON object");
+            std::process::exit(1);
+        }
+    };
 
     // Add tool to permissions.allow array
     let permissions = obj
         .entry("permissions")
         .or_insert_with(|| serde_json::json!({}));
-    let allow = permissions
-        .as_object_mut()
-        .expect("permissions is not an object")
-        .entry("allow")
-        .or_insert_with(|| serde_json::json!([]));
-    let allow_arr = allow.as_array_mut().expect("allow is not an array");
+    let allow = match permissions.as_object_mut() {
+        Some(o) => o,
+        None => {
+            eprintln!("Error: settings.json 'permissions' is not an object");
+            std::process::exit(1);
+        }
+    }
+    .entry("allow")
+    .or_insert_with(|| serde_json::json!([]));
+    let allow_arr = match allow.as_array_mut() {
+        Some(a) => a,
+        None => {
+            eprintln!("Error: settings.json 'permissions.allow' is not an array");
+            std::process::exit(1);
+        }
+    };
 
     // Add each tool, skipping duplicates
     let mut added = Vec::new();
@@ -74,8 +123,17 @@ pub fn handle_addmcptool(tool_names: &[String]) {
     }
 
     // Save
-    let content = serde_json::to_string_pretty(&json).expect("Failed to serialize JSON");
-    std::fs::write(&settings_path, content).expect("Failed to write .claude/settings.json");
+    let content = match serde_json::to_string_pretty(&json) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: failed to serialize JSON: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = std::fs::write(&settings_path, content) {
+        eprintln!("Error: failed to write {}: {e}", settings_path.display());
+        std::process::exit(1);
+    }
 
     for name in &added {
         println!("Added: {}", name);

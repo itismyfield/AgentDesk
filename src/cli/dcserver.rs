@@ -1002,9 +1002,14 @@ pub fn handle_dcserver(token: Option<String>) {
                 // Load data-driven pipeline definition (#106) — fail-fast on error
                 let pipeline_path = ad_config.policies.dir.join("default-pipeline.yaml");
                 if pipeline_path.exists() {
-                    crate::pipeline::load(&pipeline_path)
-                        .expect("Failed to load pipeline definition");
-                    println!("  ▸ Pipeline : loaded {}", pipeline_path.display());
+                    match crate::pipeline::load(&pipeline_path) {
+                        Ok(()) => println!("  ▸ Pipeline : loaded {}", pipeline_path.display()),
+                        Err(e) => {
+                            eprintln!("  ✖ Failed to load pipeline definition: {e}");
+                            eprintln!("    path: {}", pipeline_path.display());
+                            return;
+                        }
+                    }
                 }
 
                 // Start axum HTTP server (background task) — now serves all API

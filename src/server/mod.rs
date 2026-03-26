@@ -45,10 +45,13 @@ pub async fn run(
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .expect("policy-tick runtime");
+                    .unwrap_or_else(|e| {
+                        eprintln!("Fatal: failed to create policy-tick runtime: {e}");
+                        std::process::exit(1);
+                    });
                 rt.block_on(policy_tick_loop(tick_engine, tick_db));
             })
-            .expect("policy-tick thread");
+            .map_err(|e| anyhow::anyhow!("Failed to spawn policy-tick thread: {e}"))?;
     }
 
     // Spawn periodic rate-limit cache sync (every 120s)
@@ -706,10 +709,16 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 async fn message_outbox_loop(db: Db, port: u16) {
     use std::time::Duration;
 
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .expect("outbox HTTP client");
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("[outbox] Failed to create HTTP client: {e}");
+            return;
+        }
+    };
 
     let url = format!("http://127.0.0.1:{port}/api/send");
 
