@@ -1297,6 +1297,40 @@ async fn pipeline_config_repo_invalid_override_rejected() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn pipeline_config_repo_broken_merge_rejected() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_repo(&db, "owner/repo-merge");
+
+    // Override that adds a timeout referencing an unknown clock and a non-existent state.
+    // This parses as valid JSON but the merged effective pipeline should fail validate().
+    let body = r#"{"config":{"timeouts":{"nonexistent_state":{"duration":"1h","clock":"no_such_clock"}}}}"#;
+
+    let app = api_router(db, engine, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/pipeline/config/repo/owner/repo-merge")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value =
+        serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("validation failed"),
+        "expected merged validation error, got: {}",
+        body
+    );
+}
+
 // ── force-transition auth tests ──
 
 fn seed_card_with_status(db: &Db, card_id: &str, status: &str) {

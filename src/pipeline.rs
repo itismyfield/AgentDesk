@@ -433,6 +433,29 @@ impl PipelineConfig {
             }
         }
 
+        // Timeout entries: state-keyed timeouts must reference valid states.
+        // Condition-based timeouts (e.g. awaiting_dod) are pseudo-state timeouts
+        // that manage their own clock columns — skip all cross-reference checks.
+        let known_clock_fields: Vec<&str> = self.clocks.values().map(|c| c.set.as_str()).collect();
+        for (key, timeout) in &self.timeouts {
+            // Condition-based timeouts are self-contained; skip validation
+            if timeout.condition.is_some() {
+                continue;
+            }
+            if !state_ids.contains(&key.as_str()) {
+                anyhow::bail!("timeout for unknown state: {}", key);
+            }
+            if !self.clocks.contains_key(&timeout.clock)
+                && !known_clock_fields.contains(&timeout.clock.as_str())
+            {
+                anyhow::bail!(
+                    "timeout '{}' references unknown clock: {}",
+                    key,
+                    timeout.clock
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -665,6 +688,86 @@ mod tests {
         let ovr = parse_override(json).unwrap().unwrap();
         assert!(ovr.hooks.is_some());
         assert!(ovr.states.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_timeout_unknown_state() {
+        let mut p = minimal_pipeline();
+        p.clocks.insert(
+            "in_progress".into(),
+            ClockConfig {
+                set: "started_at".into(),
+                mode: None,
+            },
+        );
+        p.timeouts.insert(
+            "nonexistent".into(),
+            TimeoutConfig {
+                duration: "1h".into(),
+                clock: "started_at".into(),
+                max_retries: None,
+                on_exhaust: None,
+                condition: None,
+            },
+        );
+        let err = p.validate().unwrap_err();
+        assert!(err.to_string().contains("unknown state"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_timeout_unknown_clock() {
+        let mut p = minimal_pipeline();
+        p.timeouts.insert(
+            "in_progress".into(),
+            TimeoutConfig {
+                duration: "1h".into(),
+                clock: "no_such_clock".into(),
+                max_retries: None,
+                on_exhaust: None,
+                condition: None,
+            },
+        );
+        let err = p.validate().unwrap_err();
+        assert!(err.to_string().contains("unknown clock"), "{err}");
+    }
+
+    #[test]
+    fn validate_allows_condition_based_timeout_pseudo_state() {
+        let mut p = minimal_pipeline();
+        p.timeouts.insert(
+            "awaiting_something".into(),
+            TimeoutConfig {
+                duration: "15m".into(),
+                clock: "custom_at".into(),
+                max_retries: None,
+                on_exhaust: None,
+                condition: Some("some_field = 'value'".into()),
+            },
+        );
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_timeout_with_clock_field_ref() {
+        let mut p = minimal_pipeline();
+        p.clocks.insert(
+            "in_progress".into(),
+            ClockConfig {
+                set: "started_at".into(),
+                mode: None,
+            },
+        );
+        p.timeouts.insert(
+            "in_progress".into(),
+            TimeoutConfig {
+                duration: "2h".into(),
+                clock: "started_at".into(),
+                max_retries: None,
+                on_exhaust: None,
+                condition: None,
+            },
+        );
+        assert!(p.validate().is_ok());
     }
 
     #[test]
