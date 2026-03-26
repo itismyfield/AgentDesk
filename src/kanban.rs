@@ -281,6 +281,13 @@ pub fn transition_status_with_opts(
              ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
             [card_id],
         ).ok();
+    } else if new_status == "in_progress" {
+        // #119: Clear last_verdict on reopen to prevent stale pass verdict
+        // from generating duplicate true_negative if card reaches done again without new review
+        conn.execute(
+            "UPDATE card_review_state SET last_verdict = NULL, updated_at = datetime('now') WHERE card_id = ?1",
+            [card_id],
+        ).ok();
     } else if new_status == "review" {
         conn.execute(
             "INSERT INTO card_review_state (card_id, state, review_entered_at, updated_at) VALUES (?1, 'reviewing', datetime('now'), datetime('now')) \

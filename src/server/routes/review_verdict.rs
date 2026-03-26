@@ -699,6 +699,10 @@ pub async fn submit_review_decision(
             ).ok();
             drop(conn);
 
+            // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
+            record_decision_tuning(&state.db, &body.card_id, "dispute", pending_rd_id.as_deref());
+            spawn_aggregate_if_needed(&state.db);
+
             // Fire OnReviewEnter to create new review dispatch
             let _ = state.engine.try_fire_hook(
                 Hook::OnReviewEnter,
@@ -723,10 +727,6 @@ pub async fn submit_review_decision(
 
             // #117: Update canonical review state before returning
             update_card_review_state(&state.db, &body.card_id, "dispute", pending_rd_id.as_deref());
-
-            // #119: Record tuning outcome before returning
-            record_decision_tuning(&state.db, &body.card_id, "dispute", pending_rd_id.as_deref());
-            spawn_aggregate_if_needed(&state.db);
 
             return (
                 StatusCode::OK,
