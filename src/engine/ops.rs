@@ -1044,6 +1044,22 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
             serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
         }),
     )?;
+    inflight_obj.set(
+        "remove",
+        Function::new(ctx.clone(), |provider: String, channel_id: String| -> String {
+            if let Some(root) = crate::cli::agentdesk_runtime_root() {
+                let path = root
+                    .join("runtime/discord_inflight")
+                    .join(&provider)
+                    .join(format!("{channel_id}.json"));
+                if path.exists() {
+                    let _ = std::fs::remove_file(&path);
+                    return format!(r#"{{"ok":true,"removed":"{}"}}"#, path.display());
+                }
+            }
+            r#"{"ok":false,"error":"not found"}"#.to_string()
+        }),
+    )?;
     ad.set("inflight", inflight_obj)?;
 
     // JS wrapper
@@ -1051,8 +1067,12 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
         r#"
         (function() {
             var rawList = agentdesk.inflight.list;
+            var rawRemove = agentdesk.inflight.remove;
             agentdesk.inflight.list = function() {
                 return JSON.parse(rawList());
+            };
+            agentdesk.inflight.remove = function(provider, channelId) {
+                return JSON.parse(rawRemove(provider, "" + channelId));
             };
         })();
     "#,

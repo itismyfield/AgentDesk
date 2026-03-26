@@ -844,6 +844,17 @@ var timeouts = {
       for (var li = 0; li < inflights.length; li++) {
         var inf = inflights[li];
         if (!inf.started_at) continue;
+        // Stale inflight check: if no active turn exists for this channel, clean up
+        var activeSessions = agentdesk.db.query(
+          "SELECT status FROM sessions WHERE session_key LIKE ? AND status = 'working'",
+          ["%" + inf.channel_id + "%"]
+        );
+        if (activeSessions.length === 0) {
+          // No working session — this inflight is stale, clean it up
+          agentdesk.inflight.remove(inf.provider, inf.channel_id);
+          agentdesk.log.info("[long-turn] Cleaned stale inflight: " + inf.provider + "/" + inf.channel_id);
+          continue;
+        }
         var cooldownKey = "long_turn_alert:" + inf.provider + ":" + inf.channel_id;
         var lastAlert = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]);
         if (lastAlert.length > 0) {
