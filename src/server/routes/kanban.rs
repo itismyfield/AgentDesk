@@ -49,6 +49,8 @@ pub struct UpdateCardBody {
     pub metadata: Option<serde_json::Value>,
     pub description: Option<String>,
     pub metadata_json: Option<String>,
+    pub review_status: Option<String>,
+    pub review_notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -324,6 +326,9 @@ pub async fn update_card(
         idx += 1;
     }
 
+    push_field!("review_status", body.review_status);
+    push_field!("review_notes", body.review_notes);
+
     if sets.is_empty() && body.status.is_none() {
         return (
             StatusCode::BAD_REQUEST,
@@ -342,12 +347,20 @@ pub async fn update_card(
     };
 
     // ── Status transition FIRST (validates before any writes) ──
-    // Dispatch kickoff states (first gated target from dispatchable states) cannot be set
-    // via PATCH — use POST /api/dispatches instead. Other gated states (in_progress, review)
-    // are allowed via PATCH as the gate check in kanban.rs handles validation.
+    // Block PATCH only when the CONCRETE transition (old→new) is a dispatch kickoff.
+    // A target state may have both gated and free inbound transitions — only block
+    // when this specific edge is a kickoff (gated from a dispatchable state).
     if let Some(new_s) = &new_status {
-        let is_kickoff = effective_pipeline.is_dispatch_kickoff(new_s);
-        if is_kickoff {
+        // Only block when THIS SPECIFIC edge (old→new) is a gated dispatch kickoff.
+        // A target may have both gated and free inbound transitions — only block
+        // the gated ones originating from a dispatchable state.
+        let dispatchable = effective_pipeline.dispatchable_states();
+        let is_kickoff_transition = effective_pipeline.find_transition(&old_status, new_s)
+            .map_or(false, |t| {
+                t.transition_type == crate::pipeline::TransitionType::Gated
+                    && dispatchable.contains(&t.from.as_str())
+            });
+        if is_kickoff_transition {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(
@@ -1281,13 +1294,19 @@ pub async fn assign_issue(
         };
     }
 
+    // Pipeline-driven: new cards with assignee start in dispatchable state
+    crate::pipeline::ensure_loaded();
+    let ready_state = crate::pipeline::try_get()
+        .and_then(|p| p.dispatchable_states().into_iter().next().map(|s| s.to_string()))
+        .unwrap_or_else(|| "ready".to_string());
     let result = conn.execute(
         "INSERT INTO kanban_cards (id, repo_id, title, status, priority, assigned_agent_id, github_issue_url, github_issue_number, description, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'ready', 'medium', ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))",
+         VALUES (?1, ?2, ?3, ?4, 'medium', ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))",
         rusqlite::params![
             id,
             body.github_repo,
             body.title,
+            ready_state,
             body.assignee_agent_id,
             body.github_issue_url,
             body.github_issue_number,
@@ -1644,15 +1663,20 @@ pub async fn pm_decision(
                     ),
                 );
             }
+            // Pipeline-driven: resume to first dispatchable state
+            crate::pipeline::ensure_loaded();
+            let resume_target = crate::pipeline::try_get()
+                .and_then(|p| p.dispatchable_states().into_iter().next().map(|s| s.to_string()))
+                .unwrap_or_else(|| "in_progress".to_string());
             let _ = crate::kanban::transition_status_with_opts(
                 &state.db,
                 &state.engine,
                 &body.card_id,
-                "in_progress",
+                &resume_target,
                 "pm-decision",
                 true,
             );
-            "Card resumed to in_progress"
+            "Card resumed"
         }
         "rework" => {
             if agent_id.is_empty() {
@@ -1683,11 +1707,24 @@ pub async fn pm_decision(
                             ],
                         ).ok();
                     }
+                    // Pipeline-driven: rework target from current state's review_rework gate
+                    let rework_status: String = state.db.lock().ok()
+                        .and_then(|c| c.query_row("SELECT status FROM kanban_cards WHERE id = ?1", [&body.card_id], |r| r.get(0)).ok())
+                        .unwrap_or_default();
+                    let rework_target = crate::pipeline::try_get()
+                        .and_then(|p| {
+                            p.transitions.iter().find(|t| {
+                                t.from == rework_status
+                                    && t.transition_type == crate::pipeline::TransitionType::Gated
+                                    && t.gates.iter().any(|g| g == "review_rework")
+                            }).map(|t| t.to.clone())
+                        })
+                        .unwrap_or_else(|| "in_progress".to_string());
                     let _ = crate::kanban::transition_status_with_opts(
                         &state.db,
                         &state.engine,
                         &body.card_id,
-                        "in_progress",
+                        &rework_target,
                         "pm-decision",
                         true,
                     );
@@ -1715,15 +1752,19 @@ pub async fn pm_decision(
             }
         }
         "dismiss" => {
+            // Pipeline-driven: dismiss to terminal state
+            let terminal = crate::pipeline::try_get()
+                .map(|p| p.states.iter().find(|s| s.terminal).map(|s| s.id.as_str()).unwrap_or("done"))
+                .unwrap_or("done");
             let _ = crate::kanban::transition_status_with_opts(
                 &state.db,
                 &state.engine,
                 &body.card_id,
-                "done",
+                terminal,
                 "pm-decision",
                 true,
             );
-            "Card dismissed to done"
+            "Card dismissed"
         }
         "requeue" => {
             let _ = crate::kanban::transition_status_with_opts(
@@ -1857,22 +1898,32 @@ pub async fn reopen_card(
         }
     };
 
-    if current_status != "done" {
+    // Pipeline-driven: reopen only applies to terminal states
+    crate::pipeline::ensure_loaded();
+    let is_terminal = crate::pipeline::try_get()
+        .map(|p| p.is_terminal(&current_status))
+        .unwrap_or(current_status == "done");
+    if !is_terminal {
         return (
             StatusCode::BAD_REQUEST,
             Json(
-                json!({"error": format!("card is not done (current: {current_status}), reopen only applies to done cards")}),
+                json!({"error": format!("card is not terminal (current: {current_status}), reopen only applies to terminal cards")}),
             ),
         );
     }
 
-    // ── Transition done → in_progress (force=true bypasses terminal guard) ──
+    // Determine reopen target: first dispatchable state that has gated outbound
+    let reopen_target = crate::pipeline::try_get()
+        .and_then(|p| p.dispatchable_states().into_iter().next().map(|s| s.to_string()))
+        .unwrap_or_else(|| "in_progress".to_string());
+
+    // ── Transition terminal → work state (force=true bypasses terminal guard) ──
     let reason = body.reason.as_deref().unwrap_or("reopen via API");
     match crate::kanban::transition_status_with_opts(
         &state.db,
         &state.engine,
         &id,
-        "in_progress",
+        &reopen_target,
         &format!("pmd:reopen({})", reason),
         true,
     ) {
