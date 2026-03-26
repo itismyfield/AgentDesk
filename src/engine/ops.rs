@@ -611,7 +611,11 @@ mod tests {
                 .eval(r#"JSON.stringify(agentdesk.kanban.setStatus("card-js", "in_progress"))"#)
                 .unwrap();
             // Should not contain error
-            assert!(!result.contains("error"), "setStatus should succeed: {}", result);
+            assert!(
+                !result.contains("error"),
+                "setStatus should succeed: {}",
+                result
+            );
         });
 
         // Verify started_at was set (either reset or coalesced depending on pipeline config)
@@ -621,7 +625,8 @@ mod tests {
                 "SELECT started_at FROM kanban_cards WHERE id = 'card-js'",
                 [],
                 |row| row.get(0),
-            ).unwrap()
+            )
+            .unwrap()
         };
         assert!(
             started_at.is_some(),
@@ -941,7 +946,8 @@ fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     ad.set("kv", kv_obj)?;
 
     // JS wrappers for optional TTL and null semantics
-    ctx.eval::<(), _>(r#"
+    ctx.eval::<(), _>(
+        r#"
         (function() {
             var raw = agentdesk.kv;
             agentdesk.kv.set = function(key, value, ttlSeconds) {
@@ -952,7 +958,8 @@ fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 return r.found ? r.value : null;
             };
         })();
-    "#)?;
+    "#,
+    )?;
 
     Ok(())
 }
@@ -1046,19 +1053,22 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     )?;
     inflight_obj.set(
         "remove",
-        Function::new(ctx.clone(), |provider: String, channel_id: String| -> String {
-            if let Some(root) = crate::cli::agentdesk_runtime_root() {
-                let path = root
-                    .join("runtime/discord_inflight")
-                    .join(&provider)
-                    .join(format!("{channel_id}.json"));
-                if path.exists() {
-                    let _ = std::fs::remove_file(&path);
-                    return format!(r#"{{"ok":true,"removed":"{}"}}"#, path.display());
+        Function::new(
+            ctx.clone(),
+            |provider: String, channel_id: String| -> String {
+                if let Some(root) = crate::cli::agentdesk_runtime_root() {
+                    let path = root
+                        .join("runtime/discord_inflight")
+                        .join(&provider)
+                        .join(format!("{channel_id}.json"));
+                    if path.exists() {
+                        let _ = std::fs::remove_file(&path);
+                        return format!(r#"{{"ok":true,"removed":"{}"}}"#, path.display());
+                    }
                 }
-            }
-            r#"{"ok":false,"error":"not found"}"#.to_string()
-        }),
+                r#"{"ok":false,"error":"not found"}"#.to_string()
+            },
+        ),
     )?;
     ad.set("inflight", inflight_obj)?;
 

@@ -83,9 +83,13 @@ pub fn sync_github_issues_for_repo(
                     );
                 }
 
-                if issue.state == "CLOSED" && card_status != "done" && card_status != "cancelled" {
+                // Pipeline-driven: terminal states are "done" equivalents
+                let is_terminal = crate::pipeline::try_get()
+                    .map(|p| p.is_terminal(&card_status))
+                    .unwrap_or(card_status == "done" || card_status == "cancelled");
+                if issue.state == "CLOSED" && !is_terminal {
                     cards_to_close.push((card_id.clone(), issue.number));
-                } else if issue.state == "OPEN" && card_status == "done" {
+                } else if issue.state == "OPEN" && is_terminal {
                     result.inconsistency_count += 1;
                     tracing::warn!(
                         "[github-sync] {repo}#{}: card {} is 'done' but issue is OPEN",

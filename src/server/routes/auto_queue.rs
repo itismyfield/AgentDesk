@@ -253,8 +253,12 @@ pub async fn generate(
     };
     ensure_tables(&conn);
 
-    // Build filter
-    let mut conditions = vec!["kc.status = 'ready'".to_string()];
+    // Build filter — pipeline-driven dispatchable states
+    crate::pipeline::ensure_loaded();
+    let dispatchable = crate::pipeline::try_get()
+        .map(|p| p.dispatchable_states().iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(","))
+        .unwrap_or_else(|| "'ready'".to_string());
+    let mut conditions = vec![format!("kc.status IN ({})", dispatchable)];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref repo) = body.repo {
         conditions.push(format!("kc.repo_id = ?{}", params.len() + 1));
@@ -327,22 +331,24 @@ pub async fn generate(
             conn.query_row(&sql, refs.as_slice(), |row| row.get(0))
                 .unwrap_or(0)
         };
-        let backlog_count: i64 = count_with_filters("backlog");
-        let in_progress_count: i64 = count_with_filters("in_progress");
-        let review_count: i64 = count_with_filters("review");
+        // Pipeline-driven counts: report all non-terminal states
+        let mut counts_map = serde_json::Map::new();
+        if let Some(pipeline) = crate::pipeline::try_get() {
+            for state in &pipeline.states {
+                if !state.terminal {
+                    let c: i64 = count_with_filters(&state.id);
+                    counts_map.insert(state.id.clone(), serde_json::json!(c));
+                }
+            }
+        }
         return (
             StatusCode::OK,
             Json(json!({
                 "run": null,
                 "entries": [],
-                "message": "No ready cards found",
-                "hint": "Move cards from backlog to ready before generating a queue.",
-                "counts": {
-                    "ready": 0,
-                    "backlog": backlog_count,
-                    "in_progress": in_progress_count,
-                    "review": review_count,
-                },
+                "message": "No dispatchable cards found",
+                "hint": "Move cards to a dispatchable state before generating a queue.",
+                "counts": counts_map,
             })),
         );
     }
@@ -726,9 +732,7 @@ pub async fn activate(
             )
             .unwrap_or(false);
         if busy {
-            tracing::info!(
-                "[auto-queue] Skipping activate for {agent_id}: agent has active cards"
-            );
+            tracing::info!("[auto-queue] Skipping activate for {agent_id}: agent has active cards");
             drop(conn);
             conn = state.db.separate_conn().unwrap();
             break;
@@ -1062,7 +1066,12 @@ pub async fn reset(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
 pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
     };
     ensure_tables(&conn);
     let paused = conn
@@ -1071,16 +1080,22 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
             [],
         )
         .unwrap_or(0);
-    (StatusCode::OK, Json(json!({"ok": true, "paused_runs": paused})))
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "paused_runs": paused})),
+    )
 }
 
 /// POST /api/auto-queue/resume — resume paused runs and dispatch next entry
-pub async fn resume_run(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
     };
     ensure_tables(&conn);
     let resumed = conn
@@ -1109,14 +1124,22 @@ pub async fn resume_run(
         );
     }
 
-    (StatusCode::OK, Json(json!({"ok": true, "resumed_runs": 0, "message": "No paused runs"})))
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "resumed_runs": 0, "message": "No paused runs"})),
+    )
 }
 
 /// POST /api/auto-queue/cancel — cancel all active/paused runs and pending entries
 pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
     };
     ensure_tables(&conn);
     let cancelled_entries = conn
@@ -1333,13 +1356,16 @@ pub async fn enqueue(
         }
     }
 
-    // Validate card is 'ready' AFTER duplicate check to preserve idempotent retry,
+    // Validate card is dispatchable AFTER duplicate check to preserve idempotent retry,
     // but BEFORE run creation to prevent empty active runs
-    if card_status != "ready" {
+    let dispatchable_states = crate::pipeline::try_get()
+        .map(|p| p.dispatchable_states().iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        .unwrap_or_else(|| vec!["ready".to_string()]);
+    if !dispatchable_states.iter().any(|s| s == &card_status) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": format!("card status is '{}', only 'ready' cards can be enqueued", card_status),
+                "error": format!("card status is '{}', only dispatchable cards can be enqueued", card_status),
                 "card_id": card_id,
                 "status": card_status,
             })),
@@ -1457,7 +1483,7 @@ pub async fn submit_order(
 
         let Some(card_id) = card_id else { continue };
 
-        // Only enqueue cards with 'ready' status
+        // Only enqueue cards in dispatchable states (pipeline-driven)
         let card_status: String = conn
             .query_row(
                 "SELECT COALESCE(status, '') FROM kanban_cards WHERE id = ?1",
@@ -1465,9 +1491,12 @@ pub async fn submit_order(
                 |row| row.get(0),
             )
             .unwrap_or_default();
-        if card_status != "ready" {
+        let dispatchable_check = crate::pipeline::try_get()
+            .map(|p| p.dispatchable_states().iter().any(|s| *s == card_status))
+            .unwrap_or(card_status == "ready");
+        if !dispatchable_check {
             tracing::info!(
-                "[auto-queue] Skipping card {card_id} (status={card_status}, expected 'ready')"
+                "[auto-queue] Skipping card {card_id} (status={card_status}, not dispatchable)"
             );
             continue;
         }

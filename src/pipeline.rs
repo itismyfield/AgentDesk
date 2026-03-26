@@ -315,6 +315,54 @@ impl PipelineConfig {
         self.hooks.get(state)
     }
 
+    /// Get the initial state (first non-terminal state in the pipeline).
+    /// This is the state new cards start in.
+    pub fn initial_state(&self) -> &str {
+        self.states
+            .iter()
+            .find(|s| !s.terminal)
+            .map(|s| s.id.as_str())
+            .unwrap_or("backlog")
+    }
+
+    /// Get states that are dispatchable (have gated outbound transitions).
+    /// These are states where cards are "ready to be dispatched".
+    pub fn dispatchable_states(&self) -> Vec<&str> {
+        self.states
+            .iter()
+            .filter(|s| {
+                !s.terminal
+                    && self.transitions.iter().any(|t| {
+                        t.from == s.id && t.transition_type == TransitionType::Gated
+                    })
+                    // Must be reachable only via free transitions (not gated inbound)
+                    && self.transitions.iter().all(|t| {
+                        t.to != s.id || t.transition_type == TransitionType::Free
+                    })
+            })
+            .map(|s| s.id.as_str())
+            .collect()
+    }
+
+    /// Check if a state requires a gated inbound transition (dispatch-entry states).
+    /// These states should only be entered via dispatch API, not direct PATCH.
+    pub fn requires_dispatch_entry(&self, state: &str) -> bool {
+        self.transitions.iter().any(|t| {
+            t.to == state && t.transition_type == TransitionType::Gated
+        }) && !self.transitions.iter().any(|t| {
+            t.to == state && t.transition_type == TransitionType::Free
+        })
+    }
+
+    /// Check if a state is a force-only target (only reachable via force=true).
+    pub fn is_force_only_state(&self, state: &str) -> bool {
+        let has_inbound = self.transitions.iter().any(|t| t.to == state);
+        has_inbound
+            && self.transitions.iter().all(|t| {
+                t.to != state || t.transition_type == TransitionType::ForceOnly
+            })
+    }
+
     /// Validate internal consistency.
     pub fn validate(&self) -> Result<()> {
         let state_ids: Vec<&str> = self.states.iter().map(|s| s.id.as_str()).collect();

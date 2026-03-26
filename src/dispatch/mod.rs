@@ -33,7 +33,9 @@ pub fn create_dispatch_core(
                 let repo_dir = match std::env::var("AGENTDESK_REPO_DIR") {
                     Ok(d) => d,
                     Err(_) => dirs::home_dir()
-                        .ok_or_else(|| anyhow::anyhow!("HOME directory not found; set AGENTDESK_REPO_DIR"))?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("HOME directory not found; set AGENTDESK_REPO_DIR")
+                        })?
                         .join("AgentDesk")
                         .to_string_lossy()
                         .into_owned(),
@@ -90,13 +92,18 @@ pub fn create_dispatch_core(
         )
         .map_err(|e| anyhow::anyhow!("Card not found: {e}"))?;
 
-    // Guard: prevent ALL dispatches for done cards — done is terminal.
+    // Guard: prevent ALL dispatches for terminal cards (pipeline-driven).
     // No dispatch type should reopen a completed card.
-    if old_status == "done" {
+    crate::pipeline::ensure_loaded();
+    let is_terminal = crate::pipeline::try_get()
+        .map(|p| p.is_terminal(&old_status))
+        .unwrap_or(old_status == "done");
+    if is_terminal {
         return Err(anyhow::anyhow!(
-            "Cannot create {} dispatch for done card {} — cannot revert terminal card",
+            "Cannot create {} dispatch for terminal card {} (status: {}) — cannot revert terminal card",
             dispatch_type,
-            kanban_card_id
+            kanban_card_id,
+            old_status
         ));
     }
 

@@ -278,7 +278,9 @@ impl PolicyEngine {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::WouldBlock) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ⏸ try_fire_hook_by_name({hook_name}): engine busy, deferring to DB");
+                println!(
+                    "  [{ts}] ⏸ try_fire_hook_by_name({hook_name}): engine busy, deferring to DB"
+                );
                 if let Ok(conn) = self.db.separate_conn() {
                     let _ = conn.execute(
                         "INSERT INTO deferred_hooks (hook_name, payload) VALUES (?1, ?2)",
@@ -793,13 +795,18 @@ mod tests {
         let policies = engine.list_policies();
         assert_eq!(policies.len(), 1);
         assert!(
-            policies[0].hooks.contains(&"onCustomStateEnter".to_string()),
+            policies[0]
+                .hooks
+                .contains(&"onCustomStateEnter".to_string()),
             "dynamic hook should appear in list_policies"
         );
 
         // Fire by name — this should reach the dynamic_hooks path
         engine
-            .try_fire_hook_by_name("onCustomStateEnter", serde_json::json!({"status": "custom_state"}))
+            .try_fire_hook_by_name(
+                "onCustomStateEnter",
+                serde_json::json!({"status": "custom_state"}),
+            )
             .unwrap();
 
         let conn = db.lock().unwrap();
@@ -865,11 +872,9 @@ mod tests {
         // Last write wins, so value should be "low".
         let conn = db.lock().unwrap();
         let val: String = conn
-            .query_row(
-                "SELECT value FROM kv_meta WHERE key = 'order'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT value FROM kv_meta WHERE key = 'order'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(val, "low", "low-priority policy runs last (priority=100)");
     }

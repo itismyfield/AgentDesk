@@ -224,10 +224,15 @@ pub async fn create_card(
         }
     };
 
+    // Pipeline-driven initial state
+    crate::pipeline::ensure_loaded();
+    let initial_state = crate::pipeline::try_get()
+        .map(|p| p.initial_state().to_string())
+        .unwrap_or_else(|| "backlog".to_string());
     let result = conn.execute(
         "INSERT INTO kanban_cards (id, repo_id, title, status, priority, github_issue_url, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'backlog', ?4, ?5, datetime('now'), datetime('now'))",
-        rusqlite::params![id, body.repo_id, body.title, priority, body.github_issue_url],
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))",
+        rusqlite::params![id, body.repo_id, body.title, initial_state, priority, body.github_issue_url],
     );
 
     if let Err(e) = result {
@@ -330,13 +335,20 @@ pub async fn update_card(
     let new_status = body.status.clone();
 
     // ── Status transition FIRST (validates before any writes) ──
-    // "requested" transition is ONLY allowed via POST /api/dispatches
+    // Dispatch-entry states (reachable only via gated transitions) cannot be set via PATCH.
+    // Use POST /api/dispatches instead.
     if let Some(new_s) = &new_status {
-        if new_s == "requested" {
+        let requires_dispatch = {
+            crate::pipeline::ensure_loaded();
+            crate::pipeline::try_get()
+                .map(|p| p.requires_dispatch_entry(new_s))
+                .unwrap_or(false)
+        };
+        if requires_dispatch {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(
-                    json!({"error": "Use POST /api/dispatches to start work. PATCH status=requested is not allowed."}),
+                    json!({"error": format!("Use POST /api/dispatches to transition to '{}'. Direct PATCH is not allowed for dispatch-entry states.", new_s)}),
                 ),
             );
         }
@@ -412,7 +424,9 @@ pub async fn update_card(
             crate::pipeline::ensure_loaded();
             crate::pipeline::try_get()
                 .and_then(|p| p.find_transition(&old_status, new_s))
-                .map_or(false, |t| t.transition_type == crate::pipeline::TransitionType::Gated)
+                .map_or(false, |t| {
+                    t.transition_type == crate::pipeline::TransitionType::Gated
+                })
         };
         if new_s.as_str() != old_status && is_gated_transition {
             let db_clone = state.db.clone();
@@ -496,9 +510,14 @@ pub async fn assign_card(
         }
     };
 
+    // Pipeline-driven: assign to the first dispatchable state (or second state)
+    crate::pipeline::ensure_loaded();
+    let ready_state = crate::pipeline::try_get()
+        .and_then(|p| p.dispatchable_states().into_iter().next().map(|s| s.to_string()))
+        .unwrap_or_else(|| "ready".to_string());
     match conn.execute(
-        "UPDATE kanban_cards SET assigned_agent_id = ?1, status = 'ready', updated_at = datetime('now') WHERE id = ?2",
-        rusqlite::params![body.agent_id, id],
+        "UPDATE kanban_cards SET assigned_agent_id = ?1, status = ?2, updated_at = datetime('now') WHERE id = ?3",
+        rusqlite::params![body.agent_id, ready_state, id],
     ) {
         Ok(0) => {
             return (StatusCode::NOT_FOUND, Json(json!({"error": "card not found"})));
@@ -517,14 +536,14 @@ pub async fn assign_card(
     });
     drop(conn);
 
-    // Fire transition hook
-    if old_status != "ready" {
+    // Fire transition hook if status actually changed
+    if old_status != ready_state {
         let _ = state.engine.try_fire_hook(
             Hook::OnCardTransition,
             json!({
                 "card_id": id,
                 "from": old_status,
-                "to": "ready",
+                "to": ready_state,
             }),
         );
     }
@@ -954,8 +973,7 @@ pub async fn defer_dod(
             let all_done = if let (Some(items), Some(verified)) =
                 (dod["items"].as_array(), dod["verified"].as_array())
             {
-                !items.is_empty()
-                    && items.iter().all(|item| verified.contains(item))
+                !items.is_empty() && items.iter().all(|item| verified.contains(item))
             } else {
                 false
             };
@@ -992,7 +1010,10 @@ pub async fn defer_dod(
             crate::engine::hooks::Hook::OnReviewEnter,
             json!({"card_id": id}),
         );
-        tracing::info!("[dod] Card {} DoD all-complete — restarting review from awaiting_dod", id);
+        tracing::info!(
+            "[dod] Card {} DoD all-complete — restarting review from awaiting_dod",
+            id
+        );
     }
 
     match card_result {
@@ -1165,10 +1186,17 @@ pub async fn bulk_action(
     State(state): State<AppState>,
     Json(body): Json<BulkActionBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Pipeline-driven target status for bulk actions
+    crate::pipeline::ensure_loaded();
+    let pipeline = crate::pipeline::try_get();
+    let terminal_state = pipeline
+        .map(|p| p.states.iter().find(|s| s.terminal).map(|s| s.id.as_str()).unwrap_or("done"))
+        .unwrap_or("done");
+    let initial_state = pipeline.map(|p| p.initial_state()).unwrap_or("backlog");
     let target_status = match body.action.as_str() {
-        "pass" => "done",
-        "reset" => "backlog",
-        "cancel" => "done", // cancelled 상태 제거됨 — cancel은 done으로 처리
+        "pass" => terminal_state,
+        "reset" => initial_state,
+        "cancel" => terminal_state, // cancelled 상태 제거됨 — cancel은 terminal로 처리
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1229,9 +1257,12 @@ pub async fn assign_issue(
         );
         drop(conn);
 
-        // Transition to 'ready' if not already — fires OnCardTransition hook
-        // (backlog → ready is a free transition, no dispatch needed)
-        let _ = crate::kanban::transition_status(&state.db, &state.engine, &existing_id, "ready");
+        // Transition to dispatchable state if not already — fires OnCardTransition hook
+        crate::pipeline::ensure_loaded();
+        let ready_state = crate::pipeline::try_get()
+            .and_then(|p| p.dispatchable_states().into_iter().next().map(|s| s.to_string()))
+            .unwrap_or_else(|| "ready".to_string());
+        let _ = crate::kanban::transition_status(&state.db, &state.engine, &existing_id, &ready_state);
 
         let conn = match state.db.lock() {
             Ok(c) => c,
@@ -1557,10 +1588,17 @@ pub async fn pm_decision(
         );
     };
 
-    if status != "pending_decision" {
+    // Pipeline-driven: PMD decisions only allowed from force-only states
+    let is_force_only = {
+        crate::pipeline::ensure_loaded();
+        crate::pipeline::try_get()
+            .map(|p| p.is_force_only_state(&status))
+            .unwrap_or(false)
+    };
+    if !is_force_only {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("card is '{}', not 'pending_decision'", status)})),
+            Json(json!({"error": format!("card is '{}', which is not a decision-pending state", status)})),
         );
     }
 
@@ -1609,7 +1647,9 @@ pub async fn pm_decision(
             if !has_live {
                 return (
                     StatusCode::CONFLICT,
-                    Json(json!({"error": "cannot resume: no live dispatch/session for this card. Use 'rework' or 'requeue' instead."})),
+                    Json(
+                        json!({"error": "cannot resume: no live dispatch/session for this card. Use 'rework' or 'requeue' instead."}),
+                    ),
                 );
             }
             let _ = crate::kanban::transition_status_with_opts(
@@ -1793,7 +1833,9 @@ pub async fn reopen_card(
         );
         return (
             StatusCode::FORBIDDEN,
-            Json(json!({"error": "reopen requires X-Channel-Id matching kanban_manager_channel_id"})),
+            Json(
+                json!({"error": "reopen requires X-Channel-Id matching kanban_manager_channel_id"}),
+            ),
         );
     }
 
@@ -1826,7 +1868,9 @@ pub async fn reopen_card(
     if current_status != "done" {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("card is not done (current: {current_status}), reopen only applies to done cards")})),
+            Json(
+                json!({"error": format!("card is not done (current: {current_status}), reopen only applies to done cards")}),
+            ),
         );
     }
 
@@ -1889,10 +1933,9 @@ pub async fn reopen_card(
                 .ok()
                 .flatten();
 
-            let card = conn
-                .query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
-                    card_row_to_json(row)
-                });
+            let card = conn.query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
+                card_row_to_json(row)
+            });
             drop(conn);
 
             // Async: reopen GitHub issue

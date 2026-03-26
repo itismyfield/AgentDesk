@@ -171,8 +171,7 @@ pub fn load_single_policy(ctx: &Context, path: &Path) -> Result<LoadedPolicy> {
         let props = policy_obj.keys::<String>();
         for key_result in props {
             if let Ok(key) = key_result {
-                if skip_keys.contains(&key.as_str()) || known_js_names.contains(&key.as_str())
-                {
+                if skip_keys.contains(&key.as_str()) || known_js_names.contains(&key.as_str()) {
                     continue;
                 }
                 if let Ok(val) = policy_obj.get::<_, rquickjs::Value>(&key) {
