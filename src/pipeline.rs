@@ -354,6 +354,18 @@ impl PipelineConfig {
         })
     }
 
+    /// Check if a state is a dispatch kickoff state — the first gated target
+    /// reachable from a dispatchable state. Only these should be blocked from
+    /// direct PATCH (must use POST /api/dispatches instead).
+    pub fn is_dispatch_kickoff(&self, state: &str) -> bool {
+        let dispatchable = self.dispatchable_states();
+        self.transitions.iter().any(|t| {
+            t.to == state
+                && t.transition_type == TransitionType::Gated
+                && dispatchable.contains(&t.from.as_str())
+        })
+    }
+
     /// Check if a state is a force-only target (only reachable via force=true).
     pub fn is_force_only_state(&self, state: &str) -> bool {
         let has_inbound = self.transitions.iter().any(|t| t.to == state);

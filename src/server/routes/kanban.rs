@@ -335,20 +335,21 @@ pub async fn update_card(
     let new_status = body.status.clone();
 
     // ── Status transition FIRST (validates before any writes) ──
-    // Dispatch-entry states (reachable only via gated transitions) cannot be set via PATCH.
-    // Use POST /api/dispatches instead.
+    // Dispatch kickoff states (first gated target from dispatchable states) cannot be set
+    // via PATCH — use POST /api/dispatches instead. Other gated states (in_progress, review)
+    // are allowed via PATCH as the gate check in kanban.rs handles validation.
     if let Some(new_s) = &new_status {
-        let requires_dispatch = {
+        let is_kickoff = {
             crate::pipeline::ensure_loaded();
             crate::pipeline::try_get()
-                .map(|p| p.requires_dispatch_entry(new_s))
+                .map(|p| p.is_dispatch_kickoff(new_s))
                 .unwrap_or(false)
         };
-        if requires_dispatch {
+        if is_kickoff {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(
-                    json!({"error": format!("Use POST /api/dispatches to transition to '{}'. Direct PATCH is not allowed for dispatch-entry states.", new_s)}),
+                    json!({"error": format!("Use POST /api/dispatches to transition to '{}'. Direct PATCH is not allowed for dispatch kickoff states.", new_s)}),
                 ),
             );
         }
