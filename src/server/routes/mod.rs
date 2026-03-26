@@ -4,6 +4,7 @@ pub mod analytics;
 pub mod auth;
 pub mod auto_queue;
 pub mod cron_api;
+mod queue_api;
 pub mod departments;
 pub mod discord;
 pub mod dispatched_sessions;
@@ -321,6 +322,11 @@ pub fn api_router(
         .route("/auto-queue/runs/{id}", patch(auto_queue::update_run))
         .route("/auto-queue/reorder", patch(auto_queue::reorder))
         .route("/auto-queue/reset", post(auto_queue::reset))
+        // Queue management (#138)
+        .route("/channels/{id}/queue", get(queue_api::list_channel_queue))
+        .route("/dispatches/pending", get(queue_api::list_pending_dispatches))
+        .route("/dispatches/{id}/cancel", post(queue_api::cancel_dispatch))
+        .route("/dispatches/cancel-all", post(queue_api::cancel_all_dispatches))
         .route(
             "/auto-queue/runs/{id}/order",
             post(auto_queue::submit_order),
