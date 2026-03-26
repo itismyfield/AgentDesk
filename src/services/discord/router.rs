@@ -732,20 +732,24 @@ pub(super) async fn handle_text_message(
                         .canonicalize()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|_| ws_path.clone());
-                    // Check worktree conflict
+                    // Check worktree: always use worktree for thread sessions,
+                    // or when conflict detected with another session on same path.
                     let wt_info = {
+                        let is_thread = shared.dispatch_thread_parents.contains_key(&channel_id);
                         let data = shared.core.lock().await;
                         let conflict =
                             detect_worktree_conflict(&data.sessions, &canonical, channel_id);
                         drop(data);
-                        if let Some(conflicting) = conflict {
+                        let needs_worktree = is_thread || conflict.is_some();
+                        if needs_worktree {
+                            let reason = if is_thread { "thread session" } else { "conflict" };
                             let ch = ch_name.as_deref().unwrap_or("unknown");
                             match create_git_worktree(&canonical, ch, provider.as_str()) {
                                 Ok((wt_path, branch)) => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     println!(
-                                        "  [{ts}] 🌿 Auto-start worktree: {} uses {}",
-                                        conflicting, canonical
+                                        "  [{ts}] 🌿 Auto-start worktree ({reason}): {ch} → {}",
+                                        wt_path
                                     );
                                     Some(WorktreeInfo {
                                         original_path: canonical.clone(),
