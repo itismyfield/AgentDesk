@@ -397,10 +397,11 @@ pub fn run(
         Err(e) => format!("wait_error:{e}"),
     };
 
-    // Kill Claude if still running (handles case where output thread exited early
-    // due to fatal error while Claude is still waiting for stdin input)
-    let _ = child.kill();
-    let _ = child.wait();
+    // Kill Claude AND all its descendants (cmd.exe, bash, etc.).
+    // Using kill_child_tree() instead of child.kill() ensures that child processes
+    // spawned by Claude (e.g. cmd.exe on Windows, bash on Unix) are also terminated.
+    // Without this, those descendants survive as orphan processes.
+    crate::services::claude::kill_child_tree(&mut child);
 
     // Write exit reason file for recovery diagnostics
     let exit_reason_path = format!("{}.exit_reason", output_file);

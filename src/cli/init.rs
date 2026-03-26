@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write as IoWrite};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::dcserver;
 

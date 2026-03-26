@@ -122,6 +122,18 @@ impl SessionBackend for ProcessBackend {
             cmd.process_group(0); // new process group = wrapper PID
         }
 
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+            // CREATE_NO_WINDOW gives the wrapper a hidden console that children
+            // inherit. Without this, every cmd.exe spawned by Claude/Codex
+            // creates its own *visible* console window when the parent process
+            // has no console (e.g. running as a Windows service via NSSM).
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        }
+
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn wrapper process: {}", e))?;

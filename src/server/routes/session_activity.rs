@@ -3,6 +3,7 @@ use std::process::Command;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 
+#[cfg(unix)]
 use crate::services::tmux_diagnostics::tmux_session_has_live_pane;
 
 const REMOTE_HEARTBEAT_GRACE_SECS: i64 = 90;
@@ -39,7 +40,10 @@ impl SessionActivityResolver {
             if let Some(cached) = cache.get(tmux_name) {
                 return *cached;
             }
+            #[cfg(unix)]
             let live = tmux_session_has_live_pane(tmux_name);
+            #[cfg(not(unix))]
+            let live = false; // tmux not available on Windows
             cache.insert(tmux_name.to_string(), live);
             live
         };
