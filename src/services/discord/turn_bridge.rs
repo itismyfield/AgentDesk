@@ -1,9 +1,9 @@
 use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
+use crate::config::local_api_url;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
-use crate::config::local_api_url;
 use crate::utils::format::{safe_suffix, tail_with_ellipsis};
 
 /// Decide the final response text when a Done event arrives.
@@ -346,11 +346,7 @@ async fn guard_review_dispatch_completion(
 /// Unlike review dispatches (which auto-complete on session idle), these types
 /// require an explicit PATCH so the pipeline can advance deterministically.
 /// Fail a dispatch with retry on PATCH failure.
-async fn fail_dispatch_with_retry(
-    api_port: u16,
-    dispatch_id: Option<&str>,
-    error_msg: &str,
-) {
+async fn fail_dispatch_with_retry(api_port: u16, dispatch_id: Option<&str>, error_msg: &str) {
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
@@ -360,7 +356,12 @@ async fn fail_dispatch_with_retry(
         "result": {"error": error_msg.chars().take(500).collect::<String>()}
     });
     for attempt in 1..=3 {
-        match reqwest::Client::new().patch(&url).json(&payload).send().await {
+        match reqwest::Client::new()
+            .patch(&url)
+            .json(&payload)
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 eprintln!("  [{ts}] ⚠ Dispatch {dispatch_id} failed (transport error)");
@@ -376,7 +377,9 @@ async fn fail_dispatch_with_retry(
     // Fallback: direct DB update to prevent orphan dispatch.
     // Also leave a reconciliation marker so onTick can run the hook chain later.
     let ts = chrono::Local::now().format("%H:%M:%S");
-    eprintln!("  [{ts}] ❌ PATCH failed after 3 retries, falling back to direct DB for {dispatch_id}");
+    eprintln!(
+        "  [{ts}] ❌ PATCH failed after 3 retries, falling back to direct DB for {dispatch_id}"
+    );
     if let Some(root) = crate::cli::agentdesk_runtime_root() {
         let db_path = root.join("data/agentdesk.sqlite");
         if let Ok(conn) = rusqlite::Connection::open(&db_path) {
@@ -394,16 +397,18 @@ async fn fail_dispatch_with_retry(
     }
 }
 
-async fn complete_work_dispatch_on_turn_end(
-    api_port: u16,
-    dispatch_id: Option<&str>,
-) {
+async fn complete_work_dispatch_on_turn_end(api_port: u16, dispatch_id: Option<&str>) {
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
     let Some(snapshot) = fetch_dispatch_snapshot(api_port, dispatch_id).await else {
         // Snapshot fetch failed — fail the dispatch with retry to prevent orphan
-        fail_dispatch_with_retry(api_port, Some(dispatch_id), "dispatch snapshot fetch failed").await;
+        fail_dispatch_with_retry(
+            api_port,
+            Some(dispatch_id),
+            "dispatch snapshot fetch failed",
+        )
+        .await;
         return;
     };
     if snapshot.status != "pending" {
@@ -445,7 +450,9 @@ async fn complete_work_dispatch_on_turn_end(
             }
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ Explicit dispatch completion error (attempt {attempt}/3): {e}");
+                eprintln!(
+                    "  [{ts}] ⚠ Explicit dispatch completion error (attempt {attempt}/3): {e}"
+                );
             }
         }
         if attempt < 3 {
@@ -454,7 +461,9 @@ async fn complete_work_dispatch_on_turn_end(
     }
     // Fallback: direct DB update + reconciliation marker for onTick hook chain.
     let ts = chrono::Local::now().format("%H:%M:%S");
-    eprintln!("  [{ts}] ❌ Explicit completion failed after 3 retries, falling back to direct DB for {dispatch_id}");
+    eprintln!(
+        "  [{ts}] ❌ Explicit completion failed after 3 retries, falling back to direct DB for {dispatch_id}"
+    );
     if let Some(root) = crate::cli::agentdesk_runtime_root() {
         let db_path = root.join("data/agentdesk.sqlite");
         if let Ok(conn) = rusqlite::Connection::open(&db_path) {
@@ -946,11 +955,7 @@ pub(super) fn spawn_turn_bridge(
         // Skip if: cancelled, prompt too long, or transport error.
         // transport_error is set by StreamMessage::Error — not substring matching.
         if !cancelled && !is_prompt_too_long && !transport_error {
-            complete_work_dispatch_on_turn_end(
-                shared_owned.api_port,
-                dispatch_id.as_deref(),
-            )
-            .await;
+            complete_work_dispatch_on_turn_end(shared_owned.api_port, dispatch_id.as_deref()).await;
         } else if transport_error && !cancelled {
             // Transport error — fail the dispatch instead of completing
             fail_dispatch_with_retry(
@@ -1001,6 +1006,8 @@ pub(super) fn spawn_turn_bridge(
                     .global_active
                     .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
+            // Clean up any pending watchdog deadline override for this channel
+            super::clear_watchdog_deadline_override(channel_id.get());
             data.active_request_owner.remove(&channel_id);
             // Clean up dispatch-thread parent mapping when the thread turn ends.
             // Iterate and remove entries whose thread matches this channel_id.
@@ -1118,12 +1125,49 @@ pub(super) fn spawn_turn_bridge(
                     }
                 }
 
-                if full_response.is_empty() {
-                    // Check for resume failure: "No conversation found" in output
-                    // OR quick exit (<10s) with empty response + session_id present
+                // Check for resume failure BEFORE other response handling.
+                // Covers both empty response AND error text in response.
+                let resume_error_in_response = full_response.contains("No conversation found")
+                    || full_response.contains("Error: No conversation");
+                if resume_error_in_response {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ Resume failed (error in response), clearing session_id (channel {})",
+                        channel_id
+                    );
+                    // Clear all 3 locations
+                    let stale_sid = {
+                        let mut data = shared_owned.core.lock().await;
+                        let old = data.sessions.get(&channel_id).and_then(|s| s.session_id.clone());
+                        if let Some(session) = data.sessions.get_mut(&channel_id) {
+                            session.session_id = None;
+                        }
+                        old
+                    };
+                    if let Some(ref key) = adk_session_key {
+                        super::adk_session::save_claude_session_id(key, "", shared_owned.api_port).await;
+                    }
+                    if let Some(ref sid) = stale_sid {
+                        if let Some(root) = crate::cli::agentdesk_runtime_root() {
+                            let f = root.join("ai_sessions").join(format!("{sid}.json"));
+                            let _ = std::fs::remove_file(&f);
+                        }
+                        let port = shared_owned.api_port;
+                        let sid_c = sid.clone();
+                        tokio::spawn(async move {
+                            let _ = reqwest::Client::new()
+                                .post(format!("http://127.0.0.1:{port}/api/dispatched-sessions/clear-stale-session-id"))
+                                .json(&serde_json::json!({"claude_session_id": sid_c}))
+                                .send().await;
+                        });
+                    }
+                    full_response = "⚠️ 이전 대화 세션이 만료되어 새 세션으로 시작합니다. 메시지를 다시 보내주세요.".to_string();
+                } else if full_response.is_empty() {
+                    // Check for resume failure via other methods
                     let mut resume_failed = false;
                     let quick_exit = turn_start.elapsed().as_secs() < 10;
-                    let had_session_id = new_session_id.is_none() && bridge.new_session_id.is_none();
+                    let _had_session_id =
+                        new_session_id.is_none() && bridge.new_session_id.is_none();
                     // Method 1: check tmux output file
                     if let Some(ref path) = inflight_state.output_path {
                         if let Ok(content) = std::fs::read_to_string(path) {
@@ -1177,7 +1221,10 @@ pub(super) fn spawn_turn_bridge(
                                     let port = shared_owned.api_port;
                                     let sid_clone = sid.clone();
                                     tokio::spawn(async move {
-                                        let url = local_api_url(port, "/api/dispatched-sessions/clear-stale-session-id");
+                                        let url = local_api_url(
+                                            port,
+                                            "/api/dispatched-sessions/clear-stale-session-id",
+                                        );
                                         let _ = reqwest::Client::new()
                                             .post(&url)
                                             .json(&serde_json::json!({"claude_session_id": sid_clone}))
@@ -1210,14 +1257,22 @@ pub(super) fn spawn_turn_bridge(
                             // Clear all 3 locations
                             let stale_sid = {
                                 let mut data = shared_owned.core.lock().await;
-                                let old = data.sessions.get(&channel_id).and_then(|s| s.session_id.clone());
+                                let old = data
+                                    .sessions
+                                    .get(&channel_id)
+                                    .and_then(|s| s.session_id.clone());
                                 if let Some(session) = data.sessions.get_mut(&channel_id) {
                                     session.session_id = None;
                                 }
                                 old
                             };
                             if let Some(ref key) = adk_session_key {
-                                super::adk_session::save_claude_session_id(key, "", shared_owned.api_port).await;
+                                super::adk_session::save_claude_session_id(
+                                    key,
+                                    "",
+                                    shared_owned.api_port,
+                                )
+                                .await;
                             }
                             if let Some(ref sid) = stale_sid {
                                 if let Some(root) = crate::cli::agentdesk_runtime_root() {
@@ -1422,7 +1477,10 @@ pub(super) fn spawn_turn_bridge(
                     .ok()
                     .and_then(|g| g.clone())
                 {
-                    record_tmux_exit_reason(name, "dispatch turn completed — killing thread session");
+                    record_tmux_exit_reason(
+                        name,
+                        "dispatch turn completed — killing thread session",
+                    );
                     let sess = name.clone();
                     let kill_result = tokio::task::spawn_blocking(move || {
                         std::process::Command::new("tmux")
@@ -1447,7 +1505,9 @@ pub(super) fn spawn_turn_bridge(
                             }
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!("  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}");
+                                eprintln!(
+                                    "  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}"
+                                );
                             }
                             _ => {}
                         }
@@ -1463,8 +1523,11 @@ pub(super) fn spawn_turn_bridge(
                         )
                         .await
                         {
-                            super::adk_session::delete_adk_session(&session_key, shared_owned.api_port)
-                                .await;
+                            super::adk_session::delete_adk_session(
+                                &session_key,
+                                shared_owned.api_port,
+                            )
+                            .await;
                         }
                     }
                 }
