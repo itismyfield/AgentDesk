@@ -728,6 +728,31 @@ pub async fn submit_review_decision(
             // #117: Update canonical review state before returning
             update_card_review_state(&state.db, &body.card_id, "dispute", pending_rd_id.as_deref());
 
+            // Send newly created review dispatch to Discord (created by OnReviewEnter hook)
+            if let Ok(conn) = state.db.lock() {
+                let new_review: Option<(String, String, String)> = conn
+                    .query_row(
+                        "SELECT td.id, COALESCE(td.to_agent_id, ''), COALESCE(td.title, '') \
+                         FROM task_dispatches td \
+                         WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' AND td.status = 'pending' \
+                         ORDER BY td.rowid DESC LIMIT 1",
+                        [&body.card_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .ok();
+                drop(conn);
+                if let Some((did, aid, title)) = new_review {
+                    let db_clone = state.db.clone();
+                    let card_id = body.card_id.clone();
+                    tokio::spawn(async move {
+                        super::dispatches::send_dispatch_to_discord(
+                            &db_clone, &aid, &title, &card_id, &did,
+                        )
+                        .await;
+                    });
+                }
+            }
+
             return (
                 StatusCode::OK,
                 Json(json!({
