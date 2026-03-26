@@ -400,20 +400,6 @@ pub async fn submit_verdict(
     });
     let result_str = result_json.to_string();
 
-    // #100: stamp release marker BEFORE completing dispatch — if this fails, we bail out
-    // without committing the dispatch, so no partial state is left behind.
-    if body.overall == "pass" || body.overall == "approved" {
-        if let Err(e) = stamp_review_passed_marker(effective_commit.as_deref()) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "ok": false,
-                    "error": format!("failed to write release marker: {e}"),
-                })),
-            );
-        }
-    }
-
     // Update dispatch with verdict result — only if still pending/dispatched.
     // Cancelled dispatches (e.g. after dismiss) must NOT be promoted to completed,
     // as that would re-trigger OnDispatchCompleted hooks and cause review loops (#80).
@@ -459,6 +445,28 @@ pub async fn submit_verdict(
         .flatten();
 
     drop(conn);
+
+    // #100: stamp release marker AFTER dispatch update confirmed, BEFORE hooks.
+    // This ensures: (1) stale/duplicate submissions don't write markers (updated==0 already returned),
+    // (2) marker failure prevents hooks from firing (no partial state).
+    if body.overall == "pass" || body.overall == "approved" {
+        if let Err(e) = stamp_review_passed_marker(effective_commit.as_deref()) {
+            // Roll back the dispatch status since we can't complete the pass flow
+            if let Ok(conn) = state.db.lock() {
+                let _ = conn.execute(
+                    "UPDATE task_dispatches SET status = 'dispatched', updated_at = datetime('now') WHERE id = ?1",
+                    [&body.dispatch_id],
+                );
+            }
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "ok": false,
+                    "error": format!("failed to write release marker: {e}"),
+                })),
+            );
+        }
+    }
 
     // Fire OnReviewVerdict hook — policy engine handles all state transitions
     if let Some(ref cid) = card_id {
