@@ -532,8 +532,7 @@ pub(crate) async fn send_dispatch_to_discord(
     // For review dispatches, use the alternate channel (counter-model)
     let mut use_alt = use_counter_model_channel(dispatch_type.as_deref());
 
-    // #137: In unified thread mode, always use primary channel so all dispatches
-    // go to the same thread (review included). Check if this card is in a unified run.
+    // #137: Check if this card is in a unified thread auto-queue run
     let is_unified_run: bool = db
         .lock()
         .ok()
@@ -548,9 +547,7 @@ pub(crate) async fn send_dispatch_to_discord(
             .ok()
         })
         .unwrap_or(false);
-    if is_unified_run {
-        use_alt = false; // Force primary channel for unified thread
-    }
+    // Each channel (primary/alt) gets its own unified thread — don't override use_alt
 
     // Look up agent's discord channel
     let channel_id: Option<String> = {
@@ -670,19 +667,32 @@ pub(crate) async fn send_dispatch_to_discord(
     let dispatch_type_label = dispatch_type.as_deref().unwrap_or("implementation");
 
     // #137: Check if this dispatch belongs to a unified-thread auto-queue run
+    // #137: Look up per-channel unified thread from JSON map
     let mut unified_thread_id: Option<String> = db
         .lock()
         .ok()
         .and_then(|conn| {
-            conn.query_row(
-                "SELECT r.unified_thread_id FROM auto_queue_runs r \
-                 JOIN auto_queue_entries e ON e.run_id = r.id \
-                 WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
-                 AND r.unified_thread_id IS NOT NULL",
-                [card_id],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
+            let map_json: Option<String> = conn
+                .query_row(
+                    "SELECT r.unified_thread_id FROM auto_queue_runs r \
+                     JOIN auto_queue_entries e ON e.run_id = r.id \
+                     WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
+                     AND r.unified_thread_id IS NOT NULL",
+                    [card_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
+            map_json.and_then(|json_str| {
+                // Try parsing as JSON map {"channel_id": "thread_id", ...}
+                if let Ok(map) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                    map.get(&channel_id_num.to_string())
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    // Legacy: plain thread_id string — use as-is if channel matches
+                    Some(json_str)
+                }
+            })
         });
 
     // Try to reuse existing thread for this card (channel-specific)
@@ -717,15 +727,28 @@ pub(crate) async fn send_dispatch_to_discord(
         }
     }
 
-    // #137: If unified thread reuse failed, clear stale ID so new thread gets saved in this call
+    // #137: If unified thread reuse failed, remove this channel from JSON map
     if unified_thread_id.is_some() {
         if let Ok(conn) = db.lock() {
-            conn.execute(
-                "UPDATE auto_queue_runs SET unified_thread_id = NULL, unified_thread_channel_id = NULL \
-                 WHERE unified_thread = 1 AND id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1)",
-                [card_id],
-            )
-            .ok();
+            let existing: String = conn
+                .query_row(
+                    "SELECT COALESCE(unified_thread_id, '{}') FROM auto_queue_runs \
+                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1)",
+                    [card_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| "{}".to_string());
+            if let Ok(mut map) = serde_json::from_str::<serde_json::Value>(&existing) {
+                if let Some(obj) = map.as_object_mut() {
+                    obj.remove(&channel_id_num.to_string());
+                }
+                conn.execute(
+                    "UPDATE auto_queue_runs SET unified_thread_id = ?1 \
+                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?2)",
+                    rusqlite::params![map.to_string(), card_id],
+                )
+                .ok();
+            }
         }
         unified_thread_id = None; // Reset local so new thread creation saves to run below
     }
@@ -857,13 +880,24 @@ pub(crate) async fn send_dispatch_to_discord(
                             )
                             .ok();
                             set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
-                            // #137: Store as unified thread for the run (first dispatch creates it)
-                            if unified_thread_id.is_none() {
+                            // #137: Store unified thread per channel in JSON map
+                            if unified_thread_id.is_none() && is_unified_run {
+                                // Read existing map, add this channel's thread
+                                let existing: String = conn
+                                    .query_row(
+                                        "SELECT COALESCE(unified_thread_id, '{}') FROM auto_queue_runs \
+                                         WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1)",
+                                        [card_id],
+                                        |row| row.get(0),
+                                    )
+                                    .unwrap_or_else(|_| "{}".to_string());
+                                let mut map: serde_json::Value = serde_json::from_str(&existing)
+                                    .unwrap_or(serde_json::json!({}));
+                                map[channel_id_num.to_string()] = serde_json::json!(thread_id);
                                 conn.execute(
-                                    "UPDATE auto_queue_runs SET unified_thread_id = ?1, unified_thread_channel_id = ?2 \
-                                     WHERE unified_thread = 1 AND unified_thread_id IS NULL \
-                                     AND id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?3)",
-                                    rusqlite::params![thread_id, channel_id_num.to_string(), card_id],
+                                    "UPDATE auto_queue_runs SET unified_thread_id = ?1 \
+                                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?2)",
+                                    rusqlite::params![map.to_string(), card_id],
                                 )
                                 .ok();
                             }
