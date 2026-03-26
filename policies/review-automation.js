@@ -331,7 +331,8 @@ function processVerdict(cardId, verdict, result) {
     agentdesk.db.execute(
       "INSERT INTO card_review_state (card_id, state, last_verdict, updated_at) " +
       "VALUES (?, 'idle', ?, datetime('now')) " +
-      "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', last_verdict = ?, pending_dispatch_id = NULL, updated_at = datetime('now')",
+      "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', last_verdict = ?, pending_dispatch_id = NULL, " +
+      "approach_change_round = NULL, updated_at = datetime('now')",
       [cardId, verdict, verdict]
     );
 

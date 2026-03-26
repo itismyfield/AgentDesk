@@ -1251,6 +1251,31 @@ pub(super) async fn send_review_result_to_primary(
         return;
     }
 
+    // #118: If approach-change already created a rework dispatch (review_status = rework_pending),
+    // skip creating the review-decision dispatch to avoid double dispatch.
+    {
+        let skip = db
+            .lock()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT review_status FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+            })
+            .map(|s| s == "rework_pending")
+            .unwrap_or(false);
+        if skip {
+            tracing::info!(
+                "[review-followup] #118 skipping review-decision for {card_id} — approach-change rework already dispatched"
+            );
+            return;
+        }
+    }
+
     // For improve/rework/reject: create a review-decision dispatch via central create_dispatch_core
     // to enforce the done terminal guard (prevents review-decision on done cards).
     let dispatch_id = match crate::dispatch::create_dispatch_core(
