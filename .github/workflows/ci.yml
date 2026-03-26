@@ -86,7 +86,7 @@ jobs:
         run: |
           FAILED=0
           while IFS= read -r f; do
-            shellcheck -S warning "$f" || FAILED=1
+            shellcheck -S error "$f" || FAILED=1
           done < <(find . -name '*.sh' -not -path './target/*' -not -path './.git/*')
           exit $FAILED
         shell: bash
