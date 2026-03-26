@@ -694,6 +694,7 @@ var timeouts = {
           "🔴 [Deadlock 복구] " + sess.agent_id + "\n" +
           "session_key: " + sess.session_key + "\n" +
           "tmux: " + ((sess.session_key || "").split(":").pop() || "unknown") + "\n" +
+          "연장: " + extensions + "/" + MAX_EXTENSIONS + "\n" +
           totalMin + "분 무응답 → 강제 중단" +
           (redispatched ? " + 재디스패치 완료" : ""));
 
