@@ -3,7 +3,6 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
-use crate::engine::hooks::Hook;
 use crate::services::provider::ProviderKind;
 
 /// #119: Convenience wrapper — queries review state and records a tuning outcome.
@@ -163,7 +162,10 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), Strin
     } else {
         let repo_dir = match std::env::var("AGENTDESK_REPO_DIR") {
             Ok(d) => d,
-            Err(_) => resolve_home()?.join("AgentDesk").to_string_lossy().into_owned(),
+            Err(_) => resolve_home()?
+                .join("AgentDesk")
+                .to_string_lossy()
+                .into_owned(),
         };
         match crate::services::platform::git_head_commit(&repo_dir) {
             Some(c) => c,
@@ -175,7 +177,10 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), Strin
     };
     let root = match std::env::var("AGENTDESK_ROOT_DIR") {
         Ok(d) => d,
-        Err(_) => resolve_home()?.join(".adk/release").to_string_lossy().into_owned(),
+        Err(_) => resolve_home()?
+            .join(".adk/release")
+            .to_string_lossy()
+            .into_owned(),
     };
     let dir = format!("{}/runtime/review_passed", root);
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -461,10 +466,12 @@ pub async fn submit_verdict(
         }
     }
 
-    // Fire OnReviewVerdict hook — policy engine handles all state transitions
+    // Fire event hooks for review verdict (#134 — pipeline-defined events)
     if let Some(ref cid) = card_id {
-        let _ = state.engine.try_fire_hook(
-            Hook::OnReviewVerdict,
+        crate::kanban::fire_event_hooks(
+            &state.engine,
+            "on_review_verdict",
+            "OnReviewVerdict",
             json!({
                 "card_id": cid,
                 "dispatch_id": body.dispatch_id,
@@ -484,7 +491,11 @@ pub async fn submit_verdict(
             }
             for (t_card_id, old_s, new_s) in &transitions {
                 crate::kanban::fire_transition_hooks(
-                    &state.db, &state.engine, t_card_id, old_s, new_s,
+                    &state.db,
+                    &state.engine,
+                    t_card_id,
+                    old_s,
+                    new_s,
                 );
             }
         }
@@ -650,7 +661,12 @@ pub async fn submit_review_decision(
                         ).ok();
                     }
                     // #119: Record tuning outcome BEFORE transition (which clears last_verdict)
-                    record_decision_tuning(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
+                    record_decision_tuning(
+                        &state.db,
+                        &body.card_id,
+                        "accept",
+                        pending_rd_id.as_deref(),
+                    );
                     spawn_aggregate_if_needed(&state.db);
 
                     let _ = crate::kanban::transition_status(
@@ -685,7 +701,12 @@ pub async fn submit_review_decision(
                     });
 
                     // #117: Update canonical review state before returning
-                    update_card_review_state(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
+                    update_card_review_state(
+                        &state.db,
+                        &body.card_id,
+                        "accept",
+                        pending_rd_id.as_deref(),
+                    );
 
                     return (
                         StatusCode::OK,
@@ -735,17 +756,16 @@ pub async fn submit_review_decision(
             drop(conn);
 
             // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
-            record_decision_tuning(&state.db, &body.card_id, "dispute", pending_rd_id.as_deref());
+            record_decision_tuning(
+                &state.db,
+                &body.card_id,
+                "dispute",
+                pending_rd_id.as_deref(),
+            );
             spawn_aggregate_if_needed(&state.db);
 
-            // Fire OnReviewEnter to create new review dispatch
-            let _ = state.engine.try_fire_hook(
-                Hook::OnReviewEnter,
-                json!({
-                    "card_id": body.card_id,
-                    "from": "review",
-                }),
-            );
+            // Fire on_enter hooks for review state to create new review dispatch (#134)
+            crate::kanban::fire_enter_hooks(&state.db, &state.engine, &body.card_id, "review");
 
             // Drain: onReviewEnter may call setStatus (e.g. pending_decision on max rounds)
             loop {
@@ -755,13 +775,22 @@ pub async fn submit_review_decision(
                 }
                 for (t_card_id, old_s, new_s) in &transitions {
                     crate::kanban::fire_transition_hooks(
-                        &state.db, &state.engine, &t_card_id, &old_s, &new_s,
+                        &state.db,
+                        &state.engine,
+                        &t_card_id,
+                        &old_s,
+                        &new_s,
                     );
                 }
             }
 
             // #117: Update canonical review state before returning
-            update_card_review_state(&state.db, &body.card_id, "dispute", pending_rd_id.as_deref());
+            update_card_review_state(
+                &state.db,
+                &body.card_id,
+                "dispute",
+                pending_rd_id.as_deref(),
+            );
 
             // Send newly created review dispatch to Discord (created by OnReviewEnter hook)
             if let Ok(conn) = state.db.lock() {
@@ -831,10 +860,20 @@ pub async fn submit_review_decision(
     }
 
     // #117: Update canonical review state for all decision paths
-    update_card_review_state(&state.db, &body.card_id, &body.decision, pending_rd_id.as_deref());
+    update_card_review_state(
+        &state.db,
+        &body.card_id,
+        &body.decision,
+        pending_rd_id.as_deref(),
+    );
 
     // #119: Record tuning outcome (dismiss falls through here; accept/dispute call helper before returning)
-    record_decision_tuning(&state.db, &body.card_id, &body.decision, pending_rd_id.as_deref());
+    record_decision_tuning(
+        &state.db,
+        &body.card_id,
+        &body.decision,
+        pending_rd_id.as_deref(),
+    );
     spawn_aggregate_if_needed(&state.db);
 
     (
@@ -886,9 +925,12 @@ fn aggregate_review_tuning_core(db: &crate::db::Db) -> (i64, i64, i64, i64, i64,
     let mut total_tn = 0i64;
     let mut total_fn = 0i64;
     let mut total_disputed = 0i64;
-    let mut fp_categories: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut tp_categories: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut fn_categories: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut fp_categories: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    let mut tp_categories: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    let mut fn_categories: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
 
     {
         let mut stmt = match conn.prepare(
@@ -902,10 +944,7 @@ fn aggregate_review_tuning_core(db: &crate::db::Db) -> (i64, i64, i64, i64, i64,
 
         let rows: Vec<(String, Option<String>)> = stmt
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })
             .ok()
             .into_iter()
@@ -1024,7 +1063,14 @@ fn aggregate_review_tuning_core(db: &crate::db::Db) -> (i64, i64, i64, i64, i64,
         guidance_path.display()
     );
 
-    (total_tp, total_fp, total_tn, total_fn, total_disputed, lines)
+    (
+        total_tp,
+        total_fp,
+        total_tn,
+        total_fn,
+        total_disputed,
+        lines,
+    )
 }
 
 /// POST /api/review-tuning/aggregate
@@ -2007,7 +2053,8 @@ mod tests {
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     dispatched_at DATETIME, completed_at DATETIME
                 );",
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO auto_queue_runs (id, status, agent_id) VALUES ('run-drain', 'active', 'agent-1')",
                 [],
@@ -2045,7 +2092,11 @@ mod tests {
 
         // Card must be done
         let card_status: String = conn
-            .query_row("SELECT status FROM kanban_cards WHERE id = 'card-1'", [], |row| row.get(0))
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(card_status, "done");
 
@@ -2101,9 +2152,17 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST, "accept should be rejected as a verdict");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "accept should be rejected as a verdict"
+        );
         let err = body.0["error"].as_str().unwrap_or("");
-        assert!(err.contains("must be one of"), "error should list valid verdicts: {}", err);
+        assert!(
+            err.contains("must be one of"),
+            "error should list valid verdicts: {}",
+            err
+        );
     }
 
     /// #116: Creating a new review-decision cancels any existing pending ones for the same card.
@@ -2130,7 +2189,8 @@ mod tests {
             conn.execute(
                 "UPDATE kanban_cards SET latest_dispatch_id = 'rd-old' WHERE id = 'card-dup'",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // Creating a new review-decision should cancel the old one
@@ -2142,7 +2202,10 @@ mod tests {
             "[New RD]",
             &serde_json::json!({"verdict": "improve"}),
         );
-        assert!(result.is_ok(), "new review-decision creation should succeed");
+        assert!(
+            result.is_ok(),
+            "new review-decision creation should succeed"
+        );
 
         let conn = db.lock().unwrap();
 
@@ -2154,7 +2217,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(old_status, "cancelled", "old review-decision must be cancelled");
+        assert_eq!(
+            old_status, "cancelled",
+            "old review-decision must be cancelled"
+        );
 
         // Only 1 pending review-decision should exist for this card
         let pending_count: i64 = conn
@@ -2164,7 +2230,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(pending_count, 1, "exactly 1 pending review-decision per card");
+        assert_eq!(
+            pending_count, 1,
+            "exactly 1 pending review-decision per card"
+        );
     }
 
     /// #117: card_review_state is updated when review-decision is consumed (accept path).
@@ -2216,7 +2285,14 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(rs_state, "rework_pending", "canonical state should be rework_pending after accept");
-        assert_eq!(last_decision.as_deref(), Some("accept"), "last_decision should be accept");
+        assert_eq!(
+            rs_state, "rework_pending",
+            "canonical state should be rework_pending after accept"
+        );
+        assert_eq!(
+            last_decision.as_deref(),
+            Some("accept"),
+            "last_decision should be accept"
+        );
     }
 }

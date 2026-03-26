@@ -118,6 +118,10 @@ hooks:
   done:
     on_enter: [OnCardTransition, OnCardTerminal]
 
+events:
+  on_dispatch_completed: [OnDispatchCompleted]
+  on_review_verdict: [OnReviewVerdict]
+
 clocks:
   requested:
     set: requested_at

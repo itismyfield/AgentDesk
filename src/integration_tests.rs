@@ -8,7 +8,7 @@ mod tests {
 
     use crate::db;
     use crate::dispatch;
-    use crate::engine::{hooks::Hook, PolicyEngine};
+    use crate::engine::PolicyEngine;
     use crate::kanban;
     use crate::server::routes::AppState;
 
@@ -46,13 +46,7 @@ mod tests {
         .unwrap();
     }
 
-    fn seed_dispatch(
-        db: &db::Db,
-        dispatch_id: &str,
-        card_id: &str,
-        dtype: &str,
-        status: &str,
-    ) {
+    fn seed_dispatch(db: &db::Db, dispatch_id: &str, card_id: &str, dtype: &str, status: &str) {
         let conn = db.lock().unwrap();
         conn.execute(
             "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
@@ -104,18 +98,20 @@ mod tests {
 
         let (status, _) = crate::server::routes::dispatched_sessions::hook_session(
             axum::extract::State(state),
-            axum::Json(crate::server::routes::dispatched_sessions::HookSessionBody {
-                session_key: "test-session".to_string(),
-                status: Some("idle".to_string()),
-                provider: Some("claude".to_string()),
-                session_info: None,
-                name: None,
-                model: None,
-                tokens: None,
-                cwd: None,
-                dispatch_id: Some("d-s1".to_string()),
-                claude_session_id: None,
-            }),
+            axum::Json(
+                crate::server::routes::dispatched_sessions::HookSessionBody {
+                    session_key: "test-session".to_string(),
+                    status: Some("idle".to_string()),
+                    provider: Some("claude".to_string()),
+                    session_info: None,
+                    name: None,
+                    model: None,
+                    tokens: None,
+                    cwd: None,
+                    dispatch_id: Some("d-s1".to_string()),
+                    claude_session_id: None,
+                },
+            ),
         )
         .await;
 
@@ -198,9 +194,8 @@ mod tests {
         {
             let conn = db.lock().unwrap();
             // Remove index to simulate pre-#116 DB state
-            conn.execute_batch(
-                "DROP INDEX IF EXISTS idx_single_active_review_decision;"
-            ).unwrap();
+            conn.execute_batch("DROP INDEX IF EXISTS idx_single_active_review_decision;")
+                .unwrap();
             // Create two pending review-decisions (duplicate — legacy race)
             conn.execute(
                 "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
@@ -216,7 +211,8 @@ mod tests {
             conn.execute(
                 "UPDATE kanban_cards SET latest_dispatch_id = 'rd-loser' WHERE id = 'card-s3'",
                 [],
-            ).unwrap();
+            )
+            .unwrap();
             // card_review_state with stale NULL pending_dispatch_id
             conn.execute(
                 "INSERT INTO card_review_state (card_id, review_round, state, pending_dispatch_id, review_entered_at, updated_at) \
@@ -245,7 +241,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(active_count, 1, "reconciliation must leave exactly 1 active review-decision");
+            assert_eq!(
+                active_count, 1,
+                "reconciliation must leave exactly 1 active review-decision"
+            );
 
             // 2) latest_dispatch_id should point to the surviving active dispatch
             let latest: String = conn
@@ -370,7 +369,7 @@ mod tests {
         }
 
         // Fire onTick1min — [A] requested timeout lives in 1min tier (#127)
-        let _ = engine.try_fire_hook(Hook::OnTick1min, serde_json::json!({}));
+        let _ = engine.try_fire_hook_by_name("OnTick1min", serde_json::json!({}));
 
         // Drain transitions
         loop {
@@ -428,7 +427,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(latest, dispatch_id, "latest_dispatch_id must point to new dispatch");
+            assert_eq!(
+                latest, dispatch_id,
+                "latest_dispatch_id must point to new dispatch"
+            );
         }
 
         // Step 2: Complete via dispatch::complete_dispatch — the canonical path
@@ -440,7 +442,11 @@ mod tests {
             &dispatch_id,
             &serde_json::json!({"completion_source": "test_harness"}),
         );
-        assert!(result.is_ok(), "complete_dispatch should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "complete_dispatch should succeed: {:?}",
+            result.err()
+        );
         assert_eq!(get_dispatch_status(&db, &dispatch_id), "completed");
 
         // Step 3: PM gate passes (no DoD items, no duration constraint) → card must be in review

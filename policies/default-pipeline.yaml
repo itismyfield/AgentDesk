@@ -151,6 +151,16 @@ hooks:
   done:
     on_enter: [OnCardTransition, OnCardTerminal]
 
+# ── Event Hooks ──────────────────────────────────────────────────
+#
+# Lifecycle event hooks (not state-transition-bound).
+# These fire on specific system events regardless of card state.
+
+events:
+  on_dispatch_completed: [OnDispatchCompleted]
+  on_review_verdict: [OnReviewVerdict]
+  on_session_status_change: [OnSessionStatusChange]
+
 # ── Clocks ────────────────────────────────────────────────────────
 #
 # Fields set on state entry for timeout detection.

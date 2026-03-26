@@ -151,6 +151,8 @@ pub struct PipelineOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<HashMap<String, HookBindings>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<HashMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub clocks: Option<HashMap<String, ClockConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<HashMap<String, TimeoutConfig>>,
@@ -168,6 +170,10 @@ pub struct PipelineConfig {
     pub gates: HashMap<String, GateConfig>,
     #[serde(default)]
     pub hooks: HashMap<String, HookBindings>,
+    /// Event hooks — lifecycle events not bound to state transitions.
+    /// Key: event name (e.g. "on_dispatch_completed"), Value: list of hook names to fire.
+    #[serde(default)]
+    pub events: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub clocks: HashMap<String, ClockConfig>,
     #[serde(default)]
@@ -266,6 +272,11 @@ impl PipelineConfig {
                 .as_ref()
                 .cloned()
                 .unwrap_or_else(|| self.hooks.clone()),
+            events: ovr
+                .events
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.events.clone()),
             clocks: ovr
                 .clocks
                 .as_ref()
@@ -313,6 +324,11 @@ impl PipelineConfig {
     /// Get hook bindings for a state.
     pub fn hooks_for_state(&self, state: &str) -> Option<&HookBindings> {
         self.hooks.get(state)
+    }
+
+    /// Get event hook names for a lifecycle event (e.g. "on_dispatch_completed").
+    pub fn event_hooks(&self, event: &str) -> Option<&Vec<String>> {
+        self.events.get(event)
     }
 
     /// Get the initial state (first non-terminal state in the pipeline).
@@ -512,6 +528,7 @@ mod tests {
                 m
             },
             hooks: HashMap::new(),
+            events: HashMap::new(),
             clocks: HashMap::new(),
             timeouts: HashMap::new(),
         }

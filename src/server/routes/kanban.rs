@@ -7,7 +7,6 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
-use crate::engine::hooks::Hook;
 
 /// Common kanban card SELECT columns with dispatch metadata via LEFT JOIN.
 const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.status, kc.priority, kc.assigned_agent_id, \
@@ -259,8 +258,8 @@ pub async fn update_card(
     Path(id): Path<String>,
     Json(body): Json<UpdateCardBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Read old status for transition hook
-    let old_status: Option<String> = {
+    // Read old status + repo/agent for effective pipeline resolution
+    let (old_status, card_repo_id, card_agent_id): (Option<String>, Option<String>, Option<String>) = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -272,11 +271,11 @@ pub async fn update_card(
         };
 
         conn.query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
+            "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
             [&id],
-            |row| row.get(0),
+            |row| Ok((Some(row.get::<_, String>(0)?), row.get(1)?, row.get(2)?)),
         )
-        .ok()
+        .unwrap_or((None, None, None))
     };
 
     if old_status.is_none() {
@@ -334,17 +333,20 @@ pub async fn update_card(
 
     let new_status = body.status.clone();
 
+    // Resolve effective pipeline for this card (repo + agent overrides)
+    crate::pipeline::ensure_loaded();
+    let effective_pipeline = if let Ok(conn) = state.db.lock() {
+        crate::pipeline::resolve_for_card(&conn, card_repo_id.as_deref(), card_agent_id.as_deref())
+    } else {
+        crate::pipeline::get().clone()
+    };
+
     // ── Status transition FIRST (validates before any writes) ──
     // Dispatch kickoff states (first gated target from dispatchable states) cannot be set
     // via PATCH — use POST /api/dispatches instead. Other gated states (in_progress, review)
     // are allowed via PATCH as the gate check in kanban.rs handles validation.
     if let Some(new_s) = &new_status {
-        let is_kickoff = {
-            crate::pipeline::ensure_loaded();
-            crate::pipeline::try_get()
-                .map(|p| p.is_dispatch_kickoff(new_s))
-                .unwrap_or(false)
-        };
+        let is_kickoff = effective_pipeline.is_dispatch_kickoff(new_s);
         if is_kickoff {
             return (
                 StatusCode::BAD_REQUEST,
@@ -420,15 +422,10 @@ pub async fn update_card(
 
     // Discord notification for new dispatches (if hooks created them)
     // Pipeline-driven: notify when the transition is gated (involves dispatches)
+    // Uses effective_pipeline resolved earlier (already accounts for repo/agent overrides)
     if let Some(ref new_s) = new_status {
-        let is_gated_transition = {
-            crate::pipeline::ensure_loaded();
-            crate::pipeline::try_get()
-                .and_then(|p| p.find_transition(&old_status, new_s))
-                .map_or(false, |t| {
-                    t.transition_type == crate::pipeline::TransitionType::Gated
-                })
-        };
+        let is_gated_transition = effective_pipeline.find_transition(&old_status, new_s)
+            .map_or(false, |t| t.transition_type == crate::pipeline::TransitionType::Gated);
         if new_s.as_str() != old_status && is_gated_transition {
             let db_clone = state.db.clone();
             let card_id = id.clone();
@@ -537,16 +534,9 @@ pub async fn assign_card(
     });
     drop(conn);
 
-    // Fire transition hook if status actually changed
+    // Fire pipeline-defined hooks for the state transition (#134)
     if old_status != ready_state {
-        let _ = state.engine.try_fire_hook(
-            Hook::OnCardTransition,
-            json!({
-                "card_id": id,
-                "from": old_status,
-                "to": ready_state,
-            }),
-        );
+        crate::kanban::fire_state_hooks(&state.db, &state.engine, &id, &old_status, &ready_state);
     }
 
     match card {
@@ -951,7 +941,8 @@ pub async fn defer_dod(
     ).ok();
 
     // #128: Check if all DoD items are now complete AND card is awaiting_dod.
-    // If so, clear awaiting_dod and restart review (fire OnReviewEnter).
+    // If so, clear awaiting_dod and restart review (fire on_enter hooks).
+    let restart_review_state: Option<String>;
     let should_restart_review = {
         let (card_status, review_status): (String, Option<String>) = conn
             .query_row(
@@ -990,11 +981,14 @@ pub async fn defer_dod(
                      ON CONFLICT(card_id) DO UPDATE SET state = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now')",
                     [&id],
                 ).ok();
+                restart_review_state = Some(card_status);
                 true
             } else {
+                restart_review_state = None;
                 false
             }
         } else {
+            restart_review_state = None;
             false
         }
     };
@@ -1005,12 +999,9 @@ pub async fn defer_dod(
     });
     drop(conn);
 
-    // Fire OnReviewEnter outside of DB lock to trigger review dispatch creation
-    if should_restart_review {
-        let _ = state.engine.try_fire_hook(
-            crate::engine::hooks::Hook::OnReviewEnter,
-            json!({"card_id": id}),
-        );
+    // Fire on_enter hooks for the review state to trigger review dispatch creation (#134)
+    if let Some(ref review_state) = restart_review_state {
+        crate::kanban::fire_enter_hooks(&state.db, &state.engine, &id, review_state);
         tracing::info!(
             "[dod] Card {} DoD all-complete — restarting review from awaiting_dod",
             id

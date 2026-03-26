@@ -141,7 +141,6 @@ pub async fn run(
 /// - OnTick (legacy, 5m): backward compat for policies that only register onTick
 async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
     use std::time::Duration;
-    use crate::engine::hooks::Hook;
 
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
 
@@ -155,29 +154,30 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         interval_30s.tick().await;
         count += 1;
 
-        // ── 30s tier: every tick ──
-        fire_tick_hook(&engine, &db, Hook::OnTick30s, "30s");
+        // ── 30s tier: every tick ── (#134: fire by name for dynamic hook binding)
+        fire_tick_hook_by_name(&engine, &db, "OnTick30s", "30s");
         drain_transitions(&engine, &db);
 
         // ── 1min tier: every 2nd tick (60s) ──
         if count % 2 == 0 {
-            fire_tick_hook(&engine, &db, Hook::OnTick1min, "1min");
+            fire_tick_hook_by_name(&engine, &db, "OnTick1min", "1min");
             drain_transitions(&engine, &db);
         }
 
         // ── 5min tier: every 10th tick (300s) ──
         if count % 10 == 0 {
-            fire_tick_hook(&engine, &db, Hook::OnTick5min, "5min");
+            fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min");
             drain_transitions(&engine, &db);
             // Also fire legacy OnTick for backward compat
-            fire_tick_hook(&engine, &db, Hook::OnTick, "legacy");
+            fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy");
             drain_transitions(&engine, &db);
         }
     }
 }
 
-/// Fire a single tick hook, log timing, record telemetry, and notify any dispatches created by JS.
-fn fire_tick_hook(engine: &PolicyEngine, db: &Db, hook: crate::engine::hooks::Hook, label: &str) {
+/// Fire a single tick hook by name, log timing, record telemetry, and notify any dispatches created by JS.
+/// Uses try_fire_hook_by_name for dynamic hook binding (#134).
+fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str, label: &str) {
     let start = std::time::Instant::now();
     let now_ms = chrono::Utc::now().timestamp_millis().to_string();
 
@@ -197,7 +197,7 @@ fn fire_tick_hook(engine: &PolicyEngine, db: &Db, hook: crate::engine::hooks::Ho
     let key_ms = format!("last_tick_{}_ms", label);
     let key_status = format!("last_tick_{}_status", label);
 
-    if let Err(e) = engine.try_fire_hook(hook, serde_json::json!({})) {
+    if let Err(e) = engine.try_fire_hook_by_name(hook_name, serde_json::json!({})) {
         tracing::warn!("[policy-tick] {} hook error: {e}", label);
         if let Ok(conn) = db.lock() {
             conn.execute(

@@ -14,7 +14,6 @@
 
 use crate::db::Db;
 use crate::engine::PolicyEngine;
-use crate::engine::hooks::Hook;
 use anyhow::Result;
 use serde_json::json;
 
@@ -355,6 +354,96 @@ fn fire_dynamic_hooks(
         }
     }
     // No fallback — YAML is the sole source of truth for hook bindings.
+}
+
+/// Fire pipeline-defined event hooks for a lifecycle event (#134).
+///
+/// Looks up the `events` section of the effective pipeline and fires each
+/// hook name via `try_fire_hook_by_name`. Falls back to firing the default
+/// hook name if no pipeline config or no event binding is found.
+pub fn fire_event_hooks(engine: &PolicyEngine, event: &str, default_hook: &str, payload: serde_json::Value) {
+    crate::pipeline::ensure_loaded();
+    let hooks: Vec<String> = crate::pipeline::try_get()
+        .and_then(|p| p.event_hooks(event).cloned())
+        .unwrap_or_else(|| vec![default_hook.to_string()]);
+    for hook_name in &hooks {
+        let _ = engine.try_fire_hook_by_name(hook_name, payload.clone());
+    }
+}
+
+/// Fire only the pipeline-defined on_enter/on_exit hooks for a transition.
+///
+/// Unlike `fire_transition_hooks`, this does NOT perform side-effects
+/// (audit log, GitHub sync, terminal-state sync, dispatch notifications).
+/// Use this when callers already handle those concerns separately
+/// (e.g. dispatch creation, route handlers).
+pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &str, to: &str) {
+    if from == to {
+        return;
+    }
+    crate::pipeline::ensure_loaded();
+    let effective = db.lock().ok().map(|conn| {
+        let repo_id: Option<String> = conn
+            .query_row(
+                "SELECT repo_id FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        let agent_id: Option<String> = conn
+            .query_row(
+                "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
+    });
+    if let Some(ref pipeline) = effective {
+        fire_dynamic_hooks(engine, pipeline, card_id, from, to);
+    }
+}
+
+/// Fire only the on_enter hooks for a specific state, without requiring a transition.
+///
+/// Used when re-entering the same state (e.g., restarting review from awaiting_dod)
+/// where `fire_state_hooks` would no-op because from == to.
+pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &str) {
+    crate::pipeline::ensure_loaded();
+    let effective = db.lock().ok().map(|conn| {
+        let repo_id: Option<String> = conn
+            .query_row(
+                "SELECT repo_id FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        let agent_id: Option<String> = conn
+            .query_row(
+                "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
+    });
+    if let Some(ref pipeline) = effective {
+        if let Some(bindings) = pipeline.hooks_for_state(state) {
+            let payload = json!({
+                "card_id": card_id,
+                "from": state,
+                "to": state,
+                "status": state,
+            });
+            for hook_name in &bindings.on_enter {
+                let _ = engine.try_fire_hook_by_name(hook_name, payload.clone());
+            }
+        }
+    }
 }
 
 /// Fire hooks for a status transition that already happened in the DB.
@@ -1196,8 +1285,8 @@ mod tests {
         }
 
         // Fire OnDispatchCompleted — should NOT create a new dispatch for stage-2
-        let _ = engine.try_fire_hook(
-            Hook::OnDispatchCompleted,
+        let _ = engine.try_fire_hook_by_name(
+            "OnDispatchCompleted",
             json!({ "dispatch_id": dispatch_id }),
         );
 

@@ -52,6 +52,9 @@ hooks:
   done:
     on_enter: [OnCardTransition, OnCardTerminal]
 
+events:
+  on_dispatch_completed: [OnDispatchCompleted]
+
 clocks:
   in_progress:
     set: started_at

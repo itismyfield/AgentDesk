@@ -310,8 +310,7 @@ pub async fn hook_session(
                 // Only review dispatches are auto-completed on idle.
                 // implementation/rework require explicit completion via
                 // PATCH /api/dispatches/:id (turn_bridge calls this at turn end).
-                (dtype == "review" && dstatus == "pending")
-                    .then_some(did.clone())
+                (dtype == "review" && dstatus == "pending").then_some(did.clone())
             })
         })
     } else {
@@ -401,9 +400,11 @@ pub async fn hook_session(
                 .ok()
             });
 
-            // Fire OnSessionStatusChange hook for policy engines
-            let _ = state.engine.try_fire_hook(
-                crate::engine::hooks::Hook::OnSessionStatusChange,
+            // Fire event hooks for session status change (#134)
+            crate::kanban::fire_event_hooks(
+                &state.engine,
+                "on_session_status_change",
+                "OnSessionStatusChange",
                 json!({
                     "session_key": body.session_key,
                     "status": status,
@@ -698,6 +699,255 @@ pub async fn update_dispatched_session(
     }
 }
 
+#[derive(Deserialize)]
+pub struct ForceKillBody {
+    pub session_key: String,
+    /// If true, mark the dispatch as 'failed' and create a retry dispatch.
+    #[serde(default)]
+    pub retry: bool,
+}
+
+/// POST /api/sessions/force-kill
+///
+/// Atomically: kill tmux session + clear inflight file + set session disconnected
+/// + mark active dispatch failed. Optionally creates a retry dispatch.
+pub async fn force_kill_session(
+    State(state): State<AppState>,
+    Json(body): Json<ForceKillBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let session_key = &body.session_key;
+
+    // Parse tmux session name from session_key (format: "hostname:tmux_name")
+    let tmux_name = match session_key.split_once(':') {
+        Some((_, name)) => name.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid session_key format — expected hostname:tmux_name"})),
+            );
+        }
+    };
+
+    // Parse provider from tmux name
+    let provider_info =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_name);
+
+    // Query session from DB
+    let (active_dispatch_id, _thread_channel_id) = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        match conn.query_row(
+            "SELECT active_dispatch_id, thread_channel_id FROM sessions WHERE session_key = ?1",
+            [session_key],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        ) {
+            Ok(row) => row,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "session not found"})),
+                );
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        }
+    };
+
+    // 1. Kill tmux session
+    let tmux_killed = {
+        let sess = tmux_name.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::services::tmux_diagnostics::record_tmux_exit_reason(
+                &sess,
+                "force-kill API invoked",
+            );
+            std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &sess])
+                .output()
+        })
+        .await;
+        matches!(result, Ok(Ok(o)) if o.status.success())
+    };
+
+    // 2. Clear inflight state by scanning provider directory for matching tmux_session_name
+    let inflight_cleared = if let Some((ref provider, _)) = provider_info {
+        clear_inflight_by_tmux_name(provider, &tmux_name)
+    } else {
+        false
+    };
+
+    // 3. Update session → disconnected, clear active fields
+    // 4. Mark dispatch → failed
+    // 5. Optionally create retry dispatch
+    let mut retry_dispatch_id: Option<String> = None;
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        conn.execute(
+            "UPDATE sessions SET status = 'disconnected', active_dispatch_id = NULL, \
+             claude_session_id = NULL WHERE session_key = ?1",
+            [session_key],
+        )
+        .ok();
+
+        if let Some(ref did) = active_dispatch_id {
+            conn.execute(
+                "UPDATE task_dispatches SET status = 'failed', updated_at = datetime('now') \
+                 WHERE id = ?1 AND status NOT IN ('completed')",
+                [did],
+            )
+            .ok();
+
+            // Create retry dispatch by cloning the failed one
+            if body.retry {
+                retry_dispatch_id = create_retry_dispatch(&conn, did);
+            }
+        }
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    eprintln!(
+        "  [{ts}] ⚡ force-kill: session={}, tmux_killed={}, inflight_cleared={}, dispatch_failed={:?}",
+        session_key, tmux_killed, inflight_cleared, active_dispatch_id
+    );
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "tmux_killed": tmux_killed,
+            "inflight_cleared": inflight_cleared,
+            "dispatch_failed": active_dispatch_id,
+            "retry_dispatch_id": retry_dispatch_id,
+        })),
+    )
+}
+
+/// Scan inflight directory for the provider and delete the file matching the given tmux_session_name.
+fn clear_inflight_by_tmux_name(
+    provider: &crate::services::provider::ProviderKind,
+    tmux_name: &str,
+) -> bool {
+    let inflight_root = {
+        let root = if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
+            let trimmed = override_root.trim();
+            if !trimmed.is_empty() {
+                std::path::PathBuf::from(trimmed)
+            } else {
+                match dirs::home_dir() {
+                    Some(h) => h.join(".adk").join("release"),
+                    None => return false,
+                }
+            }
+        } else {
+            match dirs::home_dir() {
+                Some(h) => h.join(".adk").join("release"),
+                None => return false,
+            }
+        };
+        root.join("runtime").join("discord_inflight")
+    };
+
+    let provider_dir = inflight_root.join(provider.as_str());
+    let Ok(entries) = std::fs::read_dir(&provider_dir) else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(state) = serde_json::from_str::<serde_json::Value>(&data) {
+                if state
+                    .get("tmux_session_name")
+                    .and_then(|v| v.as_str())
+                    == Some(tmux_name)
+                {
+                    let _ = std::fs::remove_file(&path);
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Create a retry dispatch by cloning the failed dispatch's metadata.
+fn create_retry_dispatch(conn: &rusqlite::Connection, failed_dispatch_id: &str) -> Option<String> {
+    let row = conn
+        .query_row(
+            "SELECT kanban_card_id, to_agent_id, dispatch_type, title, context, retry_count \
+             FROM task_dispatches WHERE id = ?1",
+            [failed_dispatch_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .ok()?;
+
+    let (card_id, to_agent_id, dispatch_type, title, context, retry_count) = row;
+    let new_id = format!("d-retry-{}", uuid::Uuid::new_v4());
+
+    conn.execute(
+        "INSERT INTO task_dispatches \
+         (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, retry_count, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, datetime('now'), datetime('now'))",
+        rusqlite::params![
+            new_id,
+            card_id,
+            to_agent_id,
+            dispatch_type,
+            title,
+            context,
+            retry_count + 1,
+        ],
+    )
+    .ok()?;
+
+    // Update card's latest_dispatch_id
+    conn.execute(
+        "UPDATE kanban_cards SET latest_dispatch_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![new_id, card_id],
+    )
+    .ok();
+
+    Some(new_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,7 +1055,10 @@ mod tests {
             card_status == "requested" || card_status == "in_progress",
             "card should not advance past in_progress, got: {card_status}"
         );
-        assert_eq!(dispatch_status, "pending", "implementation dispatch should stay pending on idle");
+        assert_eq!(
+            dispatch_status, "pending",
+            "implementation dispatch should stay pending on idle"
+        );
     }
 
     #[tokio::test]
@@ -893,7 +1146,10 @@ mod tests {
         // Card stays in rework — must NOT advance to review (which would happen
         // if idle auto-completed the rework dispatch).
         assert_eq!(card_status, "rework", "card should not advance past rework");
-        assert_eq!(dispatch_status, "pending", "rework dispatch should stay pending on idle");
+        assert_eq!(
+            dispatch_status, "pending",
+            "rework dispatch should stay pending on idle"
+        );
     }
 
     #[tokio::test]
