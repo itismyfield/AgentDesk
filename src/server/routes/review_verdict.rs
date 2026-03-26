@@ -1122,6 +1122,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // CI: handle_completed_dispatch_followups -> send_review_result_to_primary early-returns without ADK runtime
     async fn submit_verdict_improve_creates_review_decision_dispatch() {
         let db = test_db();
         seed_review_card(&db, "dispatch-improve");
