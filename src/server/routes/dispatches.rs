@@ -711,7 +711,68 @@ pub(crate) async fn send_dispatch_to_discord(
     }
 
     // No existing thread or reuse failed — create a new thread
-    let thread_name = if let Some(num) = issue_number {
+    // #137: For unified thread, build name from all queued issue numbers
+    let thread_name = if unified_thread_id.is_none() {
+        // First dispatch in unified run — check if we should use a combined name
+        let unified_issues: Option<String> = db
+            .lock()
+            .ok()
+            .and_then(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT kc.github_issue_number FROM auto_queue_entries e \
+                         JOIN auto_queue_runs r ON e.run_id = r.id \
+                         JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
+                         WHERE r.unified_thread = 1 AND r.unified_thread_id IS NULL \
+                         AND e.kanban_card_id = ?1 AND kc.github_issue_number IS NOT NULL \
+                         LIMIT 1",
+                    )
+                    .ok()?;
+                // If this card is in a unified run, gather all issue numbers
+                let is_unified: bool = stmt
+                    .query_map([card_id], |row| row.get::<_, i64>(0))
+                    .ok()
+                    .map(|rows| rows.count() > 0)
+                    .unwrap_or(false);
+                if !is_unified {
+                    return None;
+                }
+                drop(stmt);
+                let mut stmt2 = conn
+                    .prepare(
+                        "SELECT kc.github_issue_number FROM auto_queue_entries e \
+                         JOIN auto_queue_runs r ON e.run_id = r.id \
+                         JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
+                         WHERE r.unified_thread = 1 AND r.unified_thread_id IS NULL \
+                         AND e.run_id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1) \
+                         AND kc.github_issue_number IS NOT NULL \
+                         ORDER BY e.priority_rank ASC",
+                    )
+                    .ok()?;
+                let nums: Vec<String> = stmt2
+                    .query_map([card_id], |row| row.get::<_, i64>(0))
+                    .ok()?
+                    .filter_map(|r| r.ok())
+                    .map(|n| format!("#{}", n))
+                    .collect();
+                if nums.is_empty() {
+                    None
+                } else {
+                    let joined = nums.join(" ");
+                    Some(format!("[Queue] {}", joined))
+                }
+            });
+
+        if let Some(name) = unified_issues {
+            // Discord thread name max 100 chars
+            name.chars().take(100).collect()
+        } else if let Some(num) = issue_number {
+            let short: String = title.chars().take(90).collect();
+            format!("#{} {}", num, short)
+        } else {
+            title.chars().take(100).collect()
+        }
+    } else if let Some(num) = issue_number {
         let short: String = title.chars().take(90).collect();
         format!("#{} {}", num, short)
     } else {
