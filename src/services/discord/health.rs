@@ -598,10 +598,15 @@ pub fn spawn_watchdog(port: u16) {
                             "  [{ts}] 🩺 watchdog: runtime unresponsive — capturing diagnostics before exit"
                         );
                         // Capture process dump for post-mortem analysis (platform-aware)
+                        // Write to runtime root's logs/ dir so dumps survive /tmp cleanup
                         let pid = std::process::id();
+                        let dump_dir = crate::agentdesk_runtime_root()
+                            .map(|r| r.join("logs"))
+                            .unwrap_or_else(|| std::env::temp_dir());
+                        let _ = std::fs::create_dir_all(&dump_dir);
                         let dump_path = format!(
                             "{}/adk-hang-{}-{}.txt",
-                            std::env::temp_dir().display(),
+                            dump_dir.display(),
                             pid,
                             chrono::Local::now().format("%Y%m%d-%H%M%S")
                         );
