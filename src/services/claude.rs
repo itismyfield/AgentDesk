@@ -1029,6 +1029,20 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     break;
                 }
                 debug_log("  Message sent to channel successfully");
+
+                // Send any extra tool_use messages from the same content array.
+                // An assistant message can contain [text, tool_use, ...] but
+                // parse_stream_message only returns the first text block.
+                for extra in parse_assistant_extra_tool_uses(&json) {
+                    debug_log(&format!(
+                        "  >>> Extra ToolUse from same assistant message: {:?}",
+                        std::mem::discriminant(&extra)
+                    ));
+                    if sender.send(extra).is_err() {
+                        debug_log("  ERROR: Channel send failed on extra ToolUse");
+                        break;
+                    }
+                }
             } else {
                 debug_log(&format!(
                     "  parse_stream_message returned None for type={}",
@@ -1239,6 +1253,13 @@ pub(crate) fn process_stream_line(
         if sender.send(msg).is_err() {
             return false; // channel disconnected
         }
+
+        // Send any extra tool_use messages from the same content array.
+        for extra in parse_assistant_extra_tool_uses(&json) {
+            if sender.send(extra).is_err() {
+                return false;
+            }
+        }
     }
 
     true
@@ -1432,6 +1453,67 @@ fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
         }
         _ => None,
     }
+}
+
+/// Extract additional tool_use messages from an assistant event whose content
+/// array contains both text and tool_use blocks.
+///
+/// `parse_stream_message` returns only the first text block it finds, silently
+/// dropping any tool_use blocks that follow in the same content array.  This
+/// causes the `any_tool_used` / `has_post_tool_text` tracking in `turn_bridge`
+/// to be incorrect when text and tool_use coexist (the common case for
+/// intermediate narration like "이슈를 생성합니다" followed by a tool call).
+///
+/// Call this **after** `parse_stream_message` on the same JSON line and forward
+/// the returned messages through the channel so the bridge sees the ToolUse events.
+fn parse_assistant_extra_tool_uses(json: &Value) -> Vec<StreamMessage> {
+    if json.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+        return Vec::new();
+    }
+    let content = match json
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    // Only emit extras when the primary parse_stream_message returned a Text
+    // (i.e. the first actionable block was text).  Detect this by checking
+    // whether a text block appears before any tool_use in iteration order.
+    let mut saw_text_first = false;
+    let mut extras = Vec::new();
+    for item in content {
+        let item_type = match item.get("type").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
+        match item_type {
+            "text" if extras.is_empty() => {
+                // A text block before any tool_use — matches what
+                // parse_stream_message would have returned.
+                let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                if !text.is_empty() {
+                    saw_text_first = true;
+                }
+            }
+            "tool_use" if saw_text_first => {
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                if !name.is_empty() {
+                    let input = item
+                        .get("input")
+                        .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                        .unwrap_or_default();
+                    extras.push(StreamMessage::ToolUse {
+                        name: name.to_string(),
+                        input,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    extras
 }
 
 /// Check if tmux is available on the system
@@ -2602,5 +2684,79 @@ mod tests {
             StreamMessage::ToolUse { name, .. } => assert_eq!(name, "Read"),
             _ => panic!("Expected ToolUse"),
         }
+    }
+
+    // ========== parse_assistant_extra_tool_uses tests ==========
+
+    #[test]
+    fn test_extra_tool_uses_text_and_tool() {
+        // When content has [text, tool_use], parse_stream_message returns Text;
+        // parse_assistant_extra_tool_uses should return the tool_use.
+        let json: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"이슈를 생성합니다."},{"type":"tool_use","name":"Bash","input":{"command":"echo hi"}}]}}"#
+        ).unwrap();
+
+        // Primary returns Text
+        let primary = parse_stream_message(&json).unwrap();
+        assert!(matches!(primary, StreamMessage::Text { .. }));
+
+        // Extra returns the ToolUse
+        let extras = parse_assistant_extra_tool_uses(&json);
+        assert_eq!(extras.len(), 1);
+        match &extras[0] {
+            StreamMessage::ToolUse { name, .. } => assert_eq!(name, "Bash"),
+            _ => panic!("Expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_extra_tool_uses_text_only() {
+        // When content has only text, no extra tool_uses.
+        let json: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"}]}}"#,
+        )
+        .unwrap();
+        let extras = parse_assistant_extra_tool_uses(&json);
+        assert!(extras.is_empty());
+    }
+
+    #[test]
+    fn test_extra_tool_uses_tool_only() {
+        // When content has only tool_use (no preceding text), no extras
+        // because parse_stream_message would have returned the tool_use directly.
+        let json: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp"}}]}}"#
+        ).unwrap();
+        let extras = parse_assistant_extra_tool_uses(&json);
+        assert!(extras.is_empty());
+    }
+
+    #[test]
+    fn test_extra_tool_uses_text_and_multiple_tools() {
+        // [text, tool_use, tool_use] — should return both tool_uses
+        let json: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"작업 시작"},{"type":"tool_use","name":"Bash","input":{"command":"ls"}},{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/a"}}]}}"#
+        ).unwrap();
+        let extras = parse_assistant_extra_tool_uses(&json);
+        assert_eq!(extras.len(), 2);
+        match &extras[0] {
+            StreamMessage::ToolUse { name, .. } => assert_eq!(name, "Bash"),
+            _ => panic!("Expected Bash"),
+        }
+        match &extras[1] {
+            StreamMessage::ToolUse { name, .. } => assert_eq!(name, "Read"),
+            _ => panic!("Expected Read"),
+        }
+    }
+
+    #[test]
+    fn test_extra_tool_uses_non_assistant() {
+        // Non-assistant types should return empty.
+        let json: Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","result":"ok"}"#,
+        )
+        .unwrap();
+        let extras = parse_assistant_extra_tool_uses(&json);
+        assert!(extras.is_empty());
     }
 }
