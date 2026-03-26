@@ -37,6 +37,7 @@ use crate::services::claude::{
     self, CancelToken, DEFAULT_ALLOWED_TOOLS, ReadOutputResult, StreamMessage,
 };
 use crate::services::codex;
+use crate::services::gemini;
 use crate::services::provider::ProviderKind;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType, SessionData};
 
@@ -1098,6 +1099,71 @@ pub(super) fn scan_skills(
                 }
             }
         }
+        ProviderKind::Gemini => {
+            let mut roots = Vec::new();
+            if let Some(home) = dirs::home_dir() {
+                roots.push(home.join(".gemini").join("skills"));
+            }
+            if let Some(proj) = project_path {
+                roots.push(Path::new(proj).join(".gemini").join("skills"));
+            }
+
+            for root in roots {
+                if !root.is_dir() {
+                    continue;
+                }
+                let Ok(entries) = fs::read_dir(&root) else {
+                    continue;
+                };
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if let Some(skill_path) = resolve_codex_skill_file(&path) {
+                        if let Some(name) = skill_path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|s| s.to_str())
+                        {
+                            let name = name.to_string();
+                            if seen.insert(name.clone()) {
+                                let desc = fs::read_to_string(&skill_path)
+                                    .ok()
+                                    .map(|content| extract_skill_description(&content))
+                                    .unwrap_or_else(|| format!("Skill: {}", name));
+                                skills.push((name, desc));
+                            }
+                        }
+                        continue;
+                    }
+
+                    if path.is_dir() {
+                        let Ok(nested) = fs::read_dir(&path) else {
+                            continue;
+                        };
+                        for child in nested.filter_map(|e| e.ok()) {
+                            let child_path = child.path();
+                            let Some(skill_path) = resolve_codex_skill_file(&child_path) else {
+                                continue;
+                            };
+                            let Some(name) = skill_path
+                                .parent()
+                                .and_then(|p| p.file_name())
+                                .and_then(|s| s.to_str())
+                            else {
+                                continue;
+                            };
+                            let name = name.to_string();
+                            if seen.insert(name.clone()) {
+                                let desc = fs::read_to_string(&skill_path)
+                                    .ok()
+                                    .map(|content| extract_skill_description(&content))
+                                    .unwrap_or_else(|| format!("Skill: {}", name));
+                                skills.push((name, desc));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         ProviderKind::Unsupported(_) => {}
     }
 
@@ -1123,6 +1189,13 @@ fn skill_dir_fingerprint(provider: &ProviderKind) -> (usize, u64) {
             let mut v = Vec::new();
             if let Some(home) = dirs::home_dir() {
                 v.push(home.join(".codex").join("skills"));
+            }
+            v
+        }
+        ProviderKind::Gemini => {
+            let mut v = Vec::new();
+            if let Some(home) = dirs::home_dir() {
+                v.push(home.join(".gemini").join("skills"));
             }
             v
         }
@@ -1197,6 +1270,7 @@ fn skill_dir_fingerprint_with_projects(
         let proj_dir = match provider {
             ProviderKind::Claude => Path::new(path).join(".claude").join("commands"),
             ProviderKind::Codex => Path::new(path).join(".codex").join("skills"),
+            ProviderKind::Gemini => Path::new(path).join(".gemini").join("skills"),
             _ => continue,
         };
         if proj_dir.is_dir() {

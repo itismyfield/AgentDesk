@@ -1,3 +1,53 @@
+use super::VERSION;
+
+pub fn print_help() {
+    println!("AgentDesk {} - AI agent orchestration platform", VERSION);
+    println!();
+    println!("USAGE:");
+    println!("    agentdesk [OPTIONS]");
+    println!();
+    println!("OPTIONS:");
+    println!("    -h, --help              Print help information");
+    println!("    -v, --version           Print version information");
+    println!(
+        "    --dcserver [TOKEN]      Start Discord bot server(s); without TOKEN uses bot_settings.json"
+    );
+    println!(
+        "    --restart-dcserver [--report-channel-id <ID> --report-provider <claude|codex|gemini> [--report-message-id <ID>]]"
+    );
+    println!("    --discord-sendfile <PATH> --channel <ID> --key <HASH>");
+    println!("    --discord-sendmessage --channel <ID> --message <TEXT> [--key <HASH>]");
+    println!("    --discord-senddm --user <ID> --message <TEXT> [--key <HASH>]");
+    println!("    --reset-tmux             Kill all AgentDesk-* tmux sessions");
+    println!(
+        "    --ismcptool <TOOL>...    Check if MCP tool(s) are registered in .claude/settings.json (CWD)"
+    );
+    println!(
+        "    --addmcptool <TOOL>...   Add MCP tool permission(s) to .claude/settings.json (CWD)"
+    );
+    println!();
+}
+
+pub fn print_version() {
+    println!("AgentDesk {}", VERSION);
+}
+
+pub fn handle_base64(encoded: &str) {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    match BASE64.decode(encoded) {
+        Ok(decoded) => {
+            if let Ok(text) = String::from_utf8(decoded) {
+                print!("{}", text);
+            } else {
+                std::process::exit(1);
+            }
+        }
+        Err(_) => {
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn handle_ismcptool(tool_names: &[String]) {
     let cwd = match std::env::current_dir() {
         Ok(d) => d,

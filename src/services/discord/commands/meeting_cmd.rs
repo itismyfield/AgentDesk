@@ -39,7 +39,16 @@ pub(in crate::services::discord) async fn cmd_meeting(
                 return Ok(());
             }
             let selected_provider = match primary_provider.as_deref().map(ProviderKind::from_str) {
-                Some(Some(provider)) => provider,
+                Some(Some(provider))
+                    if matches!(provider, ProviderKind::Claude | ProviderKind::Codex) =>
+                {
+                    provider
+                }
+                Some(Some(_)) => {
+                    ctx.say("meeting은 아직 `claude` 또는 `codex`만 가능해.")
+                        .await?;
+                    return Ok(());
+                }
                 Some(None) => {
                     ctx.say("primary_provider는 `claude` 또는 `codex`만 가능해.")
                         .await?;

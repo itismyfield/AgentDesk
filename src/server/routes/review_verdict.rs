@@ -350,6 +350,17 @@ pub async fn submit_verdict(
                             })),
                         );
                     }
+                    Some(s) if !matches!(s, ProviderKind::Claude | ProviderKind::Codex) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": format!(
+                                    "unsupported review provider '{}' — only claude/codex are allowed here",
+                                    s.as_str()
+                                )
+                            })),
+                        );
+                    }
                     _ => {} // Normalized cross-provider match → allowed
                 }
             }

@@ -225,6 +225,19 @@ pub(in crate::services::discord) async fn cmd_cc(
             } else {
                 format!(
                     "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
+                    Follow its SKILL.md instructions exactly and adapt them to the request."
+                )
+            }
+        }
+        ProviderKind::Gemini => {
+            if args_str.is_empty() {
+                format!(
+                    "Use the local Gemini skill `/{skill}` now. \
+                     Follow its SKILL.md instructions exactly and complete the task."
+                )
+            } else {
+                format!(
+                    "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
                      Follow its SKILL.md instructions exactly and adapt them to the request."
                 )
             }

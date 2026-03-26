@@ -219,12 +219,15 @@ fn parse_primary_provider_arg(
     default_provider: ProviderKind,
 ) -> Result<ProviderKind, String> {
     match raw.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => ProviderKind::from_str(value).ok_or_else(|| {
-            format!(
+        Some(value) => match ProviderKind::from_str(value) {
+            Some(provider) if matches!(provider, ProviderKind::Claude | ProviderKind::Codex) => {
+                Ok(provider)
+            }
+            _ => Err(format!(
                 "지원하지 않는 provider야: `{}` (`claude` 또는 `codex`만 가능)",
                 value
-            )
-        }),
+            )),
+        },
         None => Ok(default_provider),
     }
 }
