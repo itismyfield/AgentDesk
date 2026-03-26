@@ -737,11 +737,37 @@ fn record_true_negative_if_pass(db: &Db, card_id: &str) -> bool {
                     )
                     .ok();
 
+                // Carry forward finding_categories from the last completed review dispatch
+                // so that if this TN is later corrected to FN on reopen, the categories are preserved
+                let finding_cats: Option<String> = conn
+                    .query_row(
+                        "SELECT td.result FROM task_dispatches td \
+                         WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' \
+                         AND td.status = 'completed' ORDER BY td.rowid DESC LIMIT 1",
+                        [card_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .ok()
+                    .flatten()
+                    .and_then(|r| {
+                        serde_json::from_str::<serde_json::Value>(&r)
+                            .ok()
+                            .and_then(|v| {
+                                v["items"].as_array().map(|items| {
+                                    let cats: Vec<String> = items
+                                        .iter()
+                                        .filter_map(|it| it["category"].as_str().map(|s| s.to_string()))
+                                        .collect();
+                                    serde_json::to_string(&cats).unwrap_or_default()
+                                })
+                            })
+                    });
+
                 let inserted = conn.execute(
                     "INSERT INTO review_tuning_outcomes \
                      (card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories) \
-                     VALUES (?1, NULL, ?2, ?3, 'done', 'true_negative', NULL)",
-                    rusqlite::params![card_id, review_round, last_verdict.as_deref().unwrap_or("pass")],
+                     VALUES (?1, NULL, ?2, ?3, 'done', 'true_negative', ?4)",
+                    rusqlite::params![card_id, review_round, last_verdict.as_deref().unwrap_or("pass"), finding_cats],
                 )
                 .map(|n| n > 0)
                 .unwrap_or(false);
@@ -762,16 +788,19 @@ fn record_true_negative_if_pass(db: &Db, card_id: &str) -> bool {
 /// correct any true_negative outcomes to false_negative — the review missed a real bug.
 pub fn correct_tn_to_fn_on_reopen(db: &Db, card_id: &str) {
     if let Ok(conn) = db.lock() {
+        // Only correct the most recent TN (latest review_round) to avoid
+        // corrupting historical TN records from earlier rounds
         let updated = conn
             .execute(
                 "UPDATE review_tuning_outcomes SET outcome = 'false_negative' \
-                 WHERE card_id = ?1 AND outcome = 'true_negative'",
+                 WHERE card_id = ?1 AND outcome = 'true_negative' \
+                 AND review_round = (SELECT MAX(review_round) FROM review_tuning_outcomes WHERE card_id = ?1 AND outcome = 'true_negative')",
                 [card_id],
             )
             .unwrap_or(0);
         if updated > 0 {
             tracing::info!(
-                "[review-tuning] #119 corrected {updated} true_negative → false_negative: card={card_id} (reopen)"
+                "[review-tuning] #119 corrected {updated} true_negative → false_negative: card={card_id} (reopen, latest round only)"
             );
         }
     }

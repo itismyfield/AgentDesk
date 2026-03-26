@@ -350,6 +350,34 @@ var timeouts = {
             "UPDATE kanban_cards SET review_status = 'rework_pending', suggestion_pending_at = NULL, updated_at = datetime('now') WHERE id = ?",
             [sc.id]
           );
+          // #119: Record tuning outcome (auto-accept = true_positive) BEFORE transition clears last_verdict
+          var reviewState = agentdesk.db.query(
+            "SELECT review_round, last_verdict FROM card_review_state WHERE card_id = ?",
+            [sc.id]
+          );
+          if (reviewState.length > 0) {
+            var rs = reviewState[0];
+            // Get finding categories from last completed review dispatch
+            var lastReview = agentdesk.db.query(
+              "SELECT result FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'review' AND status = 'completed' ORDER BY rowid DESC LIMIT 1",
+              [sc.id]
+            );
+            var findingCats = null;
+            if (lastReview.length > 0 && lastReview[0].result) {
+              try {
+                var parsed = JSON.parse(lastReview[0].result);
+                if (parsed.items) {
+                  findingCats = JSON.stringify(parsed.items.map(function(it) { return it.category || "unknown"; }));
+                }
+              } catch(e) {}
+            }
+            agentdesk.db.execute(
+              "INSERT INTO review_tuning_outcomes (card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories) " +
+              "VALUES (?, NULL, ?, ?, 'auto_accept', 'true_positive', ?)",
+              [sc.id, rs.review_round || null, rs.last_verdict || "unknown", findingCats]
+            );
+            agentdesk.log.info("[review-tuning] #119 recorded true_positive (auto-accept): card=" + sc.id);
+          }
           // #117: sync canonical review state
           agentdesk.db.execute(
             "INSERT INTO card_review_state (card_id, state, last_decision, updated_at) VALUES (?, 'rework_pending', 'auto_accept', datetime('now')) " +
