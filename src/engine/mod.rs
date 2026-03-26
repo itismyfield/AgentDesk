@@ -260,6 +260,67 @@ impl PolicyEngine {
         }
     }
 
+    /// Fire a dynamic hook by name string. Used for pipeline-defined hooks
+    /// that aren't in the fixed Hook enum (e.g. custom on_exit hooks).
+    pub fn try_fire_hook_by_name(&self, hook_name: &str, payload: serde_json::Value) -> Result<()> {
+        // First try as a known hook
+        if let Some(h) = Hook::from_str(hook_name) {
+            return self.try_fire_hook(h, payload);
+        }
+        // Dynamic: look up the JS function name directly in policy objects
+        let inner = match self.inner.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ⏸ try_fire_hook_by_name({hook_name}): engine busy, deferring to DB");
+                if let Ok(conn) = self.db.separate_conn() {
+                    let _ = conn.execute(
+                        "INSERT INTO deferred_hooks (hook_name, payload) VALUES (?1, ?2)",
+                        rusqlite::params![hook_name, payload.to_string()],
+                    );
+                }
+                return Ok(());
+            }
+            Err(std::sync::TryLockError::Poisoned(e)) => {
+                return Err(anyhow::anyhow!("engine lock poisoned: {e}"));
+            }
+        };
+        // Find policies that have a function with this name
+        let policies = inner
+            .policies
+            .lock()
+            .map_err(|e| anyhow::anyhow!("policy store lock poisoned: {e}"))?;
+        let policy_names: Vec<String> = policies.iter().map(|p| p.name.clone()).collect();
+        drop(policies);
+
+        inner.context.with(|ctx| -> Result<()> {
+            let js_payload = json_to_js(&ctx, &payload)?;
+            for policy_name in &policy_names {
+                // Try to get the policy object and call the named function
+                let result: std::result::Result<rquickjs::Value, _> = ctx.eval(format!(
+                    r#"(function() {{
+                        var policies = agentdesk.__registered_policies || [];
+                        for (var i = 0; i < policies.length; i++) {{
+                            if (policies[i].name === "{policy_name}" && typeof policies[i]["{hook_name}"] === "function") {{
+                                policies[i]["{hook_name}"](arguments[0]);
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    }})()"#
+                ));
+                if let Ok(val) = result {
+                    if val.as_bool() == Some(true) {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!("  [{ts}] 🔥 fire_hook_by_name({hook_name}) → {policy_name}");
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     pub fn fire_hook(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {
         let inner = self
             .inner

@@ -309,18 +309,17 @@ fn fire_dynamic_hooks(
         "status": new_status,
     });
 
+    // Fire on_exit hooks for the state being LEFT
+    if let Some(bindings) = pipeline.hooks_for_state(old_status) {
+        for hook_name in &bindings.on_exit {
+            let _ = engine.try_fire_hook_by_name(hook_name, payload.clone());
+        }
+    }
+    // Fire on_enter hooks for the state being ENTERED
     if let Some(bindings) = pipeline.hooks_for_state(new_status) {
         for hook_name in &bindings.on_enter {
-            if let Some(h) = Hook::from_str(hook_name) {
-                let _ = engine.try_fire_hook(h, payload.clone());
-            } else {
-                tracing::warn!(
-                    "[kanban] Unknown hook in pipeline on_enter: {hook_name} (state: {new_status})"
-                );
-            }
+            let _ = engine.try_fire_hook_by_name(hook_name, payload.clone());
         }
-    } else {
-        eprintln!("[DEBUG] fire_dynamic_hooks: no hooks for state {new_status}");
     }
     // No fallback — YAML is the sole source of truth for hook bindings.
 }
