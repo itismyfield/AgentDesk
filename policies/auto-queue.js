@@ -2,6 +2,25 @@ var autoQueue = {
   name: "auto-queue",
   priority: 500,
 
+  // ── Auto-skip: detect cards progressed outside of auto-queue ──
+  // If a pending queue entry's card gets dispatched externally (by PMD, user, etc.),
+  // skip the entry so auto-queue doesn't try to dispatch it again.
+  onCardTransition: function(payload) {
+    if (payload.to !== "requested" && payload.to !== "in_progress") return;
+    var entries = agentdesk.db.query(
+      "SELECT e.id FROM auto_queue_entries e " +
+      "WHERE e.kanban_card_id = ? AND e.status = 'pending'",
+      [payload.card_id]
+    );
+    for (var i = 0; i < entries.length; i++) {
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'skipped' WHERE id = ?",
+        [entries[i].id]
+      );
+      agentdesk.log.info("[auto-queue] Skipped entry " + entries[i].id + " — card " + payload.card_id + " progressed externally to " + payload.to);
+    }
+  },
+
   // ── Authoritative auto-queue continuation (#110) ──────────────
   // This is the SINGLE path for done → next queued item.
   // Rust transition_status() already marks auto_queue_entries as 'done'
