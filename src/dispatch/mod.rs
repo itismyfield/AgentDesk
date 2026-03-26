@@ -852,6 +852,8 @@ fn provider_from_channel_suffix(channel: &str) -> Option<&'static str> {
         Some("claude")
     } else if channel.ends_with("-cdx") {
         Some("codex")
+    } else if channel.ends_with("-gm") {
+        Some("gemini")
     } else {
         None
     }
@@ -1006,6 +1008,14 @@ mod tests {
             returned["status"], "cancelled",
             "cancelled dispatch must not be re-completed"
         );
+    }
+
+    #[test]
+    fn provider_from_channel_suffix_supports_gemini() {
+        assert_eq!(provider_from_channel_suffix("agent-cc"), Some("claude"));
+        assert_eq!(provider_from_channel_suffix("agent-cdx"), Some("codex"));
+        assert_eq!(provider_from_channel_suffix("agent-gm"), Some("gemini"));
+        assert_eq!(provider_from_channel_suffix("agent"), None);
     }
 
     #[test]

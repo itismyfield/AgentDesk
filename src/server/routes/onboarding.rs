@@ -93,6 +93,20 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             |row| row.get(0),
         )
         .ok();
+    let primary_provider: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = 'onboarding_provider'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    let command_provider_2: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = 'onboarding_command_provider_2'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
 
     let completed = has_bots && agent_count > 0;
 
@@ -121,6 +135,10 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
                 "announce": mask(announce_token),
                 "notify": mask(notify_token),
                 "command2": mask(command_token_2),
+            },
+            "bot_providers": {
+                "command": primary_provider,
+                "command2": command_provider_2,
             },
             "guild_id": guild_id,
             "owner_id": owner_id,
@@ -184,14 +202,17 @@ pub struct ChannelsQuery {
     pub token: Option<String>,
 }
 
-/// GET /api/onboarding/channels
-/// Fetches Discord guilds + text channels for the given bot token.
-pub async fn channels(
+#[derive(Debug, Deserialize)]
+pub struct ChannelsBody {
+    pub token: Option<String>,
+}
+
+async fn load_channels(
     State(state): State<AppState>,
-    axum::extract::Query(query): axum::extract::Query<ChannelsQuery>,
+    token: Option<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Use provided token or saved token
-    let token = query.token.or_else(|| {
+    let token = token.or_else(|| {
         state.db.lock().ok().and_then(|conn| {
             conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
@@ -272,6 +293,24 @@ pub async fn channels(
     (StatusCode::OK, Json(json!({"guilds": result_guilds})))
 }
 
+/// GET /api/onboarding/channels
+/// Fetches Discord guilds + text channels for the given bot token.
+pub async fn channels(
+    state: State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ChannelsQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    load_channels(state, query.token).await
+}
+
+/// POST /api/onboarding/channels
+/// Fetches Discord guilds + text channels for the given bot token from request body.
+pub async fn channels_post(
+    state: State<AppState>,
+    Json(body): Json<ChannelsBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    load_channels(state, body.token).await
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CompleteBody {
     pub token: String,
@@ -350,10 +389,10 @@ fn write_bot_settings(
         let secondary_provider = secondary_provider
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or(if primary_provider == "codex" {
-                "claude"
-            } else {
-                "codex"
+            .unwrap_or(match primary_provider {
+                "codex" => "claude",
+                "gemini" => "codex",
+                _ => "codex",
             });
         upsert_bot_settings_entry(obj, token, secondary_provider, owner_id);
     }
@@ -454,6 +493,11 @@ pub async fn complete(
         [&body.guild_id],
     )
     .ok();
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_provider', ?1)",
+        [provider],
+    )
+    .ok();
     if let Some(ref owner) = body.owner_id {
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_owner_id', ?1)",
@@ -479,6 +523,13 @@ pub async fn complete(
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_command_token_2', ?1)",
             [cmd2],
+        )
+        .ok();
+    }
+    if let Some(ref provider2) = body.command_provider_2 {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_command_provider_2', ?1)",
+            [provider2],
         )
         .ok();
     }
@@ -660,7 +711,7 @@ pub struct CheckProviderBody {
 }
 
 /// POST /api/onboarding/check-provider
-/// Checks if a CLI provider (claude/codex) is installed and authenticated.
+/// Checks if a CLI provider (claude/codex/gemini) is installed and authenticated.
 pub async fn check_provider(
     Json(body): Json<CheckProviderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {

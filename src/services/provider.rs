@@ -62,7 +62,7 @@ impl ProviderKind {
         match self {
             Self::Claude => Self::Codex,
             Self::Codex => Self::Claude,
-            Self::Gemini => Self::Gemini,
+            Self::Gemini => Self::Codex,
             Self::Unsupported(_) => self.clone(),
         }
     }
@@ -558,7 +558,7 @@ mod tests {
     fn test_counterpart_provider() {
         assert_eq!(ProviderKind::Claude.counterpart(), ProviderKind::Codex);
         assert_eq!(ProviderKind::Codex.counterpart(), ProviderKind::Claude);
-        assert_eq!(ProviderKind::Gemini.counterpart(), ProviderKind::Gemini);
+        assert_eq!(ProviderKind::Gemini.counterpart(), ProviderKind::Codex);
 
         let unsupported = ProviderKind::Unsupported("gpt".to_string());
         assert_eq!(

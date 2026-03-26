@@ -1252,7 +1252,7 @@ pub(super) fn spawn_turn_bridge(
                                 };
                                 // 2. DB
                                 if let Some(ref key) = adk_session_key {
-                                    super::adk_session::save_claude_session_id(
+                                    super::adk_session::save_provider_session_id(
                                         key,
                                         "",
                                         shared_owned.api_port,
@@ -1284,7 +1284,7 @@ pub(super) fn spawn_turn_bridge(
                                         );
                                         let _ = reqwest::Client::new()
                                             .post(&url)
-                                            .json(&serde_json::json!({"claude_session_id": sid_clone}))
+                                            .json(&serde_json::json!({"session_id": sid_clone, "claude_session_id": sid_clone}))
                                             .send()
                                             .await;
                                     });
@@ -1469,7 +1469,7 @@ pub(super) fn spawn_turn_bridge(
 
         // Update in-memory session under lock, then do file I/O outside the
         // lock to avoid blocking other tasks (including health checks).
-        let (file_save_info, claude_sid_to_persist) = {
+        let (file_save_info, session_id_to_persist) = {
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
                 if !session.cleared && !is_prompt_too_long {
@@ -1486,12 +1486,12 @@ pub(super) fn spawn_turn_bridge(
                     });
                     let current_path = session.current_path.clone();
                     let channel_name = session.channel_name.clone();
-                    let claude_sid = session.session_id.clone();
+                    let persisted_sid = session.session_id.clone();
                     let info = current_path.map(|path| {
                         let snapshot = session.clone();
                         (path, channel_name, snapshot)
                     });
-                    (info, claude_sid)
+                    (info, persisted_sid)
                 } else {
                     (None, None)
                 }
@@ -1504,13 +1504,13 @@ pub(super) fn spawn_turn_bridge(
             save_session_to_file(&session_snapshot, &path);
         }
 
-        // Persist claude_session_id to DB so it survives dcserver restarts.
-        if let (Some(ref session_key), Some(ref claude_sid)) =
-            (adk_session_key, claude_sid_to_persist)
+        // Persist provider session_id to DB so it survives dcserver restarts.
+        if let (Some(ref session_key), Some(ref persisted_sid)) =
+            (adk_session_key, session_id_to_persist)
         {
-            super::adk_session::save_claude_session_id(
+            super::adk_session::save_provider_session_id(
                 session_key,
-                claude_sid,
+                persisted_sid,
                 shared_owned.api_port,
             )
             .await;

@@ -311,6 +311,7 @@ fn provider_check_id(provider: &ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Claude => "provider_claude",
         ProviderKind::Codex => "provider_codex",
+        ProviderKind::Gemini => "provider_gemini",
         ProviderKind::Unsupported(_) => "provider_unsupported",
     }
 }
@@ -338,6 +339,11 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
             snapshot,
         ),
         check_provider_cli(ProviderKind::Codex, configured.contains("codex"), snapshot),
+        check_provider_cli(
+            ProviderKind::Gemini,
+            configured.contains("gemini"),
+            snapshot,
+        ),
     ]
 }
 
@@ -801,6 +807,7 @@ fn check_provider_cli(
     let name = match provider {
         ProviderKind::Claude => "claude CLI",
         ProviderKind::Codex => "codex CLI",
+        ProviderKind::Gemini => "gemini CLI",
         ProviderKind::Unsupported(_) => "provider CLI",
     };
     let capability_summary = provider_capability_summary(&provider);

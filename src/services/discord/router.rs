@@ -1396,13 +1396,17 @@ pub(super) async fn handle_text_message(
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
 
     // If in-memory session_id is None (e.g. after dcserver restart),
-    // try to restore it from the DB's claude_session_id.
+    // try to restore it from the DB's persisted provider session_id.
     let session_id = if session_id.is_none() {
         if let Some(ref key) = adk_session_key {
-            let restored = super::adk_session::fetch_claude_session_id(key, shared.api_port).await;
+            let restored =
+                super::adk_session::fetch_provider_session_id(key, shared.api_port).await;
             if restored.is_some() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ↻ Restored claude_session_id from DB for {}", key);
+                println!(
+                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
+                    key
+                );
                 // Also update in-memory session so subsequent turns don't re-fetch
                 let mut data = shared.core.lock().await;
                 if let Some(session) = data.sessions.get_mut(&channel_id) {

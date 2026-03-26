@@ -110,6 +110,7 @@ mod tests {
                     cwd: None,
                     dispatch_id: Some("d-s1".to_string()),
                     claude_session_id: None,
+                    session_id: None,
                 },
             ),
         )

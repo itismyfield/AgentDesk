@@ -15,10 +15,10 @@ import {
 import { FileText, Plus, Settings2, Trash2, ChevronDown, ChevronUp } from "lucide-react";
 import MeetingDetailModal from "./MeetingDetailModal";
 import MeetingProviderFlow, { formatProviderFlow, providerFlowCaption } from "./MeetingProviderFlow";
-import { CLI_PROVIDERS } from "./agent-manager/constants";
 import MarkdownContent from "./common/MarkdownContent";
 
 const STORAGE_KEY = "pcd_meeting_channel_id";
+const MEETING_PROVIDERS = ["claude", "codex", "gemini"] as const;
 const PROVIDER_LABELS: Record<string, string> = {
   claude: "Claude",
   codex: "Codex",
@@ -471,7 +471,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               className="px-3 py-1.5 rounded-lg text-xs"
               style={inputStyle}
             >
-              {CLI_PROVIDERS.map((p) => (
+              {MEETING_PROVIDERS.map((p) => (
                 <option key={p} value={p}>{PROVIDER_LABELS[p] ?? p.toUpperCase()}</option>
               ))}
             </select>

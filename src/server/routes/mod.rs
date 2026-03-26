@@ -82,7 +82,10 @@ pub fn api_router(
             "/onboarding/validate-token",
             post(onboarding::validate_token),
         )
-        .route("/onboarding/channels", get(onboarding::channels))
+        .route(
+            "/onboarding/channels",
+            get(onboarding::channels).post(onboarding::channels_post),
+        )
         .route("/onboarding/complete", post(onboarding::complete))
         .route(
             "/onboarding/check-provider",

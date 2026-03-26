@@ -48,7 +48,7 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     let gemini_bin = get_gemini_path().ok_or_else(|| "Gemini CLI not found".to_string())?;
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let output = Command::new(gemini_bin)
-        .args(build_exec_args(prompt, None))
+        .args(build_exec_args(prompt, None, None))
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -78,7 +78,7 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
 #[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
-    _session_id: Option<&str>,
+    session_id: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     system_prompt: Option<&str>,
@@ -98,7 +98,7 @@ pub fn execute_command_streaming(
     let prompt = compose_gemini_prompt(prompt, system_prompt, allowed_tools);
 
     let mut child = Command::new(gemini_bin)
-        .args(build_exec_args(&prompt, model))
+        .args(build_exec_args(&prompt, model, session_id))
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -135,6 +135,7 @@ pub fn execute_command_streaming(
     let mut raw_stdout = String::new();
     let mut last_session_id: Option<String> = None;
     let mut init_model: Option<String> = None;
+    let mut last_error_message: Option<String> = None;
 
     for line_result in BufReader::new(stdout).lines() {
         if let Some(ref token) = cancel_token {
@@ -182,6 +183,19 @@ pub fn execute_command_streaming(
                     });
                 }
             }
+            Some("tool_use") => {
+                if let Some(tool_use) = build_gemini_tool_use_message(&json) {
+                    let _ = sender.send(tool_use);
+                }
+            }
+            Some("tool_result") => {
+                if let Some(tool_result) = build_gemini_tool_result_message(&json) {
+                    let _ = sender.send(tool_result);
+                }
+            }
+            Some("error") => {
+                last_error_message = extract_gemini_error_message(&json);
+            }
             Some("result") => {
                 let stats = json.get("stats");
                 let model_name = init_model.clone().or_else(|| {
@@ -225,7 +239,9 @@ pub fn execute_command_streaming(
 
     if !status.success() {
         let _ = sender.send(StreamMessage::Error {
-            message: derive_error_message(&raw_stdout, &stderr, status.code(), "Gemini"),
+            message: last_error_message.clone().unwrap_or_else(|| {
+                derive_error_message(&raw_stdout, &stderr, status.code(), "Gemini")
+            }),
             stdout: raw_stdout,
             stderr,
             exit_code: status.code(),
@@ -236,7 +252,9 @@ pub fn execute_command_streaming(
     let result = final_text.trim().to_string();
     if result.is_empty() {
         let _ = sender.send(StreamMessage::Error {
-            message: "Empty response from Gemini".to_string(),
+            message: last_error_message
+                .clone()
+                .unwrap_or_else(|| "Empty response from Gemini".to_string()),
             stdout: raw_stdout,
             stderr,
             exit_code: status.code(),
@@ -283,7 +301,7 @@ fn compose_gemini_prompt(
     sections.join("\n\n")
 }
 
-fn build_exec_args(prompt: &str, model: Option<&str>) -> Vec<String> {
+fn build_exec_args(prompt: &str, model: Option<&str>, session_id: Option<&str>) -> Vec<String> {
     let mut args = Vec::new();
     let model = model
         .map(str::trim)
@@ -292,6 +310,10 @@ fn build_exec_args(prompt: &str, model: Option<&str>) -> Vec<String> {
 
     args.push("-m".to_string());
     args.push(model.to_string());
+    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
+        args.push("--resume".to_string());
+        args.push(session_id.to_string());
+    }
     args.push("-p".to_string());
     args.push(prompt.to_string());
     args.push("--output-format".to_string());
@@ -334,4 +356,144 @@ fn derive_error_message(stdout: &str, stderr: &str, exit_code: Option<i32>, labe
     }
 
     format!("{} exited with code {:?}", label, exit_code)
+}
+
+fn build_gemini_tool_use_message(json: &Value) -> Option<StreamMessage> {
+    let tool_name = json.get("tool_name")?.as_str()?.trim();
+    if tool_name.is_empty() {
+        return None;
+    }
+
+    let mapped_name = map_gemini_tool_name(tool_name).to_string();
+    let input = json
+        .get("parameters")
+        .map(render_gemini_value)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "{}".to_string());
+
+    Some(StreamMessage::ToolUse {
+        name: mapped_name,
+        input,
+    })
+}
+
+fn build_gemini_tool_result_message(json: &Value) -> Option<StreamMessage> {
+    let status = json
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("success");
+    let content = json
+        .get("output")
+        .map(render_gemini_value)
+        .or_else(|| json.get("error").map(render_gemini_value))
+        .or_else(|| json.get("result").map(render_gemini_value))
+        .unwrap_or_default();
+
+    Some(StreamMessage::ToolResult {
+        content,
+        is_error: status != "success",
+    })
+}
+
+fn extract_gemini_error_message(json: &Value) -> Option<String> {
+    json.get("message")
+        .or_else(|| json.get("error"))
+        .map(render_gemini_value)
+        .or_else(|| {
+            json.get("details")
+                .and_then(|details| details.as_array())
+                .and_then(|details| details.first())
+                .map(render_gemini_value)
+        })
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty())
+}
+
+fn map_gemini_tool_name(tool_name: &str) -> &str {
+    match tool_name {
+        "run_shell_command" => "Bash",
+        "read_many_files" | "read_file" => "Read",
+        "write_file" => "Write",
+        "replace" | "edit_file" => "Edit",
+        "glob" => "Glob",
+        "grep" => "Grep",
+        "web_search" => "WebSearch",
+        "web_fetch" => "WebFetch",
+        other => other,
+    }
+}
+
+fn render_gemini_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.to_string(),
+        _ => value.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_exec_args, build_gemini_tool_result_message, build_gemini_tool_use_message,
+        extract_gemini_error_message,
+    };
+    use crate::services::claude::StreamMessage;
+    use serde_json::json;
+
+    #[test]
+    fn build_exec_args_includes_resume_when_session_present() {
+        let args = build_exec_args("hello", Some("gemini-2.5-flash"), Some("latest"));
+        assert!(args.windows(2).any(|pair| pair == ["--resume", "latest"]));
+        assert!(args.windows(2).any(|pair| pair == ["-p", "hello"]));
+    }
+
+    #[test]
+    fn tool_use_event_maps_shell_command_to_bash() {
+        let event = json!({
+            "type": "tool_use",
+            "tool_name": "run_shell_command",
+            "parameters": {
+                "description": "Print working directory",
+                "command": "pwd"
+            }
+        });
+
+        match build_gemini_tool_use_message(&event) {
+            Some(StreamMessage::ToolUse { name, input }) => {
+                assert_eq!(name, "Bash");
+                assert!(input.contains("\"command\":\"pwd\""));
+            }
+            other => panic!("expected ToolUse, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_result_event_maps_output_and_error_flag() {
+        let event = json!({
+            "type": "tool_result",
+            "status": "success",
+            "output": "/tmp/example"
+        });
+
+        match build_gemini_tool_result_message(&event) {
+            Some(StreamMessage::ToolResult { content, is_error }) => {
+                assert_eq!(content, "/tmp/example");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn error_event_prefers_message_field() {
+        let event = json!({
+            "type": "error",
+            "message": "quota exceeded"
+        });
+
+        assert_eq!(
+            extract_gemini_error_message(&event).as_deref(),
+            Some("quota exceeded")
+        );
+    }
 }
