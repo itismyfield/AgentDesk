@@ -165,14 +165,7 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), Strin
             Ok(d) => d,
             Err(_) => resolve_home()?.join("AgentDesk").to_string_lossy().into_owned(),
         };
-        match std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&repo_dir)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        {
+        match crate::services::platform::git_head_commit(&repo_dir) {
             Some(c) => c,
             None => {
                 eprintln!("stamp_review_passed_marker: git rev-parse HEAD failed, skipping marker");

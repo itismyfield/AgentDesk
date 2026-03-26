@@ -1258,14 +1258,7 @@ mod tests {
             health_registry: None,
         };
 
-        let hostname = std::process::Command::new("hostname")
-            .arg("-s")
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "localhost".to_string());
+        let hostname = crate::services::platform::hostname_short();
         let session_key = format!("{hostname}:AgentDesk-stale-test-{}", std::process::id());
 
         {

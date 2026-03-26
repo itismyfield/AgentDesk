@@ -38,14 +38,7 @@ pub(super) async fn build_adk_session_key(
             .map(|name| provider.build_tmux_session_name(name))
     }?;
 
-    let hostname = std::process::Command::new("hostname")
-        .arg("-s")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+    let hostname = crate::services::platform::hostname_short();
 
     Some(format!("{}:{}", hostname, tmux_name))
 }

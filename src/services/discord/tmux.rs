@@ -1023,13 +1023,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 
         for dc in &dead_cleanups {
             let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
-            let hostname = std::process::Command::new("hostname")
-                .arg("-s")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            let hostname = crate::services::platform::hostname_short();
             let session_key = format!("{}:{}", hostname, tmux_name);
 
             super::adk_session::post_adk_session_status(
@@ -1243,13 +1237,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         // Dead session with no watcher — report idle to DB and kill
         let tmux_name =
             provider.build_tmux_session_name(channel_name.as_deref().unwrap_or("unknown"));
-        let hostname = std::process::Command::new("hostname")
-            .arg("-s")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let hostname = crate::services::platform::hostname_short();
         let session_key = format!("{}:{}", hostname, tmux_name);
 
         // Check if this is a thread session (channel name contains -t{15+digit})

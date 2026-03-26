@@ -68,6 +68,34 @@ pub fn async_shell_command_builder(cmd: &str) -> tokio::process::Command {
     }
 }
 
+// ── Common shell utilities ─────────────────────────────────────────
+
+/// Get the short hostname of the current machine.
+///
+/// Equivalent to `hostname -s` on Unix.  Falls back to "localhost" on failure.
+pub fn hostname_short() -> String {
+    Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+/// Get the current HEAD commit hash from a git repo directory.
+///
+/// Returns `None` if git is unavailable or the directory is not a repo.
+pub fn git_head_commit(repo_dir: &str) -> Option<String> {
+    Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

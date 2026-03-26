@@ -79,13 +79,7 @@ impl SessionRuntime for TmuxRuntime {
     }
 
     fn session_exists(&self, session_name: &str) -> bool {
-        std::process::Command::new("tmux")
-            .args(["has-session", "-t", session_name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        crate::services::tmux_diagnostics::tmux_session_exists(session_name)
     }
 
     fn session_has_live_pane(&self, session_name: &str) -> bool {

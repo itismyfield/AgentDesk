@@ -86,13 +86,7 @@ pub fn handle_addmcptool(tool_names: &[String]) {
 }
 
 pub fn handle_reset_tmux() {
-    let hostname = std::process::Command::new("hostname")
-        .arg("-s")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "local".to_string());
+    let hostname = crate::services::platform::hostname_short();
 
     // Kill local AgentDesk-* sessions.
     println!("[{}] Cleaning AgentDesk-* tmux sessions...", hostname);

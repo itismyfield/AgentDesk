@@ -38,14 +38,7 @@ pub fn create_dispatch_core(
                         .to_string_lossy()
                         .into_owned(),
                 };
-                if let Some(commit) = std::process::Command::new("git")
-                    .args(["rev-parse", "HEAD"])
-                    .current_dir(&repo_dir)
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                {
+                if let Some(commit) = crate::services::platform::git_head_commit(&repo_dir) {
                     obj.insert("reviewed_commit".to_string(), json!(commit));
                 }
             }

@@ -11,4 +11,4 @@ pub use binary_resolver::{
     async_resolve_binary_with_login_shell, resolve_binary, resolve_binary_with_login_shell,
 };
 pub use dump_tool::capture_process_dump;
-pub use shell::{async_shell_command, shell_command};
+pub use shell::{async_shell_command, git_head_commit, hostname_short, shell_command};

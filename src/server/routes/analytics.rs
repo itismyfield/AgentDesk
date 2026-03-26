@@ -557,11 +557,7 @@ pub async fn machine_status(
         })
         .unwrap_or_else(|| {
             // Default: current hostname
-            let hostname = Command::new("hostname")
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|| "localhost".to_string());
+            let hostname = crate::services::platform::hostname_short();
             vec![(hostname.clone(), hostname)]
         });
 

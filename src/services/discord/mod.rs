@@ -2422,14 +2422,7 @@ pub(super) async fn auto_restore_session(
             if need_db_restore {
                 if let Some(ref ch_name) = restore_ch_name {
                     let tmux_name = provider.build_tmux_session_name(ch_name);
-                    let hostname = std::process::Command::new("hostname")
-                        .arg("-s")
-                        .output()
-                        .ok()
-                        .and_then(|o| String::from_utf8(o.stdout).ok())
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "unknown".to_string());
+                    let hostname = crate::services::platform::hostname_short();
                     let session_key = format!("{}:{}", hostname, tmux_name);
                     if let Some(claude_sid) =
                         adk_session::fetch_claude_session_id(&session_key, shared.api_port).await
