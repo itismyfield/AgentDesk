@@ -2027,7 +2027,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Discord channel alias resolution (integration test)
     async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
         // When a review dispatch has an explicit verdict (e.g. "improve"),
         // Rust creates a review-decision dispatch for the original agent.
@@ -2264,7 +2263,6 @@ mod tests {
     /// and sets review_followup_handled=true, preventing duplicate resend
     /// via the generic latest_dispatch_id check.
     #[tokio::test]
-    #[ignore] // Requires Discord channel alias resolution (integration test)
     async fn review_followup_skips_generic_resend_for_explicit_verdict() {
         let db = test_db();
         {
@@ -2332,7 +2330,6 @@ mod tests {
     /// This ensures that Discord send failures leave the dispatch recoverable
     /// by timeouts.js [I-0].
     #[tokio::test]
-    #[ignore] // Requires Discord HTTP mock (integration test)
     async fn no_notified_marker_when_discord_send_fails() {
         let db = test_db();
         {

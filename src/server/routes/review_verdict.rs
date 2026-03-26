@@ -1122,7 +1122,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires engine + Discord channel alias resolution (integration test)
     async fn submit_verdict_improve_creates_review_decision_dispatch() {
         let db = test_db();
         seed_review_card(&db, "dispatch-improve");

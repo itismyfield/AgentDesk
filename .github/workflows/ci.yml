@@ -16,8 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows excluded until P1 platform-compat (#98-#101) is complete
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    # Windows may fail until P1 platform-compat (#98-#101) is complete
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -83,25 +84,56 @@ jobs:
 
       - name: shellcheck scripts
         run: |
+          FAILED=0
           find . -name '*.sh' -not -path './target/*' -not -path './.git/*' | while read f; do
-            shellcheck -S warning "$f" || true
+            shellcheck -S warning "$f" || FAILED=1
           done
-        continue-on-error: true
+          exit $FAILED
 
       - name: Check hardcoded port/path drift
         run: |
+          FAIL=0
           echo "=== Checking for hardcoded ports ==="
-          # Port 8791/8799 should only appear in expected places
           grep -rn '8791\|8799' --include='*.rs' --include='*.js' --include='*.yaml' --include='*.json' \
             --exclude-dir=target --exclude-dir=.git \
             | grep -v 'Cargo.lock' \
             | grep -v '// port' \
-            | grep -v '# port' || echo "No unexpected port references found"
+            | grep -v '# port' || true
 
           echo ""
           echo "=== Checking for hardcoded home paths ==="
-          # env!("HOME") or hardcoded /Users/ paths (except tests)
-          grep -rn 'env!("HOME")\|/Users/itismyfield' --include='*.rs' \
-            --exclude-dir=target --exclude-dir=.git \
-            | grep -v '#\[test\]' \
-            | grep -v '// test' || echo "No hardcoded home paths found"
+          HARDCODED=$(grep -rn 'env!("HOME")' --include='*.rs' \
+            --exclude-dir=target --exclude-dir=.git 2>/dev/null || true)
+          if [ -n "$HARDCODED" ]; then
+            echo "ERROR: Found env!(\"HOME\") — use dirs::home_dir() or runtime config instead:"
+            echo "$HARDCODED"
+            FAIL=1
+          fi
+          exit $FAIL
+
+      - name: Path integrity check
+        run: |
+          FAIL=0
+          echo "=== Checking Cargo.toml paths ==="
+          # Ensure no absolute paths in Cargo.toml
+          if grep -n '/Users/\|/home/' Cargo.toml 2>/dev/null; then
+            echo "ERROR: Absolute paths found in Cargo.toml"
+            FAIL=1
+          fi
+
+          echo "=== Checking policies/ exist ==="
+          # Core policy files must be present
+          for f in policies/default-pipeline.yaml policies/kanban-rules.js policies/timeouts.js policies/auto-queue.js policies/review-automation.js; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: Required policy file missing: $f"
+              FAIL=1
+            fi
+          done
+
+          echo "=== Checking dashboard source exists ==="
+          if [ ! -f "dashboard/package.json" ]; then
+            echo "ERROR: dashboard/package.json missing"
+            FAIL=1
+          fi
+
+          exit $FAIL
