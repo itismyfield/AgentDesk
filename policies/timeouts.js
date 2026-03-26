@@ -93,11 +93,17 @@ var timeouts = {
       );
       if (cards.length === 0) continue;
       var card = cards[0];
-      if (card.status === "done") continue;
+      var rCfg = agentdesk.pipeline.resolveForCard(card.id);
+      var rInitial = agentdesk.pipeline.kickoffState(rCfg) || "requested";
+      var rInProgress = agentdesk.pipeline.nextGatedTarget(rInitial, rCfg) || "in_progress";
+      var rReview = agentdesk.pipeline.nextGatedTarget(rInProgress, rCfg) || "review";
+      var rForce = agentdesk.pipeline.forceOnlyTargets(rInProgress, rCfg) || [];
+      var rPending = rForce[0] || "pending_decision";
+      if (agentdesk.pipeline.isTerminal(card.status, rCfg)) continue;
       if (di.dispatch_type === "review" || di.dispatch_type === "review-decision") continue;
       if (di.dispatch_type === "rework") {
-        agentdesk.kanban.setStatus(card.id, "review");
-        agentdesk.log.info("[reconcile] " + card.id + " rework done → review");
+        agentdesk.kanban.setStatus(card.id, rReview);
+        agentdesk.log.info("[reconcile] " + card.id + " rework done → " + rReview);
         continue;
       }
       // Implementation: run PM gate same as kanban-rules.js onDispatchCompleted
@@ -149,7 +155,7 @@ var timeouts = {
         if (reasons.length > 0) {
           var dodOnly = reasons.length === 1 && reasons[0].indexOf("DoD 미완료") === 0;
           if (dodOnly) {
-            agentdesk.kanban.setStatus(card.id, "review");
+            agentdesk.kanban.setStatus(card.id, rReview);
             agentdesk.db.execute(
               "UPDATE kanban_cards SET review_status = 'awaiting_dod', awaiting_dod_at = datetime('now') WHERE id = ?",
               [card.id]
@@ -160,10 +166,10 @@ var timeouts = {
               "ON CONFLICT(card_id) DO UPDATE SET state = 'awaiting_dod', updated_at = datetime('now')",
               [card.id]
             );
-            agentdesk.log.warn("[reconcile] Card " + card.id + " → review(awaiting_dod): " + reasons[0]);
+            agentdesk.log.warn("[reconcile] Card " + card.id + " → " + rReview + "(awaiting_dod): " + reasons[0]);
             continue;
           }
-          agentdesk.kanban.setStatus(card.id, "pending_decision");
+          agentdesk.kanban.setStatus(card.id, rPending);
           agentdesk.db.execute(
             "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
             [card.id]
@@ -174,7 +180,7 @@ var timeouts = {
             "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
             [card.id]
           );
-          agentdesk.log.warn("[reconcile] Card " + card.id + " → pending_decision: " + reasons.join("; "));
+          agentdesk.log.warn("[reconcile] Card " + card.id + " → " + rPending + ": " + reasons.join("; "));
           // PMD notification via async outbox (#120)
           var pmdCh = agentdesk.config.get("kanban_manager_channel_id");
           if (pmdCh) {
@@ -186,20 +192,26 @@ var timeouts = {
           continue;
         }
       }
-      agentdesk.kanban.setStatus(card.id, "review");
-      agentdesk.log.info("[reconcile] " + card.id + " implementation done → review (via DB fallback)");
+      agentdesk.kanban.setStatus(card.id, rReview);
+      agentdesk.log.info("[reconcile] " + card.id + " implementation done → " + rReview + " (via DB fallback)");
     }
   },
 
   _section_A: function() {
     // ─── [A] Requested 타임아웃 (45분) ─────────────────────
     // retry_count < 10이면 pending_decision 대신 failed만 마크 → [J]가 30초 후 재시도
+    var aCfg = agentdesk.pipeline.getConfig();
+    var aInitial = agentdesk.pipeline.kickoffState(aCfg) || "requested";
+    var aInProgress = agentdesk.pipeline.nextGatedTarget(aInitial, aCfg) || "in_progress";
+    var aForce = agentdesk.pipeline.forceOnlyTargets(aInProgress, aCfg) || [];
+    var aPending = aForce[0] || "pending_decision";
     var staleRequested = agentdesk.db.query(
       "SELECT kc.id, kc.assigned_agent_id, kc.latest_dispatch_id, " +
       "COALESCE(td.retry_count, 0) as retry_count " +
       "FROM kanban_cards kc " +
       "LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id " +
-      "WHERE kc.status = 'requested' AND kc.requested_at IS NOT NULL AND kc.requested_at < datetime('now', '-45 minutes')"
+      "WHERE kc.status = ? AND kc.requested_at IS NOT NULL AND kc.requested_at < datetime('now', '-45 minutes')",
+      [aInitial]
     );
     for (var i = 0; i < staleRequested.length; i++) {
       var rc = staleRequested[i];
@@ -221,13 +233,13 @@ var timeouts = {
         agentdesk.log.warn("[timeout] Card " + rc.id + " requested timeout — retry " +
           rc.retry_count + "/" + MAX_DISPATCH_RETRIES + ", will auto-retry in 30s");
       } else {
-        // 10회 재시도 소진 → pending_decision + PMD 알림
-        agentdesk.kanban.setStatus(rc.id, "pending_decision");
+        // 10회 재시도 소진 → aPending + PMD 알림
+        agentdesk.kanban.setStatus(rc.id, aPending);
         agentdesk.db.execute(
           "UPDATE kanban_cards SET blocked_reason = 'Timed out waiting for agent (" + MAX_DISPATCH_RETRIES + " retries exhausted)' WHERE id = ?",
           [rc.id]
         );
-        agentdesk.log.warn("[timeout] Card " + rc.id + " requested timeout → pending_decision (" + MAX_DISPATCH_RETRIES + " retries exhausted)");
+        agentdesk.log.warn("[timeout] Card " + rc.id + " " + aInitial + " timeout → " + aPending + " (" + MAX_DISPATCH_RETRIES + " retries exhausted)");
         // PMD에게 결정 요청
         var cardInfo = agentdesk.db.query(
           "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
@@ -251,16 +263,22 @@ var timeouts = {
 
   _section_B: function() {
     // ─── [B] In-Progress 스테일 (2시간) ────────────────────
+    var bCfg = agentdesk.pipeline.getConfig();
+    var bInitial = agentdesk.pipeline.kickoffState(bCfg) || "requested";
+    var bInProgress = agentdesk.pipeline.nextGatedTarget(bInitial, bCfg) || "in_progress";
+    var bForce = agentdesk.pipeline.forceOnlyTargets(bInProgress, bCfg) || [];
+    var bBlocked = bForce.length > 1 ? bForce[1] : "blocked";
     var staleInProgress = agentdesk.db.query(
-      "SELECT id FROM kanban_cards WHERE status = 'in_progress' AND started_at IS NOT NULL AND started_at < datetime('now', '-2 hours')"
+      "SELECT id FROM kanban_cards WHERE status = ? AND started_at IS NOT NULL AND started_at < datetime('now', '-2 hours')",
+      [bInProgress]
     );
     for (var j = 0; j < staleInProgress.length; j++) {
-      agentdesk.kanban.setStatus(staleInProgress[j].id, "blocked");
+      agentdesk.kanban.setStatus(staleInProgress[j].id, bBlocked);
       agentdesk.db.execute(
         "UPDATE kanban_cards SET blocked_reason = 'Stalled: no activity for 2+ hours' WHERE id = ?",
         [staleInProgress[j].id]
       );
-      agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " in_progress stale → blocked");
+      agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " " + bInProgress + " stale → " + bBlocked);
       // PMD에게 결정 요청 (announce bot)
       var stalledInfo = agentdesk.db.query(
         "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
@@ -283,16 +301,23 @@ var timeouts = {
 
   _section_C: function() {
     // ─── [C] 스테일 리뷰 (dispatch 완료인데 verdict 없음) ──
+    var cCfg = agentdesk.pipeline.getConfig();
+    var cInitial = agentdesk.pipeline.kickoffState(cCfg) || "requested";
+    var cInProgress = agentdesk.pipeline.nextGatedTarget(cInitial, cCfg) || "in_progress";
+    var cReview = agentdesk.pipeline.nextGatedTarget(cInProgress, cCfg) || "review";
+    var cForce = agentdesk.pipeline.forceOnlyTargets(cInProgress, cCfg) || [];
+    var cPending = cForce[0] || "pending_decision";
     var staleReviews = agentdesk.db.query(
       "SELECT kc.id as card_id " +
       "FROM kanban_cards kc " +
       "JOIN task_dispatches td ON td.kanban_card_id = kc.id " +
-      "WHERE kc.status = 'review' AND kc.review_status = 'reviewing' " +
+      "WHERE kc.status = ? AND kc.review_status = 'reviewing' " +
       "AND td.dispatch_type = 'review' AND td.status IN ('completed', 'failed') " +
-      "AND kc.review_entered_at IS NOT NULL AND kc.review_entered_at < datetime('now', '-30 minutes')"
+      "AND kc.review_entered_at IS NOT NULL AND kc.review_entered_at < datetime('now', '-30 minutes')",
+      [cReview]
     );
     for (var k = 0; k < staleReviews.length; k++) {
-      agentdesk.kanban.setStatus(staleReviews[k].card_id, "pending_decision");
+      agentdesk.kanban.setStatus(staleReviews[k].card_id, cPending);
       agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?", [staleReviews[k].card_id]);
       // #117: sync canonical review state
       agentdesk.db.execute(
@@ -306,13 +331,20 @@ var timeouts = {
 
   _section_D: function() {
     // ─── [D] DoD 대기 타임아웃 (15분) ──────────────────────
+    var dCfg = agentdesk.pipeline.getConfig();
+    var dInitial = agentdesk.pipeline.kickoffState(dCfg) || "requested";
+    var dInProgress = agentdesk.pipeline.nextGatedTarget(dInitial, dCfg) || "in_progress";
+    var dReview = agentdesk.pipeline.nextGatedTarget(dInProgress, dCfg) || "review";
+    var dForce = agentdesk.pipeline.forceOnlyTargets(dInProgress, dCfg) || [];
+    var dPending = dForce[0] || "pending_decision";
     var stuckDod = agentdesk.db.query(
       "SELECT id FROM kanban_cards " +
-      "WHERE status = 'review' AND review_status = 'awaiting_dod' " +
-      "AND awaiting_dod_at IS NOT NULL AND awaiting_dod_at < datetime('now', '-15 minutes')"
+      "WHERE status = ? AND review_status = 'awaiting_dod' " +
+      "AND awaiting_dod_at IS NOT NULL AND awaiting_dod_at < datetime('now', '-15 minutes')",
+      [dReview]
     );
     for (var d = 0; d < stuckDod.length; d++) {
-      agentdesk.kanban.setStatus(stuckDod[d].id, "pending_decision");
+      agentdesk.kanban.setStatus(stuckDod[d].id, dPending);
       agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?", [stuckDod[d].id]);
       // #117: sync canonical review state
       agentdesk.db.execute(
@@ -327,7 +359,14 @@ var timeouts = {
   _section_E: function() {
     // ─── [E] 자동-수용 결정 타임아웃 (suggestion_pending 15분) ──
     // Auto-accept: same effect as manual review-decision accept
-    // (status → in_progress, review_status → rework_pending, create rework dispatch)
+    // (status → rework target, review_status → rework_pending, create rework dispatch)
+    var eCfg = agentdesk.pipeline.getConfig();
+    var eInitial = agentdesk.pipeline.kickoffState(eCfg) || "requested";
+    var eInProgress = agentdesk.pipeline.nextGatedTarget(eInitial, eCfg) || "in_progress";
+    var eReview = agentdesk.pipeline.nextGatedTarget(eInProgress, eCfg) || "review";
+    var eReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(eReview, "review_rework", eCfg) || eInProgress;
+    var eForce = agentdesk.pipeline.forceOnlyTargets(eInProgress, eCfg) || [];
+    var ePending = eForce[0] || "pending_decision";
     var staleSuggestions = agentdesk.db.query(
       "SELECT id, assigned_agent_id, title FROM kanban_cards " +
       "WHERE review_status = 'suggestion_pending' " +
@@ -344,8 +383,8 @@ var timeouts = {
             "rework",
             "[Rework] " + (sc.title || sc.id)
           );
-          // Dispatch succeeded — now transition to in_progress + rework_pending
-          agentdesk.kanban.setStatus(sc.id, "in_progress");
+          // Dispatch succeeded — now transition to rework target + rework_pending
+          agentdesk.kanban.setStatus(sc.id, eReworkTarget);
           agentdesk.db.execute(
             "UPDATE kanban_cards SET review_status = 'rework_pending', suggestion_pending_at = NULL, updated_at = datetime('now') WHERE id = ?",
             [sc.id]
@@ -386,8 +425,8 @@ var timeouts = {
           );
           agentdesk.log.warn("[timeout] Auto-accepted suggestions for card " + sc.id + " — rework dispatch created");
         } catch (e) {
-          // Dispatch failed — route to pending_decision instead
-          agentdesk.kanban.setStatus(sc.id, "pending_decision");
+          // Dispatch failed — route to pending state instead
+          agentdesk.kanban.setStatus(sc.id, ePending);
           agentdesk.db.execute(
             "UPDATE kanban_cards SET blocked_reason = 'Auto-accept rework dispatch failed: " + e + "' WHERE id = ?",
             [sc.id]
@@ -409,6 +448,11 @@ var timeouts = {
 
   _section_G: function() {
     // ─── [G] 스테일 디스패치 정리 (24시간) ──────────────────
+    var gCfg = agentdesk.pipeline.getConfig();
+    var gInitial = agentdesk.pipeline.kickoffState(gCfg) || "requested";
+    var gInProgress = agentdesk.pipeline.nextGatedTarget(gInitial, gCfg) || "in_progress";
+    var gForce = agentdesk.pipeline.forceOnlyTargets(gInProgress, gCfg) || [];
+    var gPending = gForce[0] || "pending_decision";
     var staleDispatches = agentdesk.db.query(
       "SELECT id, kanban_card_id FROM task_dispatches WHERE status IN ('pending','dispatched') AND created_at < datetime('now', '-24 hours')"
     );
@@ -419,8 +463,8 @@ var timeouts = {
       );
       if (staleDispatches[sd].kanban_card_id) {
         var card = agentdesk.kanban.getCard(staleDispatches[sd].kanban_card_id);
-        if (card && card.status !== "done") {
-          agentdesk.kanban.setStatus(staleDispatches[sd].kanban_card_id, "pending_decision");
+        if (card && !agentdesk.pipeline.isTerminal(card.status, gCfg)) {
+          agentdesk.kanban.setStatus(staleDispatches[sd].kanban_card_id, gPending);
           agentdesk.db.execute(
             "UPDATE kanban_cards SET blocked_reason = 'Stale dispatch auto-failed after 24h' WHERE id = ?",
             [staleDispatches[sd].kanban_card_id]
@@ -433,10 +477,14 @@ var timeouts = {
 
   _section_H: function() {
     // ─── [H] Stale dispatched 큐 엔트리 진행 ───────────────
+    var hCfg = agentdesk.pipeline.getConfig();
+    var hInitial = agentdesk.pipeline.kickoffState(hCfg) || "requested";
+    var hInProgress = agentdesk.pipeline.nextGatedTarget(hInitial, hCfg) || "in_progress";
     var staleQueueEntries = agentdesk.db.query(
       "SELECT dq.id FROM dispatch_queue dq " +
       "JOIN kanban_cards kc ON kc.id = dq.kanban_card_id " +
-      "WHERE dq.status = 'dispatched' AND kc.status NOT IN ('requested', 'in_progress')"
+      "WHERE dq.status = 'dispatched' AND kc.status NOT IN (?, ?)",
+      [hInitial, hInProgress]
     );
     for (var se = 0; se < staleQueueEntries.length; se++) {
       agentdesk.db.execute(
@@ -495,6 +543,12 @@ var timeouts = {
     // failed 상태의 디스패치 중 retry_count < 10이고 30초+ 경과한 것을 재시도.
     // 실제 cadence는 onTick 60초 간격이므로 ~60-90초.
     // 10분 윈도우 제거 — latest_dispatch_id 체크로 stale 방지 충분.
+    var jCfg = agentdesk.pipeline.getConfig();
+    var jTerminal = agentdesk.pipeline.terminalState(jCfg) || "done";
+    var jInitial = agentdesk.pipeline.kickoffState(jCfg) || "requested";
+    var jInProgress = agentdesk.pipeline.nextGatedTarget(jInitial, jCfg) || "in_progress";
+    var jForce = agentdesk.pipeline.forceOnlyTargets(jInProgress, jCfg) || [];
+    var jPending = jForce[0] || "pending_decision";
     var failedForRetry = agentdesk.db.query(
       "SELECT td.id, td.kanban_card_id, td.to_agent_id, td.dispatch_type, td.title, " +
       "COALESCE(td.retry_count, 0) as retry_count, kc.github_issue_url, kc.github_issue_number " +
@@ -504,7 +558,8 @@ var timeouts = {
       "AND COALESCE(td.retry_count, 0) < " + MAX_DISPATCH_RETRIES + " " +
       "AND td.updated_at < datetime('now', '-30 seconds') " +
       "AND kc.latest_dispatch_id = td.id " +
-      "AND kc.status NOT IN ('done', 'pending_decision')"
+      "AND kc.status NOT IN (?, ?)",
+      [jTerminal, jPending]
     );
     for (var jr = 0; jr < failedForRetry.length; jr++) {
       var fd = failedForRetry[jr];
@@ -552,8 +607,8 @@ var timeouts = {
       } catch (e) {
         agentdesk.log.error("[retry] Failed to create retry dispatch for card " +
           fd.kanban_card_id + ": " + e);
-        // 재시도 디스패치 생성 실패 → pending_decision으로 이관
-        agentdesk.kanban.setStatus(fd.kanban_card_id, "pending_decision");
+        // 재시도 디스패치 생성 실패 → pending state로 이관
+        agentdesk.kanban.setStatus(fd.kanban_card_id, jPending);
         agentdesk.db.execute(
           "UPDATE kanban_cards SET blocked_reason = 'Auto-retry dispatch creation failed: " + e + "' WHERE id = ?",
           [fd.kanban_card_id]
@@ -569,6 +624,11 @@ var timeouts = {
     // 확정: 연장 상한 초과 시 agentdesk.session.kill → 강제 중단 + 재디스패치
     var DEADLOCK_MINUTES = 15;
     var MAX_EXTENSIONS = 3;
+    var iCfg = agentdesk.pipeline.getConfig();
+    var iInitial = agentdesk.pipeline.kickoffState(iCfg) || "requested";
+    var iInProgress = agentdesk.pipeline.nextGatedTarget(iInitial, iCfg) || "in_progress";
+    var iForce = agentdesk.pipeline.forceOnlyTargets(iInProgress, iCfg) || [];
+    var iPending = iForce[0] || "pending_decision";
 
     // 먼저: heartbeat가 신선한 working 세션의 카운터를 리셋 (비연속 스톨 누적 방지)
     var freshSessions = agentdesk.db.query(
@@ -703,7 +763,7 @@ var timeouts = {
                 di.kanban_card_id + " → " + di.to_agent_id);
             } catch (e) {
               // 재디스패치 실패 시 PMD 판단으로 이관
-              agentdesk.kanban.setStatus(di.kanban_card_id, "pending_decision");
+              agentdesk.kanban.setStatus(di.kanban_card_id, iPending);
               agentdesk.db.execute(
                 "UPDATE kanban_cards SET blocked_reason = ? WHERE id = ?",
                 ["Deadlock recovery re-dispatch failed: " + e, di.kanban_card_id]
@@ -795,11 +855,15 @@ var timeouts = {
     // 해당 dispatch_id를 가진 working 세션이 없는 경우 = 고아 디스패치.
     // dcserver 재시작 등으로 세션-디스패치 연결이 끊긴 상태.
     // dispatch를 completed로 마크하고 card를 review로 전이하여 리뷰 파이프라인을 재개한다.
+    var kCfg = agentdesk.pipeline.getConfig();
+    var kInitial = agentdesk.pipeline.kickoffState(kCfg) || "requested";
+    var kInProgress = agentdesk.pipeline.nextGatedTarget(kInitial, kCfg) || "in_progress";
+    var kReview = agentdesk.pipeline.nextGatedTarget(kInProgress, kCfg) || "review";
     var orphanedDispatches = agentdesk.db.query(
       "SELECT td.id as dispatch_id, td.kanban_card_id, td.dispatch_type " +
       "FROM task_dispatches td " +
       "JOIN kanban_cards kc ON kc.id = td.kanban_card_id " +
-      "WHERE kc.status = 'in_progress' " +
+      "WHERE kc.status = ? " +
       "AND td.status = 'pending' " +
       "AND kc.latest_dispatch_id = td.id " +
       "AND td.dispatch_type IN ('implementation', 'rework') " +
@@ -807,7 +871,8 @@ var timeouts = {
       "AND NOT EXISTS (" +
       "  SELECT 1 FROM sessions s " +
       "  WHERE s.active_dispatch_id = td.id AND s.status = 'working'" +
-      ")"
+      ")",
+      [kInProgress]
     );
     for (var op = 0; op < orphanedDispatches.length; op++) {
       var od = orphanedDispatches[op];
@@ -819,9 +884,9 @@ var timeouts = {
         [od.dispatch_id]
       );
       // 2) Card를 review로 전이 → OnReviewEnter 훅이 review dispatch를 생성
-      agentdesk.kanban.setStatus(od.kanban_card_id, "review");
+      agentdesk.kanban.setStatus(od.kanban_card_id, kReview);
       agentdesk.log.warn("[orphan-recovery] Completed orphaned dispatch " + od.dispatch_id +
-        " (type=" + od.dispatch_type + ") → card " + od.kanban_card_id + " → review");
+        " (type=" + od.dispatch_type + ") → card " + od.kanban_card_id + " → " + kReview);
       // 3) PMD 알림
       var orphanInfo = agentdesk.db.query(
         "SELECT title, assigned_agent_id FROM kanban_cards WHERE id = ?",
@@ -831,14 +896,15 @@ var timeouts = {
       var orphanAgent = (orphanInfo.length > 0) ? orphanInfo[0].assigned_agent_id : "?";
       sendNotifyAlert(getPMDChannel(),
         "🔄 [고아 디스패치 복구] " + orphanAgent + " — " + orphanTitle +
-        "\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → review 전이");
+        "\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → " + kReview + " 전이");
     }
   },
 
   _section_L: function() {
     // ─── [L] 장시간 턴 감지 — agentdesk.inflight.list() 기반 ────
-    // heartbeat와 독립. 프로세스 살아있어도 턴이 15분 이상이면 알림.
-    var LONG_TURN_MINUTES = 15;
+    // Tiered alerts: 15m, 30m, 60m, 120m. After 120m, no more alerts.
+    // Prevents alarm fatigue while still notifying at key thresholds.
+    var ALERT_THRESHOLDS = [15, 30, 60, 120]; // minutes
     try {
       var inflights = agentdesk.inflight.list();
       for (var li = 0; li < inflights.length; li++) {
@@ -850,32 +916,55 @@ var timeouts = {
           ["%" + inf.channel_id + "%"]
         );
         if (activeSessions.length === 0) {
-          // No working session — this inflight is stale, clean it up
           agentdesk.inflight.remove(inf.provider, inf.channel_id);
           agentdesk.log.info("[long-turn] Cleaned stale inflight: " + inf.provider + "/" + inf.channel_id);
           continue;
         }
-        var cooldownKey = "long_turn_alert:" + inf.provider + ":" + inf.channel_id;
-        var lastAlert = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]);
-        if (lastAlert.length > 0) {
-          var lastMs = parseInt(lastAlert[0].value, 10);
-          if (Date.now() - lastMs < LONG_TURN_MINUTES * 60 * 1000) continue;
-        }
         var startedAt = new Date(inf.started_at);
         var elapsedMin = (Date.now() - startedAt.getTime()) / 60000;
-        if (elapsedMin >= LONG_TURN_MINUTES) {
-          sendDeadlockAlert(
-            "⚠️ [장시간 턴] " + (inf.channel_name || inf.channel_id) + "\n" +
-            "tmux: " + (inf.tmux_session_name || "?") + "\n" +
-            "경과: " + Math.round(elapsedMin) + "분\n" +
-            "provider: " + (inf.provider || "?")
-          );
-          agentdesk.db.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-            [cooldownKey, "" + Date.now()]
-          );
-          agentdesk.log.warn("[long-turn] " + (inf.channel_name || inf.channel_id) + " — " + Math.round(elapsedMin) + "min");
+        // Find the highest threshold that elapsed time exceeds
+        var currentTier = -1;
+        for (var t = ALERT_THRESHOLDS.length - 1; t >= 0; t--) {
+          if (elapsedMin >= ALERT_THRESHOLDS[t]) { currentTier = t; break; }
         }
+        if (currentTier < 0) continue; // under 15min, skip
+        // Check if we already alerted at this tier
+        var tierKey = "long_turn_tier:" + inf.provider + ":" + inf.channel_id;
+        var lastTier = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [tierKey]);
+        var lastAlertedTier = lastTier.length > 0 ? parseInt(lastTier[0].value, 10) : -1;
+        if (currentTier <= lastAlertedTier) continue; // already alerted at this tier or higher
+        sendDeadlockAlert(
+          "⚠️ [장시간 턴] " + (inf.channel_name || inf.channel_id) + "\n" +
+          "tmux: " + (inf.tmux_session_name || "?") + "\n" +
+          "경과: " + Math.round(elapsedMin) + "분 (" + ALERT_THRESHOLDS[currentTier] + "분 단계)\n" +
+          "provider: " + (inf.provider || "?")
+        );
+        agentdesk.db.execute(
+          "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+          [tierKey, "" + currentTier]
+        );
+        agentdesk.log.warn("[long-turn] " + (inf.channel_name || inf.channel_id) + " — " + Math.round(elapsedMin) + "min (tier " + currentTier + ")");
+      }
+      // Clean up tier keys for inflights that no longer exist
+      var tierKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_tier:%'");
+      for (var tk = 0; tk < tierKeys.length; tk++) {
+        var parts = tierKeys[tk].key.split(":");
+        var tkProvider = parts[1];
+        var tkChannel = parts[2];
+        var stillActive = false;
+        for (var si = 0; si < inflights.length; si++) {
+          if (inflights[si].provider === tkProvider && inflights[si].channel_id === tkChannel) {
+            stillActive = true; break;
+          }
+        }
+        if (!stillActive) {
+          agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [tierKeys[tk].key]);
+        }
+      }
+      // Also clean up old cooldown keys
+      var oldKeys = agentdesk.db.query("SELECT key FROM kv_meta WHERE key LIKE 'long_turn_alert:%'");
+      for (var ok = 0; ok < oldKeys.length; ok++) {
+        agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [oldKeys[ok].key]);
       }
     } catch(de) {
       agentdesk.log.warn("[long-turn] inflight scan error: " + de);
