@@ -438,6 +438,9 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
             "auto-queue",
             "Reorder auto-queue",
         ),
+        ep("POST", "/api/auto-queue/pause", "auto-queue", "Pause all active runs"),
+        ep("POST", "/api/auto-queue/resume", "auto-queue", "Resume paused runs + dispatch next"),
+        ep("POST", "/api/auto-queue/cancel", "auto-queue", "Cancel all active/paused runs"),
         // Analytics
         ep("GET", "/api/streaks", "analytics", "Agent activity streaks"),
         ep(

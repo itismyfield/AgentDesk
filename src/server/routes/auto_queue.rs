@@ -1058,6 +1058,89 @@ pub async fn reset(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
     )
 }
 
+/// POST /api/auto-queue/pause — pause all active runs
+pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+    };
+    ensure_tables(&conn);
+    let paused = conn
+        .execute(
+            "UPDATE auto_queue_runs SET status = 'paused' WHERE status = 'active'",
+            [],
+        )
+        .unwrap_or(0);
+    (StatusCode::OK, Json(json!({"ok": true, "paused_runs": paused})))
+}
+
+/// POST /api/auto-queue/resume — resume paused runs and dispatch next entry
+pub async fn resume_run(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+    };
+    ensure_tables(&conn);
+    let resumed = conn
+        .execute(
+            "UPDATE auto_queue_runs SET status = 'active' WHERE status = 'paused'",
+            [],
+        )
+        .unwrap_or(0);
+    drop(conn);
+
+    // Trigger dispatch of next pending entry
+    if resumed > 0 {
+        let (status, body) = activate(
+            State(state),
+            Json(ActivateBody {
+                repo: None,
+                agent_id: None,
+                unified_thread: None,
+            }),
+        )
+        .await;
+        let dispatched = body.0.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+        return (
+            StatusCode::OK,
+            Json(json!({"ok": true, "resumed_runs": resumed, "dispatched": dispatched})),
+        );
+    }
+
+    (StatusCode::OK, Json(json!({"ok": true, "resumed_runs": 0, "message": "No paused runs"})))
+}
+
+/// POST /api/auto-queue/cancel — cancel all active/paused runs and pending entries
+pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
+    };
+    ensure_tables(&conn);
+    let cancelled_entries = conn
+        .execute(
+            "UPDATE auto_queue_entries SET status = 'skipped' WHERE status IN ('pending', 'dispatched')",
+            [],
+        )
+        .unwrap_or(0);
+    let cancelled_runs = conn
+        .execute(
+            "UPDATE auto_queue_runs SET status = 'cancelled', completed_at = datetime('now') WHERE status IN ('active', 'paused')",
+            [],
+        )
+        .unwrap_or(0);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "cancelled_entries": cancelled_entries,
+            "cancelled_runs": cancelled_runs,
+        })),
+    )
+}
+
 /// PATCH /api/auto-queue/reorder
 pub async fn reorder(
     State(state): State<AppState>,
