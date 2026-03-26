@@ -93,7 +93,6 @@ pub fn create_dispatch_core(
         .map_err(|e| anyhow::anyhow!("Card not found: {e}"))?;
 
     // Guard: prevent ALL dispatches for terminal cards (pipeline-driven).
-    // No dispatch type should reopen a completed card.
     crate::pipeline::ensure_loaded();
     let is_terminal = crate::pipeline::try_get()
         .map(|p| p.is_terminal(&old_status))
@@ -104,6 +103,22 @@ pub fn create_dispatch_core(
             dispatch_type,
             kanban_card_id,
             old_status
+        ));
+    }
+
+    // Guard: prevent creating dispatch when card already has a pending/dispatched dispatch.
+    // Prevents dispatch flooding from retry loops.
+    let existing_pending: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM task_dispatches WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
+            [kanban_card_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if existing_pending {
+        return Err(anyhow::anyhow!(
+            "Card {} already has a pending/dispatched dispatch — refusing to create another",
+            kanban_card_id
         ));
     }
 
