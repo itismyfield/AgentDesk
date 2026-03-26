@@ -115,7 +115,8 @@ pub fn create_dispatch_core(
             |row| row.get(0),
         )
         .unwrap_or(false);
-    if existing_pending {
+    // review-decision handles its own dedup below (#116: cancel previous then insert)
+    if existing_pending && dispatch_type != "review-decision" {
         return Err(anyhow::anyhow!(
             "Card {} already has a pending/dispatched dispatch — refusing to create another",
             kanban_card_id

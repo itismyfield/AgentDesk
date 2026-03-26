@@ -1347,6 +1347,25 @@ fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 if (!cfg || !cfg.timeouts) return null;
                 return cfg.timeouts[state] || null;
             };
+
+            agentdesk.pipeline.hasState = function(state, config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.states) return false;
+                for (var i = 0; i < cfg.states.length; i++) {
+                    if (cfg.states[i].id === state) return true;
+                }
+                return false;
+            };
+
+            agentdesk.pipeline.dispatchableStates = function(config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                if (!cfg || !cfg.states) return [];
+                var result = [];
+                for (var i = 0; i < cfg.states.length; i++) {
+                    if (cfg.states[i].dispatchable) result.push(cfg.states[i].id);
+                }
+                return result;
+            };
         })();
     "#)?;
 

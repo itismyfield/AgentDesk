@@ -1,0 +1,544 @@
+//! Intent types for the JS policy → Rust executor pipeline (#121).
+//!
+//! JS policy hooks push intents to `agentdesk.__pendingIntents`.
+//! After hook returns, Rust drains the array and executes intents in order.
+//!
+//! Read-only operations (db.query, kanban.getCard) remain synchronous.
+//! Mutation operations (setStatus, dispatch.create, db.execute) are deferred.
+
+use serde::{Deserialize, Serialize};
+
+/// A single intent produced by a JS policy hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Intent {
+    /// Card status transition (replaces agentdesk.kanban.setStatus)
+    #[serde(rename = "transition")]
+    TransitionCard {
+        card_id: String,
+        from: String,
+        to: String,
+    },
+    /// Dispatch creation (replaces agentdesk.dispatch.create)
+    #[serde(rename = "create_dispatch")]
+    CreateDispatch {
+        dispatch_id: String,
+        card_id: String,
+        agent_id: String,
+        dispatch_type: String,
+        title: String,
+    },
+    /// Raw SQL execution (replaces agentdesk.db.execute)
+    /// Retained as escape hatch; prefer typed intents above.
+    #[serde(rename = "execute_sql")]
+    ExecuteSQL {
+        sql: String,
+        params: Vec<serde_json::Value>,
+    },
+    /// Enqueue async message (replaces agentdesk.message.queue)
+    #[serde(rename = "queue_message")]
+    QueueMessage {
+        target: String,
+        content: String,
+        bot: String,
+        source: String,
+    },
+    /// KV store set (replaces agentdesk.kv.set)
+    #[serde(rename = "set_kv")]
+    SetKV {
+        key: String,
+        value: String,
+        ttl_seconds: i64,
+    },
+    /// KV store delete (replaces agentdesk.kv.delete)
+    #[serde(rename = "delete_kv")]
+    DeleteKV { key: String },
+}
+
+/// Result of executing a batch of intents.
+pub struct IntentExecutionResult {
+    /// Card transitions that were applied (card_id, from, to).
+    /// Callers use these to fire transition hooks.
+    pub transitions: Vec<(String, String, String)>,
+    /// Dispatch IDs that were created. Callers use these for Discord notifications.
+    pub created_dispatches: Vec<CreatedDispatch>,
+    /// Number of intents that failed (logged, not fatal).
+    pub errors: usize,
+}
+
+/// Info about a dispatch created by intent execution.
+pub struct CreatedDispatch {
+    pub dispatch_id: String,
+    pub card_id: String,
+    pub agent_id: String,
+    pub dispatch_type: String,
+    pub issue_url: Option<String>,
+}
+
+/// Execute a batch of intents against the database.
+///
+/// Intents are applied in order. Failures are logged and skipped (fail-soft)
+/// to prevent one bad intent from blocking the rest.
+pub fn execute_intents(db: &crate::db::Db, intents: Vec<Intent>) -> IntentExecutionResult {
+    let mut result = IntentExecutionResult {
+        transitions: Vec::new(),
+        created_dispatches: Vec::new(),
+        errors: 0,
+    };
+
+    if intents.is_empty() {
+        return result;
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!(
+        "  [{ts}] 📋 execute_intents: {} intent(s)",
+        intents.len()
+    );
+
+    for intent in intents {
+        match intent {
+            Intent::TransitionCard {
+                card_id,
+                from,
+                to,
+            } => {
+                if let Err(e) = execute_transition(db, &card_id, &from, &to) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] ⚠ intent TransitionCard({card_id} {from}→{to}) failed: {e}"
+                    );
+                    result.errors += 1;
+                } else {
+                    result.transitions.push((card_id, from, to));
+                }
+            }
+            Intent::CreateDispatch {
+                dispatch_id,
+                card_id,
+                agent_id,
+                dispatch_type,
+                title,
+            } => {
+                match execute_create_dispatch(
+                    db,
+                    &dispatch_id,
+                    &card_id,
+                    &agent_id,
+                    &dispatch_type,
+                    &title,
+                ) {
+                    Ok(created) => result.created_dispatches.push(created),
+                    Err(e) => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!(
+                            "  [{ts}] ⚠ intent CreateDispatch({dispatch_id} {card_id}→{agent_id}) failed: {e}"
+                        );
+                        result.errors += 1;
+                    }
+                }
+            }
+            Intent::ExecuteSQL { sql, params } => {
+                if let Err(e) = execute_sql(db, &sql, &params) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ⚠ intent ExecuteSQL failed: {e}");
+                    result.errors += 1;
+                }
+            }
+            Intent::QueueMessage {
+                target,
+                content,
+                bot,
+                source,
+            } => {
+                if let Err(e) = execute_queue_message(db, &target, &content, &bot, &source) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ⚠ intent QueueMessage failed: {e}");
+                    result.errors += 1;
+                }
+            }
+            Intent::SetKV {
+                key,
+                value,
+                ttl_seconds,
+            } => {
+                if let Err(e) = execute_set_kv(db, &key, &value, ttl_seconds) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ⚠ intent SetKV({key}) failed: {e}");
+                    result.errors += 1;
+                }
+            }
+            Intent::DeleteKV { key } => {
+                if let Err(e) = execute_delete_kv(db, &key) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ⚠ intent DeleteKV({key}) failed: {e}");
+                    result.errors += 1;
+                }
+            }
+        }
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!(
+        "  [{ts}] ✅ execute_intents done: {} transitions, {} dispatches, {} errors",
+        result.transitions.len(),
+        result.created_dispatches.len(),
+        result.errors
+    );
+
+    result
+}
+
+// ── Individual intent executors ─────────────────────────────────
+
+fn execute_transition(
+    db: &crate::db::Db,
+    card_id: &str,
+    expected_from: &str,
+    to: &str,
+) -> anyhow::Result<()> {
+    let conn = db.separate_conn()?;
+
+    // Verify current status matches expected
+    let current: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| anyhow::anyhow!("card not found: {card_id}"))?;
+
+    if current != expected_from {
+        // Status changed between intent push and execution — skip
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] ⏭ TransitionCard({card_id}): expected from={expected_from} but current={current}, skipping"
+        );
+        return Ok(());
+    }
+
+    if current == to {
+        return Ok(()); // no-op
+    }
+
+    // Pipeline-driven validation and clock fields
+    crate::pipeline::ensure_loaded();
+    let pipeline = crate::pipeline::try_get()
+        .ok_or_else(|| anyhow::anyhow!("pipeline not loaded"))?;
+
+    // Terminal guard
+    if pipeline.is_terminal(&current) {
+        return Err(anyhow::anyhow!(
+            "cannot revert terminal card {card_id} from {current} to {to}"
+        ));
+    }
+
+    // Clock fields
+    let clock_extra = match pipeline.clock_for_state(to) {
+        Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
+            format!(", {} = COALESCE({}, datetime('now'))", clock.set, clock.set)
+        }
+        Some(clock) => format!(", {} = datetime('now')", clock.set),
+        None => String::new(),
+    };
+
+    // Terminal cleanup
+    let terminal_cleanup = if pipeline.is_terminal(to) {
+        ", review_status = NULL, suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL"
+    } else {
+        ""
+    };
+
+    let extra = format!("{clock_extra}{terminal_cleanup}");
+    let sql = format!(
+        "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now'){extra} WHERE id = ?2"
+    );
+    conn.execute(&sql, rusqlite::params![to, card_id])?;
+
+    // Auto-queue sync for terminal states
+    if pipeline.is_terminal(to) {
+        conn.execute(
+            "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ?1 AND status = 'dispatched'",
+            [card_id],
+        ).ok();
+    }
+
+    // #117: Sync canonical review state
+    let has_hooks = pipeline
+        .hooks_for_state(to)
+        .map_or(false, |h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
+    let is_review_enter = pipeline.hooks_for_state(to).map_or(false, |h| {
+        h.on_enter.iter().any(|n| n == "OnReviewEnter")
+    });
+    if pipeline.is_terminal(to) || !has_hooks {
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, 'idle', datetime('now')) \
+             ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
+            [card_id],
+        ).ok();
+    } else if is_review_enter {
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, review_entered_at, updated_at) VALUES (?1, 'reviewing', datetime('now'), datetime('now')) \
+             ON CONFLICT(card_id) DO UPDATE SET state = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now')",
+            [card_id],
+        ).ok();
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!("  [{ts}] 🔄 TransitionCard: {card_id} {expected_from}→{to}");
+    Ok(())
+}
+
+fn execute_create_dispatch(
+    db: &crate::db::Db,
+    pre_id: &str,
+    card_id: &str,
+    agent_id: &str,
+    dispatch_type: &str,
+    title: &str,
+) -> anyhow::Result<CreatedDispatch> {
+    // Delegate to the authoritative dispatch creation path.
+    // create_dispatch_core generates its own UUID — we override by using a
+    // variant that accepts a pre-assigned ID.
+    let context = serde_json::json!({});
+    let (dispatch_id, _old_status) = crate::dispatch::create_dispatch_core_with_id(
+        db,
+        pre_id,
+        card_id,
+        agent_id,
+        dispatch_type,
+        title,
+        &context,
+    )?;
+
+    // #117: Update card_review_state for review-decision
+    if dispatch_type == "review-decision" {
+        if let Ok(conn) = db.separate_conn() {
+            conn.execute(
+                "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at) \
+                 VALUES (?1, 'suggestion_pending', ?2, datetime('now')) \
+                 ON CONFLICT(card_id) DO UPDATE SET pending_dispatch_id = ?2, updated_at = datetime('now')",
+                rusqlite::params![card_id, dispatch_id],
+            ).ok();
+        }
+    }
+
+    // Get issue URL for Discord notification
+    let issue_url: Option<String> = db.separate_conn().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
+    });
+
+    Ok(CreatedDispatch {
+        dispatch_id,
+        card_id: card_id.to_string(),
+        agent_id: agent_id.to_string(),
+        dispatch_type: dispatch_type.to_string(),
+        issue_url,
+    })
+}
+
+fn json_to_sqlite(val: &serde_json::Value) -> rusqlite::types::Value {
+    match val {
+        serde_json::Value::Null => rusqlite::types::Value::Null,
+        serde_json::Value::Bool(b) => rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                rusqlite::types::Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                rusqlite::types::Value::Real(f)
+            } else {
+                rusqlite::types::Value::Null
+            }
+        }
+        serde_json::Value::String(s) => rusqlite::types::Value::Text(s.clone()),
+        _ => rusqlite::types::Value::Text(val.to_string()),
+    }
+}
+
+fn execute_sql(
+    db: &crate::db::Db,
+    sql: &str,
+    params: &[serde_json::Value],
+) -> anyhow::Result<()> {
+    // Block direct kanban_cards status UPDATE (same guard as ops.rs)
+    let sql_upper = sql.to_uppercase();
+    if sql_upper.contains("UPDATE") && sql_upper.contains("KANBAN_CARDS") {
+        // Simple check: ensure "status" appears as a column assignment, not as part of
+        // review_status or other compound names. We check that "status" is preceded by
+        // whitespace, comma, or SET keyword.
+        let re_status = regex::Regex::new(r"(?i)(?:^|[\s,])status\s*=").unwrap();
+        if re_status.is_match(sql) {
+            return Err(anyhow::anyhow!(
+                "Direct kanban_cards status UPDATE is blocked. Use TransitionCard intent."
+            ));
+        }
+    }
+
+    let conn = db.separate_conn()?;
+    let bind: Vec<rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect();
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind
+        .iter()
+        .map(|v| v as &dyn rusqlite::types::ToSql)
+        .collect();
+    conn.execute(sql, params_ref.as_slice())?;
+    Ok(())
+}
+
+fn execute_queue_message(
+    db: &crate::db::Db,
+    target: &str,
+    content: &str,
+    bot: &str,
+    source: &str,
+) -> anyhow::Result<()> {
+    let conn = db.separate_conn()?;
+    conn.execute(
+        "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![target, content, bot, source],
+    )?;
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    let id = conn.last_insert_rowid();
+    println!("  [{ts}] 📨 QueueMessage → {target} (bot={bot}, id={id})");
+    Ok(())
+}
+
+fn execute_set_kv(
+    db: &crate::db::Db,
+    key: &str,
+    value: &str,
+    ttl_seconds: i64,
+) -> anyhow::Result<()> {
+    let conn = db.separate_conn()?;
+    if ttl_seconds > 0 {
+        conn.execute(
+            &format!(
+                "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, datetime('now', '+{ttl_seconds} seconds'))"
+            ),
+            rusqlite::params![key, value],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, NULL)",
+            rusqlite::params![key, value],
+        )?;
+    }
+    Ok(())
+}
+
+fn execute_delete_kv(db: &crate::db::Db, key: &str) -> anyhow::Result<()> {
+    let conn = db.separate_conn()?;
+    conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> crate::db::Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        crate::db::wrap_conn(conn)
+    }
+
+    #[test]
+    fn test_execute_empty_intents() {
+        let db = test_db();
+        let result = execute_intents(&db, vec![]);
+        assert!(result.transitions.is_empty());
+        assert!(result.created_dispatches.is_empty());
+        assert_eq!(result.errors, 0);
+    }
+
+    #[test]
+    fn test_execute_sql_intent() {
+        let db = test_db();
+        let intents = vec![Intent::ExecuteSQL {
+            sql: "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('test', 'hello')".into(),
+            params: vec![],
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 0);
+
+        let conn = db.lock().unwrap();
+        let val: String = conn
+            .query_row("SELECT value FROM kv_meta WHERE key = 'test'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(val, "hello");
+    }
+
+    #[test]
+    fn test_execute_set_kv_intent() {
+        let db = test_db();
+        let intents = vec![Intent::SetKV {
+            key: "mykey".into(),
+            value: "myval".into(),
+            ttl_seconds: 0,
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 0);
+
+        let conn = db.lock().unwrap();
+        let val: String = conn
+            .query_row("SELECT value FROM kv_meta WHERE key = 'mykey'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(val, "myval");
+    }
+
+    #[test]
+    fn test_execute_queue_message_intent() {
+        let db = test_db();
+        let intents = vec![Intent::QueueMessage {
+            target: "channel:123".into(),
+            content: "hello".into(),
+            bot: "announce".into(),
+            source: "system".into(),
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 0);
+
+        let conn = db.lock().unwrap();
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM message_outbox ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn test_blocked_status_update_sql() {
+        let db = test_db();
+        let intents = vec![Intent::ExecuteSQL {
+            sql: "UPDATE kanban_cards SET status = 'done' WHERE id = 'x'".into(),
+            params: vec![],
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 1);
+    }
+
+    #[test]
+    fn test_transition_card_not_found() {
+        let db = test_db();
+        let intents = vec![Intent::TransitionCard {
+            card_id: "nonexistent".into(),
+            from: "requested".into(),
+            to: "in_progress".into(),
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 1);
+    }
+}
