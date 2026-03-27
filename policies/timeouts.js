@@ -94,11 +94,11 @@ var timeouts = {
       if (cards.length === 0) continue;
       var card = cards[0];
       var rCfg = agentdesk.pipeline.resolveForCard(card.id);
-      var rInitial = agentdesk.pipeline.kickoffState(rCfg) || "requested";
-      var rInProgress = agentdesk.pipeline.nextGatedTarget(rInitial, rCfg) || "in_progress";
-      var rReview = agentdesk.pipeline.nextGatedTarget(rInProgress, rCfg) || "review";
-      var rForce = agentdesk.pipeline.forceOnlyTargets(rInProgress, rCfg) || [];
-      var rPending = rForce[0] || "pending_decision";
+      var rInitial = agentdesk.pipeline.kickoffState(rCfg);
+      var rInProgress = agentdesk.pipeline.nextGatedTarget(rInitial, rCfg);
+      var rReview = agentdesk.pipeline.nextGatedTarget(rInProgress, rCfg);
+      var rForce = agentdesk.pipeline.forceOnlyTargets(rInProgress, rCfg);
+      var rPending = rForce[0];
       if (agentdesk.pipeline.isTerminal(card.status, rCfg)) continue;
       if (di.dispatch_type === "review" || di.dispatch_type === "review-decision") continue;
       if (di.dispatch_type === "rework") {
@@ -201,10 +201,10 @@ var timeouts = {
     // ─── [A] Requested 타임아웃 (45분) ─────────────────────
     // retry_count < 10이면 pending_decision 대신 failed만 마크 → [J]가 30초 후 재시도
     var aCfg = agentdesk.pipeline.getConfig();
-    var aInitial = agentdesk.pipeline.kickoffState(aCfg) || "requested";
-    var aInProgress = agentdesk.pipeline.nextGatedTarget(aInitial, aCfg) || "in_progress";
-    var aForce = agentdesk.pipeline.forceOnlyTargets(aInitial, aCfg) || [];
-    var aPending = aForce[0] || "pending_decision";
+    var aInitial = agentdesk.pipeline.kickoffState(aCfg);
+    var aInProgress = agentdesk.pipeline.nextGatedTarget(aInitial, aCfg);
+    var aForce = agentdesk.pipeline.forceOnlyTargets(aInitial, aCfg);
+    var aPending = aForce[0];
     var staleRequested = agentdesk.db.query(
       "SELECT kc.id, kc.assigned_agent_id, kc.latest_dispatch_id, " +
       "COALESCE(td.retry_count, 0) as retry_count " +
@@ -264,10 +264,10 @@ var timeouts = {
   _section_B: function() {
     // ─── [B] In-Progress 스테일 (2시간) ────────────────────
     var bCfg = agentdesk.pipeline.getConfig();
-    var bInitial = agentdesk.pipeline.kickoffState(bCfg) || "requested";
-    var bInProgress = agentdesk.pipeline.nextGatedTarget(bInitial, bCfg) || "in_progress";
-    var bForce = agentdesk.pipeline.forceOnlyTargets(bInProgress, bCfg) || [];
-    var bBlocked = bForce.length > 1 ? bForce[1] : "blocked";
+    var bInitial = agentdesk.pipeline.kickoffState(bCfg);
+    var bInProgress = agentdesk.pipeline.nextGatedTarget(bInitial, bCfg);
+    var bForce = agentdesk.pipeline.forceOnlyTargets(bInProgress, bCfg);
+    var bBlocked = bForce.length > 1 ? bForce[1] : bForce[0];
     var staleInProgress = agentdesk.db.query(
       "SELECT id FROM kanban_cards WHERE status = ? AND started_at IS NOT NULL AND started_at < datetime('now', '-2 hours')",
       [bInProgress]
@@ -302,11 +302,11 @@ var timeouts = {
   _section_C: function() {
     // ─── [C] 스테일 리뷰 (dispatch 완료인데 verdict 없음) ──
     var cCfg = agentdesk.pipeline.getConfig();
-    var cInitial = agentdesk.pipeline.kickoffState(cCfg) || "requested";
-    var cInProgress = agentdesk.pipeline.nextGatedTarget(cInitial, cCfg) || "in_progress";
-    var cReview = agentdesk.pipeline.nextGatedTarget(cInProgress, cCfg) || "review";
-    var cForce = agentdesk.pipeline.forceOnlyTargets(cInProgress, cCfg) || [];
-    var cPending = cForce[0] || "pending_decision";
+    var cInitial = agentdesk.pipeline.kickoffState(cCfg);
+    var cInProgress = agentdesk.pipeline.nextGatedTarget(cInitial, cCfg);
+    var cReview = agentdesk.pipeline.nextGatedTarget(cInProgress, cCfg);
+    var cForce = agentdesk.pipeline.forceOnlyTargets(cInProgress, cCfg);
+    var cPending = cForce[0];
     var staleReviews = agentdesk.db.query(
       "SELECT kc.id as card_id " +
       "FROM kanban_cards kc " +
@@ -332,11 +332,11 @@ var timeouts = {
   _section_D: function() {
     // ─── [D] DoD 대기 타임아웃 (15분) ──────────────────────
     var dCfg = agentdesk.pipeline.getConfig();
-    var dInitial = agentdesk.pipeline.kickoffState(dCfg) || "requested";
-    var dInProgress = agentdesk.pipeline.nextGatedTarget(dInitial, dCfg) || "in_progress";
-    var dReview = agentdesk.pipeline.nextGatedTarget(dInProgress, dCfg) || "review";
-    var dForce = agentdesk.pipeline.forceOnlyTargets(dInProgress, dCfg) || [];
-    var dPending = dForce[0] || "pending_decision";
+    var dInitial = agentdesk.pipeline.kickoffState(dCfg);
+    var dInProgress = agentdesk.pipeline.nextGatedTarget(dInitial, dCfg);
+    var dReview = agentdesk.pipeline.nextGatedTarget(dInProgress, dCfg);
+    var dForce = agentdesk.pipeline.forceOnlyTargets(dInProgress, dCfg);
+    var dPending = dForce[0];
     var stuckDod = agentdesk.db.query(
       "SELECT id FROM kanban_cards " +
       "WHERE status = ? AND review_status = 'awaiting_dod' " +
@@ -361,12 +361,12 @@ var timeouts = {
     // Auto-accept: same effect as manual review-decision accept
     // (status → rework target, review_status → rework_pending, create rework dispatch)
     var eCfg = agentdesk.pipeline.getConfig();
-    var eInitial = agentdesk.pipeline.kickoffState(eCfg) || "requested";
-    var eInProgress = agentdesk.pipeline.nextGatedTarget(eInitial, eCfg) || "in_progress";
-    var eReview = agentdesk.pipeline.nextGatedTarget(eInProgress, eCfg) || "review";
+    var eInitial = agentdesk.pipeline.kickoffState(eCfg);
+    var eInProgress = agentdesk.pipeline.nextGatedTarget(eInitial, eCfg);
+    var eReview = agentdesk.pipeline.nextGatedTarget(eInProgress, eCfg);
     var eReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(eReview, "review_rework", eCfg) || eInProgress;
-    var eForce = agentdesk.pipeline.forceOnlyTargets(eInProgress, eCfg) || [];
-    var ePending = eForce[0] || "pending_decision";
+    var eForce = agentdesk.pipeline.forceOnlyTargets(eInProgress, eCfg);
+    var ePending = eForce[0];
     var staleSuggestions = agentdesk.db.query(
       "SELECT id, assigned_agent_id, title FROM kanban_cards " +
       "WHERE review_status = 'suggestion_pending' " +
@@ -449,10 +449,10 @@ var timeouts = {
   _section_G: function() {
     // ─── [G] 스테일 디스패치 정리 (24시간) ──────────────────
     var gCfg = agentdesk.pipeline.getConfig();
-    var gInitial = agentdesk.pipeline.kickoffState(gCfg) || "requested";
-    var gInProgress = agentdesk.pipeline.nextGatedTarget(gInitial, gCfg) || "in_progress";
-    var gForce = agentdesk.pipeline.forceOnlyTargets(gInProgress, gCfg) || [];
-    var gPending = gForce[0] || "pending_decision";
+    var gInitial = agentdesk.pipeline.kickoffState(gCfg);
+    var gInProgress = agentdesk.pipeline.nextGatedTarget(gInitial, gCfg);
+    var gForce = agentdesk.pipeline.forceOnlyTargets(gInProgress, gCfg);
+    var gPending = gForce[0];
     var staleDispatches = agentdesk.db.query(
       "SELECT id, kanban_card_id FROM task_dispatches WHERE status IN ('pending','dispatched') AND created_at < datetime('now', '-24 hours')"
     );
@@ -478,8 +478,8 @@ var timeouts = {
   _section_H: function() {
     // ─── [H] Stale dispatched 큐 엔트리 진행 ───────────────
     var hCfg = agentdesk.pipeline.getConfig();
-    var hInitial = agentdesk.pipeline.kickoffState(hCfg) || "requested";
-    var hInProgress = agentdesk.pipeline.nextGatedTarget(hInitial, hCfg) || "in_progress";
+    var hInitial = agentdesk.pipeline.kickoffState(hCfg);
+    var hInProgress = agentdesk.pipeline.nextGatedTarget(hInitial, hCfg);
     var staleQueueEntries = agentdesk.db.query(
       "SELECT dq.id FROM dispatch_queue dq " +
       "JOIN kanban_cards kc ON kc.id = dq.kanban_card_id " +
@@ -544,11 +544,11 @@ var timeouts = {
     // 실제 cadence는 onTick 60초 간격이므로 ~60-90초.
     // 10분 윈도우 제거 — latest_dispatch_id 체크로 stale 방지 충분.
     var jCfg = agentdesk.pipeline.getConfig();
-    var jTerminal = agentdesk.pipeline.terminalState(jCfg) || "done";
-    var jInitial = agentdesk.pipeline.kickoffState(jCfg) || "requested";
-    var jInProgress = agentdesk.pipeline.nextGatedTarget(jInitial, jCfg) || "in_progress";
-    var jForce = agentdesk.pipeline.forceOnlyTargets(jInProgress, jCfg) || [];
-    var jPending = jForce[0] || "pending_decision";
+    var jTerminal = agentdesk.pipeline.terminalState(jCfg);
+    var jInitial = agentdesk.pipeline.kickoffState(jCfg);
+    var jInProgress = agentdesk.pipeline.nextGatedTarget(jInitial, jCfg);
+    var jForce = agentdesk.pipeline.forceOnlyTargets(jInProgress, jCfg);
+    var jPending = jForce[0];
     var failedForRetry = agentdesk.db.query(
       "SELECT td.id, td.kanban_card_id, td.to_agent_id, td.dispatch_type, td.title, " +
       "COALESCE(td.retry_count, 0) as retry_count, kc.github_issue_url, kc.github_issue_number " +
@@ -625,10 +625,10 @@ var timeouts = {
     var DEADLOCK_MINUTES = 15;
     var MAX_EXTENSIONS = 3;
     var iCfg = agentdesk.pipeline.getConfig();
-    var iInitial = agentdesk.pipeline.kickoffState(iCfg) || "requested";
-    var iInProgress = agentdesk.pipeline.nextGatedTarget(iInitial, iCfg) || "in_progress";
-    var iForce = agentdesk.pipeline.forceOnlyTargets(iInProgress, iCfg) || [];
-    var iPending = iForce[0] || "pending_decision";
+    var iInitial = agentdesk.pipeline.kickoffState(iCfg);
+    var iInProgress = agentdesk.pipeline.nextGatedTarget(iInitial, iCfg);
+    var iForce = agentdesk.pipeline.forceOnlyTargets(iInProgress, iCfg);
+    var iPending = iForce[0];
 
     // 먼저: heartbeat가 신선한 working 세션의 카운터를 리셋 (비연속 스톨 누적 방지)
     var freshSessions = agentdesk.db.query(
@@ -856,9 +856,9 @@ var timeouts = {
     // dcserver 재시작 등으로 세션-디스패치 연결이 끊긴 상태.
     // dispatch를 completed로 마크하고 card를 review로 전이하여 리뷰 파이프라인을 재개한다.
     var kCfg = agentdesk.pipeline.getConfig();
-    var kInitial = agentdesk.pipeline.kickoffState(kCfg) || "requested";
-    var kInProgress = agentdesk.pipeline.nextGatedTarget(kInitial, kCfg) || "in_progress";
-    var kReview = agentdesk.pipeline.nextGatedTarget(kInProgress, kCfg) || "review";
+    var kInitial = agentdesk.pipeline.kickoffState(kCfg);
+    var kInProgress = agentdesk.pipeline.nextGatedTarget(kInitial, kCfg);
+    var kReview = agentdesk.pipeline.nextGatedTarget(kInProgress, kCfg);
     var orphanedDispatches = agentdesk.db.query(
       "SELECT td.id as dispatch_id, td.kanban_card_id, td.dispatch_type " +
       "FROM task_dispatches td " +

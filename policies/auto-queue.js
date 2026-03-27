@@ -6,7 +6,10 @@ var autoQueue = {
   // If a pending queue entry's card gets dispatched externally (by PMD, user, etc.),
   // skip the entry so auto-queue doesn't try to dispatch it again.
   onCardTransition: function(payload) {
-    if (payload.to !== "requested" && payload.to !== "in_progress") return;
+    var aqCfg = agentdesk.pipeline.getConfig();
+    var aqKickoff = agentdesk.pipeline.kickoffState(aqCfg);
+    var aqNext = agentdesk.pipeline.nextGatedTarget(aqKickoff, aqCfg);
+    if (payload.to !== aqKickoff && payload.to !== aqNext) return;
     var entries = agentdesk.db.query(
       "SELECT e.id FROM auto_queue_entries e " +
       "WHERE e.kanban_card_id = ? AND e.status = 'pending'",
@@ -44,9 +47,15 @@ var autoQueue = {
     if (wasQueued.length === 0 || wasQueued[0].cnt === 0) return;
 
     // Check if agent has any active (non-terminal) cards — don't dispatch if busy
+    var tCfg = agentdesk.pipeline.getConfig();
+    var tKickoff = agentdesk.pipeline.kickoffState(tCfg);
+    var tInProgress = agentdesk.pipeline.nextGatedTarget(tKickoff, tCfg);
+    var tReview = agentdesk.pipeline.nextGatedTarget(tInProgress, tCfg);
+    var activeStates = [tKickoff, tInProgress, tReview].filter(function(s) { return s; });
+    var placeholders = activeStates.map(function() { return "?"; }).join(",");
     var active = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM kanban_cards WHERE assigned_agent_id = ? AND status IN ('requested','in_progress','review')",
-      [agentId]
+      "SELECT COUNT(*) as cnt FROM kanban_cards WHERE assigned_agent_id = ? AND status IN (" + placeholders + ")",
+      [agentId].concat(activeStates)
     );
     if (active.length > 0 && active[0].cnt > 0) {
       agentdesk.log.info("[auto-queue] Agent " + agentId + " still has active cards, deferring next dispatch");
@@ -59,6 +68,12 @@ var autoQueue = {
   // ── Periodic recovery: dispatch next entry for idle agents (#110) ──
   // Catches cases where onCardTerminal dispatch failed or was missed.
   onTick: function() {
+    var tickCfg = agentdesk.pipeline.getConfig();
+    var tickKickoff = agentdesk.pipeline.kickoffState(tickCfg);
+    var tickInProgress = agentdesk.pipeline.nextGatedTarget(tickKickoff, tickCfg);
+    var tickReview = agentdesk.pipeline.nextGatedTarget(tickInProgress, tickCfg);
+    var tickActiveStates = [tickKickoff, tickInProgress, tickReview].filter(function(s) { return s; });
+    var tickPlaceholders = tickActiveStates.map(function() { return "?"; }).join(",");
     var idleWithQueue = agentdesk.db.query(
       "SELECT DISTINCT e.agent_id " +
       "FROM auto_queue_entries e " +
@@ -67,8 +82,9 @@ var autoQueue = {
       "AND NOT EXISTS (" +
       "  SELECT 1 FROM kanban_cards kc " +
       "  WHERE kc.assigned_agent_id = e.agent_id " +
-      "  AND kc.status IN ('requested','in_progress','review')" +
-      ")"
+      "  AND kc.status IN (" + tickPlaceholders + ")" +
+      ")",
+      tickActiveStates
     );
 
     for (var i = 0; i < idleWithQueue.length; i++) {

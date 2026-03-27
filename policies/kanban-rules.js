@@ -49,10 +49,13 @@ var rules = {
     );
     if (cards.length === 0) return;
     var card = cards[0];
+    var cfg = agentdesk.pipeline.resolveForCard(card.id);
+    var initialState = agentdesk.pipeline.kickoffState(cfg);
+    var nextFromInitial = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
 
-    // working → in_progress: only for implementation/rework dispatches
+    // working → nextFromInitial: only for implementation/rework dispatches
     // Review dispatches should NOT advance the card to in_progress
-    if (payload.status === "working" && card.status === "requested") {
+    if (payload.status === "working" && card.status === initialState) {
       var dispatch = agentdesk.db.query(
         "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?",
         [payload.dispatch_id]
@@ -61,8 +64,8 @@ var rules = {
       var dtype = dispatch[0].dispatch_type;
       // Only implementation and rework dispatches acknowledge work start
       if (dtype === "implementation" || dtype === "rework") {
-        agentdesk.kanban.setStatus(card.id, "in_progress");
-        agentdesk.log.info("[kanban] " + card.id + " requested → in_progress (ack via " + dtype + " dispatch " + payload.dispatch_id + ")");
+        agentdesk.kanban.setStatus(card.id, nextFromInitial);
+        agentdesk.log.info("[kanban] " + card.id + " " + initialState + " → " + nextFromInitial + " (ack via " + dtype + " dispatch " + payload.dispatch_id + ")");
       }
     }
 
@@ -74,7 +77,11 @@ var rules = {
     // Previously this JS policy also auto-completed review dispatches via direct DB UPDATE,
     // causing double processing (JS verdict extraction + Rust OnDispatchCompleted).
     // Now only Rust handles auto-complete; JS policy reacts via onDispatchCompleted hook.
-    if (false && payload.status === "idle" && card.status === "review") {
+    var reviewState = agentdesk.pipeline.nextGatedTarget(nextFromInitial, cfg);
+    var forceTargets = agentdesk.pipeline.forceOnlyTargets(nextFromInitial, cfg);
+    var pendingState = forceTargets[0];
+
+    if (false && payload.status === "idle" && card.status === reviewState) {
       var dispatch = agentdesk.db.query(
         "SELECT id, dispatch_type, status, result, kanban_card_id FROM task_dispatches WHERE id = ?",
         [payload.dispatch_id]
@@ -143,14 +150,14 @@ var rules = {
           }
         }
 
-        // 3. No verdict found → pending_decision (never default to pass)
+        // 3. No verdict found → pendingState (never default to pass)
         if (!verdict) {
-          agentdesk.kanban.setStatus(card.id, "pending_decision");
+          agentdesk.kanban.setStatus(card.id, pendingState);
           agentdesk.db.execute(
             "UPDATE kanban_cards SET blocked_reason = 'Review completed but verdict unclear — manual decision needed' WHERE id = ?",
             [card.id]
           );
-          agentdesk.log.warn("[kanban] review dispatch " + payload.dispatch_id + " — no clear verdict, → pending_decision");
+          agentdesk.log.warn("[kanban] review dispatch " + payload.dispatch_id + " — no clear verdict, → " + pendingState);
           return;
         }
 
@@ -180,17 +187,22 @@ var rules = {
     );
     if (cards.length === 0) return;
     var card = cards[0];
+    var cfg = agentdesk.pipeline.resolveForCard(card.id);
+    var inProgressState = agentdesk.pipeline.nextGatedTarget(agentdesk.pipeline.kickoffState(cfg), cfg);
+    var reviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
+    var forceTargets = agentdesk.pipeline.forceOnlyTargets(inProgressState, cfg);
+    var pendingState = forceTargets[0];
 
     // Skip terminal cards
-    if (card.status === "done") return;
+    if (agentdesk.pipeline.isTerminal(card.status, cfg)) return;
 
     // Review/decision dispatches — handled by review-automation policy
     if (dispatch.dispatch_type === "review" || dispatch.dispatch_type === "review-decision") return;
 
     // Rework dispatches — skip gate, go directly to review
     if (dispatch.dispatch_type === "rework") {
-      agentdesk.kanban.setStatus(card.id, "review");
-      agentdesk.log.info("[kanban] " + card.id + " rework done → review");
+      agentdesk.kanban.setStatus(card.id, reviewState);
+      agentdesk.log.info("[kanban] " + card.id + " rework done → " + reviewState);
       return;
     }
 
@@ -256,8 +268,8 @@ var rules = {
         // Check if the only failure is DoD — give agent 15 min to complete it
         var dodOnly = reasons.length === 1 && reasons[0].indexOf("DoD 미완료") === 0;
         if (dodOnly) {
-          // DoD 미완료만 → awaiting_dod (15분 유예, timeouts.js [D]가 만료 시 pending_decision)
-          agentdesk.kanban.setStatus(card.id, "review");
+          // DoD 미완료만 → awaiting_dod (15분 유예, timeouts.js [D]가 만료 시 pendingState)
+          agentdesk.kanban.setStatus(card.id, reviewState);
           agentdesk.db.execute(
             "UPDATE kanban_cards SET review_status = 'awaiting_dod', awaiting_dod_at = datetime('now') WHERE id = ?",
             [card.id]
@@ -271,8 +283,8 @@ var rules = {
           agentdesk.log.warn("[pm-gate] Card " + card.id + " → review(awaiting_dod): " + reasons[0]);
           return;
         }
-        // Other gate failures → pending_decision
-        agentdesk.kanban.setStatus(card.id, "pending_decision");
+        // Other gate failures → pendingState
+        agentdesk.kanban.setStatus(card.id, pendingState);
         agentdesk.db.execute(
           "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
           [card.id]
@@ -283,23 +295,28 @@ var rules = {
           "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
           [card.id]
         );
-        agentdesk.log.warn("[pm-gate] Card " + card.id + " → pending_decision: " + reasons.join("; "));
+        agentdesk.log.warn("[pm-gate] Card " + card.id + " → " + pendingState + ": " + reasons.join("; "));
         notifyPMD(card.id, reasons.join("; "));
         return;
       }
     }
 
     // ── Gate passed → always review (counter-model review) ──
-    agentdesk.kanban.setStatus(card.id, "review");
-    agentdesk.log.info("[kanban] " + card.id + " → review");
+    agentdesk.kanban.setStatus(card.id, reviewState);
+    agentdesk.log.info("[kanban] " + card.id + " → " + reviewState);
   },
 
   // ── Card Transition — side effects ────────────────────────
   onCardTransition: function(payload) {
     agentdesk.log.info("[kanban] card " + payload.card_id + ": " + payload.from + " → " + payload.to);
+    var cfg = agentdesk.pipeline.resolveForCard(payload.card_id);
+    var initialState = agentdesk.pipeline.kickoffState(cfg);
+    var inProgressForForce = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
+    var blockedTargets = agentdesk.pipeline.forceOnlyTargets(inProgressForForce, cfg);
+    var pendingState = blockedTargets[0];
 
-    // → requested: auto-create dispatch
-    if (payload.to === "requested" && payload.from !== "requested") {
+    // → initialState: auto-create dispatch
+    if (payload.to === initialState && payload.from !== initialState) {
       var cards = agentdesk.db.query(
         "SELECT assigned_agent_id, title, latest_dispatch_id FROM kanban_cards WHERE id = ?",
         [payload.card_id]
@@ -330,8 +347,13 @@ var rules = {
       }
     }
 
-    // → blocked: PMD 알림 (Agent in the Loop)
-    if (payload.to === "blocked") {
+    // → blocked (force-only target): PMD 알림 (Agent in the Loop)
+    // "blocked" is a force-only target from in_progress — check all force targets
+    var inProgressState = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
+    var allForceTargets = agentdesk.pipeline.forceOnlyTargets(inProgressState, cfg);
+    // blocked is typically the second force target (index 1)
+    var blockedState = allForceTargets.length > 1 ? allForceTargets[1] : allForceTargets[0];
+    if (payload.to === blockedState) {
       var reason = "상태 전이: " + payload.from + " → " + payload.to;
 
       // blocked_reason이 있으면 사용
@@ -346,8 +368,8 @@ var rules = {
       notifyPMD(payload.card_id, reason);
     }
 
-    // → pending_decision: create pm-decision dispatch + notify PMD
-    if (payload.to === "pending_decision") {
+    // → pendingState: create pm-decision dispatch + notify PMD
+    if (payload.to === pendingState) {
       var blockInfo = agentdesk.db.query(
         "SELECT blocked_reason, assigned_agent_id, title FROM kanban_cards WHERE id = ?",
         [payload.card_id]
@@ -396,8 +418,10 @@ var rules = {
   // kanban-rules does NOT touch auto_queue_entries to avoid triple-update conflicts.
   onCardTerminal: function(payload) {
     agentdesk.log.info("[kanban] card " + payload.card_id + " reached terminal: " + payload.status);
+    var cfg = agentdesk.pipeline.resolveForCard(payload.card_id);
+    var terminalState = agentdesk.pipeline.terminalState(cfg);
 
-    if (payload.status === "done") {
+    if (payload.status === terminalState) {
       agentdesk.db.execute(
         "UPDATE kanban_cards SET completed_at = datetime('now') WHERE id = ? AND completed_at IS NULL",
         [payload.card_id]

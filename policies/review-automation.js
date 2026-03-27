@@ -52,6 +52,8 @@ var reviewAutomation = {
     );
     if (cards.length === 0) return;
     var card = cards[0];
+    var cfg = agentdesk.pipeline.resolveForCard(card.id);
+    var pendingState = agentdesk.pipeline.forceOnlyTargets(agentdesk.pipeline.nextGatedTarget(agentdesk.pipeline.kickoffState(cfg), cfg), cfg)[0];
 
     // #128: If card entered review with awaiting_dod (DoD incomplete),
     // skip review dispatch — timeouts.js [D] will escalate to pending_decision after 15 min
@@ -63,7 +65,7 @@ var reviewAutomation = {
     // Check if review is enabled — if not, route to PM decision (not silent done)
     var reviewEnabled = agentdesk.config.get("review_enabled");
     if (reviewEnabled === "false" || reviewEnabled === false) {
-      agentdesk.kanban.setStatus(card.id, "pending_decision");
+      agentdesk.kanban.setStatus(card.id, pendingState);
       agentdesk.db.execute(
         "UPDATE kanban_cards SET blocked_reason = 'Review disabled — PM decision needed to proceed' WHERE id = ?",
         [card.id]
@@ -78,16 +80,17 @@ var reviewAutomation = {
         "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
         [card.id]
       );
-      agentdesk.log.info("[review] Review disabled, card " + card.id + " → pending_decision");
+      agentdesk.log.info("[review] Review disabled, card " + card.id + " → " + pendingState);
       notifyPmdPendingDecision(card.id, "리뷰 비활성화 — PM 판단 필요");
       return;
     }
 
-    // Increment review round (AND status != 'done' guards against race with concurrent dismiss)
+    // Increment review round (AND status != terminal guards against race with concurrent dismiss)
+    var terminalState = agentdesk.pipeline.terminalState(cfg);
     var newRound = (card.review_round || 0) + 1;
     agentdesk.db.execute(
-      "UPDATE kanban_cards SET review_round = ?, review_status = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status != 'done'",
-      [newRound, card.id]
+      "UPDATE kanban_cards SET review_round = ?, review_status = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status != ?",
+      [newRound, card.id, terminalState]
     );
 
     // #117: Update canonical card_review_state
@@ -102,7 +105,7 @@ var reviewAutomation = {
     // Check review round limit — exceed → pending_decision with PMD notification
     var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
     if (newRound > maxRounds) {
-      agentdesk.kanban.setStatus(card.id, "pending_decision");
+      agentdesk.kanban.setStatus(card.id, pendingState);
       agentdesk.db.execute(
         "UPDATE kanban_cards SET review_status = 'dilemma_pending', blocked_reason = ? WHERE id = ?",
         ["Max review rounds (" + maxRounds + ") exceeded — PM decision needed", card.id]
@@ -113,7 +116,7 @@ var reviewAutomation = {
         "ON CONFLICT(card_id) DO UPDATE SET review_round = ?, state = 'dilemma_pending', updated_at = datetime('now')",
         [card.id, newRound, newRound]
       );
-      agentdesk.log.warn("[review] Max review rounds (" + maxRounds + ") reached for " + card.id + " → pending_decision");
+      agentdesk.log.warn("[review] Max review rounds (" + maxRounds + ") reached for " + card.id + " → " + pendingState);
       notifyPmdPendingDecision(card.id, "리뷰 라운드 상한(" + maxRounds + "회) 초과");
       return;
     }
@@ -121,7 +124,7 @@ var reviewAutomation = {
     // Counter-model review: send to alternate channel (Claude↔Codex pair)
     var counterModelEnabled = agentdesk.config.get("counter_model_review_enabled");
     if (counterModelEnabled === false || counterModelEnabled === "false") {
-      agentdesk.kanban.setStatus(card.id, "pending_decision");
+      agentdesk.kanban.setStatus(card.id, pendingState);
       agentdesk.db.execute(
         "UPDATE kanban_cards SET blocked_reason = 'Counter-model review disabled — PM decision needed' WHERE id = ?",
         [card.id]
@@ -136,7 +139,7 @@ var reviewAutomation = {
         "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
         [card.id]
       );
-      agentdesk.log.info("[review] Counter-model disabled, card " + card.id + " → pending_decision");
+      agentdesk.log.info("[review] Counter-model disabled, card " + card.id + " → " + pendingState);
       notifyPmdPendingDecision(card.id, "카운터모델 리뷰 비활성화 — PM 판단 필요");
       return;
     }
@@ -150,7 +153,7 @@ var reviewAutomation = {
     );
     if (agentRow.length === 0 || !agentRow[0].discord_channel_alt) {
       // No alt channel → PM decision (not silent done skip)
-      agentdesk.kanban.setStatus(card.id, "pending_decision");
+      agentdesk.kanban.setStatus(card.id, pendingState);
       agentdesk.db.execute(
         "UPDATE kanban_cards SET blocked_reason = 'No alt channel for counter-model review — PM decision needed' WHERE id = ?",
         [card.id]
@@ -165,7 +168,7 @@ var reviewAutomation = {
         "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
         [card.id]
       );
-      agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + " → pending_decision");
+      agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + " → " + pendingState);
       notifyPmdPendingDecision(card.id, "카운터모델 alt 채널 없음 — PM 판단 필요");
       return;
     }
@@ -200,6 +203,7 @@ var reviewAutomation = {
     // Only handle review-type dispatches
     if (dispatch.dispatch_type !== "review" && dispatch.dispatch_type !== "review-decision") return;
     if (!dispatch.kanban_card_id) return;
+    var cfg = agentdesk.pipeline.resolveForCard(dispatch.kanban_card_id);
 
     var result = null;
     try { result = JSON.parse(dispatch.result || "{}"); } catch(e) { result = {}; }
@@ -223,9 +227,9 @@ var reviewAutomation = {
         "SELECT assigned_agent_id, title, github_issue_number, status FROM kanban_cards WHERE id = ?",
         [dispatch.kanban_card_id]
       );
-      // Guard: skip dispatch creation for done cards — prevents stale review loops after dismiss
-      if (cards.length > 0 && cards[0].status === "done") {
-        agentdesk.log.info("[review] Card " + dispatch.kanban_card_id + " already done — skipping review-decision dispatch");
+      // Guard: skip dispatch creation for terminal cards — prevents stale review loops after dismiss
+      if (cards.length > 0 && agentdesk.pipeline.isTerminal(cards[0].status, cfg)) {
+        agentdesk.log.info("[review] Card " + dispatch.kanban_card_id + " already terminal — skipping review-decision dispatch");
         return;
       }
       if (cards.length > 0 && cards[0].assigned_agent_id) {
@@ -294,9 +298,11 @@ function findingsSimilar(textA, textB) {
 
 // #118: Normal suggestion_pending flow — extracted to avoid duplication
 function setNormalSuggestionPending(cardId, verdict) {
+  var spCfg = agentdesk.pipeline.resolveForCard(cardId);
+  var spTerminal = agentdesk.pipeline.terminalState(spCfg);
   agentdesk.db.execute(
-    "UPDATE kanban_cards SET review_status = 'suggestion_pending', suggestion_pending_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status != 'done'",
-    [cardId]
+    "UPDATE kanban_cards SET review_status = 'suggestion_pending', suggestion_pending_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status != ?",
+    [cardId, spTerminal]
   );
   agentdesk.log.info("[review] Card " + cardId + " needs review decision → suggestion_pending");
 
@@ -310,13 +316,23 @@ function setNormalSuggestionPending(cardId, verdict) {
 }
 
 function processVerdict(cardId, verdict, result) {
-  // Guard: skip processing for done cards — prevents stale dispatches from
+  // Guard: skip processing for terminal cards — prevents stale dispatches from
   // re-triggering review state changes after dismiss.
+  var cfg = agentdesk.pipeline.resolveForCard(cardId);
+  var terminalState = agentdesk.pipeline.terminalState(cfg);
+  var initialState = agentdesk.pipeline.kickoffState(cfg);
+  var inProgressState = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
+  var reviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
+  var reviewPassTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_passed", cfg) || terminalState;
+  var reviewReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_rework", cfg) || inProgressState;
+  var forceTargets = agentdesk.pipeline.forceOnlyTargets(inProgressState, cfg);
+  var pendingState = forceTargets[0];
+
   var cardCheck = agentdesk.db.query(
     "SELECT status FROM kanban_cards WHERE id = ?", [cardId]
   );
-  if (cardCheck.length > 0 && cardCheck[0].status === "done") {
-    agentdesk.log.info("[review] processVerdict skipped — card " + cardId + " already done");
+  if (cardCheck.length > 0 && agentdesk.pipeline.isTerminal(cardCheck[0].status, cfg)) {
+    agentdesk.log.info("[review] processVerdict skipped — card " + cardId + " already terminal");
     return;
   }
 
@@ -337,7 +353,7 @@ function processVerdict(cardId, verdict, result) {
       [cardId, verdict, verdict]
     );
 
-    // Review passed — check for next pipeline stage, otherwise done (#110)
+    // Review passed — check for next pipeline stage, otherwise terminal (#110)
     // Look for the next stage AFTER current pipeline_stage_id (stage_order based),
     // OR the first review_pass stage if card has no current pipeline stage.
     var cardInfo = agentdesk.db.query(
@@ -399,14 +415,14 @@ function processVerdict(cardId, verdict, result) {
           agentdesk.log.warn("[review] Pipeline dispatch failed: " + e);
         }
       } else {
-        agentdesk.kanban.setStatus(cardId, "pending_decision");
+        agentdesk.kanban.setStatus(cardId, pendingState);
         agentdesk.db.execute(
           "UPDATE kanban_cards SET blocked_reason = ? WHERE id = ?",
           ["Pipeline stage '" + nextStage.stage_name + "' has no assigned agent", cardId]
         );
       }
     } else {
-      // No more stages — clear pipeline_stage_id and mark done
+      // No more stages — clear pipeline_stage_id and mark terminal
       if (cardInfo.length > 0 && cardInfo[0].pipeline_stage_id) {
         agentdesk.db.execute(
           "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
@@ -414,8 +430,8 @@ function processVerdict(cardId, verdict, result) {
         );
         agentdesk.log.info("[review] Card " + cardId + " completed all pipeline stages");
       }
-      agentdesk.kanban.setStatus(cardId, "done");
-      agentdesk.log.info("[review] Card " + cardId + " passed review → done");
+      agentdesk.kanban.setStatus(cardId, reviewPassTarget);
+      agentdesk.log.info("[review] Card " + cardId + " passed review → " + reviewPassTarget);
     }
 
   } else if (verdict === "improve" || verdict === "reject" || verdict === "rework") {
@@ -453,8 +469,8 @@ function processVerdict(cardId, verdict, result) {
       // Already tried approach change → escalate to PM
       if (approachChangeRound) {
         agentdesk.log.warn("[review] #118 Approach change already attempted at R" + approachChangeRound +
-          ", findings still repeat at R" + currentRound + " → pending_decision");
-        agentdesk.kanban.setStatus(cardId, "pending_decision");
+          ", findings still repeat at R" + currentRound + " → " + pendingState);
+        agentdesk.kanban.setStatus(cardId, pendingState);
         agentdesk.db.execute(
           "UPDATE kanban_cards SET review_status = 'dilemma_pending', blocked_reason = ? WHERE id = ?",
           ["접근 전환 후에도 동일 finding 반복 (R" + approachChangeRound + "→R" + currentRound + ") — PM 판단 필요", cardId]
@@ -495,12 +511,12 @@ function processVerdict(cardId, verdict, result) {
           [cardId, verdict, currentRound, verdict, currentRound]
         );
 
-        // Transition card to in_progress for rework
+        // Transition card to rework target for rework
         agentdesk.db.execute(
-          "UPDATE kanban_cards SET review_status = 'rework_pending', updated_at = datetime('now') WHERE id = ? AND status != 'done'",
-          [cardId]
+          "UPDATE kanban_cards SET review_status = 'rework_pending', updated_at = datetime('now') WHERE id = ? AND status != ?",
+          [cardId, terminalState]
         );
-        agentdesk.kanban.setStatus(cardId, "in_progress");
+        agentdesk.kanban.setStatus(cardId, reviewReworkTarget);
       } catch (e) {
         agentdesk.log.warn("[review] #118 Approach-change dispatch failed: " + e + " — falling back to suggestion_pending");
         // Fall through to normal suggestion_pending below

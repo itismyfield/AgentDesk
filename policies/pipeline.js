@@ -6,23 +6,20 @@ var pipeline = {
   onCardTransition: function(payload) {
     // Pipeline-driven: check if target state is a dispatchable state
     var cfg = agentdesk.pipeline.resolveForCard(payload.card_id);
-    if (!cfg || !cfg.states || !cfg.transitions) {
-      if (payload.to !== "ready") return;
-    } else {
-      var isDispatchable = false;
-      for (var si = 0; si < cfg.states.length; si++) {
-        var s = cfg.states[si];
-        if (s.id !== payload.to || s.terminal) continue;
-        for (var ti = 0; ti < cfg.transitions.length; ti++) {
-          if (cfg.transitions[ti].from === s.id && cfg.transitions[ti].type === "gated") {
-            isDispatchable = true;
-            break;
-          }
+    if (!cfg || !cfg.states || !cfg.transitions) return;
+    var isDispatchable = false;
+    for (var si = 0; si < cfg.states.length; si++) {
+      var s = cfg.states[si];
+      if (s.id !== payload.to || s.terminal) continue;
+      for (var ti = 0; ti < cfg.transitions.length; ti++) {
+        if (cfg.transitions[ti].from === s.id && cfg.transitions[ti].type === "gated") {
+          isDispatchable = true;
+          break;
         }
-        break;
       }
-      if (!isDispatchable) return;
+      break;
     }
+    if (!isDispatchable) return;
 
     // Check if repo has pipeline stages triggered on this dispatchable state
     var cards = agentdesk.db.query(
