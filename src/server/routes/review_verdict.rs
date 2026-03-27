@@ -676,45 +676,45 @@ pub async fn submit_review_decision(
                     );
                     spawn_aggregate_if_needed(&state.db);
 
-                    // Pipeline-driven: find rework target (gated transition with review_rework gate)
-                    let card_status_now: String = state
+                    // Pipeline-driven: find rework target using card's effective pipeline
+                    let (card_status_now, card_repo_id, card_agent_id): (String, Option<String>, Option<String>) = state
                         .db
                         .lock()
                         .ok()
                         .and_then(|c| {
                             c.query_row(
-                                "SELECT status FROM kanban_cards WHERE id = ?1",
+                                "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
                                 [&body.card_id],
-                                |r| r.get(0),
+                                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                             )
                             .ok()
                         })
                         .unwrap_or_default();
                     crate::pipeline::ensure_loaded();
-                    let rework_target = crate::pipeline::try_get()
-                        .and_then(|p| {
-                            p.transitions
-                                .iter()
+                    let effective_pipeline = crate::pipeline::resolve_for_card(
+                        &state.db.lock().unwrap(),
+                        card_repo_id.as_deref(),
+                        card_agent_id.as_deref(),
+                    );
+                    let rework_target = effective_pipeline
+                        .transitions
+                        .iter()
+                        .find(|t| {
+                            t.from == card_status_now
+                                && t.transition_type
+                                    == crate::pipeline::TransitionType::Gated
+                                && t.gates.iter().any(|g| g == "review_rework")
+                        })
+                        .map(|t| t.to.clone())
+                        .unwrap_or_else(|| {
+                            // Fallback: find the first gated target from any dispatchable state
+                            let disp = effective_pipeline.dispatchable_states();
+                            effective_pipeline.transitions.iter()
                                 .find(|t| {
-                                    t.from == card_status_now
-                                        && t.transition_type
-                                            == crate::pipeline::TransitionType::Gated
-                                        && t.gates.iter().any(|g| g == "review_rework")
+                                    t.transition_type == crate::pipeline::TransitionType::Gated
+                                        && disp.contains(&t.from.as_str())
                                 })
                                 .map(|t| t.to.clone())
-                        })
-                        .unwrap_or_else(|| {
-                            // Fallback: find the first gated target from any dispatchable state (work state)
-                            crate::pipeline::try_get()
-                                .and_then(|p| {
-                                    let disp = p.dispatchable_states();
-                                    p.transitions.iter()
-                                        .find(|t| {
-                                            t.transition_type == crate::pipeline::TransitionType::Gated
-                                                && disp.contains(&t.from.as_str())
-                                        })
-                                        .map(|t| t.to.clone())
-                                })
                                 .unwrap_or_else(|| "in_progress".to_string())
                         });
                     let _ = crate::kanban::transition_status(
@@ -899,17 +899,20 @@ pub async fn submit_review_decision(
             // transition BEFORE cancelling pending dispatches.
             drop(conn);
             crate::pipeline::ensure_loaded();
-            let terminal = crate::pipeline::try_get()
-                .map(|p| {
-                    p.states
-                        .iter()
-                        .find(|s| s.terminal)
-                        .map(|s| s.id.as_str())
-                        .unwrap_or("done")
-                })
-                .unwrap_or("done");
+            let terminal_state = {
+                let conn_lock = state.db.lock().unwrap();
+                let (repo_id, agent_id): (Option<String>, Option<String>) = conn_lock
+                    .query_row(
+                        "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                        [&body.card_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap_or((None, None));
+                let eff = crate::pipeline::resolve_for_card(&conn_lock, repo_id.as_deref(), agent_id.as_deref());
+                eff.states.iter().find(|s| s.terminal).map(|s| s.id.clone()).unwrap_or_else(|| "done".to_string())
+            };
             let _ =
-                crate::kanban::transition_status(&state.db, &state.engine, &body.card_id, terminal);
+                crate::kanban::transition_status(&state.db, &state.engine, &body.card_id, &terminal_state);
 
             // Post-transition cleanup: cancel remaining pending review dispatches to prevent
             // stale dispatches from re-triggering review loops after dismiss.
