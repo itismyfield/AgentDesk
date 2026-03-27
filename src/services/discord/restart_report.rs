@@ -212,6 +212,10 @@ fn report_age(report: &RestartCompletionReport) -> Option<Duration> {
     delta.to_std().ok()
 }
 
+fn is_unrecoverable_flush_error(error: &str) -> bool {
+    error.contains("Unknown Channel")
+}
+
 pub(super) async fn flush_restart_reports(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -352,6 +356,13 @@ pub(super) async fn flush_restart_reports(
                             "  [{ts}] ❌ keeping restart report for channel {} after {} failed attempts: {}",
                             report.channel_id, attempt, e
                         );
+                        if is_unrecoverable_flush_error(&e.to_string()) {
+                            clear_restart_report(provider, report.channel_id);
+                            println!(
+                                "  [{ts}] 🧹 dropped unrecoverable restart report for channel {}",
+                                report.channel_id
+                            );
+                        }
                     }
                 }
             }
@@ -362,8 +373,8 @@ pub(super) async fn flush_restart_reports(
 #[cfg(test)]
 mod tests {
     use super::{
-        RESTART_REPORT_VERSION, RestartCompletionReport, load_restart_reports_in_root,
-        save_restart_report_in_root,
+        RESTART_REPORT_VERSION, RestartCompletionReport, is_unrecoverable_flush_error,
+        load_restart_reports_in_root, save_restart_report_in_root,
     };
     use crate::services::provider::ProviderKind;
     use tempfile::TempDir;
@@ -436,5 +447,11 @@ mod tests {
         let claude_reports = load_restart_reports_in_root(temp.path(), &ProviderKind::Claude);
         assert_eq!(claude_reports.len(), 1);
         assert_eq!(claude_reports[0].channel_id, 456);
+    }
+
+    #[test]
+    fn test_unknown_channel_is_unrecoverable() {
+        assert!(is_unrecoverable_flush_error("Unknown Channel"));
+        assert!(!is_unrecoverable_flush_error("temporary network error"));
     }
 }
