@@ -932,9 +932,8 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             continue;
         };
 
-        owned_sessions
-            .entry(*channel_id)
-            .or_insert_with(|| channel_name.clone());
+        // #148: Do NOT register in owned_sessions yet — QUARANTINE check below may
+        // skip this session. Registering early blocks new session creation for the channel.
 
         if let Some(started) = shared.recovering_channels.get(channel_id) {
             if started.elapsed() < std::time::Duration::from_secs(60) {
@@ -976,11 +975,48 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             .unwrap_or(0);
         let current_gen = super::runtime_store::load_generation();
         if session_gen < current_gen && current_gen > 0 {
+            // #148: Verify this session belongs to our runtime before killing.
+            // Multiple AgentDesk runtimes may share the same tmux server.
+            let current_owner_marker = current_tmux_owner_marker();
+            if !session_belongs_to_current_runtime(session_name, &current_owner_marker) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ⏭ QUARANTINE: skipping old-gen session {} — belongs to another runtime",
+                    session_name
+                );
+                continue;
+            }
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
-                "  [{ts}] 🔒 QUARANTINE: watcher skip for {} — old generation (session_gen={}, current_gen={})",
+                "  [{ts}] 🔒 QUARANTINE: killing old-gen session {} (session_gen={}, current_gen={})",
                 session_name, session_gen, current_gen
             );
+            // Report idle to DB so dashboard/dispatch state doesn't go stale
+            if let Some((_, ch_name)) =
+                crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
+            {
+                let hostname = crate::services::platform::hostname_short();
+                let session_key = format!("{}:{}", hostname, session_name);
+                super::adk_session::post_adk_session_status(
+                    Some(&session_key),
+                    Some(&ch_name),
+                    None,
+                    "idle",
+                    &provider,
+                    None,
+                    None,
+                    None,
+                    None,
+                    shared.api_port,
+                )
+                .await;
+            }
+            // Kill old-gen session so it doesn't block new session creation.
+            let exact = tmux_exact_target(session_name);
+            record_tmux_exit_reason(session_name, "quarantine: old generation");
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &exact])
+                .output();
             continue;
         }
 
@@ -1005,6 +1041,12 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             });
             continue;
         }
+
+        // #148: Only register in owned_sessions after passing QUARANTINE + live-pane checks.
+        // Earlier registration blocked new session creation for quarantined/dead channels.
+        owned_sessions
+            .entry(*channel_id)
+            .or_insert_with(|| channel_name.clone());
 
         let initial_offset = std::fs::metadata(&output_path)
             .map(|m| m.len())
