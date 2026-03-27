@@ -1160,9 +1160,13 @@ pub(super) fn spawn_turn_bridge(
                         let sid_c = sid.clone();
                         tokio::spawn(async move {
                             let _ = reqwest::Client::new()
-                                .post(crate::config::local_api_url(port, "/api/dispatched-sessions/clear-stale-session-id"))
+                                .post(crate::config::local_api_url(
+                                    port,
+                                    "/api/dispatched-sessions/clear-stale-session-id",
+                                ))
                                 .json(&serde_json::json!({"claude_session_id": sid_c}))
-                                .send().await;
+                                .send()
+                                .await;
                         });
                     }
                     full_response = "⚠️ 이전 대화 세션이 만료되어 새 세션으로 시작합니다. 메시지를 다시 보내주세요.".to_string();
@@ -1287,9 +1291,13 @@ pub(super) fn spawn_turn_bridge(
                                 let sid_c = sid.clone();
                                 tokio::spawn(async move {
                                     let _ = reqwest::Client::new()
-                                        .post(crate::config::local_api_url(port, "/api/dispatched-sessions/clear-stale-session-id"))
+                                        .post(crate::config::local_api_url(
+                                            port,
+                                            "/api/dispatched-sessions/clear-stale-session-id",
+                                        ))
                                         .json(&serde_json::json!({"claude_session_id": sid_c}))
-                                        .send().await;
+                                        .send()
+                                        .await;
                                 });
                             }
                             full_response = "⚠️ 이전 대화 세션이 만료되어 새 세션으로 시작합니다. 메시지를 다시 보내주세요.".to_string();
