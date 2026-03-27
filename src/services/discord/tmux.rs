@@ -194,12 +194,13 @@ pub(super) async fn tmux_output_watcher(
         let mut last_edit_text = String::new();
 
         // Process any complete lines we already have
-        let (mut found_result, mut is_prompt_too_long, mut is_auth_error) = process_watcher_lines(
-            &mut all_data,
-            &mut state,
-            &mut full_response,
-            &mut tool_state,
-        );
+        let (mut found_result, mut is_prompt_too_long, mut is_auth_error, mut result_tokens) =
+            process_watcher_lines(
+                &mut all_data,
+                &mut state,
+                &mut full_response,
+                &mut tool_state,
+            );
 
         // Keep reading until result or timeout
         // Check if a Discord turn claimed this data since our epoch snapshot
@@ -246,7 +247,7 @@ pub(super) async fn tmux_output_watcher(
                     Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
                         all_data.push_str(&String::from_utf8_lossy(&chunk));
-                        let (fr, ptl, ae) = process_watcher_lines(
+                        let (fr, ptl, ae, rt) = process_watcher_lines(
                             &mut all_data,
                             &mut state,
                             &mut full_response,
@@ -255,6 +256,9 @@ pub(super) async fn tmux_output_watcher(
                         found_result = fr;
                         is_prompt_too_long = is_prompt_too_long || ptl;
                         is_auth_error = is_auth_error || ae;
+                        if rt.is_some() {
+                            result_tokens = rt;
+                        }
                     }
                     _ => {
                         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -490,6 +494,53 @@ pub(super) async fn tmux_output_watcher(
                 super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
             }
         }
+
+        // Update session tokens from result event and auto-compact if threshold exceeded
+        if let Some(tokens) = result_tokens {
+            let provider = shared.settings.read().await.provider.clone();
+            let session_key =
+                super::adk_session::build_adk_session_key(&shared, channel_id, &provider).await;
+            let channel_name = {
+                let data = shared.core.lock().await;
+                data.sessions
+                    .get(&channel_id)
+                    .and_then(|s| s.channel_name.clone())
+            };
+            super::adk_session::post_adk_session_status(
+                session_key.as_deref(),
+                channel_name.as_deref(),
+                None,
+                "idle",
+                &provider,
+                None,
+                Some(tokens),
+                None,
+                None,
+                shared.api_port,
+            )
+            .await;
+
+            const CONTEXT_WINDOW: u64 = 1_000_000;
+            const COMPACT_THRESHOLD_PCT: u64 = 60;
+            let pct = (tokens * 100) / CONTEXT_WINDOW.max(1);
+            if pct >= COMPACT_THRESHOLD_PCT && !is_prompt_too_long {
+                let exact_target =
+                    crate::services::tmux_common::tmux_exact_target(&tmux_session_name);
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚡ [watcher] Auto-compact: {} at {pct}% ({tokens} tokens)",
+                    tmux_session_name
+                );
+                let _ = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new("tmux")
+                        .args(["send-keys", "-t", &exact_target, "/compact", "Enter"])
+                        .output()
+                })
+                .await;
+            }
+            // Reset for next turn
+            result_tokens = None;
+        }
     }
 
     // Cleanup
@@ -581,16 +632,17 @@ impl WatcherToolState {
 /// Process buffered lines for the tmux watcher.
 /// Extracts text content, tracks tool status, and detects result events.
 /// Returns true if a "result" event was found.
-/// Return value: (found_result, is_prompt_too_long, is_auth_error)
+/// Return value: (found_result, is_prompt_too_long, is_auth_error, result_tokens)
 pub(super) fn process_watcher_lines(
     buffer: &mut String,
     state: &mut claude::StreamLineState,
     full_response: &mut String,
     tool_state: &mut WatcherToolState,
-) -> (bool, bool, bool) {
+) -> (bool, bool, bool, Option<u64>) {
     let mut found_result = false;
     let mut is_prompt_too_long = false;
     let mut is_auth_error = false;
+    let mut result_tokens: Option<u64> = None;
 
     while let Some(pos) = buffer.find('\n') {
         let line: String = buffer.drain(..=pos).collect();
@@ -738,6 +790,27 @@ pub(super) fn process_watcher_lines(
                             full_response.push_str(result_str);
                         }
                     }
+                    // Extract token usage from result event for context tracking
+                    if let Some(usage) = val.get("usage") {
+                        let input = usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let cache_read = usage
+                            .get("cache_read_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let cache_creation = usage
+                            .get("cache_creation_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let output = usage
+                            .get("output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        result_tokens = Some(input + cache_read + cache_creation + output);
+                    }
+
                     state.final_result = Some(String::new());
                     found_result = true;
                 }
@@ -746,7 +819,7 @@ pub(super) fn process_watcher_lines(
         }
     }
 
-    (found_result, is_prompt_too_long, is_auth_error)
+    (found_result, is_prompt_too_long, is_auth_error, result_tokens)
 }
 
 /// On startup, scan for surviving tmux sessions (AgentDesk-*) and restore watchers.
