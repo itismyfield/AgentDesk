@@ -1,6 +1,8 @@
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 #[cfg(unix)]
+use crate::services::tmux_common::tmux_exact_target;
+#[cfg(unix)]
 use crate::services::tmux_diagnostics::{build_tmux_death_diagnostic, tmux_session_has_live_pane};
 
 #[cfg(not(unix))]
@@ -502,8 +504,9 @@ pub(super) async fn restore_inflight_turns(
         }
 
         let can_recover = tmux_session_name.as_deref().map_or(false, |name| {
+            let exact_target = tmux_exact_target(name);
             std::process::Command::new("tmux")
-                .args(["has-session", "-t", name])
+                .args(["has-session", "-t", &exact_target])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()

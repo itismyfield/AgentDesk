@@ -1,5 +1,15 @@
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 
+/// Format a tmux session name as an exact-match target.
+///
+/// tmux `-t` flags perform prefix matching by default: `-t foo` matches
+/// both `foo` and `foo-bar`.  Prefixing with `=` forces exact matching,
+/// preventing the wrong session from being targeted when session names
+/// share a common prefix (e.g. main vs thread sessions).
+pub fn tmux_exact_target(session_name: &str) -> String {
+    format!("={}", session_name)
+}
+
 /// Get the platform-appropriate temp directory for AgentDesk runtime files.
 pub fn agentdesk_temp_dir() -> String {
     std::env::temp_dir().display().to_string()

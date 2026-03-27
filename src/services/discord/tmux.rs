@@ -19,7 +19,7 @@ use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};
 
 use crate::utils::format::tail_with_ellipsis;
 
-use crate::services::tmux_common::{current_tmux_owner_marker, tmux_owner_path};
+use crate::services::tmux_common::{current_tmux_owner_marker, tmux_exact_target, tmux_owner_path};
 
 fn session_belongs_to_current_runtime(session_name: &str, current_owner_marker: &str) -> bool {
     std::fs::read_to_string(tmux_owner_path(session_name))
@@ -329,13 +329,14 @@ pub(super) async fn tmux_output_watcher(
             );
             prompt_too_long_killed = true;
 
+            let exact_target = tmux_exact_target(&tmux_session_name);
             let sess = tmux_session_name.clone();
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tokio::task::spawn_blocking(move || {
                     record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
                     let _ = std::process::Command::new("tmux")
-                        .args(["kill-session", "-t", &sess])
+                        .args(["kill-session", "-t", &exact_target])
                         .status();
                 }),
             )
@@ -365,13 +366,14 @@ pub(super) async fn tmux_output_watcher(
             );
             prompt_too_long_killed = true; // reuse flag to suppress duplicate "session ended" message
 
+            let exact_target = tmux_exact_target(&tmux_session_name);
             let sess = tmux_session_name.clone();
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tokio::task::spawn_blocking(move || {
                     record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
                     let _ = std::process::Command::new("tmux")
-                        .args(["kill-session", "-t", &sess])
+                        .args(["kill-session", "-t", &exact_target])
                         .status();
                 }),
             )
@@ -497,6 +499,7 @@ pub(super) async fn tmux_output_watcher(
     // which are created per-dispatch and would otherwise linger for 24h).
     // #145: skip kill for unified-thread sessions with active auto-queue runs.
     {
+        let exact_target = tmux_exact_target(&tmux_session_name);
         let sess = tmux_session_name.clone();
         let _ = tokio::task::spawn_blocking(move || {
             if tmux_session_exists(&sess) && !tmux_session_has_live_pane(&sess) {
@@ -510,7 +513,7 @@ pub(super) async fn tmux_output_watcher(
                 }
                 record_tmux_exit_reason(&sess, "watcher cleanup: dead session after turn");
                 let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &sess])
+                    .args(["kill-session", "-t", &exact_target])
                     .output();
             }
         })
@@ -1041,11 +1044,12 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             .await;
 
             // Kill the dead tmux session
+            let exact_target = tmux_exact_target(&dc.session_name);
             let sess = dc.session_name.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 record_tmux_exit_reason(&sess, "startup cleanup: dead session");
                 let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &sess])
+                    .args(["kill-session", "-t", &exact_target])
                     .output();
             })
             .await;
@@ -1135,13 +1139,14 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
     );
 
     for name in &orphans {
+        let exact_target = tmux_exact_target(name);
         let name_clone = name.clone();
         let killed = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             tokio::task::spawn_blocking(move || {
                 record_tmux_exit_reason(&name_clone, "orphan cleanup: no owning channel session");
                 std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &name_clone])
+                    .args(["kill-session", "-t", &exact_target])
                     .status()
                     .map(|s| s.success())
                     .unwrap_or(false)
@@ -1285,11 +1290,12 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         }
 
         // Kill the dead tmux session
+        let exact_target = tmux_exact_target(session_name);
         let sess = session_name.to_string();
         let kill_result = tokio::task::spawn_blocking(move || {
             record_tmux_exit_reason(&sess, "reaper: dead session with no watcher");
             std::process::Command::new("tmux")
-                .args(["kill-session", "-t", &sess])
+                .args(["kill-session", "-t", &exact_target])
                 .output()
         })
         .await;

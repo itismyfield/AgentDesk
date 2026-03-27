@@ -60,7 +60,7 @@ fn get_claude_path() -> Option<&'static str> {
 }
 
 #[cfg(unix)]
-use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
+use crate::services::tmux_common::{tmux_exact_target, tmux_owner_path, write_tmux_owner_marker};
 
 /// Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var.
 static DEBUG_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -240,8 +240,9 @@ fn tmux_capture_indicates_ready_for_input(capture: &str) -> bool {
 
 #[cfg(unix)]
 pub(crate) fn tmux_session_ready_for_input(tmux_session_name: &str) -> bool {
+    let exact_target = tmux_exact_target(tmux_session_name);
     Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", tmux_session_name, "-S", "-80"])
+        .args(["capture-pane", "-p", "-t", &exact_target, "-S", "-80"])
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -294,8 +295,9 @@ impl CancelToken {
             #[cfg(unix)]
             {
                 record_tmux_exit_reason(&name, "explicit cleanup via cancel_with_tmux_cleanup");
+                let exact_target = tmux_exact_target(&name);
                 let _ = Command::new("tmux")
-                    .args(["kill-session", "-t", &name])
+                    .args(["kill-session", "-t", &exact_target])
                     .output();
             }
             #[cfg(not(unix))]
@@ -1611,8 +1613,9 @@ fn execute_streaming_local_tmux(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
+        let exact_target = tmux_exact_target(tmux_session_name);
         let _ = Command::new("tmux")
-            .args(["kill-session", "-t", tmux_session_name])
+            .args(["kill-session", "-t", &exact_target])
             .status();
     }
 
@@ -1739,11 +1742,12 @@ fn execute_streaming_local_tmux(
     }
 
     // Keep tmux session alive after process exits for post-mortem analysis
+    let exact_target = tmux_exact_target(tmux_session_name);
     let _ = Command::new("tmux")
         .args([
             "set-option",
             "-t",
-            tmux_session_name,
+            &exact_target,
             "remain-on-exit",
             "on",
         ])
@@ -1811,8 +1815,9 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     "stream retry after repeated tmux session death",
                 );
+                let exact_target = tmux_exact_target(tmux_session_name);
                 let _ = Command::new("tmux")
-                    .args(["kill-session", "-t", tmux_session_name])
+                    .args(["kill-session", "-t", &exact_target])
                     .output();
 
                 // Clean up and recreate temp files

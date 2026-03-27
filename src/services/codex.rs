@@ -33,7 +33,7 @@ fn get_codex_path() -> Option<&'static str> {
 }
 
 #[cfg(unix)]
-use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
+use crate::services::tmux_common::{tmux_exact_target, tmux_owner_path, write_tmux_owner_marker};
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     let codex_bin = get_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
@@ -380,8 +380,9 @@ fn execute_streaming_local_tmux(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
+        let exact_target = tmux_exact_target(tmux_session_name);
         let _ = Command::new("tmux")
-            .args(["kill-session", "-t", tmux_session_name])
+            .args(["kill-session", "-t", &exact_target])
             .status();
     }
 
@@ -489,11 +490,12 @@ fn execute_streaming_local_tmux(
     }
 
     // Keep tmux session alive after process exits for post-mortem analysis
+    let exact_target = tmux_exact_target(tmux_session_name);
     let _ = Command::new("tmux")
         .args([
             "set-option",
             "-t",
-            tmux_session_name,
+            &exact_target,
             "remain-on-exit",
             "on",
         ])

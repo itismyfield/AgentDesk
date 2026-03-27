@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use crate::services::tmux_common::tmux_exact_target;
 
 pub(super) fn should_process_turn_message(kind: serenity::model::channel::MessageType) -> bool {
     matches!(
@@ -2099,10 +2101,10 @@ async fn handle_text_command(
             // Send /clear to the actual Claude Code session via tmux
             #[cfg(unix)]
             if let Some(ref name) = tmux_name {
-                let sess = name.clone();
+                let exact_target = tmux_exact_target(name);
                 let _ = tokio::task::spawn_blocking(move || {
                     std::process::Command::new("tmux")
-                        .args(["send-keys", "-t", &sess, "/clear", "Enter"])
+                        .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
                         .output()
                 })
                 .await;

@@ -3,6 +3,8 @@ use super::restart_report::{RestartCompletionReport, clear_restart_report, save_
 use super::*;
 use crate::config::local_api_url;
 #[cfg(unix)]
+use crate::services::tmux_common::tmux_exact_target;
+#[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 use crate::utils::format::{safe_suffix, tail_with_ellipsis};
 
@@ -50,8 +52,9 @@ pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, 
                 #[cfg(unix)]
                 {
                     record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
+                    let exact_target = tmux_exact_target(&name);
                     let _ = std::process::Command::new("tmux")
-                        .args(["kill-session", "-t", &name])
+                        .args(["kill-session", "-t", &exact_target])
                         .output();
                 }
                 #[cfg(not(unix))]
@@ -1001,10 +1004,10 @@ pub(super) fn spawn_turn_bridge(
                     println!(
                         "  [{ts}] ⚡ Auto-compact: {tmux_name} at {pct}% ({total_tokens} tokens)"
                     );
-                    let sess = tmux_name.clone();
+                    let exact_target = tmux_exact_target(tmux_name);
                     let _ = tokio::task::spawn_blocking(move || {
                         std::process::Command::new("tmux")
-                            .args(["send-keys", "-t", &sess, "/compact", "Enter"])
+                            .args(["send-keys", "-t", &exact_target, "/compact", "Enter"])
                             .output()
                     })
                     .await;
@@ -1521,10 +1524,10 @@ pub(super) fn spawn_turn_bridge(
                         name,
                         "dispatch turn completed — killing thread session",
                     );
-                    let sess = name.clone();
+                    let exact_target = tmux_exact_target(&name);
                     let kill_result = tokio::task::spawn_blocking(move || {
                         std::process::Command::new("tmux")
-                            .args(["kill-session", "-t", &sess])
+                            .args(["kill-session", "-t", &exact_target])
                             .output()
                     })
                     .await;
