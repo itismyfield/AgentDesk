@@ -126,9 +126,11 @@ function dispatchNextEntry(agentId) {
       [entry.id]
     );
 
-    // Check if run is complete (no more pending)
+    // Check if run is complete (no more pending AND no more dispatched)
+    // #145: Must check both 'pending' and 'dispatched' — a just-dispatched item
+    // is still active and killing the tmux session would tear down the working turn.
     var remaining = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status = 'pending'",
+      "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status IN ('pending', 'dispatched')",
       [entry.run_id]
     );
     if (remaining.length > 0 && remaining[0].cnt === 0) {

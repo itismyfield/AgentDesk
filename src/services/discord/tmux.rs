@@ -1412,23 +1412,47 @@ async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
         .await
         .unwrap_or_default();
 
-    for channel_name in channels {
+    for thread_channel_id in channels {
+        // The kill signal carries the raw thread channel ID. Thread tmux sessions
+        // are named "{parent_channel_name}-t{thread_channel_id}" (see mod.rs:2601).
+        // We must find the matching tmux session by scanning for the -t{id} suffix
+        // rather than building from the raw ID directly.
+        let suffix = format!("-t{thread_channel_id}");
         let provider = shared.settings.read().await.provider.clone();
-        let tmux_name = provider.build_tmux_session_name(&channel_name);
-        let exact_target = tmux_exact_target(&tmux_name);
-        let sess = tmux_name.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if tmux_session_exists(&sess) {
-                record_tmux_exit_reason(&sess, "unified-thread run completed");
-                let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &exact_target])
-                    .output();
+        let suffix_c = suffix.clone();
+        let provider_c = provider.clone();
+        let killed = tokio::task::spawn_blocking(move || {
+            // List tmux sessions and find the one containing -t{thread_channel_id}
+            let prefix = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
+            let output = std::process::Command::new("tmux")
+                .args(["list-sessions", "-F", "#{session_name}"])
+                .output()
+                .ok();
+            let mut killed_name = None;
+            if let Some(out) = output {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                for line in stdout.lines() {
+                    if line.starts_with(&prefix) && line.contains(&suffix_c) {
+                        record_tmux_exit_reason(line, "unified-thread run completed");
+                        let exact = tmux_exact_target(line);
+                        let _ = std::process::Command::new("tmux")
+                            .args(["kill-session", "-t", &exact])
+                            .output();
+                        killed_name = Some(line.to_string());
+                        break;
+                    }
+                }
             }
+            killed_name
         })
-        .await;
+        .await
+        .unwrap_or(None);
+
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] ♻ Killed unified-thread tmux session: {tmux_name} (channel: {channel_name})"
-        );
+        if let Some(name) = killed {
+            println!(
+                "  [{ts}] ♻ Killed unified-thread tmux session: {name} (thread: {thread_channel_id})"
+            );
+        }
     }
 }

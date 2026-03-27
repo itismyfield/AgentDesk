@@ -940,9 +940,9 @@ pub(crate) async fn send_dispatch_to_discord(
                                 });
                                 map[channel_id_num.to_string()] = serde_json::json!(thread_id);
                                 conn.execute(
-                                    "UPDATE auto_queue_runs SET unified_thread_id = ?1 \
-                                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?2)",
-                                    rusqlite::params![map.to_string(), card_id],
+                                    "UPDATE auto_queue_runs SET unified_thread_id = ?1, unified_thread_channel_id = ?2 \
+                                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?3)",
+                                    rusqlite::params![map.to_string(), thread_id, card_id],
                                 )
                                 .ok();
                             }
