@@ -982,7 +982,7 @@ var timeouts = {
       var provider = s.provider || "claude";
       if (provider !== "claude") continue;
 
-      // Skip working sessions — don't interrupt active work
+      // Skip working sessions — turn-end handler in tmux watcher handles compact
       if (s.status === "working") continue;
 
       // Check cooldown (5 min) to avoid spamming commands
@@ -995,30 +995,8 @@ var timeouts = {
         if (now - lastMs < 300000) continue; // 5 min cooldown
       }
 
-      // Probe actual context usage via /context command + tmux capture
-      var pct = (s.tokens / CONTEXT_WINDOW) * 100; // fallback: stored tokens
-      var tmuxName = (s.session_key || "").split(":").pop();
-      if (tmuxName) {
-        try {
-          // Send /context and capture output
-          agentdesk.exec("tmux", JSON.stringify(["send-keys", "-t", tmuxName, "/context", "Enter"]));
-          agentdesk.exec("sleep", JSON.stringify(["3"]));
-          var captured = agentdesk.exec("tmux", JSON.stringify(["capture-pane", "-t", tmuxName, "-p", "-S", "-10"]));
-          // Parse: **Tokens:** 80.6k / 1000k (8%)
-          var match = captured && captured.match(/\*\*Tokens:\*\*\s*[\d.]+k?\s*\/\s*[\d.]+k?\s*\((\d+)%\)/);
-          if (match) {
-            pct = parseInt(match[1], 10);
-            var actualTokens = Math.round(pct / 100 * CONTEXT_WINDOW);
-            agentdesk.db.execute(
-              "UPDATE sessions SET tokens = ? WHERE session_key = ?",
-              [actualTokens, s.session_key]
-            );
-          }
-        } catch (e) {
-          // Fallback: use stored tokens
-          agentdesk.log.warn("[context] /context probe failed for " + s.session_key + ": " + e);
-        }
-      }
+      // Use DB tokens directly — updated from result events by tmux watcher/turn_bridge
+      var pct = (s.tokens / CONTEXT_WINDOW) * 100;
 
       // Compact: >= compactPercent
       if (pct >= compactPercent) {
