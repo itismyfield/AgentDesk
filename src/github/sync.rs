@@ -109,20 +109,32 @@ pub fn sync_github_issues_for_repo(
     } // conn dropped here
 
     // Process closures via central state machine (outside conn lock)
+    // Pipeline-driven: resolve terminal state
+    crate::pipeline::ensure_loaded();
+    let terminal = crate::pipeline::try_get()
+        .map(|p| {
+            p.states
+                .iter()
+                .find(|s| s.terminal)
+                .map(|s| s.id.as_str())
+                .unwrap_or("done")
+        })
+        .unwrap_or("done");
     for (card_id, issue_number) in &cards_to_close {
         let _ = crate::kanban::transition_status_with_opts(
             db,
             engine,
             card_id,
-            "done",
+            terminal,
             "github-sync",
             true,
         );
         result.closed_count += 1;
         tracing::info!(
-            "[github-sync] {repo}#{}: card {} → done (issue closed)",
+            "[github-sync] {repo}#{}: card {} → {} (issue closed)",
             issue_number,
-            card_id
+            card_id,
+            terminal
         );
     }
 

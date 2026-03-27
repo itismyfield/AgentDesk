@@ -94,9 +94,7 @@ pub fn create_dispatch_core(
 
     // Guard: prevent ALL dispatches for terminal cards (pipeline-driven).
     crate::pipeline::ensure_loaded();
-    let is_terminal = crate::pipeline::try_get()
-        .map(|p| p.is_terminal(&old_status))
-        .unwrap_or(old_status == "done");
+    let is_terminal = crate::pipeline::get().is_terminal(&old_status);
     if is_terminal {
         return Err(anyhow::anyhow!(
             "Cannot create {} dispatch for terminal card {} (status: {}) — cannot revert terminal card",
@@ -172,24 +170,32 @@ pub fn create_dispatch_core(
     } else {
         // Pipeline-driven: resolve the dispatch kickoff state (first gated target from dispatchable)
         crate::pipeline::ensure_loaded();
-        let kickoff_state = crate::pipeline::try_get()
-            .and_then(|p| {
-                let dispatchable = p.dispatchable_states();
-                p.transitions.iter().find(|t| {
-                    t.transition_type == crate::pipeline::TransitionType::Gated
-                        && dispatchable.contains(&t.from.as_str())
-                }).map(|t| t.to.clone())
+        let pipeline = crate::pipeline::get();
+        let dispatchable = pipeline.dispatchable_states();
+        let kickoff_state = pipeline
+            .transitions
+            .iter()
+            .find(|t| {
+                t.transition_type == crate::pipeline::TransitionType::Gated
+                    && dispatchable.contains(&t.from.as_str())
             })
-            .unwrap_or_else(|| "requested".to_string());
+            .map(|t| t.to.clone())
+            .unwrap_or_else(|| {
+                tracing::error!("Pipeline has no kickoff state — check pipeline configuration");
+                pipeline.initial_state().to_string()
+            });
         // Build clock SQL from pipeline config
-        let clock_sql = crate::pipeline::try_get()
-            .and_then(|p| p.clock_for_state(&kickoff_state))
+        let clock_sql = pipeline
+            .clock_for_state(&kickoff_state)
             .map(|c| format!(", {} = datetime('now')", c.set))
-            .unwrap_or_else(|| ", requested_at = datetime('now')".to_string());
+            .unwrap_or_default();
         let sql = format!(
             "UPDATE kanban_cards SET latest_dispatch_id = ?1, status = ?2{clock_sql}, updated_at = datetime('now') WHERE id = ?3"
         );
-        conn.execute(&sql, rusqlite::params![dispatch_id, kickoff_state, kanban_card_id])?;
+        conn.execute(
+            &sql,
+            rusqlite::params![dispatch_id, kickoff_state, kanban_card_id],
+        )?;
     }
 
     Ok((dispatch_id, old_status))
@@ -247,8 +253,7 @@ pub fn create_dispatch_core_with_id(
                             }
                         }
                         if !obj.contains_key("target_provider") {
-                            if let Some(tp) =
-                                alt.as_deref().and_then(provider_from_channel_suffix)
+                            if let Some(tp) = alt.as_deref().and_then(provider_from_channel_suffix)
                             {
                                 obj.insert("target_provider".to_string(), json!(tp));
                             }
@@ -275,13 +280,13 @@ pub fn create_dispatch_core_with_id(
         .map_err(|e| anyhow::anyhow!("Card not found: {e}"))?;
 
     crate::pipeline::ensure_loaded();
-    let is_terminal = crate::pipeline::try_get()
-        .map(|p| p.is_terminal(&old_status))
-        .unwrap_or(old_status == "done");
+    let is_terminal = crate::pipeline::get().is_terminal(&old_status);
     if is_terminal {
         return Err(anyhow::anyhow!(
             "Cannot create {} dispatch for terminal card {} (status: {}) — cannot revert terminal card",
-            dispatch_type, kanban_card_id, old_status
+            dispatch_type,
+            kanban_card_id,
+            old_status
         ));
     }
 
@@ -298,7 +303,8 @@ pub fn create_dispatch_core_with_id(
         if cancelled > 0 {
             tracing::info!(
                 "[dispatch] Cancelled {} stale review-decision(s) for card {} before creating new one",
-                cancelled, kanban_card_id
+                cancelled,
+                kanban_card_id
             );
         }
     }
@@ -368,15 +374,20 @@ pub fn create_dispatch(
     // Fire pipeline-defined on_enter hooks for the kickoff state (#134).
     // Resolve kickoff state from pipeline (same logic as create_dispatch_core).
     crate::pipeline::ensure_loaded();
-    let kickoff = crate::pipeline::try_get()
-        .and_then(|p| {
-            let d = p.dispatchable_states();
-            p.transitions.iter().find(|t| {
-                t.transition_type == crate::pipeline::TransitionType::Gated
-                    && d.contains(&t.from.as_str())
-            }).map(|t| t.to.as_str())
+    let pipeline = crate::pipeline::get();
+    let d = pipeline.dispatchable_states();
+    let kickoff = pipeline
+        .transitions
+        .iter()
+        .find(|t| {
+            t.transition_type == crate::pipeline::TransitionType::Gated
+                && d.contains(&t.from.as_str())
         })
-        .unwrap_or("requested");
+        .map(|t| t.to.as_str())
+        .unwrap_or_else(|| {
+            tracing::error!("Pipeline has no kickoff state for hook firing");
+            pipeline.initial_state()
+        });
     crate::kanban::fire_state_hooks(db, engine, kanban_card_id, &old_status, kickoff);
 
     Ok(dispatch)
@@ -459,6 +470,7 @@ pub fn complete_dispatch(
 
     // Fire event hooks for dispatch completion (#134 — pipeline-defined events)
     crate::kanban::fire_event_hooks(
+        db,
         engine,
         "on_dispatch_completed",
         "OnDispatchCompleted",
@@ -469,20 +481,9 @@ pub fn complete_dispatch(
         }),
     );
 
-    // After OnDispatchCompleted, policies may have changed card status via setStatus().
-    // Drain pending transitions and fire follow-up hooks (OnReviewEnter, etc.).
-    // Loop because transition hooks may generate further transitions.
-    // Note: fire_transition_hooks already calls notify_new_dispatches_after_hooks
-    // for dispatches created during each transition's hooks.
-    loop {
-        let transitions = engine.drain_pending_transitions();
-        if transitions.is_empty() {
-            break;
-        }
-        for (card_id, old_s, new_s) in &transitions {
-            crate::kanban::fire_transition_hooks(db, engine, card_id, old_s, new_s);
-        }
-    }
+    // After OnDispatchCompleted, policies may have queued follow-up transitions
+    // and dispatch intents (OnReviewEnter, retry dispatches, etc.).
+    crate::kanban::drain_hook_side_effects(db, engine);
 
     // After all hooks and transitions drained, check for dispatches created by
     // OnDispatchCompleted hooks (e.g. pipeline.js, review-automation.js, timeouts.js)
@@ -530,20 +531,8 @@ pub fn complete_dispatch(
                 "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter (#139)",
                 cid
             );
-            let _ = engine.try_fire_hook_by_name(
-                "OnReviewEnter",
-                json!({ "card_id": cid }),
-            );
-            // Drain any transitions from the re-fired hook
-            loop {
-                let transitions = engine.drain_pending_transitions();
-                if transitions.is_empty() {
-                    break;
-                }
-                for (cid, old_s, new_s) in &transitions {
-                    crate::kanban::fire_transition_hooks(db, engine, cid, old_s, new_s);
-                }
-            }
+            let _ = engine.try_fire_hook_by_name("OnReviewEnter", json!({ "card_id": cid }));
+            crate::kanban::drain_hook_side_effects(db, engine);
             notify_hook_created_dispatches(db, pre_hook_max_rowid);
         }
     }
