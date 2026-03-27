@@ -1138,14 +1138,18 @@ pub(super) fn spawn_turn_bridge(
                     // Clear all 3 locations
                     let stale_sid = {
                         let mut data = shared_owned.core.lock().await;
-                        let old = data.sessions.get(&channel_id).and_then(|s| s.session_id.clone());
+                        let old = data
+                            .sessions
+                            .get(&channel_id)
+                            .and_then(|s| s.session_id.clone());
                         if let Some(session) = data.sessions.get_mut(&channel_id) {
                             session.session_id = None;
                         }
                         old
                     };
                     if let Some(ref key) = adk_session_key {
-                        super::adk_session::save_claude_session_id(key, "", shared_owned.api_port).await;
+                        super::adk_session::save_claude_session_id(key, "", shared_owned.api_port)
+                            .await;
                     }
                     if let Some(ref sid) = stale_sid {
                         if let Some(root) = crate::cli::agentdesk_runtime_root() {
@@ -1156,7 +1160,7 @@ pub(super) fn spawn_turn_bridge(
                         let sid_c = sid.clone();
                         tokio::spawn(async move {
                             let _ = reqwest::Client::new()
-                                .post(format!("http://127.0.0.1:{port}/api/dispatched-sessions/clear-stale-session-id"))
+                                .post(crate::config::local_api_url(port, "/api/dispatched-sessions/clear-stale-session-id"))
                                 .json(&serde_json::json!({"claude_session_id": sid_c}))
                                 .send().await;
                         });
@@ -1283,7 +1287,7 @@ pub(super) fn spawn_turn_bridge(
                                 let sid_c = sid.clone();
                                 tokio::spawn(async move {
                                     let _ = reqwest::Client::new()
-                                        .post(format!("http://127.0.0.1:{port}/api/dispatched-sessions/clear-stale-session-id"))
+                                        .post(crate::config::local_api_url(port, "/api/dispatched-sessions/clear-stale-session-id"))
                                         .json(&serde_json::json!({"claude_session_id": sid_c}))
                                         .send().await;
                                 });

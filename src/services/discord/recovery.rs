@@ -35,10 +35,7 @@ fn output_has_result_after_offset(output_path: &str, start_offset: u64) -> bool 
             let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
                 return false;
             };
-            let is_result = value
-                .get("type")
-                .and_then(|v| v.as_str())
-                == Some("result");
+            let is_result = value.get("type").and_then(|v| v.as_str()) == Some("result");
             let is_error = value
                 .get("is_error")
                 .and_then(|v| v.as_bool())
@@ -89,9 +86,7 @@ pub(super) fn extract_response_from_output_pub(output_path: &str, start_offset: 
                         for block in arr {
                             match block.get("type").and_then(|t| t.as_str()) {
                                 Some("text") => {
-                                    if let Some(text) =
-                                        block.get("text").and_then(|t| t.as_str())
-                                    {
+                                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                                         if !text.is_empty() {
                                             response.push_str(text);
                                             block_has_text = true;
@@ -251,9 +246,9 @@ pub(super) async fn restore_inflight_turns(
                     // #142: For implementation/rework, idle won't auto-complete (#115).
                     // Use PATCH /api/dispatches/:id to complete directly.
                     // For review, idle auto-complete works fine.
-                    let complete_url = format!(
-                        "http://127.0.0.1:{}/api/dispatches/{}",
-                        shared.api_port, did
+                    let complete_url = crate::config::local_api_url(
+                        shared.api_port,
+                        &format!("/api/dispatches/{}", did),
                     );
                     let client = reqwest::Client::new();
                     let patch_result = client
@@ -278,9 +273,12 @@ pub(super) async fn restore_inflight_turns(
                                 "  [{ts}] ⚠ recovery: dispatch {did} API completion failed ({status}), falling back to idle"
                             );
                             // Fallback: post idle (works for review type)
-                            let adk_session_key =
-                                build_adk_session_key(shared, ChannelId::new(state.channel_id), provider)
-                                    .await;
+                            let adk_session_key = build_adk_session_key(
+                                shared,
+                                ChannelId::new(state.channel_id),
+                                provider,
+                            )
+                            .await;
                             post_adk_session_status(
                                 adk_session_key.as_deref(),
                                 state.channel_name.as_deref(),
@@ -300,9 +298,12 @@ pub(super) async fn restore_inflight_turns(
                             println!(
                                 "  [{ts}] ⚠ recovery: dispatch {did} API call failed ({e}), falling back to idle"
                             );
-                            let adk_session_key =
-                                build_adk_session_key(shared, ChannelId::new(state.channel_id), provider)
-                                    .await;
+                            let adk_session_key = build_adk_session_key(
+                                shared,
+                                ChannelId::new(state.channel_id),
+                                provider,
+                            )
+                            .await;
                             post_adk_session_status(
                                 adk_session_key.as_deref(),
                                 state.channel_name.as_deref(),
@@ -861,9 +862,8 @@ mod tests {
 
     #[test]
     fn recovery_empty_response_uses_result() {
-        let file = write_jsonl(&[
-            r#"{"type":"result","subtype":"success","result":"결과만 있음"}"#,
-        ]);
+        let file =
+            write_jsonl(&[r#"{"type":"result","subtype":"success","result":"결과만 있음"}"#]);
         let resp = extract_response_from_output_pub(file.path().to_str().unwrap(), 0);
         assert_eq!(resp, "결과만 있음");
     }
@@ -883,10 +883,12 @@ mod tests {
     fn recovery_respects_start_offset() {
         // Only data after offset should be considered
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        let line1 = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"이전 턴"}]}}"#;
+        let line1 =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"이전 턴"}]}}"#;
         writeln!(file, "{}", line1).unwrap();
         let offset = file.as_file().metadata().unwrap().len();
-        let line2 = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"새 턴"}]}}"#;
+        let line2 =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"새 턴"}]}}"#;
         writeln!(file, "{}", line2).unwrap();
         file.flush().unwrap();
 
@@ -909,9 +911,7 @@ mod tests {
 
     #[test]
     fn success_result_treated_as_completion() {
-        let file = write_jsonl(&[
-            r#"{"type":"result","subtype":"success","result":"done"}"#,
-        ]);
+        let file = write_jsonl(&[r#"{"type":"result","subtype":"success","result":"done"}"#]);
         assert!(output_has_result_after_offset(
             file.path().to_str().unwrap(),
             0

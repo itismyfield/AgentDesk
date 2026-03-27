@@ -238,6 +238,8 @@ fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str, label
         }
     }
 
+    crate::kanban::drain_hook_side_effects(db, engine);
+
     // Notify any dispatches created by JS policies during this hook.
     // Without this, dispatches created in onTick (e.g., auto-queue.js dispatchNextEntry)
     // would only be picked up by [I-0] recovery 30s later.
@@ -246,15 +248,7 @@ fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str, label
 
 /// Drain pending transitions after each tier execution.
 fn drain_transitions(engine: &PolicyEngine, db: &Db) {
-    loop {
-        let transitions = engine.drain_pending_transitions();
-        if transitions.is_empty() {
-            break;
-        }
-        for (card_id, old_status, new_status) in &transitions {
-            crate::kanban::fire_transition_hooks(db, engine, card_id, old_status, new_status);
-        }
-    }
+    crate::kanban::drain_hook_side_effects(db, engine);
 }
 
 /// Background task that periodically fetches rate-limit data from external providers
@@ -720,7 +714,7 @@ async fn message_outbox_loop(db: Db, port: u16) {
         }
     };
 
-    let url = format!("http://127.0.0.1:{port}/api/send");
+    let url = crate::config::local_api_url(port, "/api/send");
 
     // Wait for server to be ready
     tokio::time::sleep(Duration::from_secs(3)).await;
