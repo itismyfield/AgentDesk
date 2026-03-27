@@ -45,10 +45,19 @@ sleep 2
 
 # Copy binary from dev
 echo "▸ Copying binary from dev..."
+# Remove immutable flag if set (only deploy scripts should touch the binary)
+chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
 cp "$ADK_DEV/bin/agentdesk" "$ADK_REL/bin/agentdesk"
 chmod +x "$ADK_REL/bin/agentdesk"
 xattr -d com.apple.provenance "$ADK_REL/bin/agentdesk" 2>/dev/null || true
-codesign -f -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime "$ADK_REL/bin/agentdesk" 2>/dev/null || true
+codesign -f -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" "$ADK_REL/bin/agentdesk"
+# Verify signature
+if ! codesign -v "$ADK_REL/bin/agentdesk" 2>/dev/null; then
+    echo "✗ Codesign verification failed — aborting"
+    exit 1
+fi
+# Lock binary to prevent unsigned overwrites
+chflags uchg "$ADK_REL/bin/agentdesk"
 
 # Copy dashboard from dev (with fallback to workspace source)
 # Stage into a temp dir first, then swap — never delete existing dist before new one is ready

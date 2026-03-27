@@ -14,7 +14,7 @@ echo "═══ ADK Dev Deploy ═══"
 # 1. Build release
 echo "▸ Building release..."
 cd "$REPO"
-cargo build --release 2>&1 | tail -1
+make build 2>&1 | tail -3
 
 # 2. Stop dev only — leave release untouched
 echo "▸ Stopping dev..."
@@ -40,9 +40,18 @@ rm -f "$ADK_DEV/runtime/dcserver.lock"
 
 # 3. Copy binary
 echo "▸ Copying binary..."
+# Remove immutable flag if set (only deploy scripts should touch the binary)
+chflags nouchg "$ADK_DEV/bin/agentdesk" 2>/dev/null || true
 cp "$REPO/target/release/agentdesk" "$ADK_DEV/bin/agentdesk"
 chmod +x "$ADK_DEV/bin/agentdesk"
-codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$ADK_DEV/bin/agentdesk" 2>/dev/null || true
+codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$ADK_DEV/bin/agentdesk"
+# Verify signature
+if ! codesign -v "$ADK_DEV/bin/agentdesk" 2>/dev/null; then
+    echo "✗ Codesign verification failed — aborting"
+    exit 1
+fi
+# Lock binary to prevent unsigned overwrites
+chflags uchg "$ADK_DEV/bin/agentdesk"
 
 # 3.5. Register with macOS firewall (NOPASSWD via /etc/sudoers.d/agentdesk-firewall)
 FW=/usr/libexec/ApplicationFirewall/socketfilterfw
