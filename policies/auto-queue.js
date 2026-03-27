@@ -40,8 +40,14 @@ var autoQueue = {
 
     // Verify this card had a dispatched queue entry (Rust already set it to 'done').
     // If no entry was in 'done' state with recent completion, this card is not from auto-queue.
+    // #145: Join with active/paused run to avoid picking up stale completed runs
+    // when the same card is re-queued into a new run
     var doneEntries = agentdesk.db.query(
-      "SELECT e.run_id FROM auto_queue_entries e WHERE e.kanban_card_id = ? AND e.status = 'done'",
+      "SELECT e.run_id FROM auto_queue_entries e " +
+      "JOIN auto_queue_runs r ON e.run_id = r.id " +
+      "WHERE e.kanban_card_id = ? AND e.status = 'done' " +
+      "AND r.status IN ('active', 'paused') " +
+      "ORDER BY r.created_at DESC LIMIT 1",
       [payload.card_id]
     );
     if (doneEntries.length === 0) return;

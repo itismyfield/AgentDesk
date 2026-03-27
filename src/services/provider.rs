@@ -96,7 +96,22 @@ impl ProviderKind {
                 }
             })
             .collect();
-        let trimmed = safe_prefix(&sanitized, 44);
+        // #145: Preserve -t{thread_id} suffix when truncating, so unified-thread
+        // guards (is_unified_thread_channel_name_active) can extract the thread ID.
+        let trimmed: String = if let Some(pos) = sanitized.rfind("-t") {
+            let suffix = &sanitized[pos..];
+            let is_thread_suffix =
+                suffix.len() > 2 && suffix[2..].chars().all(|c| c.is_ascii_digit());
+            if is_thread_suffix && sanitized.len() > 44 {
+                let prefix_budget = 44_usize.saturating_sub(suffix.len());
+                let prefix = safe_prefix(&sanitized[..pos], prefix_budget);
+                format!("{}{}", prefix, suffix)
+            } else {
+                safe_prefix(&sanitized, 44).to_string()
+            }
+        } else {
+            safe_prefix(&sanitized, 44).to_string()
+        };
         format!(
             "{}-{}-{}{}",
             TMUX_SESSION_PREFIX,

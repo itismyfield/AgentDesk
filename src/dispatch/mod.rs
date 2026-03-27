@@ -657,8 +657,10 @@ pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
              JOIN auto_queue_runs r ON e.run_id = r.id \
              WHERE e.run_id = ( \
                  SELECT e2.run_id FROM auto_queue_entries e2 \
+                 JOIN auto_queue_runs r2 ON e2.run_id = r2.id \
                  JOIN task_dispatches td ON td.kanban_card_id = e2.kanban_card_id \
-                 WHERE td.id = ?1 LIMIT 1 \
+                 WHERE td.id = ?1 AND r2.status IN ('active', 'paused') \
+                 LIMIT 1 \
              ) \
              AND r.status IN ('active', 'paused') \
              AND e.status IN ('pending', 'dispatched') \

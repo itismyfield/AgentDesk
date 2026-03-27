@@ -742,7 +742,8 @@ pub(crate) async fn send_dispatch_to_discord(
             let existing: String = conn
                 .query_row(
                     "SELECT COALESCE(unified_thread_id, '{}') FROM auto_queue_runs \
-                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1)",
+                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1) \
+                     AND status IN ('active', 'paused')",
                     [card_id],
                     |row| row.get(0),
                 )
@@ -753,7 +754,8 @@ pub(crate) async fn send_dispatch_to_discord(
                 }
                 conn.execute(
                     "UPDATE auto_queue_runs SET unified_thread_id = ?1 \
-                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?2)",
+                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?2) \
+                     AND status IN ('active', 'paused')",
                     rusqlite::params![map.to_string(), card_id],
                 )
                 .ok();
@@ -897,7 +899,8 @@ pub(crate) async fn send_dispatch_to_discord(
                                 let existing: String = conn
                                     .query_row(
                                         "SELECT COALESCE(unified_thread_id, '{}') FROM auto_queue_runs \
-                                         WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1)",
+                                         WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1) \
+                                         AND status IN ('active', 'paused')",
                                         [card_id],
                                         |row| row.get(0),
                                     )
@@ -939,9 +942,12 @@ pub(crate) async fn send_dispatch_to_discord(
                                     }
                                 });
                                 map[channel_id_num.to_string()] = serde_json::json!(thread_id);
+                                // #145: Only update active/paused runs to prevent stale-run
+                                // collision when the same card is re-queued into a new run
                                 conn.execute(
                                     "UPDATE auto_queue_runs SET unified_thread_id = ?1, unified_thread_channel_id = ?2 \
-                                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?3)",
+                                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?3) \
+                                     AND status IN ('active', 'paused')",
                                     rusqlite::params![map.to_string(), thread_id, card_id],
                                 )
                                 .ok();
