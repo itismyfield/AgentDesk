@@ -1814,8 +1814,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_mismatch_rejected() {
-        // from=codex, target=claude, submitter=codex → self-review blocked
+    async fn reverse_self_review_rejected() {
+        // from=codex, target=claude, submitter=codex → self-review blocked (submitter == from)
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-mismatch", "codex", "claude");
         let state = AppState {
@@ -1840,6 +1840,36 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.0["error"].as_str().unwrap().contains("self-review"));
+    }
+
+    #[tokio::test]
+    async fn provider_mismatch_branch_rejected() {
+        // from=claude, target=claude, submitter=codex → mismatch (not self-review, not target match)
+        // This exercises line 341-351 (mismatch branch), not 329-339 (self-review branch)
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-mismatch2", "claude", "claude");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-mismatch2".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: Some("codex".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("provider mismatch"));
     }
 
     #[tokio::test]
