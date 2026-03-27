@@ -1414,15 +1414,16 @@ async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
 
     for thread_channel_id in channels {
         // The kill signal carries the raw thread channel ID. Thread tmux sessions
-        // are named "{parent_channel_name}-t{thread_channel_id}" (see mod.rs:2601).
-        // We must find the matching tmux session by scanning for the -t{id} suffix
-        // rather than building from the raw ID directly.
-        let suffix = format!("-t{thread_channel_id}");
+        // are named "{parent_channel_name}-t{thread_channel_id}{env_suffix}" (see mod.rs:2601).
+        // We must find the matching tmux session by scanning for the exact suffix
+        // including env isolation to avoid killing sessions from other environments.
+        let env_suffix = crate::services::provider::tmux_env_suffix();
+        let full_suffix = format!("-t{thread_channel_id}{env_suffix}");
         let provider = shared.settings.read().await.provider.clone();
-        let suffix_c = suffix.clone();
+        let suffix_c = full_suffix.clone();
         let provider_c = provider.clone();
         let killed = tokio::task::spawn_blocking(move || {
-            // List tmux sessions and find the one containing -t{thread_channel_id}
+            // List tmux sessions and find the one ending with -t{thread_channel_id}{env_suffix}
             let prefix = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
             let output = std::process::Command::new("tmux")
                 .args(["list-sessions", "-F", "#{session_name}"])
@@ -1432,7 +1433,7 @@ async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
             if let Some(out) = output {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 for line in stdout.lines() {
-                    if line.starts_with(&prefix) && line.contains(&suffix_c) {
+                    if line.starts_with(&prefix) && line.ends_with(&suffix_c) {
                         record_tmux_exit_reason(line, "unified-thread run completed");
                         let exact = tmux_exact_target(line);
                         let _ = std::process::Command::new("tmux")

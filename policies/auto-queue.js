@@ -40,11 +40,42 @@ var autoQueue = {
 
     // Verify this card had a dispatched queue entry (Rust already set it to 'done').
     // If no entry was in 'done' state with recent completion, this card is not from auto-queue.
-    var wasQueued = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE kanban_card_id = ? AND status = 'done'",
+    var doneEntries = agentdesk.db.query(
+      "SELECT e.run_id FROM auto_queue_entries e WHERE e.kanban_card_id = ? AND e.status = 'done'",
       [payload.card_id]
     );
-    if (wasQueued.length === 0 || wasQueued[0].cnt === 0) return;
+    if (doneEntries.length === 0) return;
+
+    var runId = doneEntries[0].run_id;
+
+    // #145: Check if the unified run is now complete (no pending or dispatched entries remain).
+    // This must happen here in onCardTerminal — NOT inside dispatchNextEntry — because
+    // the last entry goes terminal without triggering another dispatch.
+    var remaining = agentdesk.db.query(
+      "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status IN ('pending', 'dispatched')",
+      [runId]
+    );
+    if (remaining.length > 0 && remaining[0].cnt === 0) {
+      var runInfo = agentdesk.db.query(
+        "SELECT unified_thread_id, unified_thread_channel_id FROM auto_queue_runs WHERE id = ?",
+        [runId]
+      );
+      if (runInfo.length > 0 && runInfo[0].unified_thread_id) {
+        var channelId = runInfo[0].unified_thread_channel_id;
+        if (channelId) {
+          agentdesk.log.info("[auto-queue] Unified-thread run " + runId + " complete — requesting tmux cleanup for channel " + channelId);
+          agentdesk.db.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+            ["kill_unified_thread:" + channelId, runId]
+          );
+        }
+      }
+      agentdesk.db.execute(
+        "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
+        [runId]
+      );
+      return;
+    }
 
     // Check if agent has any active (non-terminal) cards — don't dispatch if busy
     var tCfg = agentdesk.pipeline.getConfig();
@@ -126,36 +157,9 @@ function dispatchNextEntry(agentId) {
       [entry.id]
     );
 
-    // Check if run is complete (no more pending AND no more dispatched)
-    // #145: Must check both 'pending' and 'dispatched' — a just-dispatched item
-    // is still active and killing the tmux session would tear down the working turn.
-    var remaining = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status IN ('pending', 'dispatched')",
-      [entry.run_id]
-    );
-    if (remaining.length > 0 && remaining[0].cnt === 0) {
-      // #145: If unified-thread run is done, kill the shared tmux session
-      var runInfo = agentdesk.db.query(
-        "SELECT unified_thread_id, unified_thread_channel_id FROM auto_queue_runs WHERE id = ?",
-        [entry.run_id]
-      );
-      if (runInfo.length > 0 && runInfo[0].unified_thread_id) {
-        var channelId = runInfo[0].unified_thread_channel_id;
-        if (channelId) {
-          agentdesk.log.info("[auto-queue] Unified-thread run " + entry.run_id + " complete — requesting tmux cleanup for channel " + channelId);
-          // Mark a kv_meta flag for the Rust runtime to pick up and kill the session
-          agentdesk.db.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-            ["kill_unified_thread:" + channelId, entry.run_id]
-          );
-        }
-      }
-
-      agentdesk.db.execute(
-        "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
-        [entry.run_id]
-      );
-    }
+    // #145: Completion check moved to onCardTerminal where it can observe
+    // the final entry reaching 'done' state. Inside dispatchNextEntry the
+    // just-dispatched entry is counted as 'dispatched', so cnt can never be 0.
   } catch (e) {
     agentdesk.log.warn("[auto-queue] dispatch failed for " + entry.kanban_card_id + ", will retry on next tick: " + e);
   }
