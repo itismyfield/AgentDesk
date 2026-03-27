@@ -421,6 +421,27 @@ fn execute_streaming_local_tmux(
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
 
     let mut env_lines = String::from("unset CLAUDECODE\n");
+    // Build a PATH that includes the codex binary's parent directory.
+    // Codex is a `#!/usr/bin/env node` script, so `node` must be in PATH.
+    // When launchd spawns the server, PATH is minimal (/usr/bin:/bin:…)
+    // and lacks Homebrew paths, so we explicitly prepend them.
+    {
+        let mut path = std::env::var("PATH").unwrap_or_default();
+        if let Some(codex_dir) = std::path::Path::new(codex_bin).parent() {
+            let dir = codex_dir.to_string_lossy();
+            if !path.split(':').any(|p| p == dir.as_ref()) {
+                path = format!("{}:{}", dir, path);
+            }
+        }
+        // Also ensure /opt/homebrew/bin is present (common node location on Apple Silicon)
+        if !path.split(':').any(|p| p == "/opt/homebrew/bin") {
+            path = format!("/opt/homebrew/bin:{}", path);
+        }
+        env_lines.push_str(&format!(
+            "export PATH='{}'\n",
+            path.replace('\'', "'\\''")
+        ));
+    }
     if let Ok(root_dir) = std::env::var("AGENTDESK_ROOT_DIR") {
         let trimmed = root_dir.trim();
         if !trimmed.is_empty() {
