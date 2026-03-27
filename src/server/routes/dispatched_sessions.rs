@@ -608,6 +608,37 @@ pub async fn clear_stale_session_id(
     (StatusCode::OK, Json(json!({"cleared": changes})))
 }
 
+/// POST /api/dispatched-sessions/clear-session-id
+/// Clears claude_session_id for a specific session_key.
+/// Used when /clear is called so the next turn doesn't resume a dead session.
+pub async fn clear_session_id_by_key(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(key) = body.get("session_key").and_then(|v| v.as_str()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "session_key required"})),
+        );
+    };
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+    let changes = conn
+        .execute(
+            "UPDATE sessions SET claude_session_id = NULL WHERE session_key = ?1",
+            [key],
+        )
+        .unwrap_or(0);
+    (StatusCode::OK, Json(json!({"cleared": changes})))
+}
+
 /// GC stale thread sessions from DB: idle/disconnected + older than 1 hour.
 /// Thread sessions are identified by having a non-NULL thread_channel_id.
 pub fn gc_stale_thread_sessions_db(conn: &rusqlite::Connection) -> usize {

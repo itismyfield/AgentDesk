@@ -300,6 +300,10 @@ pub fn api_router(
             post(dispatched_sessions::clear_stale_session_id),
         )
         .route(
+            "/dispatched-sessions/clear-session-id",
+            post(dispatched_sessions::clear_session_id_by_key),
+        )
+        .route(
             "/sessions/force-kill",
             post(dispatched_sessions::force_kill_session),
         )

@@ -2098,6 +2098,13 @@ async fn handle_text_command(
             }
             d.intervention_queue.remove(&channel_id);
             drop(d);
+            // Clear stored claude_session_id from DB
+            if let Some(key) =
+                super::adk_session::build_adk_session_key(&data.shared, channel_id, &data.provider)
+                    .await
+            {
+                super::adk_session::clear_claude_session_id(&key, data.shared.api_port).await;
+            }
             // Send /clear to the actual Claude Code session via tmux
             #[cfg(unix)]
             if let Some(ref name) = tmux_name {
