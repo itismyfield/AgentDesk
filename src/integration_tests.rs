@@ -487,76 +487,125 @@ mod tests {
         }
     }
 
-    // ── Scenario 7: create_dispatch_core_with_id uses pipeline kickoff state (#134/#136) ──
+    // ── Scenario 7: dispatch uses card's effective pipeline, not global default (#134/#136) ──
 
     #[test]
-    fn scenario_7_dispatch_with_id_uses_pipeline_kickoff_state() {
+    fn scenario_7_dispatch_uses_card_effective_pipeline() {
         let db = test_db();
         seed_agent(&db);
-
-        // Seed card in a dispatchable state
         crate::pipeline::ensure_loaded();
-        let pipeline = crate::pipeline::get();
-        let dispatchable = pipeline
-            .dispatchable_states()
-            .into_iter()
-            .next()
-            .unwrap()
-            .to_string();
-        seed_card(&db, "card-s7", &dispatchable);
-        seed_dispatch(&db, "d-s7-existing", "card-s7", "implementation", "completed");
 
-        // Determine expected kickoff state from pipeline
-        let expected_kickoff = pipeline
-            .transitions
-            .iter()
+        // Simple pipeline override: ready→in_progress (gated), in_progress→done (gated)
+        // No "requested" state at all — kickoff should be "in_progress"
+        let simple_override = serde_json::json!({
+            "states": [
+                {"id": "backlog", "label": "Backlog"},
+                {"id": "ready", "label": "Ready"},
+                {"id": "in_progress", "label": "In Progress"},
+                {"id": "done", "label": "Done", "terminal": true}
+            ],
+            "transitions": [
+                {"from": "backlog", "to": "ready", "type": "free"},
+                {"from": "ready", "to": "in_progress", "type": "gated", "gates": ["active_dispatch"]},
+                {"from": "in_progress", "to": "done", "type": "gated", "gates": ["active_dispatch"]}
+            ],
+            "gates": {
+                "active_dispatch": {"type": "builtin", "check": "has_active_dispatch"}
+            },
+            "hooks": {
+                "in_progress": {"on_enter": ["OnCardTransition"], "on_exit": []},
+                "done": {"on_enter": ["OnCardTransition", "OnCardTerminal"], "on_exit": []}
+            },
+            "clocks": {
+                "in_progress": {"set": "started_at"},
+                "done": {"set": "completed_at"}
+            },
+            "events": {
+                "on_dispatch_completed": ["OnDispatchCompleted"]
+            },
+            "timeouts": {
+                "in_progress": {"duration": "4h", "clock": "started_at", "on_exhaust": "done"}
+            }
+        });
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO github_repos (id, display_name, pipeline_config) VALUES ('repo-s7', 'test/s7', ?1)",
+                [simple_override.to_string()],
+            ).unwrap();
+            // Card with repo_id pointing to override — in "ready" (dispatchable in simple pipeline)
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, repo_id, assigned_agent_id, created_at, updated_at) \
+                 VALUES ('card-s7', 'S7 Card', 'ready', 'repo-s7', 'agent-1', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            // Need a completed dispatch so the pending-dispatch guard doesn't block
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES ('d-s7-old', 'card-s7', 'agent-1', 'implementation', 'completed', 'old', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+        }
+
+        // Default pipeline kickoff is "requested", but simple pipeline kickoff is "in_progress"
+        let default_kickoff = crate::pipeline::get()
+            .transitions.iter()
             .find(|t| {
                 t.transition_type == crate::pipeline::TransitionType::Gated
-                    && pipeline
-                        .dispatchable_states()
-                        .contains(&t.from.as_str())
+                    && crate::pipeline::get().dispatchable_states().contains(&t.from.as_str())
             })
-            .map(|t| t.to.clone())
+            .map(|t| t.to.as_str())
             .unwrap();
+        assert_eq!(default_kickoff, "requested", "default pipeline kickoff must be 'requested'");
 
-        // Create dispatch via create_dispatch_core_with_id (the intent-model path)
+        // Create dispatch via create_dispatch_core_with_id — should use card's effective pipeline
         let result = dispatch::create_dispatch_core_with_id(
             &db,
             "d-s7-new",
             "card-s7",
             "agent-1",
             "implementation",
-            "[Impl via ID]",
+            "[S7 test]",
             &serde_json::json!({}),
         );
         assert!(result.is_ok(), "dispatch creation should succeed: {:?}", result.err());
 
-        // Card status must match pipeline kickoff state (not hardcoded 'requested')
+        // Card status must be "in_progress" (override kickoff), NOT "requested" (default kickoff)
         let status = get_card_status(&db, "card-s7");
         assert_eq!(
-            status, expected_kickoff,
-            "create_dispatch_core_with_id must use pipeline kickoff state"
+            status, "in_progress",
+            "dispatch must use card's effective pipeline kickoff, not global default"
         );
 
-        // Clock field for the kickoff state should be set
-        if let Some(clock) = pipeline.clock_for_state(&expected_kickoff) {
+        // Also test create_dispatch_core (the non-ID path)
+        {
             let conn = db.lock().unwrap();
-            let clock_val: Option<String> = conn
-                .query_row(
-                    &format!(
-                        "SELECT {} FROM kanban_cards WHERE id = 'card-s7'",
-                        clock.set
-                    ),
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(
-                clock_val.is_some(),
-                "clock field '{}' must be set for kickoff state",
-                clock.set
-            );
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, repo_id, assigned_agent_id, created_at, updated_at) \
+                 VALUES ('card-s7b', 'S7b Card', 'ready', 'repo-s7', 'agent-1', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES ('d-s7b-old', 'card-s7b', 'agent-1', 'implementation', 'completed', 'old', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
         }
+        let result2 = dispatch::create_dispatch_core(
+            &db,
+            "card-s7b",
+            "agent-1",
+            "implementation",
+            "[S7b test]",
+            &serde_json::json!({}),
+        );
+        assert!(result2.is_ok(), "create_dispatch_core should succeed: {:?}", result2.err());
+        assert_eq!(
+            get_card_status(&db, "card-s7b"),
+            "in_progress",
+            "create_dispatch_core must also use card's effective pipeline kickoff"
+        );
     }
 
     // ── Scenario 8: Custom pipeline override — resolve and validate (#135/#136) ──
