@@ -57,10 +57,24 @@ fi
 # ── Step 2: Copy binary ──────────────────────────────────────────────────────
 info "Installing binary..."
 mkdir -p "$BIN_DIR"
+if [ "$(uname -s)" = "Darwin" ]; then
+  # Remove immutable flag if set (only deploy scripts should touch the binary)
+  chflags nouchg "$BIN_DIR/agentdesk" 2>/dev/null || true
+fi
 cp "$PROJECT_DIR/target/release/agentdesk" "$BIN_DIR/agentdesk"
 chmod +x "$BIN_DIR/agentdesk"
-codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$BIN_DIR/agentdesk" 2>/dev/null || true
-ok "Binary: $BIN_DIR/agentdesk (signed as com.itismyfield.agentdesk)"
+if [ "$(uname -s)" = "Darwin" ]; then
+  codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$BIN_DIR/agentdesk" 2>/dev/null || true
+  # Verify signature
+  if ! codesign -v "$BIN_DIR/agentdesk" 2>/dev/null; then
+    fail "Codesign verification failed — aborting"
+  fi
+  # Lock binary to prevent unsigned overwrites
+  chflags uchg "$BIN_DIR/agentdesk"
+  ok "Binary: $BIN_DIR/agentdesk (signed + locked)"
+else
+  ok "Binary: $BIN_DIR/agentdesk"
+fi
 
 # Copy dashboard dist if it exists
 if [ -d "$PROJECT_DIR/dashboard/dist" ]; then

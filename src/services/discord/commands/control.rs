@@ -4,6 +4,9 @@ use std::sync::atomic::Ordering;
 use poise::serenity_prelude as serenity;
 use serenity::CreateAttachment;
 
+#[cfg(unix)]
+use crate::services::tmux_common::tmux_exact_target;
+
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::settings::cleanup_channel_uploads;
 use super::super::turn_bridge::cancel_active_token;
@@ -69,6 +72,14 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         cancel_active_token(&token, true, "/clear");
     }
 
+    let tmux_name = {
+        let data = ctx.data().shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|s| s.channel_name.as_ref())
+            .map(|ch_name| ctx.data().provider.build_tmux_session_name(ch_name))
+    };
+
     {
         let mut data = ctx.data().shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -100,6 +111,22 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         super::super::adk_session::build_adk_session_key(shared, channel_id, provider).await
     {
         super::super::adk_session::clear_claude_session_id(&key, shared.api_port).await;
+    }
+
+    // Only send /clear via send-keys for Claude sessions.
+    // Codex reads tmux pane stdin as follow-up prompts, so literal "/clear"
+    // would be interpreted as a new user turn instead of a slash command.
+    #[cfg(unix)]
+    if *provider == crate::services::provider::ProviderKind::Claude {
+        if let Some(ref name) = tmux_name {
+            let exact_target = tmux_exact_target(name);
+            let _ = tokio::task::spawn_blocking(move || {
+                std::process::Command::new("tmux")
+                    .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
+                    .output()
+            })
+            .await;
+        }
     }
 
     ctx.say("Session cleared.").await?;
