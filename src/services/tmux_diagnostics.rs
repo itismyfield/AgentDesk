@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::process::Command;
 
 use crate::utils::format::safe_prefix;
 
@@ -8,8 +7,9 @@ fn tmux_exit_reason_path(tmux_session_name: &str) -> String {
     crate::services::tmux_common::session_temp_path(tmux_session_name, "exit_reason")
 }
 
+#[cfg(unix)]
 pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
-    Command::new("tmux")
+    std::process::Command::new("tmux")
         .args(["has-session", "-t", tmux_session_name])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -18,22 +18,33 @@ pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(not(unix))]
+pub fn tmux_session_exists(_tmux_session_name: &str) -> bool {
+    false
+}
+
 fn pane_list_has_live_pane(stdout: &str) -> bool {
     stdout.lines().any(|line| line.trim() == "0")
 }
 
+#[cfg(unix)]
 pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
     if !tmux_session_exists(tmux_session_name) {
         return false;
     }
 
-    Command::new("tmux")
+    std::process::Command::new("tmux")
         .args(["list-panes", "-t", tmux_session_name, "-F", "#{pane_dead}"])
         .output()
         .ok()
         .filter(|output| output.status.success())
         .map(|output| pane_list_has_live_pane(&String::from_utf8_lossy(&output.stdout)))
         .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub fn tmux_session_has_live_pane(_tmux_session_name: &str) -> bool {
+    false
 }
 
 pub fn clear_tmux_exit_reason(tmux_session_name: &str) {

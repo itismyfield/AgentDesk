@@ -2688,12 +2688,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_tmux_capture_detects_ready_prompt() {
         let capture = "...\n▶ Ready for input (type message + Enter)\n";
         assert!(tmux_capture_indicates_ready_for_input(capture));
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_tmux_capture_ignores_non_ready_prompt() {
         let capture = "Claude is still working...\n";
         assert!(!tmux_capture_indicates_ready_for_input(capture));
