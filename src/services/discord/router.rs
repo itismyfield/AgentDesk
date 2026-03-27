@@ -2077,6 +2077,10 @@ async fn handle_text_command(
             if let Some(token) = d.cancel_tokens.remove(&channel_id) {
                 token.cancel_with_tmux_cleanup();
             }
+            // Build tmux session name from channel name
+            let tmux_name = d.sessions.get(&channel_id)
+                .and_then(|s| s.channel_name.as_ref())
+                .map(|ch_name| data.provider.build_tmux_session_name(ch_name));
             if let Some(session) = d.sessions.get_mut(&channel_id) {
                 session.history.clear();
                 session.pending_uploads.clear();
@@ -2085,6 +2089,17 @@ async fn handle_text_command(
             }
             d.intervention_queue.remove(&channel_id);
             drop(d);
+            // Send /clear to the actual Claude Code session via tmux
+            #[cfg(unix)]
+            if let Some(ref name) = tmux_name {
+                let sess = name.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new("tmux")
+                        .args(["send-keys", "-t", &sess, "/clear", "Enter"])
+                        .output()
+                })
+                .await;
+            }
             let _ = msg.reply(&ctx.http, "Session cleared.").await;
             return Ok(true);
         }
