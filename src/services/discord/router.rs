@@ -113,11 +113,18 @@ pub(super) async fn handle_event(
                 return Ok(());
             }
 
-            // Ignore messages that mention other users (not directed at the bot)
+            // Ignore messages that mention other (human) users — not directed at
+            // this bot.  Bot mentions are excluded because Discord auto-adds the
+            // replied-to author to the mentions array for InlineReply messages;
+            // filtering on those would silently drop legitimate replies to
+            // announce/notify/codex bot messages.
             if !new_message.mentions.is_empty() {
                 let bot_id = ctx.cache.current_user().id;
-                let mentions_others = new_message.mentions.iter().any(|u| u.id != bot_id);
-                if mentions_others {
+                let mentions_other_humans = new_message
+                    .mentions
+                    .iter()
+                    .any(|u| u.id != bot_id && !u.bot);
+                if mentions_other_humans {
                     return Ok(());
                 }
             }
