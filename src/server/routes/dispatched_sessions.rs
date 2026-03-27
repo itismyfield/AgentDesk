@@ -1522,6 +1522,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn stale_local_tmux_session_is_filtered_from_active_dispatch_list() {
         let db = test_db();
         let engine = test_engine(&db);

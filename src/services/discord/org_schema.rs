@@ -502,7 +502,8 @@ suffix_map:
     fn test_expand_tilde_bare() {
         let expanded = expand_tilde("~");
         assert_ne!(expanded, "~");
-        assert!(expanded.starts_with('/'));
+        // Unix: starts with '/', Windows: starts with drive letter (e.g. C:\)
+        assert!(expanded.starts_with('/') || expanded.chars().nth(1) == Some(':'));
     }
 
     #[test]
