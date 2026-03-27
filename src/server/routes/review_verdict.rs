@@ -703,7 +703,20 @@ pub async fn submit_review_decision(
                                 })
                                 .map(|t| t.to.clone())
                         })
-                        .unwrap_or_else(|| "in_progress".to_string());
+                        .unwrap_or_else(|| {
+                            // Fallback: find the first gated target from any dispatchable state (work state)
+                            crate::pipeline::try_get()
+                                .and_then(|p| {
+                                    let disp = p.dispatchable_states();
+                                    p.transitions.iter()
+                                        .find(|t| {
+                                            t.transition_type == crate::pipeline::TransitionType::Gated
+                                                && disp.contains(&t.from.as_str())
+                                        })
+                                        .map(|t| t.to.clone())
+                                })
+                                .unwrap_or_else(|| "in_progress".to_string())
+                        });
                     let _ = crate::kanban::transition_status(
                         &state.db,
                         &state.engine,

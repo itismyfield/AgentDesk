@@ -331,9 +331,32 @@ pub fn create_dispatch_core_with_id(
             rusqlite::params![dispatch_id, kanban_card_id],
         )?;
     } else {
+        // Pipeline-driven: resolve the dispatch kickoff state
+        crate::pipeline::ensure_loaded();
+        let pipeline = crate::pipeline::get();
+        let dispatchable = pipeline.dispatchable_states();
+        let kickoff_state = pipeline
+            .transitions
+            .iter()
+            .find(|t| {
+                t.transition_type == crate::pipeline::TransitionType::Gated
+                    && dispatchable.contains(&t.from.as_str())
+            })
+            .map(|t| t.to.clone())
+            .unwrap_or_else(|| {
+                tracing::error!("Pipeline has no kickoff state — check pipeline configuration");
+                pipeline.initial_state().to_string()
+            });
+        let clock_sql = pipeline
+            .clock_for_state(&kickoff_state)
+            .map(|c| format!(", {} = datetime('now')", c.set))
+            .unwrap_or_default();
+        let sql = format!(
+            "UPDATE kanban_cards SET latest_dispatch_id = ?1, status = ?2{clock_sql}, updated_at = datetime('now') WHERE id = ?3"
+        );
         conn.execute(
-            "UPDATE kanban_cards SET latest_dispatch_id = ?1, status = 'requested', requested_at = datetime('now'), updated_at = datetime('now') WHERE id = ?2",
-            rusqlite::params![dispatch_id, kanban_card_id],
+            &sql,
+            rusqlite::params![dispatch_id, kickoff_state, kanban_card_id],
         )?;
     }
 
