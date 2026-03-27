@@ -934,6 +934,31 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     .get("num_turns")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u32);
+
+                // Prefer result event's own usage field over accumulated message values.
+                // The result event usage reflects the LAST API call's context window,
+                // while accumulated values overcount for multi-call turns (tool use loops).
+                if let Some(usage) = json.get("usage") {
+                    let inp = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let cache_read = usage
+                        .get("cache_read_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let cache_creation = usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let out = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    accum_input_tokens = inp + cache_read + cache_creation;
+                    accum_output_tokens = out;
+                }
+
                 if cost_usd.is_some() || total_cost_usd.is_some() || last_model.is_some() {
                     let _ = sender.send(StreamMessage::StatusUpdate {
                         model: last_model.clone(),
@@ -1744,13 +1769,7 @@ fn execute_streaming_local_tmux(
     // Keep tmux session alive after process exits for post-mortem analysis
     let exact_target = tmux_exact_target(tmux_session_name);
     let _ = Command::new("tmux")
-        .args([
-            "set-option",
-            "-t",
-            &exact_target,
-            "remain-on-exit",
-            "on",
-        ])
+        .args(["set-option", "-t", &exact_target, "remain-on-exit", "on"])
         .output();
 
     // Stamp generation marker so post-restart watcher restore can detect old sessions
