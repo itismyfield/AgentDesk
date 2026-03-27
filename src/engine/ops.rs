@@ -114,7 +114,10 @@ fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 if (/UPDATE\s+kanban_cards\b/i.test(sql) && /(?<![_a-z])status\s*=/i.test(sql)) {
                     throw new Error("Direct kanban_cards status UPDATE is blocked. Use agentdesk.kanban.setStatus(cardId, newStatus) instead.");
                 }
-                // Direct write — intent model (#121) deferred until drain is wired up
+                // Direct write — db.execute remains synchronous by design.
+                // dispatch.create and kanban.setStatus use intent/transition model;
+                // converting db.execute to intents requires typed intents for each
+                // mutation pattern (card_review_state, kv_meta, agents, etc.).
                 var json = rawExec(sql, JSON.stringify(params || []));
                 return JSON.parse(json);
             };
