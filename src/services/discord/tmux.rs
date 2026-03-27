@@ -520,10 +520,10 @@ pub(super) async fn tmux_output_watcher(
             )
             .await;
 
-            const CONTEXT_WINDOW: u64 = 1_000_000;
-            const COMPACT_THRESHOLD_PCT: u64 = 60;
-            let pct = (tokens * 100) / CONTEXT_WINDOW.max(1);
-            if pct >= COMPACT_THRESHOLD_PCT && !is_prompt_too_long {
+            let ctx_cfg =
+                super::adk_session::fetch_context_thresholds(shared.api_port).await;
+            let pct = (tokens * 100) / ctx_cfg.context_window.max(1);
+            if pct >= ctx_cfg.compact_pct && !is_prompt_too_long {
                 let exact_target =
                     crate::services::tmux_common::tmux_exact_target(&tmux_session_name);
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -819,7 +819,12 @@ pub(super) fn process_watcher_lines(
         }
     }
 
-    (found_result, is_prompt_too_long, is_auth_error, result_tokens)
+    (
+        found_result,
+        is_prompt_too_long,
+        is_auth_error,
+        result_tokens,
+    )
 }
 
 /// On startup, scan for surviving tmux sessions (AgentDesk-*) and restore watchers.
