@@ -704,25 +704,26 @@ pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
     result
 }
 
+/// Extract thread channel ID from a channel name's `-t{15+digit}` suffix.
+/// Pure parsing — no DB access. Used by both production guards and tests.
+pub fn extract_thread_channel_id(channel_name: &str) -> Option<u64> {
+    let pos = channel_name.rfind("-t")?;
+    let suffix = &channel_name[pos + 2..];
+    if suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit()) {
+        let id: u64 = suffix.parse().ok()?;
+        if id == 0 { None } else { Some(id) }
+    } else {
+        None
+    }
+}
+
 /// Check whether a channel name (from tmux session parsing) belongs to an active
 /// unified-thread auto-queue run. Extracts the thread channel ID from the
 /// `-t{15+digit}` suffix in the channel name.
 pub fn is_unified_thread_channel_name_active(channel_name: &str) -> bool {
-    // Extract thread channel ID from channel name suffix (-t{15+digits})
-    let thread_channel_id: u64 = match channel_name.rfind("-t") {
-        Some(pos) => {
-            let suffix = &channel_name[pos + 2..];
-            if suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit()) {
-                suffix.parse().unwrap_or(0)
-            } else {
-                return false;
-            }
-        }
-        None => return false,
-    };
-    if thread_channel_id == 0 {
+    let Some(thread_channel_id) = extract_thread_channel_id(channel_name) else {
         return false;
-    }
+    };
     is_unified_thread_channel_active(thread_channel_id)
 }
 
