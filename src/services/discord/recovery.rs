@@ -598,6 +598,21 @@ pub(super) async fn restore_inflight_turns(
             continue;
         };
 
+        // If tmux pane is alive, skip recovery reader entirely.
+        // The session is idle (waiting for input) — restore_tmux_watchers will
+        // adopt it and attach a watcher. Recovery reader would just time out
+        // and declare SessionDied on an otherwise healthy session.
+        let pane_alive = tmux_session_has_live_pane(&tmux_session_name);
+        if pane_alive {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] ↻ inflight recovery: pane alive for channel {}, skipping reader → watcher adopt",
+                state.channel_id
+            );
+            clear_inflight_state(provider, state.channel_id);
+            continue;
+        }
+
         shared
             .recovering_channels
             .insert(channel_id, std::time::Instant::now());
