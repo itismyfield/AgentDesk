@@ -150,17 +150,17 @@ function dispatchNextEntry(agentId) {
   agentdesk.log.info("[auto-queue] Dispatching next entry for " + agentId + ": " + entry.kanban_card_id);
 
   try {
-    agentdesk.dispatch.create(
+    var dispatchId = agentdesk.dispatch.create(
       entry.kanban_card_id,
       agentId,
       "implementation",
       entry.title
     );
 
-    // Dispatch succeeded — mark entry
+    // Dispatch succeeded — mark entry with dispatch_id for direct run association (#145)
     agentdesk.db.execute(
-      "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?",
-      [entry.id]
+      "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = ?, dispatched_at = datetime('now') WHERE id = ?",
+      [dispatchId, entry.id]
     );
 
     // #145: Completion check moved to onCardTerminal where it can observe

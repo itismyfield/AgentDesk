@@ -78,6 +78,7 @@ fn ensure_tables(conn: &rusqlite::Connection) {
             priority_rank   INTEGER DEFAULT 0,
             reason          TEXT,
             status          TEXT DEFAULT 'pending',
+            dispatch_id     TEXT,
             created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
             dispatched_at   DATETIME,
             completed_at    DATETIME
@@ -97,6 +98,20 @@ fn ensure_tables(conn: &rusqlite::Connection) {
             "ALTER TABLE auto_queue_runs ADD COLUMN unified_thread INTEGER DEFAULT 0;
              ALTER TABLE auto_queue_runs ADD COLUMN unified_thread_id TEXT;
              ALTER TABLE auto_queue_runs ADD COLUMN unified_thread_channel_id TEXT;",
+        )
+        .ok();
+    }
+    // #145: dispatch_id on entries — direct dispatch→run association
+    let has_dispatch_id: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_entries') WHERE name = 'dispatch_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_dispatch_id {
+        conn.execute_batch(
+            "ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;",
         )
         .ok();
     }

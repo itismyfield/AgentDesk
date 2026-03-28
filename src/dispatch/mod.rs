@@ -650,6 +650,8 @@ pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
+    // #145: Direct dispatch→entry→run lookup via auto_queue_entries.dispatch_id.
+    // Eliminates kanban_card_id-based ambiguity when the same card is re-queued.
     let result: bool = conn
         .query_row(
             "SELECT COUNT(*) > 0 \
@@ -657,9 +659,7 @@ pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
              JOIN auto_queue_runs r ON e.run_id = r.id \
              WHERE e.run_id = ( \
                  SELECT e2.run_id FROM auto_queue_entries e2 \
-                 JOIN auto_queue_runs r2 ON e2.run_id = r2.id \
-                 JOIN task_dispatches td ON td.kanban_card_id = e2.kanban_card_id \
-                 WHERE td.id = ?1 AND r2.status IN ('active', 'paused') \
+                 WHERE e2.dispatch_id = ?1 \
                  LIMIT 1 \
              ) \
              AND r.status IN ('active', 'paused') \

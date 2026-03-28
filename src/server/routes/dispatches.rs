@@ -942,13 +942,13 @@ pub(crate) async fn send_dispatch_to_discord(
                                     }
                                 });
                                 map[channel_id_num.to_string()] = serde_json::json!(thread_id);
-                                // #145: Only update active/paused runs to prevent stale-run
-                                // collision when the same card is re-queued into a new run
+                                // #145: Direct dispatch→entry→run association via dispatch_id.
+                                // Eliminates card_id ambiguity when same card is re-queued.
                                 conn.execute(
                                     "UPDATE auto_queue_runs SET unified_thread_id = ?1, unified_thread_channel_id = ?2 \
-                                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?3) \
+                                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE dispatch_id = ?3) \
                                      AND status IN ('active', 'paused')",
-                                    rusqlite::params![map.to_string(), thread_id, card_id],
+                                    rusqlite::params![map.to_string(), thread_id, dispatch_id],
                                 )
                                 .ok();
                             }
