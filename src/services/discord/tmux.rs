@@ -432,6 +432,78 @@ pub(super) async fn tmux_output_watcher(
             }
         }
 
+        // Detect stale session resume failure in watcher output
+        let is_stale_resume = full_response.contains("No conversation found")
+            || full_response.contains("Error: No conversation");
+        if is_stale_resume {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!(
+                "  [{ts}] ⚠ Watcher detected stale session resume failure (channel {}), clearing session_id",
+                channel_id
+            );
+            // Clear in-memory session_id
+            {
+                let mut data = shared.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.session_id = None;
+                }
+            }
+            // Clear DB session_id
+            {
+                let hostname = crate::services::platform::hostname_short();
+                let session_key = format!("{}:{}", hostname, tmux_session_name);
+                super::adk_session::save_claude_session_id(
+                    &session_key,
+                    "",
+                    shared.api_port,
+                )
+                .await;
+            }
+            // Delete placeholder if exists
+            if let Some(msg_id) = placeholder_msg_id {
+                let _ = channel_id.delete_message(&http, msg_id).await;
+            }
+            // Auto-retry: fetch Discord history and re-send via announce bot
+            // The original message is in the channel — fetch last 10 and re-send the latest user message
+            if let Ok(msgs) = channel_id
+                .messages(&http, serenity::builder::GetMessages::new().limit(10))
+                .await
+            {
+                let mut history_lines = Vec::new();
+                let mut last_user_msg = String::new();
+                for msg in msgs.iter().rev() {
+                    if !msg.content.trim().is_empty() {
+                        let content: String = msg.content.chars().take(300).collect();
+                        history_lines.push(format!("{}: {}", msg.author.name, content));
+                        if !msg.author.bot {
+                            last_user_msg = msg.content.clone();
+                        }
+                    }
+                }
+                if !last_user_msg.is_empty() {
+                    let history = format!(
+                        "[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n{}\n\n",
+                        history_lines.join("\n")
+                    );
+                    let retry_content = format!("{}{}", history, last_user_msg);
+                    let _ = reqwest::Client::new()
+                        .post(crate::config::local_api_url(shared.api_port, "/api/send"))
+                        .json(&serde_json::json!({
+                            "target": format!("channel:{}", channel_id),
+                            "content": retry_content,
+                            "source": "session-retry",
+                            "bot": "announce",
+                        }))
+                        .send()
+                        .await;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!("  [{ts}] ↻ Watcher auto-retry sent for channel {channel_id}");
+                }
+            }
+            // Skip normal response relay
+            full_response = String::new();
+        }
+
         // Send the terminal response to Discord
         if !full_response.trim().is_empty() {
             let formatted = format_for_discord(&full_response);
