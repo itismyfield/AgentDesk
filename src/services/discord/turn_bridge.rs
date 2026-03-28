@@ -418,14 +418,17 @@ async fn fail_dispatch_with_retry(api_port: u16, dispatch_id: Option<&str>, erro
     }
 }
 
-async fn complete_work_dispatch_on_turn_end(api_port: u16, dispatch_id: Option<&str>) {
+/// Complete an implementation/rework dispatch via finalize_dispatch (#143).
+///
+/// Uses the shared Db+PolicyEngine directly (no HTTP round-trip, no DB fallback).
+/// Falls back to API PATCH only when Db/Engine are unavailable.
+async fn complete_work_dispatch_on_turn_end(shared: &Arc<super::SharedData>, dispatch_id: Option<&str>) {
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
-    let Some(snapshot) = fetch_dispatch_snapshot(api_port, dispatch_id).await else {
-        // Snapshot fetch failed — fail the dispatch with retry to prevent orphan
+    let Some(snapshot) = fetch_dispatch_snapshot(shared.api_port, dispatch_id).await else {
         fail_dispatch_with_retry(
-            api_port,
+            shared.api_port,
             Some(dispatch_id),
             "dispatch snapshot fetch failed",
         )
@@ -440,24 +443,50 @@ async fn complete_work_dispatch_on_turn_end(api_port: u16, dispatch_id: Option<&
         _ => return,
     }
 
-    let url = local_api_url(api_port, &format!("/api/dispatches/{dispatch_id}"));
-    let payload = serde_json::json!({
-        "status": "completed",
-        "result": {
-            "completion_source": "turn_bridge_explicit",
-        },
-    });
-    for attempt in 1..=3 {
-        match reqwest::Client::new()
-            .patch(&url)
-            .json(&payload)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
+    // Direct finalize_dispatch — single completion authority (#143)
+    if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+        match crate::dispatch::finalize_dispatch(
+            db,
+            engine,
+            dispatch_id,
+            "turn_bridge_explicit",
+            None,
+        ) {
+            Ok(_) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!(
                     "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id}",
+                    dtype = snapshot.dispatch_type,
+                );
+                let db_clone = db.clone();
+                let did = dispatch_id.to_string();
+                tokio::spawn(async move {
+                    crate::server::routes::dispatches::handle_completed_dispatch_followups(
+                        &db_clone, &did,
+                    )
+                    .await;
+                });
+                return;
+            }
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ finalize_dispatch failed for {dispatch_id}: {e}"
+                );
+            }
+        }
+    } else {
+        // Db/Engine not available — fall back to API PATCH
+        let url = local_api_url(shared.api_port, &format!("/api/dispatches/{dispatch_id}"));
+        let payload = serde_json::json!({
+            "status": "completed",
+            "result": { "completion_source": "turn_bridge_explicit" },
+        });
+        match reqwest::Client::new().patch(&url).json(&payload).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id} (via API)",
                     dtype = snapshot.dispatch_type,
                 );
                 return;
@@ -465,38 +494,14 @@ async fn complete_work_dispatch_on_turn_end(api_port: u16, dispatch_id: Option<&
             Ok(resp) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 eprintln!(
-                    "  [{ts}] ⚠ Explicit dispatch completion failed (attempt {attempt}/3): HTTP {}",
+                    "  [{ts}] ⚠ Explicit dispatch completion failed: HTTP {}",
                     resp.status()
                 );
             }
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
-                    "  [{ts}] ⚠ Explicit dispatch completion error (attempt {attempt}/3): {e}"
-                );
+                eprintln!("  [{ts}] ⚠ Explicit dispatch completion error: {e}");
             }
-        }
-        if attempt < 3 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-    }
-    // Fallback: direct DB update + reconciliation marker for onTick hook chain.
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    eprintln!(
-        "  [{ts}] ❌ Explicit completion failed after 3 retries, falling back to direct DB for {dispatch_id}"
-    );
-    if let Some(root) = crate::cli::agentdesk_runtime_root() {
-        let db_path = root.join("data/agentdesk.sqlite");
-        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-            let _ = conn.execute(
-                "UPDATE task_dispatches SET status = 'completed', result = '{\"completion_source\":\"turn_bridge_db_fallback\",\"needs_reconcile\":true}', updated_at = datetime('now') WHERE id = ?1 AND status = 'pending'",
-                [dispatch_id],
-            );
-            // Leave reconciliation marker for onTick to run hook chain
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
-            );
         }
     }
 }
@@ -979,7 +984,7 @@ pub(super) fn spawn_turn_bridge(
         // Skip if: cancelled, prompt too long, or transport error.
         // transport_error is set by StreamMessage::Error — not substring matching.
         if !cancelled && !is_prompt_too_long && !transport_error {
-            complete_work_dispatch_on_turn_end(shared_owned.api_port, dispatch_id.as_deref()).await;
+            complete_work_dispatch_on_turn_end(&shared_owned, dispatch_id.as_deref()).await;
         } else if transport_error && !cancelled {
             // Transport error — fail the dispatch instead of completing
             fail_dispatch_with_retry(

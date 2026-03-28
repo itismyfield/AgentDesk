@@ -986,7 +986,9 @@ pub fn handle_dcserver(token: Option<String>) {
         let health_registry = std::sync::Arc::new(services::discord::health::HealthRegistry::new());
         health_registry.init_bot_tokens().await;
 
-        // Initialize SQLite DB
+        // Initialize SQLite DB — clone handles for Discord bot before moving into HTTP server (#143)
+        let mut discord_db: Option<crate::db::Db> = None;
+        let mut discord_engine: Option<PolicyEngine> = None;
         match db::init(&ad_config) {
             Ok(ad_db) => {
                 // Sync agents from config → DB
@@ -1016,6 +1018,9 @@ pub fn handle_dcserver(token: Option<String>) {
                 let http_port = ad_config.server.port;
                 match PolicyEngine::new(&ad_config, ad_db.clone()) {
                     Ok(engine) => {
+                        // Clone for Discord bot — direct finalize_dispatch access (#143)
+                        discord_db = Some(ad_db.clone());
+                        discord_engine = Some(engine.clone());
                         let http_config = ad_config.clone();
                         let registry_for_http = health_registry.clone();
                         tokio::spawn(async move {
@@ -1072,6 +1077,8 @@ pub fn handle_dcserver(token: Option<String>) {
                     shutdown_remaining,
                     health_registry,
                     api_port,
+                    discord_db,
+                    discord_engine,
                 )
                 .await;
             }
@@ -1106,6 +1113,8 @@ pub fn handle_dcserver(token: Option<String>) {
                     let sr = shutdown_remaining.clone();
                     let hr = health_registry.clone();
                     let port = api_port;
+                    let db_clone = discord_db.clone();
+                    let engine_clone = discord_engine.clone();
                     tasks.push(tokio::spawn(async move {
                         services::discord::run_bot(
                             &config.token,
@@ -1115,6 +1124,8 @@ pub fn handle_dcserver(token: Option<String>) {
                             sr,
                             hr,
                             port,
+                            db_clone,
+                            engine_clone,
                         )
                         .await;
                     }));

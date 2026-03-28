@@ -245,80 +245,69 @@ pub(super) async fn restore_inflight_turns(
                 // review can use idle auto-complete.
                 let recovered_dispatch_id = parse_dispatch_id(&state.user_text);
                 if let Some(ref did) = recovered_dispatch_id {
-                    // #142: For implementation/rework, idle won't auto-complete (#115).
-                    // Use PATCH /api/dispatches/:id to complete directly.
-                    // For review, idle auto-complete works fine.
-                    let complete_url = crate::config::local_api_url(
-                        shared.api_port,
-                        &format!("/api/dispatches/{}", did),
-                    );
-                    let client = reqwest::Client::new();
-                    let patch_result = client
-                        .patch(&complete_url)
-                        .json(&serde_json::json!({
-                            "status": "completed",
-                            "result": {"completion_source": "recovery_completed_during_downtime"},
-                        }))
-                        .send()
-                        .await;
-                    match patch_result {
-                        Ok(resp) if resp.status().is_success() => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!(
-                                "  [{ts}] ✓ recovery: completed dispatch {did} via API (completed-during-downtime)"
-                            );
+                    // #143: Use finalize_dispatch directly (no idle fallback).
+                    if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+                        match crate::dispatch::finalize_dispatch(
+                            db,
+                            engine,
+                            did,
+                            "recovery_completed_during_downtime",
+                            None,
+                        ) {
+                            Ok(_) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!(
+                                    "  [{ts}] ✓ recovery: completed dispatch {did} via finalize_dispatch"
+                                );
+                                let db_clone = db.clone();
+                                let did_owned = did.clone();
+                                tokio::spawn(async move {
+                                    crate::server::routes::dispatches::handle_completed_dispatch_followups(
+                                        &db_clone, &did_owned,
+                                    ).await;
+                                });
+                            }
+                            Err(e) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                eprintln!(
+                                    "  [{ts}] ⚠ recovery: finalize_dispatch failed for {did}: {e}"
+                                );
+                            }
                         }
-                        Ok(resp) => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            let status = resp.status();
-                            println!(
-                                "  [{ts}] ⚠ recovery: dispatch {did} API completion failed ({status}), falling back to idle"
-                            );
-                            // Fallback: post idle (works for review type)
-                            let adk_session_key = build_adk_session_key(
-                                shared,
-                                ChannelId::new(state.channel_id),
-                                provider,
-                            )
-                            .await;
-                            post_adk_session_status(
-                                adk_session_key.as_deref(),
-                                state.channel_name.as_deref(),
-                                Some(provider.as_str()),
-                                "idle",
-                                provider,
-                                None,
-                                None,
-                                None,
-                                Some(did),
-                                shared.api_port,
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!(
-                                "  [{ts}] ⚠ recovery: dispatch {did} API call failed ({e}), falling back to idle"
-                            );
-                            let adk_session_key = build_adk_session_key(
-                                shared,
-                                ChannelId::new(state.channel_id),
-                                provider,
-                            )
-                            .await;
-                            post_adk_session_status(
-                                adk_session_key.as_deref(),
-                                state.channel_name.as_deref(),
-                                Some(provider.as_str()),
-                                "idle",
-                                provider,
-                                None,
-                                None,
-                                None,
-                                Some(did),
-                                shared.api_port,
-                            )
-                            .await;
+                    } else {
+                        // Db/Engine not available — fall back to API PATCH
+                        let complete_url = crate::config::local_api_url(
+                            shared.api_port,
+                            &format!("/api/dispatches/{}", did),
+                        );
+                        match reqwest::Client::new()
+                            .patch(&complete_url)
+                            .json(&serde_json::json!({
+                                "status": "completed",
+                                "result": {"completion_source": "recovery_completed_during_downtime"},
+                            }))
+                            .send()
+                            .await
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!(
+                                    "  [{ts}] ✓ recovery: completed dispatch {did} via API"
+                                );
+                            }
+                            Ok(resp) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                eprintln!(
+                                    "  [{ts}] ⚠ recovery: dispatch {did} API completion failed ({})",
+                                    resp.status()
+                                );
+                            }
+                            Err(e) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                eprintln!(
+                                    "  [{ts}] ⚠ recovery: dispatch {did} API call failed ({e})"
+                                );
+                            }
                         }
                     }
                 }

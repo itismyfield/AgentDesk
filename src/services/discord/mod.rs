@@ -387,6 +387,10 @@ pub(super) struct SharedData {
     pub(super) cached_bot_token: tokio::sync::OnceCell<String>,
     /// HTTP API port for self-referencing requests (from config server.port).
     pub(super) api_port: u16,
+    /// Shared DB handle for direct dispatch finalization (avoids HTTP round-trip).
+    pub(super) db: Option<crate::db::Db>,
+    /// Shared policy engine for direct dispatch finalization.
+    pub(super) engine: Option<crate::engine::PolicyEngine>,
 }
 
 /// Poise user data type
@@ -1222,6 +1226,8 @@ pub async fn run_bot(
     shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
     health_registry: Arc<health::HealthRegistry>,
     api_port: u16,
+    db: Option<crate::db::Db>,
+    engine: Option<crate::engine::PolicyEngine>,
 ) {
     // Initialize debug logging from environment variable
     claude::init_debug_from_env();
@@ -1281,6 +1287,8 @@ pub async fn run_bot(
         cached_serenity_ctx: tokio::sync::OnceCell::new(),
         cached_bot_token: tokio::sync::OnceCell::new(),
         api_port,
+        db,
+        engine,
     });
 
     {
@@ -2561,8 +2569,8 @@ pub(super) async fn auto_restore_session(
                     // and --resume with a stale ID causes immediate termination.
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
-                        "  [{ts}] 🔒 QUARANTINE: auto-restore skipping old session_id/history for {last_path} (saved_gen={}, current_gen={current_gen})"
-                        , session_data.born_generation
+                        "  [{ts}] 🔒 QUARANTINE: auto-restore skipping old session_id/history for {last_path} (saved_gen={}, current_gen={current_gen})",
+                        session_data.born_generation
                     );
                 } else {
                     session.session_id = Some(session_data.session_id.clone());
