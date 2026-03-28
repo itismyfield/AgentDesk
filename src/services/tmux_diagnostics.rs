@@ -171,14 +171,39 @@ mod tests {
 
     #[test]
     fn test_should_recreate_session_after_followup_fifo_error() {
+        // FIFO write broken pipe
         assert!(should_recreate_session_after_followup_fifo_error(
             "Failed to write to input FIFO: Broken pipe (os error 32)"
         ));
+        // FIFO flush broken pipe
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to flush input FIFO: Broken pipe (os error 32)"
+        ));
+        // FIFO open — file not found
         assert!(should_recreate_session_after_followup_fifo_error(
             "Failed to open input FIFO: No such file or directory (os error 2)"
         ));
+        // FIFO open — not found (alternative wording)
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to open input FIFO: entity not found"
+        ));
+        // FIFO open — bad file descriptor
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to open input FIFO: Bad file descriptor (os error 9)"
+        ));
+        // FIFO open — no such device
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to open input FIFO: No such device or address (os error 6)"
+        ));
+        // Unrelated error should NOT trigger recreation
         assert!(!should_recreate_session_after_followup_fifo_error(
             "Failed to read Codex output: unexpected EOF"
         ));
+        // Permission error should NOT trigger recreation
+        assert!(!should_recreate_session_after_followup_fifo_error(
+            "Failed to open input FIFO: Permission denied (os error 13)"
+        ));
+        // Empty string should NOT trigger
+        assert!(!should_recreate_session_after_followup_fifo_error(""));
     }
 }

@@ -13,7 +13,8 @@ use crate::services::provider::ProviderKind;
 use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
-    record_tmux_exit_reason, tmux_session_exists, tmux_session_has_live_pane,
+    record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
+    tmux_session_exists, tmux_session_has_live_pane,
 };
 use crate::utils::format::safe_prefix;
 
@@ -217,6 +218,29 @@ pub enum ReadOutputResult {
     SessionDied { offset: u64 },
     /// User cancelled the operation
     Cancelled { offset: u64 },
+}
+
+/// Result from sending a follow-up message to an existing tmux session.
+///
+/// When `RecreateSession` is returned, the caller should kill the current
+/// tmux session and fall through to the full session-creation path, replaying
+/// the same prompt in a fresh session.
+///
+/// **Partial-output note:** If the session dies *after* some streaming output
+/// has already been forwarded to Discord, the recreated session will produce
+/// the full response again, which may appear as duplicate text to the user.
+/// This is an acceptable trade-off: the alternative (leaving the task
+/// unfinished) is worse, and Claude/Codex prompts are generally idempotent
+/// for read/analysis tasks.  For prompts that trigger side-effects (file
+/// writes, git operations), the agent CLI itself is responsible for
+/// idempotency — the same prompt re-sent to a fresh session will not blindly
+/// re-apply already-committed changes.
+#[derive(Debug)]
+pub enum FollowupResult {
+    /// Message delivered and output successfully read to completion.
+    Delivered,
+    /// Session needs to be killed and recreated (FIFO broken or session died).
+    RecreateSession { error: String },
 }
 
 #[cfg(unix)]
@@ -1627,17 +1651,32 @@ fn execute_streaming_local_tmux(
 
     if session_usable {
         debug_log("Existing tmux session found — sending follow-up message");
-        return send_followup_to_tmux(
+        match send_followup_to_tmux(
             prompt,
             &output_path,
             &input_fifo_path,
-            sender,
-            cancel_token,
+            sender.clone(),
+            cancel_token.clone(),
             tmux_session_name,
-        );
-    }
-
-    if session_exists {
+        )? {
+            FollowupResult::Delivered => return Ok(()),
+            FollowupResult::RecreateSession { error } => {
+                debug_log(&format!(
+                    "Follow-up failed, recreating session: {}",
+                    error
+                ));
+                record_tmux_exit_reason(
+                    tmux_session_name,
+                    &format!("followup failed, recreating: {}", error),
+                );
+                let exact_target = tmux_exact_target(tmux_session_name);
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", &exact_target])
+                    .status();
+                // Fall through to new session creation below
+            }
+        }
+    } else if session_exists {
         debug_log("Stale tmux session found — recreating");
         record_tmux_exit_reason(
             tmux_session_name,
@@ -1903,6 +1942,10 @@ fn execute_streaming_local_tmux(
 }
 
 /// Send a follow-up message to an existing tmux Claude session.
+///
+/// Returns [`FollowupResult::RecreateSession`] when the FIFO is broken or the
+/// session dies mid-output, signalling the caller to kill the session and
+/// replay the prompt in a freshly created one.
 #[cfg(unix)]
 fn send_followup_to_tmux(
     prompt: &str,
@@ -1911,7 +1954,7 @@ fn send_followup_to_tmux(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
-) -> Result<(), String> {
+) -> Result<FollowupResult, String> {
     use std::io::Write;
 
     debug_log(&format!(
@@ -1933,16 +1976,26 @@ fn send_followup_to_tmux(
         }
     });
 
-    // Write to input FIFO (blocks briefly until wrapper's reader is ready)
-    let mut fifo = std::fs::OpenOptions::new()
+    // Write to input FIFO — if the pipe is broken or missing, request recreation
+    let write_result = std::fs::OpenOptions::new()
         .write(true)
         .open(input_fifo_path)
-        .map_err(|e| format!("Failed to open input FIFO: {}", e))?;
+        .map_err(|e| format!("Failed to open input FIFO: {}", e))
+        .and_then(|mut fifo| {
+            writeln!(fifo, "{}", msg)
+                .map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
+            fifo.flush()
+                .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
+            Ok(())
+        });
 
-    writeln!(fifo, "{}", msg).map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
-    fifo.flush()
-        .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
-    drop(fifo);
+    if let Err(e) = write_result {
+        if should_recreate_session_after_followup_fifo_error(&e) {
+            debug_log(&format!("FIFO error triggers session recreation: {}", e));
+            return Ok(FollowupResult::RecreateSession { error: e });
+        }
+        return Err(e);
+    }
 
     debug_log("Follow-up message sent to input FIFO");
 
@@ -1969,18 +2022,15 @@ fn send_followup_to_tmux(
                 tmux_session_name: tmux_session_name.to_string(),
                 last_offset: offset,
             });
+            Ok(FollowupResult::Delivered)
         }
         ReadOutputResult::SessionDied { .. } => {
-            debug_log("tmux session died during follow-up");
-            let _ = sender.send(StreamMessage::Done {
-                result: "⚠ 세션이 종료되었습니다. 새 메시지를 보내면 새 세션이 시작됩니다."
-                    .to_string(),
-                session_id: None,
-            });
+            debug_log("tmux session died during follow-up — requesting recreation");
+            Ok(FollowupResult::RecreateSession {
+                error: "session died during follow-up output reading".to_string(),
+            })
         }
     }
-
-    Ok(())
 }
 
 /// Callbacks for session status checks during output file polling.
@@ -2842,5 +2892,69 @@ mod tests {
             serde_json::from_str(r#"{"type":"result","subtype":"success","result":"ok"}"#).unwrap();
         let extras = parse_assistant_extra_tool_uses(&json);
         assert!(extras.is_empty());
+    }
+
+    // ========== FollowupResult tests ==========
+
+    #[test]
+    fn test_followup_result_maps_completed_to_delivered() {
+        let read_result = ReadOutputResult::Completed { offset: 100 };
+        let followup = match read_result {
+            ReadOutputResult::Completed { .. } | ReadOutputResult::Cancelled { .. } => {
+                FollowupResult::Delivered
+            }
+            ReadOutputResult::SessionDied { .. } => FollowupResult::RecreateSession {
+                error: "died".to_string(),
+            },
+        };
+        assert!(matches!(followup, FollowupResult::Delivered));
+    }
+
+    #[test]
+    fn test_followup_result_maps_session_died_to_recreate() {
+        let read_result = ReadOutputResult::SessionDied { offset: 42 };
+        let followup = match read_result {
+            ReadOutputResult::Completed { .. } | ReadOutputResult::Cancelled { .. } => {
+                FollowupResult::Delivered
+            }
+            ReadOutputResult::SessionDied { .. } => FollowupResult::RecreateSession {
+                error: "session died during follow-up output reading".to_string(),
+            },
+        };
+        match followup {
+            FollowupResult::RecreateSession { error } => {
+                assert!(error.contains("session died"));
+            }
+            _ => panic!("Expected RecreateSession"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_followup_fifo_not_found_returns_recreate() {
+        use std::sync::mpsc;
+
+        let (sender, _receiver) = mpsc::channel();
+        let dir = std::env::temp_dir();
+        let output_path = dir.join(format!("agentdesk-test-followup-{}.jsonl", std::process::id()));
+        let _ = std::fs::write(&output_path, "");
+
+        let result = send_followup_to_tmux(
+            "test prompt",
+            output_path.to_str().unwrap(),
+            "/tmp/agentdesk-test-nonexistent-fifo-path",
+            sender,
+            None,
+            "test-session-followup",
+        );
+
+        let _ = std::fs::remove_file(&output_path);
+
+        match result {
+            Ok(FollowupResult::RecreateSession { error }) => {
+                assert!(error.contains("Failed to open input FIFO"));
+            }
+            other => panic!("Expected Ok(RecreateSession), got {:?}", other),
+        }
     }
 }
