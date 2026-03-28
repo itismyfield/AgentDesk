@@ -1092,6 +1092,7 @@ mod tests {
             "gpt-5-codex".to_string()
         ]));
         assert!(args.iter().any(|arg| arg == "exec"));
+    }
 
     // ========== FollowupResult tests ==========
 
