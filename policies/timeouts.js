@@ -313,7 +313,9 @@ var timeouts = {
       "JOIN task_dispatches td ON td.kanban_card_id = kc.id " +
       "WHERE kc.status = ? AND kc.review_status = 'reviewing' " +
       "AND td.dispatch_type = 'review' AND td.status IN ('completed', 'failed') " +
-      "AND kc.review_entered_at IS NOT NULL AND kc.review_entered_at < datetime('now', '-30 minutes')",
+      "AND kc.review_entered_at IS NOT NULL AND kc.review_entered_at < datetime('now', '-30 minutes') " +
+      "AND NOT EXISTS (SELECT 1 FROM task_dispatches td2 WHERE td2.kanban_card_id = kc.id " +
+      "AND td2.dispatch_type IN ('review', 'review-decision') AND td2.status = 'pending')",
       [cReview]
     );
     for (var k = 0; k < staleReviews.length; k++) {
