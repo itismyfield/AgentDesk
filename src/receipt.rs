@@ -445,11 +445,27 @@ pub fn render_html(data: &ReceiptData) -> String {
     }
 
     let today = Local::now().format("%Y-%m-%d (%a)").to_string();
-    let cache_row = if data.cache_discount > 0.001 {
-        format!(r#"<div class="sl cd"><span>CACHE DISCOUNT</span><span>-{}</span></div>"#, fmt_cost(data.cache_discount))
-    } else {
-        String::new()
-    };
+    let subscription_cost = 200.0f64; // Max plan
+
+    // Model usage percentage breakdown
+    let total_cost = data.total;
+    let mut model_pct_rows = String::new();
+    for m in &data.models {
+        if total_cost > 0.0 {
+            let pct = m.cost / total_cost * 100.0;
+            if pct >= 0.1 {
+                model_pct_rows.push_str(&format!(
+                    r#"<div class="sl sm"><span>{}</span><span>{:.1}%</span></div>
+"#,
+                    esc(&m.display_name), pct,
+                ));
+            }
+        }
+    }
+
+    // Savings calculation
+    let savings = data.total - subscription_cost;
+    let savings_multiplier = if subscription_cost > 0.0 { data.total / subscription_cost } else { 0.0 };
 
     format!(
         r##"<!DOCTYPE html>
@@ -472,32 +488,38 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
 .li .ct{{flex-shrink:0;width:80px;text-align:right;font-weight:600}}
 .sl{{display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px}}
 .sl.b{{font-weight:700}}
-.cd{{color:#059669;font-weight:600}}
+.sv{{color:#059669;font-weight:600}}
 .tl{{display:flex;justify-content:space-between;font-size:15px;font-weight:700;margin:4px 0}}
 .ss{{margin-top:6px}}
 .st{{font-size:11px;font-weight:700;color:#444;margin-bottom:4px}}
 .sl.sm{{font-size:11px;color:#555}}
+.nc{{color:#888;font-size:10px}}
 .ft{{text-align:center;font-size:10px;color:#888;margin-top:8px}}
 .bc{{text-align:center;font-size:14px;letter-spacing:1px;color:#1a1a1a;opacity:.2;margin-top:6px;overflow:hidden;white-space:nowrap}}
 .vr{{text-align:center;font-size:8px;color:#bbb;margin-top:4px}}
 </style></head><body>
 <div class="r">
-<div class="hd">AI TOKEN RECEIPT</div>
+<div class="hd">{title}</div>
 <div class="dt">{today}</div>
 <hr class="ds">
 <div class="pl">{period_label}</div>
 <div class="pr">{period_start} ~ {period_end}</div>
 <hr class="sp">
-<div class="ch"><span class="cm">MODEL</span><span class="ct">TOKENS</span><span class="cc">COST</span></div>
-{provider_sections}<hr class="sp">
-<div class="sl b"><span>SUBTOTAL</span><span>{subtotal}</span></div>
-{cache_row}
-<hr class="ds">
-<div class="tl"><span>TOTAL</span><span>{total}</span></div>
+<div class="ch"><span class="cm">MODEL</span><span class="ct">TOKENS</span><span class="cc">API COST</span></div>
+{model_rows}<hr class="ds">
+<div class="tl"><span>API COST</span><span>{api_cost}</span></div>
+<div class="nc">(Without cache: {no_cache_cost})</div>
+<hr class="sp">
+<div class="sl b"><span>SUBSCRIPTION</span><span>$200</span></div>
+<div class="sl sv"><span>YOU SAVED</span><span>{savings} ({multiplier:.0f}x)</span></div>
 <hr class="ds">
 <div class="ss">
+<div class="st">MODEL USAGE</div>
+{model_pct_rows}</div>
+<hr class="sp">
+<div class="ss">
 <div class="st">STATISTICS</div>
-<div class="sl sm"><span>Messages</span><span>{messages}</span></div>
+<div class="sl sm"><span>Requests</span><span>{messages}</span></div>
 <div class="sl sm"><span>Sessions</span><span>{sessions}</span></div>
 </div>
 <hr class="sp">
@@ -506,14 +528,21 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
 <div class="vr">AgentDesk v{version}</div>
 </div>
 </body></html>"##,
+        title = if single_provider && !provider_name.is_empty() {
+            format!("{} TOKEN RECEIPT", esc(provider_name).to_uppercase())
+        } else {
+            "AI TOKEN RECEIPT".into()
+        },
         today = esc(&today),
         period_label = esc(&data.period_label),
         period_start = esc(&data.period_start),
         period_end = esc(&data.period_end),
-        provider_sections = provider_sections,
-        subtotal = fmt_cost(data.subtotal),
-        cache_row = cache_row,
-        total = fmt_cost(data.total),
+        model_rows = model_rows,
+        api_cost = fmt_cost(data.total),
+        no_cache_cost = fmt_cost(data.subtotal),
+        savings = fmt_cost(savings),
+        multiplier = savings_multiplier,
+        model_pct_rows = model_pct_rows,
         messages = fmt_num(data.stats.total_messages),
         sessions = fmt_num(data.stats.total_sessions),
         version = env!("CARGO_PKG_VERSION"),
