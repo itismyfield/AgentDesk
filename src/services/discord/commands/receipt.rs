@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use poise::serenity_prelude as serenity;
 use serenity::CreateAttachment;
@@ -6,7 +6,7 @@ use serenity::CreateAttachment;
 use super::super::{Context, Error, check_auth};
 use crate::receipt;
 
-/// /receipt — Show token usage receipt as a PNG image
+/// /receipt — Show token usage receipts (one per provider) as PNG images
 #[poise::command(slash_command, rename = "receipt")]
 pub(in crate::services::discord) async fn cmd_receipt(
     ctx: Context<'_>,
@@ -54,60 +54,65 @@ pub(in crate::services::discord) async fn cmd_receipt(
         return Ok(());
     }
 
-    // Render HTML
-    let html = receipt::render_html(&data);
+    // Split into per-provider receipts
+    let receipts = receipt::split_by_provider(&data);
 
-    // Write HTML to temp file (unique per invocation to avoid race conditions)
+    // Render each provider receipt as a separate PNG
     let tmp_dir = std::env::temp_dir();
     let unique_id = uuid::Uuid::new_v4();
-    let html_path = tmp_dir.join(format!("agentdesk_receipt_{unique_id}.html"));
-    let png_path = tmp_dir.join(format!("agentdesk_receipt_{unique_id}.png"));
-    std::fs::write(&html_path, &html).map_err(|e| format!("failed to write HTML: {e}"))?;
+    let mut temp_files: Vec<PathBuf> = Vec::new();
+    let mut reply = poise::CreateReply::default().content(format!(
+        "\u{1f9fe} **Token Receipt** \u{2014} {} ({} ~ {})",
+        data.period_label, data.period_start, data.period_end
+    ));
 
-    // Playwright screenshot
-    let output = tokio::process::Command::new("playwright")
-        .args([
-            "screenshot",
-            "--browser", "chromium",
-            "--full-page",
-            &format!("file://{}", html_path.display()),
-            &png_path.display().to_string(),
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("playwright failed: {e}"))?;
+    for (i, r) in receipts.iter().enumerate() {
+        let prov_name = r.providers.first().map(|p| p.provider.as_str()).unwrap_or("unknown");
+        let html = receipt::render_html(r);
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("  [{ts}] \u{2716} Playwright error: {stderr}");
-        ctx.say(format!("Failed to render receipt image: {}", stderr.chars().take(200).collect::<String>())).await?;
-        return Ok(());
+        let html_path = tmp_dir.join(format!("adk_receipt_{unique_id}_{i}.html"));
+        let png_path = tmp_dir.join(format!("adk_receipt_{unique_id}_{i}.png"));
+        std::fs::write(&html_path, &html).map_err(|e| format!("failed to write HTML: {e}"))?;
+
+        // viewport height=1 with --full-page makes Playwright fit content exactly (no bottom padding)
+        let output = tokio::process::Command::new("playwright")
+            .args([
+                "screenshot",
+                "--browser", "chromium",
+                "--full-page",
+                "--viewport-size=400,1",
+                &format!("file://{}", html_path.display()),
+                &png_path.display().to_string(),
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("playwright failed: {e}"))?;
+
+        temp_files.push(html_path);
+        temp_files.push(png_path.clone());
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("  [{ts}] \u{2716} Playwright error for {prov_name}: {stderr}");
+            continue;
+        }
+
+        if Path::new(&png_path).exists() {
+            let attachment = CreateAttachment::path(&png_path).await
+                .map_err(|e| format!("failed to read PNG: {e}"))?;
+            reply = reply.attachment(attachment);
+        }
     }
 
-    // Send PNG as attachment
-    if !Path::new(&png_path).exists() {
-        ctx.say("Receipt image was not generated.").await?;
-        return Ok(());
-    }
-
-    let attachment = CreateAttachment::path(&png_path).await
-        .map_err(|e| format!("failed to read PNG: {e}"))?;
-
-    ctx.send(
-        poise::CreateReply::default()
-            .content(format!(
-                "\u{1f9fe} **Token Receipt** \u{2014} {} ({} ~ {})",
-                data.period_label, data.period_start, data.period_end
-            ))
-            .attachment(attachment),
-    )
-    .await?;
+    ctx.send(reply).await?;
 
     // Cleanup temp files
-    let _ = std::fs::remove_file(&html_path);
-    let _ = std::fs::remove_file(&png_path);
+    for f in &temp_files {
+        let _ = std::fs::remove_file(f);
+    }
 
-    println!("  [{ts}] \u{25b6} [{user_name}] Receipt sent (total: {})", receipt_fmt_cost(data.total));
+    println!("  [{ts}] \u{25b6} [{user_name}] Receipt sent ({} providers, total: {})",
+        receipts.len(), receipt_fmt_cost(data.total));
     Ok(())
 }
 
