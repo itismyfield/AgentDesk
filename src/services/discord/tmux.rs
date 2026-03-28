@@ -506,7 +506,7 @@ pub(super) async fn tmux_output_watcher(
                         .json(&serde_json::json!({
                             "target": format!("channel:{}", channel_id),
                             "content": retry_content,
-                            "source": "session-retry",
+                            "source": "pipeline",
                             "bot": "announce",
                         }))
                         .send()

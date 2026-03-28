@@ -60,7 +60,7 @@ async fn auto_retry_with_history(
         .json(&serde_json::json!({
             "target": format!("channel:{retry_ch}"),
             "content": retry_content,
-            "source": "session-retry",
+            "source": "pipeline",
             "bot": "announce",
         }))
         .send()
