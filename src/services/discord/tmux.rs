@@ -1158,9 +1158,25 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                         born_generation: super::runtime_store::load_generation(),
                     });
 
-            // Restore current_path from saved settings so message handler accepts messages
+            // Restore current_path: DB cwd (worktree-aware) > last_sessions (yaml, main workspace)
             if session.current_path.is_none() {
-                if let Some(path) = last_path {
+                // Try DB cwd first — preserves worktree paths from previous session
+                let tmux_name = provider.build_tmux_session_name(channel_name);
+                let hostname = crate::services::platform::hostname_short();
+                let session_key = format!("{}:{}", hostname, tmux_name);
+                let db_cwd: Option<String> = shared.db.as_ref().and_then(|db| {
+                    db.lock().ok().and_then(|conn| {
+                        conn.query_row(
+                            "SELECT cwd FROM sessions WHERE session_key = ?1",
+                            [&session_key],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok()
+                        .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir())
+                    })
+                });
+                let effective_path = db_cwd.or(last_path);
+                if let Some(path) = effective_path {
                     session.current_path = Some(path);
                 }
             }

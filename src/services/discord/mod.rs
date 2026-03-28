@@ -2515,17 +2515,45 @@ pub(super) async fn auto_restore_session(
     let (ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
 
     // Read settings first to get last_sessions/last_remotes info
+    // DB cwd takes priority over yaml last_sessions (preserves worktree paths)
     let (last_path, is_remote, saved_remote, provider) = {
         let settings = shared.settings.read().await;
         let channel_key = channel_id.get().to_string();
-        let last_path = settings.last_sessions.get(&channel_key).cloned();
+        let yaml_path = settings.last_sessions.get(&channel_key).cloned();
         let is_remote = settings.last_remotes.contains_key(&channel_key);
         let saved_remote = settings.last_remotes.get(&channel_key).cloned();
+        let provider = settings.provider.clone();
+
+        // Try DB cwd first — preserves worktree paths from previous session
+        let ch_name = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|s| s.channel_name.clone())
+        };
+        let db_cwd: Option<String> = ch_name.as_ref().and_then(|ch| {
+            let tmux_name = provider.build_tmux_session_name(ch);
+            let hostname = crate::services::platform::hostname_short();
+            let session_key = format!("{}:{}", hostname, tmux_name);
+            shared.db.as_ref().and_then(|db| {
+                db.lock().ok().and_then(|conn| {
+                    conn.query_row(
+                        "SELECT cwd FROM sessions WHERE session_key = ?1",
+                        [&session_key],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+                    .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir())
+                })
+            })
+        });
+        let last_path = db_cwd.or(yaml_path);
+
         (
             last_path,
             is_remote,
             saved_remote,
-            settings.provider.clone(),
+            provider,
         )
     };
 
