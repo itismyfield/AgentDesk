@@ -1099,6 +1099,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_codex_followup_fifo_not_found_returns_recreate() {
+        use super::send_followup_to_tmux;
         use crate::services::claude::FollowupResult;
 
         let (sender, _receiver) = mpsc::channel();
