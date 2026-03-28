@@ -398,22 +398,37 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
 // ── HTML rendering ─────────────────────────────────────────────
 
 pub fn render_html(data: &ReceiptData) -> String {
-    let mut model_rows = String::new();
+    // Group models by provider
+    let mut providers_order: Vec<String> = Vec::new();
+    let mut by_provider: HashMap<String, Vec<&ModelLineItem>> = HashMap::new();
     for m in &data.models {
-        model_rows.push_str(&format!(
-            r#"<div class="li"><span class="mn">{}</span><span class="dots"></span><span class="tk">{}</span><span class="ct">{}</span></div>
-"#,
-            esc(&m.display_name), fmt_tok(m.total_tokens), fmt_cost(m.cost),
-        ));
+        by_provider.entry(m.provider.clone()).or_default().push(m);
+        if !providers_order.contains(&m.provider) {
+            providers_order.push(m.provider.clone());
+        }
     }
 
-    let mut prov_rows = String::new();
-    for p in &data.providers {
-        prov_rows.push_str(&format!(
-            r#"<div class="sl"><span>{}</span><span>{:.0}%</span></div>
-"#,
-            esc(&p.provider), p.percentage,
+    // Build provider sections
+    let mut provider_sections = String::new();
+    for prov in &providers_order {
+        let items = &by_provider[prov];
+        let prov_cost: f64 = items.iter().map(|m| m.cost).sum();
+        let prov_tokens: u64 = items.iter().map(|m| m.total_tokens).sum();
+
+        provider_sections.push_str(&format!(
+            r#"<div class="ph"><span>{prov}</span><span>{tokens} / {cost}</span></div>"#,
+            prov = esc(prov),
+            tokens = fmt_tok(prov_tokens),
+            cost = fmt_cost(prov_cost),
         ));
+
+        for m in items {
+            provider_sections.push_str(&format!(
+                r#"<div class="li"><span class="mn">{}</span><span class="dots"></span><span class="tk">{}</span><span class="ct">{}</span></div>
+"#,
+                esc(&m.display_name), fmt_tok(m.total_tokens), fmt_cost(m.cost),
+            ));
+        }
     }
 
     let today = Local::now().format("%Y-%m-%d (%a)").to_string();
@@ -422,18 +437,13 @@ pub fn render_html(data: &ReceiptData) -> String {
     } else {
         String::new()
     };
-    let prov_section = if data.providers.len() > 1 {
-        format!(r#"<div class="ps"><div class="pt">PROVIDER USAGE</div>{prov_rows}</div>"#)
-    } else {
-        String::new()
-    };
 
     format!(
         r##"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:'Courier New',Courier,monospace;background:transparent;display:flex;justify-content:center;padding:0}}
-.r{{width:400px;background:#fefdf8;color:#1a1a1a;padding:28px 24px;border-radius:12px;font-size:12px;line-height:1.6;box-shadow:0 4px 24px rgba(0,0,0,.12)}}
+body{{font-family:'Courier New',Courier,monospace;background:transparent;padding:0}}
+.r{{width:400px;background:#fefdf8;color:#1a1a1a;padding:20px 16px;font-size:12px;line-height:1.6}}
 .hd{{text-align:center;font-size:15px;font-weight:700;letter-spacing:2px;margin-bottom:2px}}
 .dt{{text-align:center;font-size:10px;color:#666;margin-bottom:4px}}
 .pl{{text-align:center;font-size:11px;color:#444;margin-bottom:4px}}
@@ -441,7 +451,7 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;display
 .sp{{border:none;border-top:1px dashed #bbb;margin:10px 0;opacity:.6}}
 .ds{{border:none;border-top:2px double #bbb;margin:10px 0;opacity:.6}}
 .ch{{display:flex;justify-content:space-between;font-size:10px;color:#888;font-weight:700;margin-bottom:4px;letter-spacing:1px}}
-.ch .cm{{flex:1}} .ch .ct{{width:70px;text-align:right}} .ch .cc{{width:80px;text-align:right}}
+.ph{{display:flex;justify-content:space-between;font-size:11px;font-weight:700;color:#7C5CFC;margin:8px 0 4px;padding-bottom:2px;border-bottom:1px solid rgba(124,92,252,.2)}}
 .li{{display:flex;align-items:baseline;margin-bottom:3px;font-size:12px}}
 .li .mn{{flex-shrink:0;font-weight:600}}
 .li .dots{{flex:1;border-bottom:1px dotted #ccc;margin:0 4px;min-width:8px;height:10px}}
@@ -454,8 +464,6 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;display
 .ss{{margin-top:6px}}
 .st{{font-size:11px;font-weight:700;color:#444;margin-bottom:4px}}
 .sl.sm{{font-size:11px;color:#555}}
-.ps{{margin-top:8px}}
-.pt{{font-size:10px;font-weight:700;color:#666;margin-bottom:2px}}
 .ft{{text-align:center;font-size:10px;color:#888;margin-top:8px}}
 .bc{{text-align:center;font-size:14px;letter-spacing:1px;color:#1a1a1a;opacity:.2;margin-top:6px;overflow:hidden;white-space:nowrap}}
 .vr{{text-align:center;font-size:8px;color:#bbb;margin-top:4px}}
@@ -468,7 +476,7 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;display
 <div class="pr">{period_start} ~ {period_end}</div>
 <hr class="sp">
 <div class="ch"><span class="cm">MODEL</span><span class="ct">TOKENS</span><span class="cc">COST</span></div>
-{model_rows}<hr class="sp">
+{provider_sections}<hr class="sp">
 <div class="sl b"><span>SUBTOTAL</span><span>{subtotal}</span></div>
 {cache_row}
 <hr class="ds">
@@ -479,7 +487,6 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;display
 <div class="sl sm"><span>Messages</span><span>{messages}</span></div>
 <div class="sl sm"><span>Sessions</span><span>{sessions}</span></div>
 </div>
-{prov_section}
 <hr class="sp">
 <div class="ft">Thank you for using AgentDesk!</div>
 <div class="bc">||||| || ||| || |||| || ||| | |||| ||| ||</div>
@@ -490,13 +497,12 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;display
         period_label = esc(&data.period_label),
         period_start = esc(&data.period_start),
         period_end = esc(&data.period_end),
-        model_rows = model_rows,
+        provider_sections = provider_sections,
         subtotal = fmt_cost(data.subtotal),
         cache_row = cache_row,
         total = fmt_cost(data.total),
         messages = fmt_num(data.stats.total_messages),
         sessions = fmt_num(data.stats.total_sessions),
-        prov_section = prov_section,
         version = env!("CARGO_PKG_VERSION"),
     )
 }
