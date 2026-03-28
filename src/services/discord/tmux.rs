@@ -265,6 +265,14 @@ pub(super) async fn tmux_output_watcher(
                     }
                 }
 
+                // Check for stale session error during streaming — abort relay immediately
+                if full_response.contains("No conversation found")
+                    || full_response.contains("Error: No conversation")
+                {
+                    found_result = true; // Exit the loop
+                    break;
+                }
+
                 // Update Discord placeholder at configurable interval
                 if last_status_update.elapsed() >= super::status_update_interval() {
                     last_status_update = tokio::time::Instant::now();
