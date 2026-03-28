@@ -607,12 +607,8 @@ var timeouts = {
       } catch (e) {
         agentdesk.log.error("[retry] Failed to create retry dispatch for card " +
           fd.kanban_card_id + ": " + e);
-        // 재시도 디스패치 생성 실패 → pending state로 이관
-        agentdesk.kanban.setStatus(fd.kanban_card_id, jBlocked);
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET blocked_reason = 'Auto-retry dispatch creation failed: " + e + "' WHERE id = ?",
-          [fd.kanban_card_id]
-        );
+        // Don't block the card on transient retry failure — leave status as-is
+        // so the next tick can retry. Only log the error.
       }
     }
   },
