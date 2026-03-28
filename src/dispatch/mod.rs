@@ -163,32 +163,16 @@ pub fn create_dispatch_core(
         return Err(e.into());
     }
 
-    // Update kanban card — rework/review dispatches keep current status
-    if is_review_type {
-        conn.execute(
-            "UPDATE kanban_cards SET latest_dispatch_id = ?1, updated_at = datetime('now') WHERE id = ?2",
-            rusqlite::params![dispatch_id, kanban_card_id],
-        )?;
-    } else {
-        // Pipeline-driven: resolve the dispatch kickoff state from card's current state.
-        // kickoff_for() prefers gated transition FROM old_status; falls back to any dispatchable.
-        let kickoff_state = effective.kickoff_for(&old_status).unwrap_or_else(|| {
-            tracing::error!("Pipeline has no kickoff state — check pipeline configuration");
-            effective.initial_state().to_string()
-        });
-        // Build clock SQL from pipeline config
-        let clock_sql = effective
-            .clock_for_state(&kickoff_state)
-            .map(|c| format!(", {} = datetime('now')", c.set))
-            .unwrap_or_default();
-        let sql = format!(
-            "UPDATE kanban_cards SET latest_dispatch_id = ?1, status = ?2{clock_sql}, updated_at = datetime('now') WHERE id = ?3"
-        );
-        conn.execute(
-            &sql,
-            rusqlite::params![dispatch_id, kickoff_state, kanban_card_id],
-        )?;
-    }
+    // #155: Use transition reducer for kanban_cards UPDATE
+    apply_dispatch_attached_intents(
+        &conn,
+        kanban_card_id,
+        &dispatch_id,
+        dispatch_type,
+        is_review_type,
+        &old_status,
+        &effective,
+    )?;
 
     Ok((dispatch_id, old_status))
 }
@@ -319,29 +303,16 @@ pub fn create_dispatch_core_with_id(
         return Err(e.into());
     }
 
-    if is_review_type {
-        conn.execute(
-            "UPDATE kanban_cards SET latest_dispatch_id = ?1, updated_at = datetime('now') WHERE id = ?2",
-            rusqlite::params![dispatch_id, kanban_card_id],
-        )?;
-    } else {
-        // Pipeline-driven: resolve the dispatch kickoff state from card's current state.
-        let kickoff_state = effective.kickoff_for(&old_status).unwrap_or_else(|| {
-            tracing::error!("Pipeline has no kickoff state — check pipeline configuration");
-            effective.initial_state().to_string()
-        });
-        let clock_sql = effective
-            .clock_for_state(&kickoff_state)
-            .map(|c| format!(", {} = datetime('now')", c.set))
-            .unwrap_or_default();
-        let sql = format!(
-            "UPDATE kanban_cards SET latest_dispatch_id = ?1, status = ?2{clock_sql}, updated_at = datetime('now') WHERE id = ?3"
-        );
-        conn.execute(
-            &sql,
-            rusqlite::params![dispatch_id, kickoff_state, kanban_card_id],
-        )?;
-    }
+    // #155: Use transition reducer for kanban_cards UPDATE
+    apply_dispatch_attached_intents(
+        &conn,
+        kanban_card_id,
+        dispatch_id,
+        dispatch_type,
+        is_review_type,
+        &old_status,
+        &effective,
+    )?;
 
     Ok((dispatch_id.to_string(), old_status))
 }
@@ -396,6 +367,63 @@ pub fn create_dispatch(
     crate::kanban::fire_state_hooks(db, engine, kanban_card_id, &old_status, &kickoff_owned);
 
     Ok(dispatch)
+}
+
+/// #155: Apply DispatchAttached transition intents via the reducer pattern.
+///
+/// Replaces the direct `UPDATE kanban_cards SET latest_dispatch_id/status` SQL
+/// with `decide_transition(DispatchAttached)` → Executor.
+fn apply_dispatch_attached_intents(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    dispatch_id: &str,
+    dispatch_type: &str,
+    is_review_type: bool,
+    old_status: &str,
+    effective: &crate::pipeline::PipelineConfig,
+) -> Result<()> {
+    use crate::engine::transition::{
+        self, CardState, GateSnapshot, TransitionContext, TransitionEvent, TransitionOutcome,
+    };
+
+    let kickoff_state = if !is_review_type {
+        Some(effective.kickoff_for(old_status).unwrap_or_else(|| {
+            tracing::error!("Pipeline has no kickoff state — check pipeline configuration");
+            effective.initial_state().to_string()
+        }))
+    } else {
+        None
+    };
+
+    let ctx = TransitionContext {
+        card: CardState {
+            id: card_id.to_string(),
+            status: old_status.to_string(),
+            review_status: None,
+            latest_dispatch_id: None,
+        },
+        pipeline: effective.clone(),
+        gates: GateSnapshot::default(),
+    };
+
+    let decision = transition::decide_transition(
+        &ctx,
+        &TransitionEvent::DispatchAttached {
+            dispatch_id: dispatch_id.to_string(),
+            dispatch_type: dispatch_type.to_string(),
+            kickoff_state,
+        },
+    );
+
+    if let TransitionOutcome::Blocked(reason) = &decision.outcome {
+        return Err(anyhow::anyhow!("{}", reason));
+    }
+
+    for intent in &decision.intents {
+        transition::execute_intent_on_conn(conn, intent)?;
+    }
+
+    Ok(())
 }
 
 /// Complete a dispatch, setting its status to "completed" with the given result.
