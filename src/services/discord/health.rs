@@ -306,6 +306,7 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str,
 
     // Verify target channel exists in role-map (authorization check).
     // If the target is a thread, resolve its parent channel and check that instead.
+    // Pass channel name so byChannelName-style configs can match.
     if super::settings::resolve_role_binding(channel_id, None).is_none() {
         let mut authorized = false;
         // Try resolving as a thread: fetch channel info and check parent_id
@@ -313,7 +314,19 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str,
             if let Ok(channel) = channel_id.to_channel(&*http).await {
                 if let Some(guild_channel) = channel.guild() {
                     if let Some(parent_id) = guild_channel.parent_id {
-                        if super::settings::resolve_role_binding(parent_id, None).is_some() {
+                        // Resolve parent channel name for byChannelName configs
+                        let parent_name = if let Ok(parent_ch) = parent_id.to_channel(&*http).await
+                        {
+                            parent_ch.guild().map(|pg| pg.name.clone())
+                        } else {
+                            None
+                        };
+                        if super::settings::resolve_role_binding(
+                            parent_id,
+                            parent_name.as_deref(),
+                        )
+                        .is_some()
+                        {
                             authorized = true;
                         }
                     }

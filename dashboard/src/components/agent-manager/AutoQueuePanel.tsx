@@ -203,8 +203,19 @@ function useDragReorder(
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const dragIdRef = useRef<string | null>(null);
+  const reorderingRef = useRef(false);
 
   const pendingEntries = entries.filter((e) => e.status === "pending");
+
+  const guardedReorder = async (orderedIds: string[]) => {
+    if (reorderingRef.current) return;
+    reorderingRef.current = true;
+    try {
+      await onReorder(orderedIds, agentId);
+    } finally {
+      reorderingRef.current = false;
+    }
+  };
 
   const makeDragHandlers = (entry: DispatchQueueEntryType) => {
     if (entry.status !== "pending") return undefined;
@@ -256,7 +267,7 @@ function useDragReorder(
         setDropTargetId(null);
         dragIdRef.current = null;
 
-        void onReorder(reorderedIds, agentId);
+        void guardedReorder(reorderedIds);
       },
       onDragEnd: () => {
         setDragId(null);
@@ -274,15 +285,15 @@ function useDragReorder(
     if (index === -1) return undefined;
 
     return {
-      canMoveUp: index > 0,
-      canMoveDown: index < ids.length - 1,
+      canMoveUp: index > 0 && !reorderingRef.current,
+      canMoveDown: index < ids.length - 1 && !reorderingRef.current,
       onMoveUp: () => {
         const reorderedIds = shiftPendingId(ids, entry.id, -1);
-        if (reorderedIds) void onReorder(reorderedIds, agentId);
+        if (reorderedIds) void guardedReorder(reorderedIds);
       },
       onMoveDown: () => {
         const reorderedIds = shiftPendingId(ids, entry.id, 1);
-        if (reorderedIds) void onReorder(reorderedIds, agentId);
+        if (reorderedIds) void guardedReorder(reorderedIds);
       },
     };
   };
