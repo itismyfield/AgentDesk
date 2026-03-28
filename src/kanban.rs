@@ -73,7 +73,15 @@ pub fn transition_status_with_opts(
             "SELECT status, review_status, latest_dispatch_id, repo_id, assigned_agent_id \
              FROM kanban_cards WHERE id = ?1",
             [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .map_err(|_| anyhow::anyhow!("card not found: {card_id}"))?;
 
@@ -173,6 +181,7 @@ pub fn transition_status_with_opts(
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TransitionResult {
     pub changed: bool,
     pub from: String,

@@ -383,6 +383,7 @@ impl PolicyEngine {
         })
     }
 
+    #[allow(dead_code)]
     pub fn fire_hook(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {
         let inner = self
             .inner

@@ -15,6 +15,7 @@ pub struct IssueRepoBody {
     pub repo: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct StartMeetingBody {
     pub agenda: Option<String>,
@@ -520,7 +521,7 @@ pub async fn discard_all_issues(
 /// POST /api/round-table-meetings/start
 /// Send meeting start request to Discord channel via announce bot.
 pub async fn start_meeting(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(body): Json<StartMeetingBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let channel_id = match &body.channel_id {

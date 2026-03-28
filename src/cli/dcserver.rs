@@ -146,6 +146,7 @@ pub fn is_windows_service_installed() -> bool {
     false
 }
 
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 pub fn is_windows_service_running() -> bool {
     let output = match std::process::Command::new("sc")
@@ -159,6 +160,7 @@ pub fn is_windows_service_running() -> bool {
     String::from_utf8_lossy(&output.stdout).contains("RUNNING")
 }
 
+#[allow(dead_code)]
 #[cfg(not(target_os = "windows"))]
 pub fn is_windows_service_running() -> bool {
     false
@@ -428,6 +430,7 @@ pub fn kill_existing_dcserver_processes() {
     }
 }
 
+#[allow(dead_code)]
 pub fn parse_restart_dcserver_report_context(
     args: &[String],
     start_index: usize,

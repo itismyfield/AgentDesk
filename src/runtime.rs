@@ -3,6 +3,8 @@
 //! Currently the only implementation is `TmuxRuntime`. A future `ProcessRuntime`
 //! can be added without touching business logic in turn_bridge.rs / recovery.rs.
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 
 /// Trait abstracting session runtime operations.

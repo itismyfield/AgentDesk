@@ -246,6 +246,7 @@ pub(super) async fn save_claude_session_id(
     save_provider_session_id(session_key, claude_session_id, api_port).await
 }
 
+#[allow(dead_code)]
 pub(super) async fn fetch_claude_session_id(session_key: &str, api_port: u16) -> Option<String> {
     fetch_provider_session_id(session_key, api_port).await
 }

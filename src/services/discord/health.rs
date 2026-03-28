@@ -629,6 +629,7 @@ pub fn spawn_watchdog(port: u16) {
 /// Parse a /api/send JSON body and extract (target, content, source).
 /// Returns Err with an error message on invalid input.
 /// Factored out of handle_send for testability.
+#[allow(dead_code)]
 fn parse_send_body(body: &str) -> Result<(String, String, String), &'static str> {
     let json: serde_json::Value = serde_json::from_str(body).map_err(|_| "invalid JSON")?;
     let content = json

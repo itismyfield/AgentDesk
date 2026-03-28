@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

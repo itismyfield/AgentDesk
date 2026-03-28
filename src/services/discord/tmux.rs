@@ -520,8 +520,7 @@ pub(super) async fn tmux_output_watcher(
             )
             .await;
 
-            let ctx_cfg =
-                super::adk_session::fetch_context_thresholds(shared.api_port).await;
+            let ctx_cfg = super::adk_session::fetch_context_thresholds(shared.api_port).await;
             let pct = (tokens * 100) / ctx_cfg.context_window.max(1);
             if pct >= ctx_cfg.compact_pct && !is_prompt_too_long {
                 let exact_target =
@@ -538,8 +537,6 @@ pub(super) async fn tmux_output_watcher(
                 })
                 .await;
             }
-            // Reset for next turn
-            result_tokens = None;
         }
     }
 
@@ -917,7 +914,6 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 
     // Dead sessions that need DB cleanup (idle status report + tmux kill)
     struct DeadSessionCleanup {
-        channel_id: ChannelId,
         channel_name: String,
         session_name: String,
     }
@@ -1041,7 +1037,6 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             }
             // Schedule DB cleanup + tmux kill for this dead session
             dead_cleanups.push(DeadSessionCleanup {
-                channel_id: *channel_id,
                 channel_name: channel_name.clone(),
                 session_name: session_name.to_string(),
             });
@@ -1469,7 +1464,7 @@ async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
         let full_suffix = format!("-t{thread_channel_id}{env_suffix}");
         let provider = shared.settings.read().await.provider.clone();
         let suffix_c = full_suffix.clone();
-        let provider_c = provider.clone();
+        let _provider_c = provider.clone();
         let killed = tokio::task::spawn_blocking(move || {
             // List tmux sessions and find the one ending with -t{thread_channel_id}{env_suffix}
             let prefix = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);

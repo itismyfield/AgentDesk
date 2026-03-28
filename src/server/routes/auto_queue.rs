@@ -110,10 +110,8 @@ fn ensure_tables(conn: &rusqlite::Connection) {
         )
         .unwrap_or(false);
     if !has_dispatch_id {
-        conn.execute_batch(
-            "ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;",
-        )
-        .ok();
+        conn.execute_batch("ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;")
+            .ok();
     }
 }
 
@@ -497,7 +495,7 @@ pub async fn generate(
                 .flatten();
 
             // Parse dependency issue numbers from ## 의존성 section
-            let dep_numbers = if let Some(ref url) = issue_body {
+            let dep_numbers = if let Some(_url) = issue_body {
                 // Get issue number from this card
                 let issue_num: Option<i64> = conn
                     .query_row(
@@ -755,7 +753,6 @@ pub async fn activate(
         if busy {
             tracing::info!("[auto-queue] Skipping activate for {agent_id}: agent has active cards");
             drop(conn);
-            conn = state.db.separate_conn().unwrap();
             break;
         }
 
@@ -806,7 +803,11 @@ pub async fn activate(
         .ok();
         drop(conn_reacquired);
         super::dispatches::queue_dispatch_notify(
-            &state.db, &dispatch_id, &agent_id, &card_id, &title,
+            &state.db,
+            &dispatch_id,
+            &agent_id,
+            &card_id,
+            &title,
         );
 
         let conn_inner = state.db.separate_conn().unwrap();
@@ -1115,7 +1116,7 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
 
     // Trigger dispatch of next pending entry
     if resumed > 0 {
-        let (status, body) = activate(
+        let (_status, body) = activate(
             State(state),
             Json(ActivateBody {
                 repo: None,

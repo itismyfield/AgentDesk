@@ -22,6 +22,7 @@ pub struct ListMessagesQuery {
     pub before: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CreateMessageBody {
     pub sender_type: Option<String>,

@@ -23,7 +23,7 @@ pub async fn list_channel_queue(
         Ok(n) => n,
         Err(_) => return Json(json!({"error": "invalid channel_id", "queue": []})),
     };
-    let cid = serenity::model::id::ChannelId::new(channel_id_num);
+    let _cid = serenity::model::id::ChannelId::new(channel_id_num);
 
     // Access SharedData via engine's shared_data (not available here)
     // Instead, read from the DB-backed pending queue files

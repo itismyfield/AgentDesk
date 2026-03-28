@@ -2234,7 +2234,9 @@ async fn handle_text_command(
                 token.cancel_with_tmux_cleanup();
             }
             // Build tmux session name from channel name
-            let tmux_name = d.sessions.get(&channel_id)
+            let tmux_name = d
+                .sessions
+                .get(&channel_id)
                 .and_then(|s| s.channel_name.as_ref())
                 .map(|ch_name| data.provider.build_tmux_session_name(ch_name));
             if let Some(session) = d.sessions.get_mut(&channel_id) {
@@ -2518,7 +2520,10 @@ Any other message is sent to {p}.
                         let _ = msg
                             .reply(
                                 &ctx.http,
-                                format!("Model set to **{}** for this channel.\n{}", validated, status),
+                                format!(
+                                    "Model set to **{}** for this channel.\n{}",
+                                    validated, status
+                                ),
                             )
                             .await;
                     }
@@ -2558,14 +2563,14 @@ Any other message is sent to {p}.
                 }
                 _ => {
                     // Treat bare arg as shorthand for "set"
-                    let validated = match super::commands::validate_model_input(&data.provider, arg1)
-                    {
-                        Ok(model) => model,
-                        Err(message) => {
-                            let _ = msg.reply(&ctx.http, message).await;
-                            return Ok(true);
-                        }
-                    };
+                    let validated =
+                        match super::commands::validate_model_input(&data.provider, arg1) {
+                            Ok(model) => model,
+                            Err(message) => {
+                                let _ = msg.reply(&ctx.http, message).await;
+                                return Ok(true);
+                            }
+                        };
                     data.shared
                         .model_overrides
                         .insert(channel_id, validated.clone());
@@ -2578,7 +2583,10 @@ Any other message is sent to {p}.
                     let _ = msg
                         .reply(
                             &ctx.http,
-                            format!("Model set to **{}** for this channel.\n{}", validated, status),
+                            format!(
+                                "Model set to **{}** for this channel.\n{}",
+                                validated, status
+                            ),
                         )
                         .await;
                 }
@@ -3084,6 +3092,7 @@ struct DispatchInfo {
     discord_channel_alt: Option<String>,
 }
 
+#[allow(dead_code)]
 async fn lookup_card_thread(api_port: u16, dispatch_id: &str) -> Option<String> {
     let info = lookup_dispatch_info(api_port, dispatch_id).await?;
     info.active_thread_id

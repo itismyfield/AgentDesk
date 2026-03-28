@@ -15,7 +15,6 @@ use crate::services::remote::RemoteProfile;
 use crate::services::tmux_diagnostics::{
     record_tmux_exit_reason, tmux_session_exists, tmux_session_has_live_pane,
 };
-use crate::utils::format::safe_prefix;
 
 /// Cached path to the claude binary.
 /// Once resolved, reused for all subsequent calls.
@@ -137,6 +136,7 @@ pub fn kill_child_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ClaudeResponse {
     pub success: bool,
@@ -264,6 +264,7 @@ pub struct CancelToken {
     pub cancelled: std::sync::atomic::AtomicBool,
     pub child_pid: std::sync::Mutex<Option<u32>>,
     /// SSH cancel flag — set to true to signal remote execution to close the channel
+    #[allow(dead_code)]
     pub ssh_cancel: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// tmux session name for cleanup on cancel
     pub tmux_session: std::sync::Mutex<Option<String>>,
@@ -342,6 +343,7 @@ pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
 ];
 
 /// Execute a command using Claude CLI
+#[allow(dead_code)]
 pub fn execute_command(
     prompt: &str,
     session_id: Option<&str>,
@@ -478,6 +480,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 }
 
 /// Parse Claude CLI JSON output
+#[allow(dead_code)]
 fn parse_claude_output(output: &str) -> ClaudeResponse {
     let mut session_id: Option<String> = None;
     let mut response_text = String::new();
@@ -517,6 +520,7 @@ fn parse_claude_output(output: &str) -> ClaudeResponse {
 }
 
 /// Check if Claude CLI is available
+#[allow(dead_code)]
 pub fn is_claude_available() -> bool {
     #[cfg(not(unix))]
     {
@@ -530,6 +534,7 @@ pub fn is_claude_available() -> bool {
 }
 
 /// Check if platform supports AI features
+#[allow(dead_code)]
 pub fn is_ai_supported() -> bool {
     cfg!(unix)
 }

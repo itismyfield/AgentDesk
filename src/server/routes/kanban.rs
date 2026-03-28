@@ -58,12 +58,14 @@ pub struct AssignCardBody {
     pub agent_id: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct RetryCardBody {
     pub assignee_agent_id: Option<String>,
     pub request_now: Option<bool>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct RedispatchCardBody {
     pub reason: Option<String>,
@@ -447,11 +449,8 @@ pub async fn update_card(
             });
         if new_s.as_str() != old_status && is_gated_transition {
             // #144: Queue via dispatch outbox instead of tokio::spawn
-            let dispatch_info: Option<(String, String, String)> = state
-                .db
-                .lock()
-                .ok()
-                .and_then(|conn| {
+            let dispatch_info: Option<(String, String, String)> =
+                state.db.lock().ok().and_then(|conn| {
                     conn.query_row(
                         "SELECT kc.assigned_agent_id, kc.title, kc.latest_dispatch_id \
                          FROM kanban_cards kc WHERE kc.id = ?1",
@@ -462,7 +461,11 @@ pub async fn update_card(
                 });
             if let Some((agent_id, title, dispatch_id)) = dispatch_info {
                 super::dispatches::queue_dispatch_notify(
-                    &state.db, &dispatch_id, &agent_id, &id, &title,
+                    &state.db,
+                    &dispatch_id,
+                    &agent_id,
+                    &id,
+                    &title,
                 );
             }
         }
@@ -735,7 +738,7 @@ pub async fn redispatch_card(
             }
         };
 
-        let old_status: String = conn
+        let _old_status: String = conn
             .query_row(
                 "SELECT status FROM kanban_cards WHERE id = ?1",
                 [&id],
@@ -950,7 +953,7 @@ pub async fn defer_dod(
     // #128: Check if all DoD items are now complete AND card is awaiting_dod.
     // If so, clear awaiting_dod and restart review (fire on_enter hooks).
     let restart_review_state: Option<String>;
-    let should_restart_review = {
+    let _should_restart_review = {
         let (card_status, review_status): (String, Option<String>) = conn
             .query_row(
                 "SELECT status, review_status FROM kanban_cards WHERE id = ?1",
@@ -1845,6 +1848,7 @@ pub async fn pm_decision(
 
 // ── PMD-only reopen (done → in_progress) ─────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct ReopenBody {
     pub review_status: Option<String>,

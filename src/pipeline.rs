@@ -312,6 +312,7 @@ impl PipelineConfig {
     }
 
     /// Check if a state is valid.
+    #[allow(dead_code)]
     pub fn is_valid_state(&self, state: &str) -> bool {
         self.states.iter().any(|s| s.id == state)
     }
@@ -387,6 +388,7 @@ impl PipelineConfig {
 
     /// Check if a state requires a gated inbound transition (dispatch-entry states).
     /// These states should only be entered via dispatch API, not direct PATCH.
+    #[allow(dead_code)]
     pub fn requires_dispatch_entry(&self, state: &str) -> bool {
         self.transitions
             .iter()
@@ -400,6 +402,7 @@ impl PipelineConfig {
     /// Check if a state is a dispatch kickoff state — the first gated target
     /// reachable from a dispatchable state. Only these should be blocked from
     /// direct PATCH (must use POST /api/dispatches instead).
+    #[allow(dead_code)]
     pub fn is_dispatch_kickoff(&self, state: &str) -> bool {
         let dispatchable = self.dispatchable_states();
         self.transitions.iter().any(|t| {

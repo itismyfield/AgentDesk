@@ -532,7 +532,7 @@ pub(crate) async fn send_dispatch_to_discord(
     };
 
     // For review dispatches, use the alternate channel (counter-model)
-    let mut use_alt = use_counter_model_channel(dispatch_type.as_deref());
+    let use_alt = use_counter_model_channel(dispatch_type.as_deref());
 
     // #145: Check if this dispatch is in a unified thread auto-queue run (dispatch_id path)
     let is_unified_run: bool = db

@@ -104,10 +104,7 @@ pub enum TransitionIntent {
         review_status: Option<String>,
     },
     /// Apply clock field for a state (e.g., started_at = datetime('now')).
-    ApplyClock {
-        card_id: String,
-        state: String,
-    },
+    ApplyClock { card_id: String, state: String },
     /// Clear review-related fields on terminal entry.
     ClearTerminalFields { card_id: String },
     /// Sync auto_queue_entries to 'done' for terminal states.
@@ -139,9 +136,7 @@ pub fn decide_transition(ctx: &TransitionContext, event: &TransitionEvent) -> Tr
         TransitionEvent::OperatorOverride { target_status } => {
             decide_operator_override(ctx, target_status)
         }
-        TransitionEvent::ReopenRequested { target_status } => {
-            decide_reopen(ctx, target_status)
-        }
+        TransitionEvent::ReopenRequested { target_status } => decide_reopen(ctx, target_status),
         TransitionEvent::DispatchAttached {
             dispatch_id,
             dispatch_type,
@@ -575,10 +570,8 @@ fn review_state_for(status: &str, pipeline: &PipelineConfig) -> String {
 ///
 /// Returns `Ok(true)` if the decision was Allowed and intents executed,
 /// `Ok(false)` if NoOp, and `Err` if Blocked.
-pub fn execute_decision(
-    db: &crate::db::Db,
-    decision: &TransitionDecision,
-) -> anyhow::Result<bool> {
+#[allow(dead_code)]
+pub fn execute_decision(db: &crate::db::Db, decision: &TransitionDecision) -> anyhow::Result<bool> {
     match &decision.outcome {
         TransitionOutcome::Blocked(reason) => {
             // Execute audit log intents even for blocked decisions
@@ -618,12 +611,13 @@ pub fn execute_intent_on_conn(
     execute_intent(conn, intent)
 }
 
-fn execute_intent(
-    conn: &rusqlite::Connection,
-    intent: &TransitionIntent,
-) -> anyhow::Result<()> {
+fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> anyhow::Result<()> {
     match intent {
-        TransitionIntent::UpdateStatus { card_id, from: _, to } => {
+        TransitionIntent::UpdateStatus {
+            card_id,
+            from: _,
+            to,
+        } => {
             conn.execute(
                 "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
                 rusqlite::params![to, card_id],
@@ -756,8 +750,7 @@ fn execute_audit_log(
 mod tests {
     use super::*;
     use crate::pipeline::{
-        ClockConfig, GateConfig, HookBindings, PipelineConfig, StateConfig,
-        TransitionConfig,
+        ClockConfig, GateConfig, HookBindings, PipelineConfig, StateConfig, TransitionConfig,
     };
     use std::collections::HashMap;
 
@@ -907,10 +900,12 @@ mod tests {
         let ctx = test_ctx("backlog", false);
         let decision = decide_status_transition(&ctx, "ready", "api", false);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
-        assert!(decision
-            .intents
-            .iter()
-            .any(|i| matches!(i, TransitionIntent::UpdateStatus { to, .. } if to == "ready")));
+        assert!(
+            decision
+                .intents
+                .iter()
+                .any(|i| matches!(i, TransitionIntent::UpdateStatus { to, .. } if to == "ready"))
+        );
     }
 
     #[test]
@@ -981,14 +976,18 @@ mod tests {
         let ctx = test_ctx("review", false);
         let decision = decide_status_transition(&ctx, "done", "api", false);
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
-        assert!(decision
-            .intents
-            .iter()
-            .any(|i| matches!(i, TransitionIntent::ClearTerminalFields { .. })));
-        assert!(decision
-            .intents
-            .iter()
-            .any(|i| matches!(i, TransitionIntent::SyncAutoQueue { .. })));
+        assert!(
+            decision
+                .intents
+                .iter()
+                .any(|i| matches!(i, TransitionIntent::ClearTerminalFields { .. }))
+        );
+        assert!(
+            decision
+                .intents
+                .iter()
+                .any(|i| matches!(i, TransitionIntent::SyncAutoQueue { .. }))
+        );
     }
 
     // ── Review state sync ────────────────────────────────────
@@ -1034,9 +1033,11 @@ mod tests {
         assert!(decision.intents.iter().any(
             |i| matches!(i, TransitionIntent::SetLatestDispatchId { dispatch_id: Some(id), .. } if id == "d-1")
         ));
-        assert!(decision.intents.iter().any(
-            |i| matches!(i, TransitionIntent::UpdateStatus { to, .. } if to == "requested")
-        ));
+        assert!(
+            decision.intents.iter().any(
+                |i| matches!(i, TransitionIntent::UpdateStatus { to, .. } if to == "requested")
+            )
+        );
     }
 
     #[test]
@@ -1051,10 +1052,12 @@ mod tests {
             },
         );
         assert_eq!(decision.outcome, TransitionOutcome::Allowed);
-        assert!(!decision
-            .intents
-            .iter()
-            .any(|i| matches!(i, TransitionIntent::UpdateStatus { .. })));
+        assert!(
+            !decision
+                .intents
+                .iter()
+                .any(|i| matches!(i, TransitionIntent::UpdateStatus { .. }))
+        );
     }
 
     // ── RedispatchRequested ──────────────────────────────────
@@ -1068,12 +1071,20 @@ mod tests {
         assert!(decision.intents.iter().any(
             |i| matches!(i, TransitionIntent::CancelDispatch { dispatch_id } if dispatch_id == "old-dispatch")
         ));
-        assert!(decision.intents.iter().any(
-            |i| matches!(i, TransitionIntent::SetLatestDispatchId { dispatch_id: None, .. })
-        ));
-        assert!(decision.intents.iter().any(
-            |i| matches!(i, TransitionIntent::SetReviewStatus { review_status: None, .. })
-        ));
+        assert!(decision.intents.iter().any(|i| matches!(
+            i,
+            TransitionIntent::SetLatestDispatchId {
+                dispatch_id: None,
+                ..
+            }
+        )));
+        assert!(decision.intents.iter().any(|i| matches!(
+            i,
+            TransitionIntent::SetReviewStatus {
+                review_status: None,
+                ..
+            }
+        )));
     }
 
     // ── Audit log always present ─────────────────────────────
@@ -1083,9 +1094,11 @@ mod tests {
         let ctx = test_ctx("done", false);
         let decision = decide_status_transition(&ctx, "review", "api", false);
         assert!(matches!(decision.outcome, TransitionOutcome::Blocked(_)));
-        assert!(decision
-            .intents
-            .iter()
-            .any(|i| matches!(i, TransitionIntent::AuditLog { .. })));
+        assert!(
+            decision
+                .intents
+                .iter()
+                .any(|i| matches!(i, TransitionIntent::AuditLog { .. }))
+        );
     }
 }

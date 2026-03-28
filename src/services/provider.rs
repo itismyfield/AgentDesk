@@ -469,16 +469,25 @@ mod tests {
         let extracted = extract_thread_channel_id(&parsed);
         assert_eq!(extracted, Some(1487044675541012490u64));
         // Trimmed total should be <= 44
-        assert!(parsed.len() <= 44, "trimmed channel must be <= 44 bytes, got {}", parsed.len());
+        assert!(
+            parsed.len() <= 44,
+            "trimmed channel must be <= 44 bytes, got {}",
+            parsed.len()
+        );
     }
 
     #[test]
     fn test_no_thread_suffix_still_truncates_normally() {
         // Non-thread channel names should still be truncated to 44 chars
-        let long_channel = "a]very]long]channel]name]that]exceeds]the]maximum]allowed]length]for]tmux";
+        let long_channel =
+            "a]very]long]channel]name]that]exceeds]the]maximum]allowed]length]for]tmux";
         let session = ProviderKind::Claude.build_tmux_session_name(long_channel);
         let (_, parsed) = parse_provider_and_channel_from_tmux_name(&session).unwrap();
-        assert!(parsed.len() <= 44, "non-thread channel must be <= 44 bytes, got {}", parsed.len());
+        assert!(
+            parsed.len() <= 44,
+            "non-thread channel must be <= 44 bytes, got {}",
+            parsed.len()
+        );
     }
 
     #[test]

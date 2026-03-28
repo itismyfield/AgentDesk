@@ -154,6 +154,7 @@ pub fn apply_runtime_path(command: &mut Command) {
 ///
 /// Runs the full resolution chain (which/where → login shell → known paths)
 /// on a blocking thread so it can be used from async contexts.
+#[allow(dead_code)]
 pub async fn async_resolve_binary_with_login_shell(name: &str) -> Option<String> {
     let name = name.to_string();
     tokio::task::spawn_blocking(move || resolve_binary_with_login_shell(&name))

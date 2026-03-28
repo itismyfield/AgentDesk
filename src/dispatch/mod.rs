@@ -481,6 +481,7 @@ pub fn mark_dispatch_completed(
 
 /// Legacy wrapper — delegates to [`finalize_dispatch`] for callers that already
 /// have a fully-formed result JSON (e.g. API PATCH handler).
+#[allow(dead_code)]
 pub fn complete_dispatch(
     db: &Db,
     engine: &PolicyEngine,

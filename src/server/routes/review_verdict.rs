@@ -117,7 +117,7 @@ fn update_card_review_state(
     db: &crate::db::Db,
     card_id: &str,
     decision: &str,
-    dispatch_id: Option<&str>,
+    _dispatch_id: Option<&str>,
 ) {
     let state = match decision {
         "accept" => "rework_pending",
@@ -396,7 +396,7 @@ pub async fn submit_verdict(
         "notes": body.notes,
         "feedback": body.feedback,
     });
-    let result_str = result_json.to_string();
+    let _result_str = result_json.to_string();
 
     // #143: Mark dispatch completed via shared helper (DB-only, no OnDispatchCompleted).
     // Review verdict fires OnReviewVerdict — specialized hook, not the generic completion hook.
@@ -412,7 +412,7 @@ pub async fn submit_verdict(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("update dispatch: {e}")})),
-            )
+            );
         }
     };
 
@@ -523,6 +523,7 @@ pub async fn submit_verdict(
 
 // ── Review Decision (agent's response to counter-model review) ──────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct ReviewDecisionBody {
     pub card_id: String,

@@ -15,6 +15,7 @@ pub struct CreateRepoBody {
     pub repo: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct UpdateRepoBody {
     pub default_agent_id: Option<String>,

@@ -2,6 +2,8 @@
 //!
 //! Abstracts `bash -c` (Unix) vs `cmd /C` (Windows) behind a unified API.
 
+#![allow(dead_code)]
+
 use std::process::{Command, Output};
 
 /// Execute a shell command string using the platform's default shell.

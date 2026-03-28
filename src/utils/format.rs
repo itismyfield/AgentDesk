@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // === UTF-8 safe string slicing utilities ===
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 

@@ -551,14 +551,20 @@ mod tests {
 
         // Default pipeline kickoff is "requested", but simple pipeline kickoff is "in_progress"
         let default_kickoff = crate::pipeline::get()
-            .transitions.iter()
+            .transitions
+            .iter()
             .find(|t| {
                 t.transition_type == crate::pipeline::TransitionType::Gated
-                    && crate::pipeline::get().dispatchable_states().contains(&t.from.as_str())
+                    && crate::pipeline::get()
+                        .dispatchable_states()
+                        .contains(&t.from.as_str())
             })
             .map(|t| t.to.as_str())
             .unwrap();
-        assert_eq!(default_kickoff, "requested", "default pipeline kickoff must be 'requested'");
+        assert_eq!(
+            default_kickoff, "requested",
+            "default pipeline kickoff must be 'requested'"
+        );
 
         // Create dispatch via create_dispatch_core_with_id — should use card's effective pipeline
         let result = dispatch::create_dispatch_core_with_id(
@@ -570,7 +576,11 @@ mod tests {
             "[S7 test]",
             &serde_json::json!({}),
         );
-        assert!(result.is_ok(), "dispatch creation should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "dispatch creation should succeed: {:?}",
+            result.err()
+        );
 
         // Card status must be "in_progress" (override kickoff), NOT "requested" (default kickoff)
         let status = get_card_status(&db, "card-s7");
@@ -601,7 +611,11 @@ mod tests {
             "[S7b test]",
             &serde_json::json!({}),
         );
-        assert!(result2.is_ok(), "create_dispatch_core should succeed: {:?}", result2.err());
+        assert!(
+            result2.is_ok(),
+            "create_dispatch_core should succeed: {:?}",
+            result2.err()
+        );
         assert_eq!(
             get_card_status(&db, "card-s7b"),
             "in_progress",
@@ -664,22 +678,41 @@ mod tests {
         drop(conn);
 
         // Validate the effective pipeline
-        assert!(effective.validate().is_ok(), "simple pipeline override must be valid");
+        assert!(
+            effective.validate().is_ok(),
+            "simple pipeline override must be valid"
+        );
 
         // Verify states: no "review" or "requested" state
         let state_ids: Vec<&str> = effective.states.iter().map(|s| s.id.as_str()).collect();
-        assert!(!state_ids.contains(&"review"), "simple pipeline has no review state");
-        assert!(!state_ids.contains(&"requested"), "simple pipeline has no requested state");
-        assert!(state_ids.contains(&"in_progress"), "simple pipeline has in_progress");
+        assert!(
+            !state_ids.contains(&"review"),
+            "simple pipeline has no review state"
+        );
+        assert!(
+            !state_ids.contains(&"requested"),
+            "simple pipeline has no requested state"
+        );
+        assert!(
+            state_ids.contains(&"in_progress"),
+            "simple pipeline has in_progress"
+        );
         assert!(state_ids.contains(&"done"), "simple pipeline has done");
 
         // Verify terminal state
         assert!(effective.is_terminal("done"), "done is terminal");
-        assert!(!effective.is_terminal("in_progress"), "in_progress is not terminal");
+        assert!(
+            !effective.is_terminal("in_progress"),
+            "in_progress is not terminal"
+        );
 
         // Verify dispatchable state
         let dispatchable = effective.dispatchable_states();
-        assert_eq!(dispatchable, vec!["ready"], "ready is the only dispatchable state");
+        assert_eq!(
+            dispatchable,
+            vec!["ready"],
+            "ready is the only dispatchable state"
+        );
 
         // Verify transitions work: card can go ready → in_progress (gated)
         assert!(
@@ -766,9 +799,15 @@ mod tests {
 
         // Key assertion: review → qa_test transition exists (not review → done)
         let review_pass = effective.find_transition("review", "qa_test");
-        assert!(review_pass.is_some(), "review → qa_test must exist in QA pipeline");
+        assert!(
+            review_pass.is_some(),
+            "review → qa_test must exist in QA pipeline"
+        );
         let review_done = effective.find_transition("review", "done");
-        assert!(review_done.is_none(), "review → done must NOT exist in QA pipeline");
+        assert!(
+            review_done.is_none(),
+            "review → done must NOT exist in QA pipeline"
+        );
 
         // qa_test → done transition
         let qa_done = effective.find_transition("qa_test", "done");
@@ -776,13 +815,19 @@ mod tests {
 
         // qa_test → in_progress force transition
         let qa_rework = effective.find_transition("qa_test", "in_progress");
-        assert!(qa_rework.is_some(), "qa_test → in_progress (force) must exist");
+        assert!(
+            qa_rework.is_some(),
+            "qa_test → in_progress (force) must exist"
+        );
 
         // Verify custom state has hooks
         let qa_hooks = effective.hooks_for_state("qa_test");
         assert!(qa_hooks.is_some(), "qa_test must have hook bindings");
         assert!(
-            qa_hooks.unwrap().on_enter.contains(&"OnCardTransition".to_string()),
+            qa_hooks
+                .unwrap()
+                .on_enter
+                .contains(&"OnCardTransition".to_string()),
             "qa_test on_enter must include OnCardTransition"
         );
 
@@ -810,9 +855,17 @@ mod tests {
 
         // Force transition qa_test → in_progress (simulating QA failure)
         let result = kanban::transition_status_with_opts(
-            &db, &engine, "card-qa", "in_progress", "qa-fail", true,
+            &db,
+            &engine,
+            "card-qa",
+            "in_progress",
+            "qa-fail",
+            true,
         );
-        assert!(result.is_ok(), "qa_test → in_progress force transition must work");
+        assert!(
+            result.is_ok(),
+            "qa_test → in_progress force transition must work"
+        );
         assert_eq!(get_card_status(&db, "card-qa"), "in_progress");
     }
 
@@ -881,11 +934,22 @@ mod tests {
         }
 
         let result_a = dispatch::create_dispatch_core_with_id(
-            &db, "d-multi-a", "card-multi-a", "agent-1", "implementation", "[Multi A]", &serde_json::json!({}),
+            &db,
+            "d-multi-a",
+            "card-multi-a",
+            "agent-1",
+            "implementation",
+            "[Multi A]",
+            &serde_json::json!({}),
         );
-        assert!(result_a.is_ok(), "dispatch for card-multi-a should succeed: {:?}", result_a.err());
+        assert!(
+            result_a.is_ok(),
+            "dispatch for card-multi-a should succeed: {:?}",
+            result_a.err()
+        );
         assert_eq!(
-            get_card_status(&db, "card-multi-a"), "in_progress",
+            get_card_status(&db, "card-multi-a"),
+            "in_progress",
             "card in 'ready' must kick off to 'in_progress', not 'qa_test'"
         );
 
@@ -905,11 +969,22 @@ mod tests {
         }
 
         let result_b = dispatch::create_dispatch_core_with_id(
-            &db, "d-multi-b", "card-multi-b", "agent-1", "implementation", "[Multi B]", &serde_json::json!({}),
+            &db,
+            "d-multi-b",
+            "card-multi-b",
+            "agent-1",
+            "implementation",
+            "[Multi B]",
+            &serde_json::json!({}),
         );
-        assert!(result_b.is_ok(), "dispatch for card-multi-b should succeed: {:?}", result_b.err());
+        assert!(
+            result_b.is_ok(),
+            "dispatch for card-multi-b should succeed: {:?}",
+            result_b.err()
+        );
         assert_eq!(
-            get_card_status(&db, "card-multi-b"), "qa_test",
+            get_card_status(&db, "card-multi-b"),
+            "qa_test",
             "card in 'qa_ready' must kick off to 'qa_test', not 'in_progress'"
         );
     }

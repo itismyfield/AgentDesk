@@ -121,6 +121,7 @@ static WATCHDOG_DEADLINE_OVERRIDES: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Maximum watchdog extension: 3 hours from the original turn start.
+#[allow(dead_code)]
 const WATCHDOG_MAX_EXTENSION_MS: i64 = 3 * 3600 * 1000;
 
 /// Extend the watchdog deadline for a channel. Returns the new deadline_ms or None if at cap.

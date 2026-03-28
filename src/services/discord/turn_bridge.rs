@@ -547,7 +547,7 @@ pub(super) fn spawn_turn_bridge(
         let request_owner = bridge.request_owner;
         let serenity_ctx = bridge.serenity_ctx.clone();
         let token = bridge.token.clone();
-        let role_binding = bridge.role_binding.clone();
+        let _role_binding = bridge.role_binding.clone();
         let adk_session_key = bridge.adk_session_key.clone();
         let adk_session_name = bridge.adk_session_name.clone();
         let adk_session_info = bridge.adk_session_info.clone();
@@ -1585,7 +1585,6 @@ pub(super) fn spawn_turn_bridge(
                                     "  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}"
                                 );
                             }
-                            _ => {}
                         }
                     }
 

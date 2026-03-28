@@ -67,6 +67,7 @@ pub struct IntentExecutionResult {
 }
 
 /// Info about a dispatch created by intent execution.
+#[allow(dead_code)]
 pub struct CreatedDispatch {
     pub dispatch_id: String,
     pub card_id: String,

@@ -1170,7 +1170,7 @@ fn check_service_manager() -> Check {
             "systemd user service not enabled",
         )
         .with_next_steps(vec![
-            "systemctl --user status agentdesk-dcserver".to_string()
+            "systemctl --user status agentdesk-dcserver".to_string(),
         ])
     }
 }
@@ -1411,9 +1411,9 @@ pub fn cmd_doctor(fix: bool, json: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_json_report, check_server_running, configured_provider_names,
-        discord_bot_check_from_health, provider_capability_summary, Check, CheckGroup, CheckStatus,
-        FixAction, HealthSnapshot,
+        Check, CheckGroup, CheckStatus, FixAction, HealthSnapshot, build_json_report,
+        check_server_running, configured_provider_names, discord_bot_check_from_health,
+        provider_capability_summary,
     };
     use crate::config::ServerConfig;
     use crate::services::provider::ProviderKind;
@@ -1512,19 +1512,21 @@ mod tests {
 
     #[test]
     fn json_report_uses_stable_machine_friendly_fields() {
-        let checks = vec![Check::warn(
-            "service_manager",
-            CheckGroup::Core,
-            "Service Manager",
-            "systemd inactive",
-            "restart service",
-        )
-        .with_path("systemctl --user")
-        .with_expected_actual("service active", "service inactive")
-        .with_next_steps(vec![
-            "systemctl --user status agentdesk-dcserver".to_string(),
-            "agentdesk doctor --fix".to_string(),
-        ])];
+        let checks = vec![
+            Check::warn(
+                "service_manager",
+                CheckGroup::Core,
+                "Service Manager",
+                "systemd inactive",
+                "restart service",
+            )
+            .with_path("systemctl --user")
+            .with_expected_actual("service active", "service inactive")
+            .with_next_steps(vec![
+                "systemctl --user status agentdesk-dcserver".to_string(),
+                "agentdesk doctor --fix".to_string(),
+            ]),
+        ];
         let fixes = vec![FixAction::ok(
             "service_restart",
             "Service Restart",

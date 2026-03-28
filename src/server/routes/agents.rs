@@ -86,6 +86,7 @@ pub async fn agent_offices(
 }
 
 /// GET /api/agents/:id/cron
+#[allow(dead_code)]
 pub async fn agent_cron(
     State(state): State<AppState>,
     Path(id): Path<String>,
