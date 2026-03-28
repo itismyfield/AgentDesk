@@ -1145,7 +1145,7 @@ pub(super) async fn handle_text_message(
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
-    let system_prompt_owned = build_system_prompt(
+    let mut system_prompt_owned = build_system_prompt(
         &discord_context,
         &current_path,
         channel_id,
@@ -1157,6 +1157,29 @@ pub(super) async fn handle_text_message(
         dispatch_profile,
         dispatch_type_str.as_deref(),
     );
+
+    // Inject session retry context (Discord history from stale session auto-retry).
+    // Consumed once — deleted after reading so subsequent turns don't see it.
+    if let Some(ref db) = shared.db {
+        let kv_key = format!("session_retry_context:{}", channel_id);
+        if let Ok(conn) = db.lock() {
+            let ctx: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM kv_meta WHERE key = ?1",
+                    [&kv_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok();
+            if let Some(history) = ctx {
+                system_prompt_owned.push_str(&format!(
+                    "\n\n[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n{}",
+                    history
+                ));
+                conn.execute("DELETE FROM kv_meta WHERE key = ?1", [&kv_key])
+                    .ok();
+            }
+        }
+    }
 
     // Create cancel token — with second check to close the TOCTOU race window.
     // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
@@ -2087,7 +2110,9 @@ async fn handle_text_command(
                 token.cancel_with_tmux_cleanup();
             }
             // Build tmux session name from channel name
-            let tmux_name = d.sessions.get(&channel_id)
+            let tmux_name = d
+                .sessions
+                .get(&channel_id)
                 .and_then(|s| s.channel_name.as_ref())
                 .map(|ch_name| data.provider.build_tmux_session_name(ch_name));
             if let Some(session) = d.sessions.get_mut(&channel_id) {

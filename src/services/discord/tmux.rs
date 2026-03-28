@@ -478,8 +478,8 @@ pub(super) async fn tmux_output_watcher(
                     )
                     .await;
             }
-            // Auto-retry: fetch Discord history and re-send via announce bot
-            // The original message is in the channel — fetch last 10 and re-send the latest user message
+            // Auto-retry: fetch Discord history, store in kv_meta for LLM injection,
+            // then re-send only the original user message via announce bot.
             if let Ok(msgs) = channel_id
                 .messages(&http, serenity::builder::GetMessages::new().limit(10))
                 .await
@@ -496,11 +496,22 @@ pub(super) async fn tmux_output_watcher(
                     }
                 }
                 if !last_user_msg.is_empty() {
-                    let history = format!(
-                        "[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n{}\n\n",
-                        history_lines.join("\n")
+                    // Store history in kv_meta for router to inject into LLM prompt
+                    if !history_lines.is_empty() {
+                        let _ = reqwest::Client::new()
+                            .post(crate::config::local_api_url(shared.api_port, "/api/kv"))
+                            .json(&serde_json::json!({
+                                "key": format!("session_retry_context:{}", channel_id),
+                                "value": history_lines.join("\n"),
+                            }))
+                            .send()
+                            .await;
+                    }
+                    // Discord: short notice + original message only
+                    let retry_content = format!(
+                        "[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n\n{}",
+                        last_user_msg
                     );
-                    let retry_content = format!("{}{}", history, last_user_msg);
                     let _ = reqwest::Client::new()
                         .post(crate::config::local_api_url(shared.api_port, "/api/send"))
                         .json(&serde_json::json!({

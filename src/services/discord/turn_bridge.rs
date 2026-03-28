@@ -8,8 +8,10 @@ use crate::services::tmux_common::tmux_exact_target;
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 use crate::utils::format::{safe_suffix, tail_with_ellipsis};
 
-/// Auto-retry a failed resume by fetching recent Discord history and re-sending
-/// the original message via announce bot with context prepended.
+/// Auto-retry a failed resume by fetching recent Discord history,
+/// storing it in kv_meta for the router to inject into the LLM prompt,
+/// and re-sending the original message via announce bot.
+/// Discord only sees a short notice — the full history is LLM-only.
 async fn auto_retry_with_history(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -29,7 +31,6 @@ async fn auto_retry_with_history(
     {
         Ok(msgs) => {
             let mut lines = Vec::new();
-            // Messages come newest-first, reverse for chronological order
             for msg in msgs.iter().rev() {
                 let author = &msg.author.name;
                 let content = msg.content.chars().take(300).collect::<String>();
@@ -38,21 +39,35 @@ async fn auto_retry_with_history(
                 }
             }
             if lines.is_empty() {
-                String::new()
+                None
             } else {
-                format!(
-                    "[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n{}\n\n",
-                    lines.join("\n")
-                )
+                Some(lines.join("\n"))
             }
         }
         Err(e) => {
             eprintln!("  [{ts}] ⚠ auto-retry: failed to fetch history: {e}");
-            String::new()
+            None
         }
     };
 
-    let retry_content = format!("{}{}", history, user_text);
+    // Store history in kv_meta for the router to inject into LLM prompt.
+    // Key: session_retry_context:{channel_id} — consumed on next turn start.
+    if let Some(ref hist) = history {
+        let _ = reqwest::Client::new()
+            .post(local_api_url(api_port, "/api/kv"))
+            .json(&serde_json::json!({
+                "key": format!("session_retry_context:{}", channel_id),
+                "value": hist,
+            }))
+            .send()
+            .await;
+    }
+
+    // Discord message: short notice only — history stays LLM-side
+    let retry_content = format!(
+        "[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n\n{}",
+        user_text
+    );
     let retry_ch = channel_id.get().to_string();
 
     let _ = reqwest::Client::new()
