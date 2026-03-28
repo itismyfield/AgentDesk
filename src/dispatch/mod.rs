@@ -745,6 +745,7 @@ pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
              WHERE e.run_id = ( \
                  SELECT e2.run_id FROM auto_queue_entries e2 \
                  WHERE e2.dispatch_id = ?1 \
+                 ORDER BY CASE e2.status WHEN 'dispatched' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END \
                  LIMIT 1 \
              ) \
              AND r.status IN ('active', 'paused') \
