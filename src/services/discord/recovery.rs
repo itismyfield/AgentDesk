@@ -158,33 +158,7 @@ pub(super) async fn restore_inflight_turns(
     let current_gen = shared.current_generation;
 
     for state in states {
-        // Generation gate: skip recovery for turns born in a previous generation.
-        // These old sessions should not be followed up — the new dcserver should
-        // start fresh sessions instead.
-        if state.born_generation < current_gen {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ skipping inflight recovery for channel {}: old generation (born={}, current={})",
-                state.channel_id, state.born_generation, current_gen
-            );
-            // Update the Discord message so "Processing..." doesn't stay forever
-            if state.current_msg_id != 0 {
-                let channel_id = ChannelId::new(state.channel_id);
-                let current_msg_id = MessageId::new(state.current_msg_id);
-                let stale_text = super::turn_bridge::stale_inflight_message(&state.full_response);
-                let _ = super::formatting::replace_long_message_raw(
-                    http,
-                    channel_id,
-                    current_msg_id,
-                    &stale_text,
-                    shared,
-                )
-                .await;
-            }
-            clear_inflight_state(provider, state.channel_id);
-            continue;
-        }
-
+        // No generation gate — adopt mode allows old-gen session recovery.
         // If a restart report exists for this channel, check whether the agent
         // has already finished before deciding to skip recovery.  When the output
         // file contains a completed result we deliver it directly and clear both

@@ -35,13 +35,24 @@ pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
     }
 
     let exact = crate::services::tmux_common::tmux_exact_target(tmux_session_name);
-    std::process::Command::new("tmux")
-        .args(["list-panes", "-t", &exact, "-F", "#{pane_dead}"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| pane_list_has_live_pane(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or(false)
+    // Retry once on failure — tmux server can be momentarily busy during
+    // dcserver restart, causing false-negative that blocks session adopt.
+    for attempt in 0..2 {
+        let result = std::process::Command::new("tmux")
+            .args(["list-panes", "-t", &exact, "-F", "#{pane_dead}"])
+            .output();
+        match result {
+            Ok(output) if output.status.success() => {
+                return pane_list_has_live_pane(&String::from_utf8_lossy(&output.stdout));
+            }
+            _ => {
+                if attempt == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(not(unix))]
@@ -121,11 +132,24 @@ pub fn build_tmux_death_diagnostic(
     }
 }
 
+pub fn should_recreate_session_after_followup_fifo_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+
+    lower.contains("failed to write to input fifo: broken pipe")
+        || lower.contains("failed to flush input fifo: broken pipe")
+        || (lower.contains("failed to open input fifo:")
+            && (lower.contains("no such file")
+                || lower.contains("not found")
+                || lower.contains("broken pipe")
+                || lower.contains("no such device")
+                || lower.contains("bad file descriptor")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         build_tmux_death_diagnostic, clear_tmux_exit_reason, pane_list_has_live_pane,
-        record_tmux_exit_reason,
+        record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
     };
 
     #[test]
@@ -143,5 +167,18 @@ mod tests {
         assert!(pane_list_has_live_pane("1\n0\n"));
         assert!(!pane_list_has_live_pane("1\n1\n"));
         assert!(!pane_list_has_live_pane(""));
+    }
+
+    #[test]
+    fn test_should_recreate_session_after_followup_fifo_error() {
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to write to input FIFO: Broken pipe (os error 32)"
+        ));
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to open input FIFO: No such file or directory (os error 2)"
+        ));
+        assert!(!should_recreate_session_after_followup_fifo_error(
+            "Failed to read Codex output: unexpected EOF"
+        ));
     }
 }
