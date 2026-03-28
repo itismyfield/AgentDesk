@@ -19,6 +19,23 @@ async fn auto_retry_with_history(
     api_port: u16,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
+
+    // Dedup guard: use a static set to prevent turn_bridge + watcher from
+    // both firing auto-retry for the same channel simultaneously.
+    use std::sync::LazyLock;
+    static RETRY_PENDING: LazyLock<dashmap::DashSet<u64>> =
+        LazyLock::new(|| dashmap::DashSet::new());
+    if !RETRY_PENDING.insert(channel_id.get()) {
+        eprintln!("  [{ts}] ⏭ auto-retry: skipped (dedup) for channel {channel_id}");
+        return;
+    }
+    // Clean up guard after 30 seconds (allow future retries)
+    let ch_id = channel_id.get();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        RETRY_PENDING.remove(&ch_id);
+    });
+
     eprintln!("  [{ts}] ↻ auto-retry: fetching last 10 messages for channel {channel_id}");
 
     // Fetch last 10 messages from Discord
