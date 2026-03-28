@@ -42,19 +42,19 @@ fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<serde_j
     let tiers: &[(&str, &str, i64, &str)] = &[
         (
             "tick:30s",
-            "onTick30s — [J] retry, [I-0] notification recovery",
+            "onTick30s — [J] retry, [I-0] notification recovery, [I] deadlock, [K] orphan",
             30_000,
             "30s",
         ),
         (
             "tick:1min",
-            "onTick1min — [A][C][D][E][K][L] timeouts, orphan recovery",
+            "onTick1min — [A][C][D][E][L] non-critical timeouts",
             60_000,
             "1min",
         ),
         (
             "tick:5min",
-            "onTick5min — [R][B][F][G][H][I][ctx] reconciliation, deadlock",
+            "onTick5min — [R][B][F][G][H][ctx] non-critical reconciliation",
             300_000,
             "5min",
         ),

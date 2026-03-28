@@ -10,11 +10,11 @@ pub enum Hook {
     OnReviewEnter,
     OnReviewVerdict,
     OnTick,
-    /// Fast tick (30s) — retry, unsent notification recovery
+    /// Fast tick (30s) — retry, notification recovery, [I] deadlock, [K] orphan
     OnTick30s,
-    /// Normal tick (1m) — timeouts, orphan recovery, stale detection
+    /// Normal tick (1m) — non-critical timeouts [A][C][D][E][L]
     OnTick1min,
-    /// Slow tick (5m) — reconciliation, deadlock, context check
+    /// Slow tick (5m) — non-critical reconciliation [R][B][F][G][H], context check
     OnTick5min,
 }
 
