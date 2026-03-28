@@ -298,6 +298,12 @@ pub async fn hook_session(
     let status = body.status.as_deref().unwrap_or("working");
     let provider = body.provider.as_deref().unwrap_or("claude");
     let tokens = body.tokens.unwrap_or(0) as i64;
+    // #107: Normalize empty claude_session_id to None (SQL NULL) so stale empty
+    // strings are never persisted — prevents invalid --resume attempts after restart.
+    let claude_session_id = body
+        .claude_session_id
+        .as_deref()
+        .filter(|s| !s.is_empty());
     let idle_auto_complete_dispatch = if status == "idle" {
         body.dispatch_id.as_ref().and_then(|did| {
             conn.query_row(
@@ -356,7 +362,7 @@ pub async fn hook_session(
             body.cwd,
             body.dispatch_id,
             thread_channel_id,
-            body.claude_session_id,
+            claude_session_id,
         ],
     );
 

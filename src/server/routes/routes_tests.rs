@@ -16,11 +16,17 @@ fn test_engine(db: &Db) -> PolicyEngine {
     PolicyEngine::new(&config, db.clone()).unwrap()
 }
 
+fn test_api_router(db: Db, engine: PolicyEngine, health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>) -> axum::Router {
+    let tx = crate::server::ws::new_broadcast();
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    api_router(db, engine, tx, buf, health_registry)
+}
+
 #[tokio::test]
 async fn health_returns_ok_with_db_status() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -46,7 +52,7 @@ async fn health_returns_ok_with_db_status() {
 async fn agents_empty_list() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -81,7 +87,7 @@ async fn agents_returns_synced_agents() {
             .unwrap();
     }
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -122,7 +128,7 @@ async fn agents_include_current_thread_channel_id_from_working_session() {
             .unwrap();
     }
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let list_response = app
         .clone()
@@ -176,7 +182,7 @@ async fn get_agent_found() {
             .unwrap();
     }
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -198,7 +204,7 @@ async fn get_agent_found() {
 async fn get_agent_not_found() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -221,7 +227,7 @@ async fn get_agent_not_found() {
 async fn sessions_empty_list() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -247,7 +253,7 @@ async fn sessions_empty_list() {
 async fn kanban_create_card() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -276,7 +282,7 @@ async fn kanban_create_card() {
 async fn kanban_list_cards_empty() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -313,7 +319,7 @@ async fn kanban_list_cards_with_filter() {
             ).unwrap();
     }
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -346,7 +352,7 @@ async fn kanban_get_card() {
             ).unwrap();
     }
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -370,7 +376,7 @@ async fn kanban_get_card() {
 async fn kanban_get_card_not_found() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -398,7 +404,7 @@ async fn kanban_update_card_status() {
             ).unwrap();
     }
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -423,7 +429,7 @@ async fn kanban_update_card_status() {
 async fn kanban_update_card_not_found() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -457,7 +463,7 @@ async fn kanban_assign_card() {
             ).unwrap();
     }
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -483,7 +489,7 @@ async fn kanban_assign_card() {
 async fn kanban_assign_card_not_found() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -506,7 +512,7 @@ async fn kanban_assign_card_not_found() {
 async fn dispatch_list_empty() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -539,7 +545,7 @@ async fn dispatch_create_and_get() {
             ).unwrap();
     }
 
-    let app = api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router(db.clone(), engine.clone(), None);
     let response = app
         .oneshot(
             Request::builder()
@@ -574,7 +580,7 @@ async fn dispatch_create_and_get() {
     drop(conn);
 
     // GET single dispatch
-    let app2 = api_router(db, engine, None);
+    let app2 = test_api_router(db, engine, None);
     let response2 = app2
         .oneshot(
             Request::builder()
@@ -597,7 +603,7 @@ async fn dispatch_create_and_get() {
 async fn dispatch_create_card_not_found() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -630,7 +636,7 @@ async fn dispatch_complete() {
     }
 
     // Create dispatch
-    let app = api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router(db.clone(), engine.clone(), None);
     let response = app
         .oneshot(
             Request::builder()
@@ -652,7 +658,7 @@ async fn dispatch_complete() {
     let dispatch_id = json["dispatch"]["id"].as_str().unwrap().to_string();
 
     // Complete dispatch
-    let app2 = api_router(db, engine, None);
+    let app2 = test_api_router(db, engine, None);
     let response2 = app2
         .oneshot(
             Request::builder()
@@ -677,7 +683,7 @@ async fn dispatch_complete() {
 async fn dispatch_get_not_found() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -788,7 +794,7 @@ async fn dispatch_list_with_filter() {
             ).unwrap();
     }
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -814,7 +820,7 @@ async fn dispatch_list_with_filter() {
 async fn github_repos_empty_list() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -840,7 +846,7 @@ async fn github_repos_register_and_list() {
     let engine = test_engine(&db);
 
     // Register
-    let app = api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router(db.clone(), engine.clone(), None);
     let response = app
         .oneshot(
             Request::builder()
@@ -861,7 +867,7 @@ async fn github_repos_register_and_list() {
     assert_eq!(json["repo"]["id"], "owner/repo1");
 
     // List
-    let app2 = api_router(db, engine, None);
+    let app2 = test_api_router(db, engine, None);
     let response2 = app2
         .oneshot(
             Request::builder()
@@ -883,7 +889,7 @@ async fn github_repos_register_and_list() {
 async fn github_repos_register_bad_format() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -904,7 +910,7 @@ async fn github_repos_register_bad_format() {
 async fn github_repos_sync_not_registered() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -926,7 +932,7 @@ async fn github_repos_sync_not_registered() {
 async fn pipeline_stages_empty_list() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -952,7 +958,7 @@ async fn pipeline_stages_create_and_list() {
     let engine = test_engine(&db);
 
     // Create
-    let app = api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router(db.clone(), engine.clone(), None);
     let response = app
             .oneshot(
                 Request::builder()
@@ -978,7 +984,7 @@ async fn pipeline_stages_create_and_list() {
     let stage_id = json["stage"]["id"].as_i64().unwrap();
 
     // List with filter
-    let app2 = api_router(db.clone(), engine.clone(), None);
+    let app2 = test_api_router(db.clone(), engine.clone(), None);
     let response2 = app2
         .oneshot(
             Request::builder()
@@ -996,7 +1002,7 @@ async fn pipeline_stages_create_and_list() {
     assert_eq!(json2["stages"].as_array().unwrap().len(), 1);
 
     // Delete
-    let app3 = api_router(db, engine, None);
+    let app3 = test_api_router(db, engine, None);
     let response3 = app3
         .oneshot(
             Request::builder()
@@ -1020,7 +1026,7 @@ async fn pipeline_stages_create_and_list() {
 async fn pipeline_stages_delete_not_found() {
     let db = test_db();
     let engine = test_engine(&db);
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
 
     let response = app
         .oneshot(
@@ -1053,7 +1059,7 @@ async fn pipeline_stages_list_filtered_by_repo() {
             ).unwrap();
     }
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -1101,7 +1107,7 @@ async fn pipeline_config_repo_get_set_override() {
     seed_repo(&db, "owner/repo-a");
 
     // GET — initially null
-    let app = api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router(db.clone(), engine.clone(), None);
     let resp = app
         .oneshot(
             Request::builder()
@@ -1121,7 +1127,7 @@ async fn pipeline_config_repo_get_set_override() {
     assert!(body["pipeline_config"].is_null());
 
     // PUT — set override
-    let app2 = api_router(db.clone(), engine.clone(), None);
+    let app2 = test_api_router(db.clone(), engine.clone(), None);
     let resp2 = app2
         .oneshot(
             Request::builder()
@@ -1138,7 +1144,7 @@ async fn pipeline_config_repo_get_set_override() {
     assert_eq!(resp2.status(), StatusCode::OK);
 
     // GET — now has override
-    let app3 = api_router(db, engine, None);
+    let app3 = test_api_router(db, engine, None);
     let resp3 = app3
         .oneshot(
             Request::builder()
@@ -1171,7 +1177,7 @@ async fn pipeline_config_agent_get_set_override() {
     seed_agent(&db, "agent-x");
 
     // PUT
-    let app = api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router(db.clone(), engine.clone(), None);
     let resp = app
         .oneshot(
             Request::builder()
@@ -1188,7 +1194,7 @@ async fn pipeline_config_agent_get_set_override() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // GET
-    let app2 = api_router(db, engine, None);
+    let app2 = test_api_router(db, engine, None);
     let resp2 = app2
         .oneshot(
             Request::builder()
@@ -1219,7 +1225,7 @@ async fn pipeline_config_effective_merges_layers() {
     seed_agent(&db, "agent-e");
 
     // Set repo override (hooks)
-    let app = api_router(db.clone(), engine.clone(), None);
+    let app = test_api_router(db.clone(), engine.clone(), None);
     app.oneshot(
         Request::builder()
             .method("PUT")
@@ -1234,7 +1240,7 @@ async fn pipeline_config_effective_merges_layers() {
     .unwrap();
 
     // Get effective — should include repo hook
-    let app2 = api_router(db.clone(), engine.clone(), None);
+    let app2 = test_api_router(db.clone(), engine.clone(), None);
     let resp = app2
         .oneshot(
             Request::builder()
@@ -1264,7 +1270,7 @@ async fn pipeline_config_graph_returns_nodes_and_edges() {
     let db = test_db();
     let engine = test_engine(&db);
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let resp = app
         .oneshot(
             Request::builder()
@@ -1301,7 +1307,7 @@ async fn pipeline_config_repo_invalid_override_rejected() {
     let engine = test_engine(&db);
     seed_repo(&db, "owner/repo-bad");
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let resp = app
         .oneshot(
             Request::builder()
@@ -1327,7 +1333,7 @@ async fn pipeline_config_repo_broken_merge_rejected() {
     // This parses as valid JSON but the merged effective pipeline should fail validate().
     let body = r#"{"config":{"timeouts":{"nonexistent_state":{"duration":"1h","clock":"no_such_clock"}}}}"#;
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let resp = app
         .oneshot(
             Request::builder()
@@ -1384,7 +1390,7 @@ async fn force_transition_rejects_without_channel_header() {
     seed_card_with_status(&db, "card-ft1", "backlog");
     set_pmd_channel(&db, "pmd-chan-123");
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -1407,7 +1413,7 @@ async fn force_transition_rejects_wrong_channel() {
     seed_card_with_status(&db, "card-ft2", "backlog");
     set_pmd_channel(&db, "pmd-chan-123");
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -1431,7 +1437,7 @@ async fn force_transition_succeeds_with_correct_channel() {
     seed_card_with_status(&db, "card-ft3", "requested");
     set_pmd_channel(&db, "pmd-chan-123");
 
-    let app = api_router(db, engine, None);
+    let app = test_api_router(db, engine, None);
     let response = app
         .oneshot(
             Request::builder()
@@ -1451,4 +1457,130 @@ async fn force_transition_succeeds_with_correct_channel() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["forced"], true);
+}
+
+/// #107 regression: empty claude_session_id must be normalized to NULL at the API
+/// boundary so that stale clear paths don't poison the DB with "".
+#[tokio::test]
+async fn hook_session_normalizes_empty_claude_session_id_to_null() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    // 1. Save a valid claude_session_id
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/hook/session")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"session_key":"test:sess1","status":"working","claude_session_id":"valid-id-123"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify it was stored
+    {
+        let conn = db.lock().unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT claude_session_id FROM sessions WHERE session_key = 'test:sess1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("valid-id-123"));
+    }
+
+    // 2. Send empty string — should be normalized to NULL (not stored as "")
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/hook/session")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"session_key":"test:sess1","status":"working","claude_session_id":""}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The COALESCE in the upsert preserves the old value when the new one is NULL,
+    // so the valid-id-123 should still be there (empty was normalized to NULL → COALESCE keeps old).
+    // This is correct: to actually clear, use the dedicated clear-session-id endpoint.
+    {
+        let conn = db.lock().unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT claude_session_id FROM sessions WHERE session_key = 'test:sess1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some("valid-id-123"),
+            "Empty string should be normalized to NULL, and COALESCE keeps the old value"
+        );
+    }
+
+    // 3. Use the dedicated clear endpoint to actually clear
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dispatched-sessions/clear-session-id")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"session_key":"test:sess1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify it's actually cleared (NULL)
+    {
+        let conn = db.lock().unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT claude_session_id FROM sessions WHERE session_key = 'test:sess1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored.is_none(),
+            "After clear-session-id, value should be NULL"
+        );
+    }
+
+    // 4. Verify GET returns null after clear
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/dispatched-sessions/claude-session-id?session_key=test:sess1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["claude_session_id"].is_null(),
+        "GET should return null after clear"
+    );
 }

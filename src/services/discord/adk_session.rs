@@ -235,8 +235,11 @@ pub(super) async fn fetch_claude_session_id(session_key: &str, api_port: u16) ->
         return None;
     }
     let json: serde_json::Value = resp.json().await.ok()?;
+    // #107: Filter empty strings — a stale clear path may have stored ""
+    // instead of NULL; treat it as no session ID.
     json.get("claude_session_id")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
 
