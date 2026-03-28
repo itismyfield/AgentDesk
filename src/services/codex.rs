@@ -397,6 +397,11 @@ fn execute_streaming_local_tmux(
                 let _ = Command::new("tmux")
                     .args(["kill-session", "-t", &exact_target])
                     .status();
+                // NOTE: Codex thread_id lives only in the wrapper's process memory.
+                // After kill, the recreated session starts a fresh conversation —
+                // the original thread context is lost.  This is an acceptable
+                // trade-off: the session was already dead/unreachable, so the
+                // thread_id was lost regardless.
                 // Fall through to new session creation below
             }
         }
@@ -951,6 +956,8 @@ fn handle_codex_json_line(
 mod tests {
     use std::sync::mpsc;
 
+    #[cfg(unix)]
+    use super::send_followup_to_tmux;
     use super::{
         TMUX_PROMPT_B64_PREFIX, base_exec_args, compose_codex_prompt, handle_codex_json_line,
     };
