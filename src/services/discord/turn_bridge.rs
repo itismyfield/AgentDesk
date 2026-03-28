@@ -1218,7 +1218,24 @@ pub(super) fn spawn_turn_bridge(
                                 .await;
                         });
                     }
-                    full_response = "⚠️ 이전 대화 세션이 만료되어 새 세션으로 시작합니다. 메시지를 다시 보내주세요.".to_string();
+                    // Auto-retry: clear stale session and re-send original message
+                    // via announce bot so the agent gets a fresh session automatically.
+                    let retry_port = shared_owned.api_port;
+                    let retry_ch = channel_id.get().to_string();
+                    let retry_text = user_text_owned.clone();
+                    tokio::spawn(async move {
+                        let _ = reqwest::Client::new()
+                            .post(crate::config::local_api_url(retry_port, "/api/send"))
+                            .json(&serde_json::json!({
+                                "target": format!("channel:{retry_ch}"),
+                                "content": retry_text,
+                                "source": "session-retry",
+                                "bot": "announce",
+                            }))
+                            .send()
+                            .await;
+                    });
+                    full_response = String::new(); // Suppress error message to user
                 } else if full_response.is_empty() {
                     // Check for resume failure via other methods
                     let mut resume_failed = false;
@@ -1234,7 +1251,7 @@ pub(super) fn spawn_turn_bridge(
                                 resume_failed = true;
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 eprintln!(
-                                    "  [{ts}] ⚠ Resume failed (stale session_id), clearing for fresh start (channel {})",
+                                    "  [{ts}] ⚠ Resume failed (stale session_id), auto-retrying with fresh session (channel {})",
                                     channel_id
                                 );
                                 // Clear stale session_id from ALL 3 storage locations:
@@ -1266,10 +1283,6 @@ pub(super) fn spawn_turn_bridge(
                                             root.join("ai_sessions").join(format!("{sid}.json"));
                                         if session_file.exists() {
                                             let _ = std::fs::remove_file(&session_file);
-                                            eprintln!(
-                                                "  [{ts}] 🗑 Removed stale session file: {}",
-                                                session_file.display()
-                                            );
                                         }
                                     }
                                 }
@@ -1289,14 +1302,28 @@ pub(super) fn spawn_turn_bridge(
                                             .await;
                                     });
                                 }
-                                full_response = "⚠️ 이전 대화 세션이 만료되어 새 세션으로 시작합니다. 메시지를 다시 보내주세요.".to_string();
+                                // Auto-retry with fresh session
+                                let retry_port = shared_owned.api_port;
+                                let retry_ch = channel_id.get().to_string();
+                                let retry_text = user_text_owned.clone();
+                                tokio::spawn(async move {
+                                    let _ = reqwest::Client::new()
+                                        .post(crate::config::local_api_url(retry_port, "/api/send"))
+                                        .json(&serde_json::json!({
+                                            "target": format!("channel:{retry_ch}"),
+                                            "content": retry_text,
+                                            "source": "session-retry",
+                                            "bot": "announce",
+                                        }))
+                                        .send()
+                                        .await;
+                                });
+                                full_response = String::new(); // Suppress error message
                             }
                         }
                     }
                     // Method 2: quick exit (<10s) + empty response + had a session_id to resume
-                    // = Claude exited immediately due to stale session
                     if !resume_failed && quick_exit && rx_disconnected {
-                        // Check if we attempted a resume (session_id was set at turn start)
                         let attempted_resume = {
                             let data = shared_owned.core.lock().await;
                             data.sessions
@@ -1308,7 +1335,7 @@ pub(super) fn spawn_turn_bridge(
                             resume_failed = true;
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             eprintln!(
-                                "  [{ts}] ⚠ Quick exit with empty response — likely stale session_id (channel {})",
+                                "  [{ts}] ⚠ Quick exit with empty response — auto-retrying with fresh session (channel {})",
                                 channel_id
                             );
                             // Clear all 3 locations
@@ -1349,7 +1376,23 @@ pub(super) fn spawn_turn_bridge(
                                         .await;
                                 });
                             }
-                            full_response = "⚠️ 이전 대화 세션이 만료되어 새 세션으로 시작합니다. 메시지를 다시 보내주세요.".to_string();
+                            // Auto-retry with fresh session
+                            let retry_port = shared_owned.api_port;
+                            let retry_ch = channel_id.get().to_string();
+                            let retry_text = user_text_owned.clone();
+                            tokio::spawn(async move {
+                                let _ = reqwest::Client::new()
+                                    .post(crate::config::local_api_url(retry_port, "/api/send"))
+                                    .json(&serde_json::json!({
+                                        "target": format!("channel:{retry_ch}"),
+                                        "content": retry_text,
+                                        "source": "session-retry",
+                                        "bot": "announce",
+                                    }))
+                                    .send()
+                                    .await;
+                            });
+                            full_response = String::new(); // Suppress error message
                         }
                     }
                     if !resume_failed {
@@ -1374,15 +1417,23 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
-            full_response = format_for_discord(&full_response);
-            let _ = super::formatting::replace_long_message_raw(
-                &http,
-                channel_id,
-                current_msg_id,
-                &full_response,
-                &shared_owned,
-            )
-            .await;
+            // If response is empty (e.g. auto-retry on stale session), delete
+            // the placeholder and skip the response — the retry will create a new turn.
+            if full_response.trim().is_empty() {
+                let _ = http
+                    .delete_message(channel_id, current_msg_id, None)
+                    .await;
+            } else {
+                full_response = format_for_discord(&full_response);
+                let _ = super::formatting::replace_long_message_raw(
+                    &http,
+                    channel_id,
+                    current_msg_id,
+                    &full_response,
+                    &shared_owned,
+                )
+                .await;
+            }
 
             // Signal the watcher that this turn's response was already delivered.
             // Prevents the watcher from relaying the same response when it resumes.
@@ -1390,7 +1441,9 @@ pub(super) fn spawn_turn_bridge(
                 watcher.turn_delivered.store(true, Ordering::Relaxed);
             }
 
-            add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
+            if !full_response.trim().is_empty() {
+                add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
+            }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ▶ Response sent");
