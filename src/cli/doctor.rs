@@ -156,7 +156,6 @@ impl Check {
         self.next_steps = next_steps;
         self
     }
-
 }
 
 struct FixAction {
@@ -450,11 +449,9 @@ fn apply_safe_fixes(cfg: &config::Config) -> Vec<FixAction> {
                 }
             }
             match failed {
-                Some(detail) => actions.push(FixAction::fail(
-                    "runtime_layout",
-                    "Runtime Layout",
-                    detail,
-                )),
+                Some(detail) => {
+                    actions.push(FixAction::fail("runtime_layout", "Runtime Layout", detail))
+                }
                 None => actions.push(FixAction::ok(
                     "runtime_layout",
                     "Runtime Layout",
@@ -920,7 +917,10 @@ fn check_provider_cli(
                         name,
                         format!("not configured [{capability_summary}]"),
                     )
-                    .with_expected_actual("provider configured if needed", "provider not configured")
+                    .with_expected_actual(
+                        "provider configured if needed",
+                        "provider not configured",
+                    )
                 }
             }
         },
@@ -989,14 +989,33 @@ fn check_server_running(snapshot: &HealthSnapshot) -> Check {
                     Some(if ok && db { "healthy" } else { "degraded" }.to_string())
                 })
                 .unwrap_or_else(|| "unknown".to_string());
-            Check::ok(
-                "server",
-                CheckGroup::Core,
-                "Server",
-                format!("{status} v{ver} on {}", snapshot.base),
-            )
-            .with_path(health_endpoint(&snapshot.base))
-            .with_expected_actual("reachable healthy health endpoint", format!("status={status}"))
+            let detail = format!("{status} v{ver} on {}", snapshot.base);
+            if status == "healthy" {
+                Check::ok("server", CheckGroup::Core, "Server", detail)
+                    .with_path(health_endpoint(&snapshot.base))
+                    .with_expected_actual(
+                        "reachable healthy health endpoint",
+                        format!("status={status}"),
+                    )
+            } else {
+                Check::fail(
+                    "server",
+                    CheckGroup::Core,
+                    "Server",
+                    detail,
+                    "health endpoint는 응답했지만 서비스 상태가 healthy가 아닙니다. dcserver 상태와 provider 초기화를 확인하세요.",
+                )
+                .with_path(health_endpoint(&snapshot.base))
+                .with_expected_actual(
+                    "reachable healthy health endpoint",
+                    format!("status={status}"),
+                )
+                .with_next_steps(vec![
+                    "agentdesk doctor --fix".to_string(),
+                    format!("curl -s {}", health_endpoint(&snapshot.base)),
+                    format!("tail -n 200 {}", dcserver_log_hint()),
+                ])
+            }
         }
         None => Check::fail(
             "server",
@@ -1048,7 +1067,10 @@ fn check_runtime_root() -> Check {
             "unable to determine runtime root",
             "AGENTDESK_ROOT_DIR 또는 기본 ~/.adk/release 경로를 확인하세요.",
         )
-        .with_expected_actual("runtime root path resolvable", "runtime root path unresolved"),
+        .with_expected_actual(
+            "runtime root path resolvable",
+            "runtime root path unresolved",
+        ),
     }
 }
 
@@ -1136,8 +1158,13 @@ fn check_service_manager() -> Check {
             "systemd --user — agentdesk-dcserver not enabled",
             "서비스로 운영할 계획이면 systemd user service 등록 여부를 확인하세요.",
         )
-        .with_expected_actual("systemd user service enabled", "systemd user service not enabled")
-        .with_next_steps(vec!["systemctl --user status agentdesk-dcserver".to_string()])
+        .with_expected_actual(
+            "systemd user service enabled",
+            "systemd user service not enabled",
+        )
+        .with_next_steps(vec![
+            "systemctl --user status agentdesk-dcserver".to_string()
+        ])
     }
 }
 
@@ -1181,7 +1208,12 @@ fn check_service_manager() -> Check {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn check_service_manager() -> Check {
-    Check::ok("service_manager", CheckGroup::Core, "Service Manager", "N/A")
+    Check::ok(
+        "service_manager",
+        CheckGroup::Core,
+        "Service Manager",
+        "N/A",
+    )
 }
 
 fn check_db_integrity(cfg: &config::Config) -> Check {
@@ -1205,9 +1237,14 @@ fn check_db_integrity(cfg: &config::Config) -> Check {
                     let size = std::fs::metadata(&db_path)
                         .map(|m| format!("{:.1} MB", m.len() as f64 / 1_048_576.0))
                         .unwrap_or_default();
-                    Check::ok("db_integrity", CheckGroup::Core, "DB Integrity", format!("ok — {size}"))
-                        .with_path(db_path.display().to_string())
-                        .with_expected_actual("PRAGMA integrity_check = ok", "ok")
+                    Check::ok(
+                        "db_integrity",
+                        CheckGroup::Core,
+                        "DB Integrity",
+                        format!("ok — {size}"),
+                    )
+                    .with_path(db_path.display().to_string())
+                    .with_expected_actual("PRAGMA integrity_check = ok", "ok")
                 }
                 Ok(result) => Check::fail(
                     "db_integrity",
@@ -1227,7 +1264,10 @@ fn check_db_integrity(cfg: &config::Config) -> Check {
                     "DB 연결 또는 권한 문제를 확인하세요.",
                 )
                 .with_path(db_path.display().to_string())
-                .with_expected_actual("database integrity check runs", format!("integrity check error: {e}")),
+                .with_expected_actual(
+                    "database integrity check runs",
+                    format!("integrity check error: {e}"),
+                ),
             }
         }
         Err(e) => Check::fail(
@@ -1238,7 +1278,10 @@ fn check_db_integrity(cfg: &config::Config) -> Check {
             "DB 파일 권한과 data 디렉터리 상태를 확인하세요.",
         )
         .with_path(db_path.display().to_string())
-        .with_expected_actual("database opens successfully", format!("database open failed: {e}"))
+        .with_expected_actual(
+            "database opens successfully",
+            format!("database open failed: {e}"),
+        )
         .with_next_steps(vec!["agentdesk doctor --fix".to_string()]),
     }
 }
@@ -1253,7 +1296,10 @@ fn check_disk_usage() -> Check {
             "agentdesk doctor --fix 로 기본 runtime 디렉터리를 생성할 수 있습니다.",
         )
         .with_path(path.display().to_string())
-        .with_expected_actual("runtime root exists for disk usage scan", "runtime root missing")
+        .with_expected_actual(
+            "runtime root exists for disk usage scan",
+            "runtime root missing",
+        )
         .with_next_steps(vec!["agentdesk doctor --fix".to_string()]),
         Some(path) => match std::fs::read_dir(&path) {
             Ok(entries) => {
@@ -1281,7 +1327,10 @@ fn check_disk_usage() -> Check {
                 "runtime root 권한을 확인하세요.",
             )
             .with_path(path.display().to_string())
-            .with_expected_actual("runtime root readable", format!("runtime root unreadable: {e}"))
+            .with_expected_actual(
+                "runtime root readable",
+                format!("runtime root unreadable: {e}"),
+            )
             .with_next_steps(vec![format!("ls -la {}", path.display())]),
         },
         None => Check::fail(
@@ -1291,7 +1340,10 @@ fn check_disk_usage() -> Check {
             "cannot determine runtime root",
             "AGENTDESK_ROOT_DIR 또는 기본 ~/.adk/release 경로를 확인하세요.",
         )
-        .with_expected_actual("runtime root path resolvable", "runtime root path unresolved"),
+        .with_expected_actual(
+            "runtime root path resolvable",
+            "runtime root path unresolved",
+        ),
     }
 }
 
@@ -1352,8 +1404,9 @@ pub fn cmd_doctor(fix: bool, json: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Check, CheckGroup, CheckStatus, FixAction, HealthSnapshot, build_json_report,
-        configured_provider_names, discord_bot_check_from_health, provider_capability_summary,
+        build_json_report, check_server_running, configured_provider_names,
+        discord_bot_check_from_health, provider_capability_summary, Check, CheckGroup, CheckStatus,
+        FixAction, HealthSnapshot,
     };
     use crate::config::ServerConfig;
     use crate::services::provider::ProviderKind;
@@ -1395,6 +1448,22 @@ mod tests {
         );
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.detail.contains("standalone health only"));
+    }
+
+    #[test]
+    fn degraded_health_fails_server_check() {
+        let snapshot = HealthSnapshot {
+            base: test_base_url(),
+            body: Some(json!({
+                "status": "degraded",
+                "version": "0.1.0"
+            })),
+            error: None,
+        };
+
+        let check = check_server_running(&snapshot);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("degraded"));
     }
 
     #[test]
