@@ -420,8 +420,9 @@ async fn fail_dispatch_with_retry(api_port: u16, dispatch_id: Option<&str>, erro
 
 /// Complete an implementation/rework dispatch via finalize_dispatch (#143).
 ///
-/// Uses the shared Db+PolicyEngine directly (no HTTP round-trip, no DB fallback).
-/// Falls back to API PATCH only when Db/Engine are unavailable.
+/// Retries finalize_dispatch 3× with 1-second backoff. On exhaustion, falls back
+/// to direct DB UPDATE + reconciliation marker for onTick hook chain.
+/// When Db/Engine are unavailable, retries API PATCH 3× then DB fallback.
 async fn complete_work_dispatch_on_turn_end(
     shared: &Arc<super::SharedData>,
     dispatch_id: Option<&str>,
@@ -446,60 +447,107 @@ async fn complete_work_dispatch_on_turn_end(
         _ => return,
     }
 
-    // Direct finalize_dispatch — single completion authority (#143)
+    // Direct finalize_dispatch with retry — single completion authority (#143)
     if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
-        match crate::dispatch::finalize_dispatch(
-            db,
-            engine,
-            dispatch_id,
-            "turn_bridge_explicit",
-            None,
-        ) {
-            Ok(_) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id}",
-                    dtype = snapshot.dispatch_type,
-                );
-                crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
-                return;
-            }
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ finalize_dispatch failed for {dispatch_id}: {e}");
+        for attempt in 1..=3u8 {
+            match crate::dispatch::finalize_dispatch(
+                db,
+                engine,
+                dispatch_id,
+                "turn_bridge_explicit",
+                None,
+            ) {
+                Ok(_) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id}",
+                        dtype = snapshot.dispatch_type,
+                    );
+                    crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
+                    return;
+                }
+                Err(e) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ finalize_dispatch failed for {dispatch_id} (attempt {attempt}/3): {e}"
+                    );
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
             }
         }
+        // All retries exhausted — DB fallback + reconciliation marker for onTick
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!(
+            "  [{ts}] ❌ finalize_dispatch failed after 3 retries, falling back to direct DB for {dispatch_id}"
+        );
+        if let Ok(conn) = db.separate_conn() {
+            let _ = conn.execute(
+                "UPDATE task_dispatches SET status = 'completed', \
+                 result = '{\"completion_source\":\"turn_bridge_db_fallback\",\"needs_reconcile\":true}', \
+                 updated_at = datetime('now') WHERE id = ?1 AND status IN ('pending', 'dispatched')",
+                [dispatch_id],
+            );
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
+            );
+        }
     } else {
-        // Db/Engine not available — fall back to API PATCH
+        // Db/Engine not available — fall back to API PATCH with retry
         let url = local_api_url(shared.api_port, &format!("/api/dispatches/{dispatch_id}"));
         let payload = serde_json::json!({
             "status": "completed",
             "result": { "completion_source": "turn_bridge_explicit" },
         });
-        match reqwest::Client::new()
-            .patch(&url)
-            .json(&payload)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id} (via API)",
-                    dtype = snapshot.dispatch_type,
-                );
-                return;
+        for attempt in 1..=3u8 {
+            match reqwest::Client::new()
+                .patch(&url)
+                .json(&payload)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id} (via API)",
+                        dtype = snapshot.dispatch_type,
+                    );
+                    return;
+                }
+                Ok(resp) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ Explicit dispatch completion failed (attempt {attempt}/3): HTTP {}",
+                        resp.status()
+                    );
+                }
+                Err(e) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ Explicit dispatch completion error (attempt {attempt}/3): {e}"
+                    );
+                }
             }
-            Ok(resp) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
-                    "  [{ts}] ⚠ Explicit dispatch completion failed: HTTP {}",
-                    resp.status()
-                );
+            if attempt < 3 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ Explicit dispatch completion error: {e}");
+        }
+        // API retries exhausted — DB fallback
+        if let Some(root) = crate::cli::agentdesk_runtime_root() {
+            let db_path = root.join("data/agentdesk.sqlite");
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                let _ = conn.execute(
+                    "UPDATE task_dispatches SET status = 'completed', \
+                     result = '{\"completion_source\":\"turn_bridge_db_fallback\",\"needs_reconcile\":true}', \
+                     updated_at = datetime('now') WHERE id = ?1 AND status IN ('pending', 'dispatched')",
+                    [dispatch_id],
+                );
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
+                );
             }
         }
     }

@@ -244,71 +244,118 @@ pub(super) async fn restore_inflight_turns(
                 // #142: Check dispatch type — implementation/rework need explicit completion,
                 // review can use idle auto-complete.
                 let recovered_dispatch_id = parse_dispatch_id(&state.user_text);
+                let mut dispatch_completed = recovered_dispatch_id.is_none();
                 if let Some(ref did) = recovered_dispatch_id {
-                    // #143: Use finalize_dispatch directly (no idle fallback).
+                    // #143: Use finalize_dispatch directly with retry.
                     if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
-                        match crate::dispatch::finalize_dispatch(
-                            db,
-                            engine,
-                            did,
-                            "recovery_completed_during_downtime",
-                            None,
-                        ) {
-                            Ok(_) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!(
-                                    "  [{ts}] ✓ recovery: completed dispatch {did} via finalize_dispatch"
-                                );
-                                crate::server::routes::dispatches::queue_dispatch_followup(
-                                    db, &did,
-                                );
+                        for attempt in 1..=3u8 {
+                            match crate::dispatch::finalize_dispatch(
+                                db,
+                                engine,
+                                did,
+                                "recovery_completed_during_downtime",
+                                None,
+                            ) {
+                                Ok(_) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    println!(
+                                        "  [{ts}] ✓ recovery: completed dispatch {did} via finalize_dispatch"
+                                    );
+                                    crate::server::routes::dispatches::queue_dispatch_followup(
+                                        db, &did,
+                                    );
+                                    dispatch_completed = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    eprintln!(
+                                        "  [{ts}] ⚠ recovery: finalize_dispatch failed for {did} (attempt {attempt}/3): {e}"
+                                    );
+                                    if attempt < 3 {
+                                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!(
-                                    "  [{ts}] ⚠ recovery: finalize_dispatch failed for {did}: {e}"
-                                );
+                        }
+                        // All retries exhausted — DB fallback + reconciliation marker
+                        if !dispatch_completed {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!(
+                                "  [{ts}] ❌ recovery: finalize_dispatch failed after 3 retries, DB fallback for {did}"
+                            );
+                            if let Ok(conn) = db.separate_conn() {
+                                let changed = conn.execute(
+                                    "UPDATE task_dispatches SET status = 'completed', \
+                                     result = '{\"completion_source\":\"recovery_db_fallback\",\"needs_reconcile\":true}', \
+                                     updated_at = datetime('now') WHERE id = ?1 AND status IN ('pending', 'dispatched')",
+                                    [did.as_str()],
+                                ).unwrap_or(0);
+                                if changed > 0 {
+                                    let _ = conn.execute(
+                                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                                        rusqlite::params![format!("reconcile_dispatch:{did}"), did.as_str()],
+                                    );
+                                    dispatch_completed = true;
+                                }
                             }
                         }
                     } else {
-                        // Db/Engine not available — fall back to API PATCH
+                        // Db/Engine not available — fall back to API PATCH with retry
                         let complete_url = crate::config::local_api_url(
                             shared.api_port,
                             &format!("/api/dispatches/{}", did),
                         );
-                        match reqwest::Client::new()
-                            .patch(&complete_url)
-                            .json(&serde_json::json!({
-                                "status": "completed",
-                                "result": {"completion_source": "recovery_completed_during_downtime"},
-                            }))
-                            .send()
-                            .await
-                        {
-                            Ok(resp) if resp.status().is_success() => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!(
-                                    "  [{ts}] ✓ recovery: completed dispatch {did} via API"
-                                );
+                        let payload = serde_json::json!({
+                            "status": "completed",
+                            "result": {"completion_source": "recovery_completed_during_downtime"},
+                        });
+                        for attempt in 1..=3u8 {
+                            match reqwest::Client::new()
+                                .patch(&complete_url)
+                                .json(&payload)
+                                .send()
+                                .await
+                            {
+                                Ok(resp) if resp.status().is_success() => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    println!(
+                                        "  [{ts}] ✓ recovery: completed dispatch {did} via API"
+                                    );
+                                    dispatch_completed = true;
+                                    break;
+                                }
+                                Ok(resp) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    eprintln!(
+                                        "  [{ts}] ⚠ recovery: dispatch {did} API completion failed (attempt {attempt}/3): {}",
+                                        resp.status()
+                                    );
+                                }
+                                Err(e) => {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    eprintln!(
+                                        "  [{ts}] ⚠ recovery: dispatch {did} API call failed (attempt {attempt}/3): {e}"
+                                    );
+                                }
                             }
-                            Ok(resp) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!(
-                                    "  [{ts}] ⚠ recovery: dispatch {did} API completion failed ({})",
-                                    resp.status()
-                                );
-                            }
-                            Err(e) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!(
-                                    "  [{ts}] ⚠ recovery: dispatch {did} API call failed ({e})"
-                                );
+                            if attempt < 3 {
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             }
                         }
                     }
                 }
-                super::restart_report::clear_restart_report(provider, state.channel_id);
-                clear_inflight_state(provider, state.channel_id);
+                // Only clear recovery bookkeeping if dispatch was completed (or no dispatch).
+                // Preserving state on failure allows the next recovery pass to retry.
+                if dispatch_completed {
+                    super::restart_report::clear_restart_report(provider, state.channel_id);
+                    clear_inflight_state(provider, state.channel_id);
+                } else if let Some(ref did) = recovered_dispatch_id {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ❌ recovery: dispatch {did} completion failed — preserving state for next recovery pass"
+                    );
+                }
                 continue;
             }
 
