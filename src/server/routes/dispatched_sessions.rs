@@ -343,7 +343,11 @@ pub async fn hook_session(
            END,
            agent_id = COALESCE(excluded.agent_id, sessions.agent_id),
            thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
-           claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
+           claude_session_id = CASE
+             WHEN excluded.claude_session_id IS NOT NULL AND excluded.claude_session_id != '' THEN excluded.claude_session_id
+             WHEN excluded.claude_session_id = '' THEN NULL
+             ELSE sessions.claude_session_id
+           END,
            last_heartbeat = datetime('now')",
         rusqlite::params![
             body.session_key,

@@ -1276,7 +1276,7 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
             if let Some(ref key) = adk_session_key {
-                super::adk_session::save_claude_session_id(key, "", shared_owned.api_port).await;
+                super::adk_session::clear_claude_session_id(key, shared_owned.api_port).await;
             }
             // Auto-retry with Discord history
             let http_c = http.clone();
@@ -1407,7 +1407,7 @@ pub(super) fn spawn_turn_bridge(
                         old
                     };
                     if let Some(ref key) = adk_session_key {
-                        super::adk_session::save_claude_session_id(key, "", shared_owned.api_port)
+                        super::adk_session::clear_claude_session_id(key, shared_owned.api_port)
                             .await;
                     }
                     if let Some(ref sid) = stale_sid {
@@ -1469,9 +1469,8 @@ pub(super) fn spawn_turn_bridge(
                                 };
                                 // 2. DB
                                 if let Some(ref key) = adk_session_key {
-                                    super::adk_session::save_claude_session_id(
+                                    super::adk_session::clear_claude_session_id(
                                         key,
-                                        "",
                                         shared_owned.api_port,
                                     )
                                     .await;
@@ -1542,9 +1541,8 @@ pub(super) fn spawn_turn_bridge(
                                 old
                             };
                             if let Some(ref key) = adk_session_key {
-                                super::adk_session::save_claude_session_id(
+                                super::adk_session::clear_claude_session_id(
                                     key,
-                                    "",
                                     shared_owned.api_port,
                                 )
                                 .await;
