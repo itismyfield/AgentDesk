@@ -1900,6 +1900,19 @@ mod tests {
             card_status, "done",
             "card must stay done, not stranded in in_progress"
         );
+
+        // #155: Review-decision dispatch must still be pending (not consumed)
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-orig'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            dispatch_status, "pending",
+            "review-decision dispatch must stay pending when accept fails on terminal card"
+        );
     }
 
     #[tokio::test]
