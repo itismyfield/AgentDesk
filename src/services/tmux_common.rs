@@ -28,13 +28,8 @@ pub fn session_temp_path(session_name: &str, extension: &str) -> String {
 
 /// Get the current AgentDesk runtime root marker for tmux session ownership.
 pub fn current_tmux_owner_marker() -> String {
-    std::env::var("AGENTDESK_ROOT_DIR")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            dirs::home_dir().map(|home| home.join(".adk").join("release").display().to_string())
-        })
+    crate::config::runtime_root()
+        .map(|p| p.display().to_string())
         .unwrap_or_else(|| ".adk/release".to_string())
 }
 

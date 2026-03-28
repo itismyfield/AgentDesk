@@ -5,14 +5,7 @@ use std::path::{Path, PathBuf};
 const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 
 pub(super) fn agentdesk_root() -> Option<PathBuf> {
-    if let Ok(override_root) = std::env::var(AGENTDESK_ROOT_DIR_ENV) {
-        let trimmed = override_root.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-
-    dirs::home_dir().map(|h| h.join(".adk").join("release"))
+    crate::config::runtime_root()
 }
 
 pub(super) fn runtime_root() -> Option<PathBuf> {

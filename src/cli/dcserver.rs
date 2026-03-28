@@ -203,14 +203,7 @@ pub fn restart_windows_dcserver_and_verify(timeout: Duration) -> Result<(), Stri
 }
 
 pub fn agentdesk_runtime_root() -> Option<PathBuf> {
-    if let Ok(override_root) = env::var(AGENTDESK_ROOT_DIR_ENV) {
-        let trimmed = override_root.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-
-    dirs::home_dir().map(|h| h.join(".adk").join("release"))
+    crate::config::runtime_root()
 }
 
 pub fn current_dcserver_launchd_label() -> String {

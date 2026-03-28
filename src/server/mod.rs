@@ -476,8 +476,8 @@ fn get_claude_oauth_token() -> Option<String> {
         }
     }
     // Fallback: credentials file
-    let home = std::env::var("HOME").ok()?;
-    let cred_path = std::path::Path::new(&home).join(".claude/.credentials.json");
+    let home = dirs::home_dir()?;
+    let cred_path = home.join(".claude").join(".credentials.json");
     let raw = std::fs::read_to_string(cred_path).ok()?;
     let creds: serde_json::Value = serde_json::from_str(&raw).ok()?;
     creds
@@ -551,8 +551,8 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>,
 
 /// Read Codex CLI access token from ~/.codex/auth.json.
 fn load_codex_access_token() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let auth_path = std::path::Path::new(&home).join(".codex/auth.json");
+    let home = dirs::home_dir()?;
+    let auth_path = home.join(".codex").join("auth.json");
     let raw = std::fs::read_to_string(auth_path).ok()?;
     let auth: serde_json::Value = serde_json::from_str(&raw).ok()?;
     auth.get("tokens")

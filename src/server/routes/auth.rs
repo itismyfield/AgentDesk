@@ -54,6 +54,7 @@ pub async fn auth_middleware(
         .and_then(|v| v.to_str().ok())
         .map(|v| {
             let loopback = crate::config::loopback();
+            // Accept both configured loopback (127.0.0.1) and "localhost" as valid local origins
             v.starts_with(&format!("http://{loopback}")) || v.starts_with("http://localhost")
         })
         .unwrap_or(false);

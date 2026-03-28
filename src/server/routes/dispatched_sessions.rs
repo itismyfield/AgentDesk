@@ -1112,24 +1112,9 @@ fn clear_inflight_by_tmux_name(
     provider: &crate::services::provider::ProviderKind,
     tmux_name: &str,
 ) -> bool {
-    let inflight_root = {
-        let root = if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
-            let trimmed = override_root.trim();
-            if !trimmed.is_empty() {
-                std::path::PathBuf::from(trimmed)
-            } else {
-                match dirs::home_dir() {
-                    Some(h) => h.join(".adk").join("release"),
-                    None => return false,
-                }
-            }
-        } else {
-            match dirs::home_dir() {
-                Some(h) => h.join(".adk").join("release"),
-                None => return false,
-            }
-        };
-        root.join("runtime").join("discord_inflight")
+    let inflight_root = match crate::config::runtime_root() {
+        Some(root) => root.join("runtime").join("discord_inflight"),
+        None => return false,
     };
 
     let provider_dir = inflight_root.join(provider.as_str());
