@@ -1062,8 +1062,10 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             continue;
         }
 
-        // Generation gate: quarantine tmux sessions from a previous generation.
-        // Keep the session alive for post-mortem but don't attach a watcher.
+        // Old-gen sessions: adopt instead of killing.
+        // The tmux session and Claude CLI process are still alive from the
+        // previous dcserver — just update the generation marker and re-attach
+        // a watcher. Auto-retry handles stale Claude session IDs if needed.
         let gen_marker_path =
             crate::services::tmux_common::session_temp_path(session_name, "generation");
         let session_gen = std::fs::read_to_string(&gen_marker_path)
@@ -1072,74 +1074,18 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             .unwrap_or(0);
         let current_gen = super::runtime_store::load_generation();
         if session_gen < current_gen && current_gen > 0 {
-            // #148: Verify this session belongs to our runtime before killing.
-            // Multiple AgentDesk runtimes may share the same tmux server.
+            // Skip sessions belonging to other runtimes
             let current_owner_marker = current_tmux_owner_marker();
             if !session_belongs_to_current_runtime(session_name, &current_owner_marker) {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ⏭ QUARANTINE: skipping old-gen session {} — belongs to another runtime",
-                    session_name
-                );
                 continue;
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
-                "  [{ts}] 🔒 QUARANTINE: killing old-gen session {} (session_gen={}, current_gen={})",
+                "  [{ts}] ↻ Adopting old-gen session {} (gen {} → {})",
                 session_name, session_gen, current_gen
             );
-            // Report idle to DB so dashboard/dispatch state doesn't go stale
-            if let Some((_, ch_name)) =
-                crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
-            {
-                let hostname = crate::services::platform::hostname_short();
-                let session_key = format!("{}:{}", hostname, session_name);
-                super::adk_session::post_adk_session_status(
-                    Some(&session_key),
-                    Some(&ch_name),
-                    None,
-                    "idle",
-                    &provider,
-                    None,
-                    None,
-                    None,
-                    None,
-                    shared.api_port,
-                )
-                .await;
-            }
-            // Clear restart report for this channel so recovery won't try to
-            // resume a session we're about to kill, which would show the
-            // "세션을 복구하지 못했습니다" error message.
-            super::restart_report::clear_restart_report(&provider, channel_id.get());
-            // Kill old-gen session so it doesn't block new session creation.
-            // Use spawn_blocking to avoid blocking the async runtime (matches
-            // startup cleanup and reaper patterns).
-            let exact = tmux_exact_target(session_name);
-            let sess = session_name.to_string();
-            let sname = session_name.to_string();
-            let kill_result = tokio::task::spawn_blocking(move || {
-                record_tmux_exit_reason(&sess, "quarantine: old generation");
-                std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &exact])
-                    .output()
-            })
-            .await;
-            match &kill_result {
-                Ok(Ok(o)) if !o.status.success() => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
-                        "  [{ts}] ⚠ quarantine: tmux kill-session failed for {sname}: {}",
-                        String::from_utf8_lossy(&o.stderr)
-                    );
-                }
-                Ok(Err(e)) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!("  [{ts}] ⚠ quarantine: tmux kill-session error for {sname}: {e}");
-                }
-                _ => {}
-            }
-            continue;
+            // Update generation marker to current gen
+            let _ = std::fs::write(&gen_marker_path, current_gen.to_string());
         }
 
         if !tmux_session_has_live_pane(session_name) {

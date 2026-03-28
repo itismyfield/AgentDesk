@@ -2561,20 +2561,18 @@ pub(super) async fn auto_restore_session(
             session.current_path = Some(last_path.clone());
             let current_gen = runtime_store::load_generation();
             if let Some((session_data, _)) = existing {
+                // Restore session_id and history regardless of generation.
+                // If the session_id is stale (Claude CLI died), auto-retry
+                // will detect "No conversation found" and create a fresh session
+                // with Discord history context.
+                session.session_id = Some(session_data.session_id.clone());
+                session.history = session_data.history.clone();
                 if session_data.born_generation < current_gen && current_gen > 0 {
-                    // Old generation session — quarantine: start fresh without
-                    // reusing session_id/history from the previous generation.
-                    // Do NOT restore claude_session_id from DB either — the old
-                    // Claude CLI session is almost certainly dead after a restart,
-                    // and --resume with a stale ID causes immediate termination.
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
-                        "  [{ts}] 🔒 QUARANTINE: auto-restore skipping old session_id/history for {last_path} (saved_gen={}, current_gen={current_gen})",
+                        "  [{ts}] ↻ Adopting old-gen session for {last_path} (gen {} → {current_gen})",
                         session_data.born_generation
                     );
-                } else {
-                    session.session_id = Some(session_data.session_id.clone());
-                    session.history = session_data.history.clone();
                 }
             }
             drop(data);
