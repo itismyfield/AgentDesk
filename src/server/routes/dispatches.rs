@@ -538,7 +538,7 @@ pub(crate) async fn send_dispatch_to_discord(
     // For review dispatches, use the alternate channel (counter-model)
     let mut use_alt = use_counter_model_channel(dispatch_type.as_deref());
 
-    // #137: Check if this card is in a unified thread auto-queue run
+    // #145: Check if this dispatch is in a unified thread auto-queue run (dispatch_id path)
     let is_unified_run: bool = db
         .lock()
         .ok()
@@ -546,8 +546,8 @@ pub(crate) async fn send_dispatch_to_discord(
             conn.query_row(
                 "SELECT COUNT(*) > 0 FROM auto_queue_runs r \
                  JOIN auto_queue_entries e ON e.run_id = r.id \
-                 WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active'",
-                [card_id],
+                 WHERE e.dispatch_id = ?1 AND r.unified_thread = 1 AND r.status = 'active'",
+                [dispatch_id],
                 |row| row.get(0),
             )
             .ok()
@@ -672,16 +672,15 @@ pub(crate) async fn send_dispatch_to_discord(
     let client = reqwest::Client::new();
     let dispatch_type_label = dispatch_type.as_deref().unwrap_or("implementation");
 
-    // #137: Check if this dispatch belongs to a unified-thread auto-queue run
-    // #137: Look up per-channel unified thread from JSON map
+    // #145: Look up per-channel unified thread via dispatch_id path
     let mut unified_thread_id: Option<String> = db.lock().ok().and_then(|conn| {
         let map_json: Option<String> = conn
             .query_row(
                 "SELECT r.unified_thread_id FROM auto_queue_runs r \
                      JOIN auto_queue_entries e ON e.run_id = r.id \
-                     WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
+                     WHERE e.dispatch_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
                      AND r.unified_thread_id IS NOT NULL",
-                [card_id],
+                [dispatch_id],
                 |row| row.get::<_, String>(0),
             )
             .ok();
@@ -736,15 +735,15 @@ pub(crate) async fn send_dispatch_to_discord(
         }
     }
 
-    // #137: If unified thread reuse failed, remove this channel from JSON map
+    // #145: If unified thread reuse failed, remove this channel from JSON map (dispatch_id path)
     if unified_thread_id.is_some() {
         if let Ok(conn) = db.lock() {
             let existing: String = conn
                 .query_row(
                     "SELECT COALESCE(unified_thread_id, '{}') FROM auto_queue_runs \
-                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1) \
+                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE dispatch_id = ?1) \
                      AND status IN ('active', 'paused')",
-                    [card_id],
+                    [dispatch_id],
                     |row| row.get(0),
                 )
                 .unwrap_or_else(|_| "{}".to_string());
@@ -754,9 +753,9 @@ pub(crate) async fn send_dispatch_to_discord(
                 }
                 conn.execute(
                     "UPDATE auto_queue_runs SET unified_thread_id = ?1 \
-                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?2) \
+                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE dispatch_id = ?2) \
                      AND status IN ('active', 'paused')",
-                    rusqlite::params![map.to_string(), card_id],
+                    rusqlite::params![map.to_string(), dispatch_id],
                 )
                 .ok();
             }
@@ -899,9 +898,9 @@ pub(crate) async fn send_dispatch_to_discord(
                                 let existing: String = conn
                                     .query_row(
                                         "SELECT COALESCE(unified_thread_id, '{}') FROM auto_queue_runs \
-                                         WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1) \
+                                         WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE dispatch_id = ?1) \
                                          AND status IN ('active', 'paused')",
-                                        [card_id],
+                                        [dispatch_id],
                                         |row| row.get(0),
                                     )
                                     .unwrap_or_else(|_| "{}".to_string());

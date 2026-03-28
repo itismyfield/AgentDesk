@@ -31,25 +31,24 @@ var autoQueue = {
   // kanban-rules.js does NOT touch auto_queue_entries (removed in #110).
   onCardTerminal: function(payload) {
     var cards = agentdesk.db.query(
-      "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?",
+      "SELECT assigned_agent_id, latest_dispatch_id FROM kanban_cards WHERE id = ?",
       [payload.card_id]
     );
     if (cards.length === 0 || !cards[0].assigned_agent_id) return;
 
     var agentId = cards[0].assigned_agent_id;
+    var latestDispatchId = cards[0].latest_dispatch_id;
 
-    // Verify this card had a dispatched queue entry (Rust already set it to 'done').
-    // If no entry was in 'done' state with recent completion, this card is not from auto-queue.
-    // #145: Join with active/paused run to avoid picking up stale completed runs
-    // when the same card is re-queued into a new run
-    var doneEntries = agentdesk.db.query(
+    // #145: Use dispatch_id to find the exact run this dispatch belongs to.
+    // Eliminates card_id ambiguity when same card is in multiple runs.
+    var doneEntries = latestDispatchId ? agentdesk.db.query(
       "SELECT e.run_id FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
-      "WHERE e.kanban_card_id = ? AND e.status = 'done' " +
+      "WHERE e.dispatch_id = ? AND e.status = 'done' " +
       "AND r.status IN ('active', 'paused') " +
-      "ORDER BY r.created_at DESC LIMIT 1",
-      [payload.card_id]
-    );
+      "LIMIT 1",
+      [latestDispatchId]
+    ) : [];
     if (doneEntries.length === 0) return;
 
     var runId = doneEntries[0].run_id;

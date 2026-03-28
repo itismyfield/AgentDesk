@@ -794,20 +794,17 @@ pub async fn activate(
             continue;
         }
 
-        // Dispatch succeeded — now mark entry
-        conn_reacquired.execute(
-            "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?1",
-            [entry_id],
-        )
-        .ok();
-        drop(conn_reacquired);
-
-        // Async Discord notification — use exact dispatch_id from create_dispatch
-        // to avoid latest_dispatch_id re-query race under concurrent dispatch creation.
+        // Dispatch succeeded — now mark entry with dispatch_id for direct run association (#145)
         let dispatch_id = dispatch_result.as_ref().unwrap()["id"]
             .as_str()
             .unwrap_or("")
             .to_string();
+        conn_reacquired.execute(
+            "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = ?1, dispatched_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![dispatch_id, entry_id],
+        )
+        .ok();
+        drop(conn_reacquired);
         let db_clone = state.db.clone();
         let card_id_c = card_id.clone();
         let agent_id_c = agent_id.clone();
