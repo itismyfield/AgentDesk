@@ -235,19 +235,6 @@ pub enum ReadOutputResult {
 /// writes, git operations), the agent CLI itself is responsible for
 /// idempotency — the same prompt re-sent to a fresh session will not blindly
 /// re-apply already-committed changes.
-///
-/// **Error-before-death limitation:** Recreation only triggers on
-/// infrastructure failures (FIFO broken, session died without result).  If
-/// the agent wrapper writes an `error_during_execution` result *before* the
-/// session dies, `read_output_file_until_result` returns `Completed` (not
-/// `SessionDied`), so the error propagates to the user without recreation.
-/// This is intentional: agent-level errors carry semantic information the
-/// user should see, and silently retrying could cause undesired side-effects.
-///
-/// **Codex thread_id note:** Codex thread_id lives in the wrapper's process
-/// memory.  After session kill, the recreated session starts a fresh
-/// conversation — original thread context is lost.  This matches the failure
-/// semantics: if the session died, the thread_id was already unreachable.
 #[derive(Debug)]
 pub enum FollowupResult {
     /// Message delivered and output successfully read to completion.
