@@ -383,6 +383,14 @@ fn execute_sql(db: &crate::db::Db, sql: &str, params: &[serde_json::Value]) -> a
             "Direct task_dispatches mutation is blocked. Use CreateDispatch intent."
         ));
     }
+    // Block direct card_review_state mutation (#158 — same guard as ops.rs)
+    if sql_upper.contains("CARD_REVIEW_STATE")
+        && (sql_upper.contains("INSERT") || sql_upper.contains("UPDATE"))
+    {
+        return Err(anyhow::anyhow!(
+            "Direct card_review_state mutation is blocked. Use reviewState.sync bridge."
+        ));
+    }
 
     let conn = db.separate_conn()?;
     let bind: Vec<rusqlite::types::Value> = params.iter().map(json_to_sqlite).collect();

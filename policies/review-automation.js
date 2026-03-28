@@ -72,11 +72,7 @@ var reviewAutomation = {
       );
       agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
       // #117: sync canonical review state
-      agentdesk.db.execute(
-        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
-        "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-        [card.id]
-      );
+      agentdesk.reviewState.sync(card.id, "idle");
       agentdesk.log.info("[review] Review disabled, card " + card.id + " → " + pendingState);
       notifyPmdPendingDecision(card.id, "리뷰 비활성화 — PM 판단 필요");
       return;
@@ -92,13 +88,7 @@ var reviewAutomation = {
     agentdesk.kanban.setReviewStatus(card.id, "reviewing", {review_entered_at: "now", exclude_status: terminalState});
 
     // #117: Update canonical card_review_state
-    agentdesk.db.execute(
-      "INSERT INTO card_review_state (card_id, review_round, state, review_entered_at, updated_at) " +
-      "VALUES (?, ?, 'reviewing', datetime('now'), datetime('now')) " +
-      "ON CONFLICT(card_id) DO UPDATE SET review_round = ?, state = 'reviewing', " +
-      "review_entered_at = datetime('now'), pending_dispatch_id = NULL, updated_at = datetime('now')",
-      [card.id, newRound, newRound]
-    );
+    agentdesk.reviewState.sync(card.id, "reviewing", { review_round: newRound });
 
     // Check review round limit — exceed → pending_decision with PMD notification
     var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
@@ -106,11 +96,7 @@ var reviewAutomation = {
       agentdesk.kanban.setStatus(card.id, pendingState);
       agentdesk.kanban.setReviewStatus(card.id, "dilemma_pending", {blocked_reason: "Max review rounds (" + maxRounds + ") exceeded — PM decision needed"});
       // #117: sync canonical review state
-      agentdesk.db.execute(
-        "INSERT INTO card_review_state (card_id, review_round, state, updated_at) VALUES (?, ?, 'dilemma_pending', datetime('now')) " +
-        "ON CONFLICT(card_id) DO UPDATE SET review_round = ?, state = 'dilemma_pending', updated_at = datetime('now')",
-        [card.id, newRound, newRound]
-      );
+      agentdesk.reviewState.sync(card.id, "dilemma_pending", { review_round: newRound });
       agentdesk.log.warn("[review] Max review rounds (" + maxRounds + ") reached for " + card.id + " → " + pendingState);
       notifyPmdPendingDecision(card.id, "리뷰 라운드 상한(" + maxRounds + "회) 초과");
       return;
@@ -126,11 +112,7 @@ var reviewAutomation = {
       );
       agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
       // #117: sync canonical review state
-      agentdesk.db.execute(
-        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
-        "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-        [card.id]
-      );
+      agentdesk.reviewState.sync(card.id, "idle");
       agentdesk.log.info("[review] Counter-model disabled, card " + card.id + " → " + pendingState);
       notifyPmdPendingDecision(card.id, "카운터모델 리뷰 비활성화 — PM 판단 필요");
       return;
@@ -152,11 +134,7 @@ var reviewAutomation = {
       );
       agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
       // #117: sync canonical review state
-      agentdesk.db.execute(
-        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
-        "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-        [card.id]
-      );
+      agentdesk.reviewState.sync(card.id, "idle");
       agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + " → " + pendingState);
       notifyPmdPendingDecision(card.id, "카운터모델 alt 채널 없음 — PM 판단 필요");
       return;
@@ -292,13 +270,7 @@ function setNormalSuggestionPending(cardId, verdict) {
   agentdesk.kanban.setReviewStatus(cardId, "suggestion_pending", {suggestion_pending_at: "now", exclude_status: spTerminal});
   agentdesk.log.info("[review] Card " + cardId + " needs review decision → suggestion_pending");
 
-  agentdesk.db.execute(
-    "INSERT INTO card_review_state (card_id, state, last_verdict, updated_at) " +
-    "VALUES (?, 'suggestion_pending', ?, datetime('now')) " +
-    "ON CONFLICT(card_id) DO UPDATE SET state = 'suggestion_pending', last_verdict = ?, " +
-    "approach_change_round = NULL, updated_at = datetime('now')",
-    [cardId, verdict, verdict]
-  );
+  agentdesk.reviewState.sync(cardId, "suggestion_pending", { last_verdict: verdict });
 }
 
 function processVerdict(cardId, verdict, result) {
@@ -328,13 +300,7 @@ function processVerdict(cardId, verdict, result) {
     agentdesk.kanban.setReviewStatus(cardId, null, {suggestion_pending_at: null});
 
     // #117: Update canonical card_review_state — review passed
-    agentdesk.db.execute(
-      "INSERT INTO card_review_state (card_id, state, last_verdict, updated_at) " +
-      "VALUES (?, 'idle', ?, datetime('now')) " +
-      "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', last_verdict = ?, pending_dispatch_id = NULL, " +
-      "approach_change_round = NULL, updated_at = datetime('now')",
-      [cardId, verdict, verdict]
-    );
+    agentdesk.reviewState.sync(cardId, "idle", { last_verdict: verdict });
 
     // Review passed — check for next pipeline stage, otherwise terminal (#110)
     // Look for the next stage AFTER current pipeline_stage_id (stage_order based),
@@ -455,12 +421,7 @@ function processVerdict(cardId, verdict, result) {
           ", findings still repeat at R" + currentRound + " → " + pendingState);
         agentdesk.kanban.setStatus(cardId, pendingState);
         agentdesk.kanban.setReviewStatus(cardId, "dilemma_pending", {blocked_reason: "접근 전환 후에도 동일 finding 반복 (R" + approachChangeRound + "→R" + currentRound + ") — PM 판단 필요"});
-        agentdesk.db.execute(
-          "INSERT INTO card_review_state (card_id, state, last_verdict, updated_at) " +
-          "VALUES (?, 'dilemma_pending', ?, datetime('now')) " +
-          "ON CONFLICT(card_id) DO UPDATE SET state = 'dilemma_pending', last_verdict = ?, updated_at = datetime('now')",
-          [cardId, verdict, verdict]
-        );
+        agentdesk.reviewState.sync(cardId, "dilemma_pending", { last_verdict: verdict });
         notifyPmdPendingDecision(cardId, "접근 전환 후에도 동일 finding 반복 — R" + approachChangeRound + "에서 접근 전환했으나 R" + currentRound + "에서 같은 문제 재발");
         return;
       }
@@ -483,13 +444,7 @@ function processVerdict(cardId, verdict, result) {
         agentdesk.log.info("[review] #118 Approach-change rework dispatch created: " + dispatchId);
 
         // Record approach change round
-        agentdesk.db.execute(
-          "INSERT INTO card_review_state (card_id, state, last_verdict, approach_change_round, updated_at) " +
-          "VALUES (?, 'rework_pending', ?, ?, datetime('now')) " +
-          "ON CONFLICT(card_id) DO UPDATE SET state = 'rework_pending', last_verdict = ?, " +
-          "approach_change_round = ?, updated_at = datetime('now')",
-          [cardId, verdict, currentRound, verdict, currentRound]
-        );
+        agentdesk.reviewState.sync(cardId, "rework_pending", { last_verdict: verdict, approach_change_round: currentRound });
 
         // Transition card to rework target for rework
         agentdesk.kanban.setReviewStatus(cardId, "rework_pending", {exclude_status: terminalState});

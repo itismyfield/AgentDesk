@@ -158,22 +158,14 @@ var timeouts = {
             agentdesk.kanban.setStatus(card.id, rReview);
             agentdesk.kanban.setReviewStatus(card.id, "awaiting_dod", {awaiting_dod_at: "now"});
             // #117: sync canonical review state
-            agentdesk.db.execute(
-              "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'awaiting_dod', datetime('now')) " +
-              "ON CONFLICT(card_id) DO UPDATE SET state = 'awaiting_dod', updated_at = datetime('now')",
-              [card.id]
-            );
+            agentdesk.reviewState.sync(card.id, "awaiting_dod");
             agentdesk.log.warn("[reconcile] Card " + card.id + " → " + rReview + "(awaiting_dod): " + reasons[0]);
             continue;
           }
           agentdesk.kanban.setStatus(card.id, rPending);
           agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
           // #117: sync canonical review state
-          agentdesk.db.execute(
-            "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
-            "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-            [card.id]
-          );
+          agentdesk.reviewState.sync(card.id, "idle");
           agentdesk.log.warn("[reconcile] Card " + card.id + " → " + rPending + ": " + reasons.join("; "));
           // PMD notification via async outbox (#120)
           var pmdCh = agentdesk.config.get("kanban_manager_channel_id");
@@ -316,11 +308,7 @@ var timeouts = {
       agentdesk.kanban.setStatus(staleReviews[k].card_id, cPending);
       agentdesk.kanban.setReviewStatus(staleReviews[k].card_id, null, {suggestion_pending_at: null});
       // #117: sync canonical review state
-      agentdesk.db.execute(
-        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
-        "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-        [staleReviews[k].card_id]
-      );
+      agentdesk.reviewState.sync(staleReviews[k].card_id, "idle");
       agentdesk.log.warn("[timeout] Stale review → pending_decision: card " + staleReviews[k].card_id);
     }
   },
@@ -343,11 +331,7 @@ var timeouts = {
       agentdesk.kanban.setStatus(stuckDod[d].id, dPending);
       agentdesk.kanban.setReviewStatus(stuckDod[d].id, null, {suggestion_pending_at: null});
       // #117: sync canonical review state
-      agentdesk.db.execute(
-        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
-        "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-        [stuckDod[d].id]
-      );
+      agentdesk.reviewState.sync(stuckDod[d].id, "idle");
       agentdesk.log.warn("[timeout] DoD await timeout → pending_decision: card " + stuckDod[d].id);
     }
   },
@@ -421,11 +405,7 @@ var timeouts = {
             }
           }
           // #117: sync canonical review state
-          agentdesk.db.execute(
-            "INSERT INTO card_review_state (card_id, state, last_decision, updated_at) VALUES (?, 'rework_pending', 'auto_accept', datetime('now')) " +
-            "ON CONFLICT(card_id) DO UPDATE SET state = 'rework_pending', last_decision = 'auto_accept', updated_at = datetime('now')",
-            [sc.id]
-          );
+          agentdesk.reviewState.sync(sc.id, "rework_pending", { last_decision: "auto_accept" });
           agentdesk.log.warn("[timeout] Auto-accepted suggestions for card " + sc.id + " — rework dispatch created");
         } catch (e) {
           // Dispatch failed — route to pending state instead

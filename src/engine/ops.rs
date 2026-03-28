@@ -123,10 +123,12 @@ fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     }
                 }
                 // Block direct INSERT/UPDATE on task_dispatches — use agentdesk.dispatch.create() instead.
-                // Direct writes bypass send_dispatch_to_discord(), unified thread routing,
-                // dispatch_notified guard, and channel_thread_map updates.
                 if (/(?:INSERT\s+INTO|UPDATE)\s+task_dispatches\b/i.test(sql)) {
                     throw new Error("Direct task_dispatches mutation is blocked. Use agentdesk.dispatch.create() instead.");
+                }
+                // Block direct INSERT/UPDATE on card_review_state — use agentdesk.reviewState.sync() instead (#158).
+                if (/(?:INSERT\s+INTO|UPDATE)\s+card_review_state\b/i.test(sql)) {
+                    throw new Error("Direct card_review_state mutation is blocked. Use agentdesk.reviewState.sync(cardId, state, opts) instead.");
                 }
                 // Direct write — db.execute remains synchronous by design.
                 // dispatch.create and kanban.setStatus use intent/transition model;
@@ -1091,7 +1093,7 @@ fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     )?;
 
     // kv.delete(key)
-    let db_del = db;
+    let db_del = db.clone();
     kv_obj.set(
         "delete",
         Function::new(ctx.clone(), move |key: String| -> String {
@@ -1124,7 +1126,106 @@ fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     "#,
     )?;
 
+    // ── agentdesk.reviewState — typed bridge for card_review_state mutations (#158) ──
+    // Replaces direct SQL INSERT/UPDATE on card_review_state from JS policies.
+    // All review-state mutations go through this single entrypoint.
+    {
+        let db_rs = db.clone();
+        let sync_raw = Function::new(ctx.clone(), move |json_str: String| -> String {
+            review_state_sync(&db_rs, &json_str)
+        })?;
+
+        let _: rquickjs::Value = ctx.eval(
+            r#"
+            (function() {
+                agentdesk.reviewState = {
+                    __syncRaw: null,
+                    sync: function(cardId, state, opts) {
+                        opts = opts || {};
+                        var payload = JSON.stringify({
+                            card_id: cardId,
+                            state: state,
+                            review_round: opts.review_round || null,
+                            last_verdict: opts.last_verdict || null,
+                            last_decision: opts.last_decision || null,
+                            pending_dispatch_id: opts.pending_dispatch_id || null,
+                            approach_change_round: opts.approach_change_round || null,
+                            review_entered_at: opts.review_entered_at || null
+                        });
+                        var result = JSON.parse(agentdesk.reviewState.__syncRaw(payload));
+                        if (result.error) throw new Error(result.error);
+                        return result;
+                    }
+                };
+            })();
+        "#,
+        )?;
+
+        let rs_obj: rquickjs::Value = ctx.eval("agentdesk.reviewState")?;
+        let rs_obj: Object = rs_obj.into_object().unwrap();
+        rs_obj.set("__syncRaw", sync_raw)?;
+    }
+
     Ok(())
+}
+
+/// Rust implementation of card_review_state sync (#158).
+/// Single entrypoint for all review-state mutations.
+/// Used by both the JS bridge and Rust route handlers.
+pub fn review_state_sync(db: &Db, json_str: &str) -> String {
+    let params: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => return format!(r#"{{"error":"invalid JSON: {}"}}"#, e),
+    };
+
+    let card_id = params["card_id"].as_str().unwrap_or("");
+    let state = params["state"].as_str().unwrap_or("");
+    if card_id.is_empty() || state.is_empty() {
+        return r#"{"error":"card_id and state are required"}"#.to_string();
+    }
+
+    let conn = match db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"db error: {}"}}"#, e),
+    };
+
+    // Build dynamic SET clause based on provided fields
+    let review_round = params["review_round"].as_i64();
+    let last_verdict = params["last_verdict"].as_str();
+    let last_decision = params["last_decision"].as_str();
+    let pending_dispatch_id = params["pending_dispatch_id"].as_str();
+    let approach_change_round = params["approach_change_round"].as_i64();
+    let review_entered_at = params["review_entered_at"].as_str();
+
+    // UPSERT: INSERT OR REPLACE with all fields
+    let result = conn.execute(
+        "INSERT INTO card_review_state (card_id, state, review_round, last_verdict, last_decision, pending_dispatch_id, approach_change_round, review_entered_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE(?8, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
+         ON CONFLICT(card_id) DO UPDATE SET \
+         state = ?2, \
+         review_round = COALESCE(?3, review_round), \
+         last_verdict = COALESCE(?4, last_verdict), \
+         last_decision = COALESCE(?5, last_decision), \
+         pending_dispatch_id = CASE WHEN ?2 = 'idle' THEN NULL ELSE COALESCE(?6, pending_dispatch_id) END, \
+         approach_change_round = COALESCE(?7, approach_change_round), \
+         review_entered_at = COALESCE(?8, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END), \
+         updated_at = datetime('now')",
+        rusqlite::params![
+            card_id,
+            state,
+            review_round,
+            last_verdict,
+            last_decision,
+            pending_dispatch_id,
+            approach_change_round,
+            review_entered_at,
+        ],
+    );
+
+    match result {
+        Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+        Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+    }
 }
 
 // ── Exec ops ──────────────────────────────────────────────────────
