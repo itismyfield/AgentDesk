@@ -711,6 +711,7 @@ pub(super) async fn restore_inflight_turns(
         let tmux_for_reader = tmux_session_name.clone();
         let start_offset = state.last_offset;
         let recovery_session_id = state.session_id.clone();
+        let retry_channel_id = channel_id.get();
         std::thread::spawn(move || {
             match claude::read_output_file_until_result(
                 &output_for_reader,
@@ -729,9 +730,17 @@ pub(super) async fn restore_inflight_turns(
                     });
                 }
                 Ok(ReadOutputResult::SessionDied { .. }) => {
+                    // Signal auto-retry via a special marker in Done result.
+                    // The turn_bridge will detect the empty result + retry info
+                    // and handle the async re-send with Discord history.
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ↻ Recovery: session died, signaling auto-retry (channel {})",
+                        retry_channel_id
+                    );
+                    // Send marker so turn_bridge triggers auto-retry with Discord history.
                     let _ = tx.send(StreamMessage::Done {
-                        result: "⚠️ AgentDesk 재시작 중 진행되던 세션을 복구하지 못했습니다."
-                            .to_string(),
+                        result: "__session_died_retry__".to_string(),
                         session_id: recovery_session_id,
                     });
                 }

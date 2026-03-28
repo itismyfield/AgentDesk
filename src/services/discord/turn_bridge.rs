@@ -1226,6 +1226,33 @@ pub(super) fn spawn_turn_bridge(
             remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
         }
 
+        // Recovery auto-retry: session died during restart recovery
+        let recovery_retry = full_response.contains("__session_died_retry__");
+        if recovery_retry {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!("  [{ts}] ↻ Recovery session died — triggering auto-retry with history (channel {})", channel_id);
+            // Clear stale session_id
+            {
+                let mut data = shared_owned.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.session_id = None;
+                }
+            }
+            if let Some(ref key) = adk_session_key {
+                super::adk_session::save_claude_session_id(key, "", shared_owned.api_port).await;
+            }
+            // Auto-retry with Discord history
+            let http_c = http.clone();
+            let retry_text = user_text_owned.clone();
+            let retry_port = shared_owned.api_port;
+            tokio::spawn(async move {
+                auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
+            });
+            // Delete placeholder — no error shown
+            let _ = http.delete_message(channel_id, current_msg_id, None).await;
+            full_response = String::new();
+        }
+
         if cancelled {
             if let Ok(guard) = cancel_token.child_pid.lock() {
                 if let Some(pid) = *guard {
