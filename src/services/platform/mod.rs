@@ -8,7 +8,8 @@ mod dump_tool;
 pub mod shell;
 
 pub use binary_resolver::{
-    async_resolve_binary_with_login_shell, resolve_binary, resolve_binary_with_login_shell,
+    apply_runtime_path, async_resolve_binary_with_login_shell, merged_runtime_path, resolve_binary,
+    resolve_binary_with_login_shell, resolve_login_shell_path,
 };
 pub use dump_tool::capture_process_dump;
 pub use shell::{async_shell_command, git_head_commit, hostname_short, shell_command};
