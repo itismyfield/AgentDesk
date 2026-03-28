@@ -1,4 +1,5 @@
 use crate::utils::format::safe_prefix;
+use std::process::Command;
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -19,6 +20,22 @@ pub enum ProviderKind {
     Claude,
     Codex,
     Unsupported(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    pub binary_name: &'static str,
+    pub supports_structured_output: bool,
+    pub supports_resume: bool,
+    pub supports_tool_stream: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderRuntimeProbe {
+    pub provider: ProviderKind,
+    pub capabilities: ProviderCapabilities,
+    pub binary_path: Option<String>,
+    pub version: Option<String>,
 }
 
 impl ProviderKind {
@@ -46,6 +63,60 @@ impl ProviderKind {
         }
     }
 
+    pub fn capabilities(&self) -> Option<ProviderCapabilities> {
+        match self {
+            Self::Claude => Some(ProviderCapabilities {
+                binary_name: "claude",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            }),
+            Self::Codex => Some(ProviderCapabilities {
+                binary_name: "codex",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            }),
+            Self::Unsupported(_) => None,
+        }
+    }
+
+    pub fn resolve_runtime_path(&self) -> Option<String> {
+        match self {
+            Self::Claude => crate::services::claude::resolve_claude_path(),
+            Self::Codex => crate::services::codex::resolve_codex_path(),
+            Self::Unsupported(_) => None,
+        }
+    }
+
+    pub fn probe_runtime(&self) -> Option<ProviderRuntimeProbe> {
+        let capabilities = self.capabilities()?;
+        let binary_path = self.resolve_runtime_path();
+        let version = binary_path.as_ref().and_then(|path| {
+            let mut command = Command::new(path);
+            crate::services::platform::apply_runtime_path(&mut command);
+            command
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| {
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if stdout.is_empty() {
+                        None
+                    } else {
+                        Some(stdout)
+                    }
+                })
+        });
+        Some(ProviderRuntimeProbe {
+            provider: self.clone(),
+            capabilities,
+            binary_path,
+            version,
+        })
+    }
+
     /// Parse a known provider string. Returns None for unknown providers.
     pub fn from_str(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -60,7 +131,7 @@ impl ProviderKind {
         Self::from_str(raw).unwrap_or_else(|| Self::Unsupported(raw.trim().to_string()))
     }
 
-    /// Returns true if this is a known, supported provider (Claude or Codex).
+    /// Returns true if this is a known, supported provider.
     pub fn is_supported(&self) -> bool {
         !matches!(self, Self::Unsupported(_))
     }
@@ -127,7 +198,6 @@ pub fn parse_provider_and_channel_from_tmux_name(
 ) -> Option<(ProviderKind, String)> {
     let prefix = format!("{}-", TMUX_SESSION_PREFIX);
     let stripped = session_name.strip_prefix(&prefix)?;
-    // Strip env suffix (e.g. "-dev") from the end before parsing
     let suffix = tmux_env_suffix();
     let without_suffix = if !suffix.is_empty() {
         stripped.strip_suffix(suffix).unwrap_or(stripped)
@@ -160,13 +230,13 @@ mod tests {
 
     #[test]
     fn test_unsupported_provider() {
-        let p = ProviderKind::from_str_or_unsupported("gemini");
+        let p = ProviderKind::from_str_or_unsupported("gpt");
         assert!(!p.is_supported());
-        assert_eq!(p.as_str(), "gemini");
-        assert_eq!(p.display_name(), "gemini");
+        assert_eq!(p.as_str(), "gpt");
+        assert_eq!(p.display_name(), "gpt");
         assert!(!p.is_channel_supported(Some("test-cc"), false));
         assert!(!p.is_channel_supported(Some("test"), false));
-        assert!(!p.is_channel_supported(None, true)); // unsupported even in DM
+        assert!(!p.is_channel_supported(None, true));
     }
 
     #[test]
@@ -197,8 +267,6 @@ mod tests {
         );
     }
 
-    // ── P0 tests ─────────────────────────────────────────────────────────
-
     #[test]
     fn test_provider_from_str_claude() {
         assert_eq!(ProviderKind::from_str("claude"), Some(ProviderKind::Claude));
@@ -219,7 +287,6 @@ mod tests {
 
     #[test]
     fn test_provider_from_str_unknown() {
-        assert_eq!(ProviderKind::from_str("gemini"), None);
         assert_eq!(ProviderKind::from_str("gpt"), None);
         assert_eq!(ProviderKind::from_str(""), None);
     }
@@ -237,7 +304,6 @@ mod tests {
 
     #[test]
     fn test_parse_provider_and_channel_from_tmux_name() {
-        // Roundtrip: build then parse
         let channel = "my-test-channel";
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
         let (provider, parsed_channel) =
@@ -254,14 +320,12 @@ mod tests {
 
     #[test]
     fn test_is_channel_supported_cc_suffix() {
-        // "-cc" channel → Claude only
         assert!(ProviderKind::Claude.is_channel_supported(Some("dev-cc"), false));
         assert!(!ProviderKind::Codex.is_channel_supported(Some("dev-cc"), false));
     }
 
     #[test]
     fn test_is_channel_supported_cdx_suffix() {
-        // "-cdx" channel → Codex only
         assert!(ProviderKind::Codex.is_channel_supported(Some("dev-cdx"), false));
         assert!(!ProviderKind::Claude.is_channel_supported(Some("dev-cdx"), false));
     }
@@ -456,10 +520,21 @@ mod tests {
         assert_eq!(ProviderKind::Claude.counterpart(), ProviderKind::Codex);
         assert_eq!(ProviderKind::Codex.counterpart(), ProviderKind::Claude);
 
-        let unsupported = ProviderKind::Unsupported("gemini".to_string());
+        let unsupported = ProviderKind::Unsupported("gpt".to_string());
         assert_eq!(
             unsupported.counterpart(),
-            ProviderKind::Unsupported("gemini".to_string())
+            ProviderKind::Unsupported("gpt".to_string())
         );
+    }
+
+    #[test]
+    fn test_provider_capabilities_known_providers_support_agent_contract() {
+        for provider in [ProviderKind::Claude, ProviderKind::Codex] {
+            let capabilities = provider.capabilities().expect("supported provider");
+            assert!(capabilities.supports_structured_output);
+            assert!(capabilities.supports_resume);
+            assert!(capabilities.supports_tool_stream);
+            assert!(!capabilities.binary_name.is_empty());
+        }
     }
 }

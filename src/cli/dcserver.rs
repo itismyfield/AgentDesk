@@ -147,6 +147,24 @@ pub fn is_windows_service_installed() -> bool {
 }
 
 #[cfg(target_os = "windows")]
+pub fn is_windows_service_running() -> bool {
+    let output = match std::process::Command::new("sc")
+        .args(["query", WINDOWS_SERVICE_NAME])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+
+    String::from_utf8_lossy(&output.stdout).contains("RUNNING")
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_windows_service_running() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
 pub fn restart_windows_service() -> bool {
     // Try NSSM first, fall back to sc.exe
     let nssm = std::process::Command::new("nssm")
@@ -306,6 +324,11 @@ pub fn update_release_link(_link_path: &Path, _target: &Path) -> Result<(), Stri
 }
 
 pub fn dcserver_process_running() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return is_windows_service_running();
+    }
+
     !dcserver_instance_pids().is_empty()
 }
 
@@ -405,6 +428,80 @@ pub fn kill_existing_dcserver_processes() {
     }
 }
 
+pub fn parse_restart_dcserver_report_context(
+    args: &[String],
+    start_index: usize,
+) -> Result<Option<services::discord::restart_report::RestartReportContext>, String> {
+    use services::discord::restart_report::{
+        RestartReportContext, restart_report_context_from_env,
+    };
+    use services::provider::ProviderKind;
+
+    let mut report_channel_id: Option<u64> = None;
+    let mut report_provider: Option<String> = None;
+    let mut report_message_id: Option<u64> = None;
+    let mut i = start_index;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--report-channel-id" => {
+                let raw = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--report-channel-id requires a numeric ID".to_string())?;
+                report_channel_id = Some(
+                    raw.parse::<u64>()
+                        .map_err(|_| format!("invalid value for --report-channel-id: {raw}"))?,
+                );
+                i += 2;
+            }
+            "--report-provider" => {
+                let raw = args
+                    .get(i + 1)
+                    .ok_or_else(|| {
+                        "--report-provider requires one of: claude, codex, gemini".to_string()
+                    })?
+                    .clone();
+                report_provider = Some(raw);
+                i += 2;
+            }
+            "--report-message-id" => {
+                let raw = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--report-message-id requires a numeric ID".to_string())?;
+                report_message_id = Some(
+                    raw.parse::<u64>()
+                        .map_err(|_| format!("invalid value for --report-message-id: {raw}"))?,
+                );
+                i += 2;
+            }
+            other => {
+                return Err(format!("unknown option for --restart-dcserver: {other}"));
+            }
+        }
+    }
+
+    match (report_provider, report_channel_id, report_message_id) {
+        (None, None, None) => Ok(restart_report_context_from_env()),
+        (None, None, Some(_)) => Err(
+            "--report-message-id requires --report-channel-id and --report-provider".to_string(),
+        ),
+        (Some(_), None, _) => Err("--report-provider requires --report-channel-id".to_string()),
+        (None, Some(_), _) => Err("--report-channel-id requires --report-provider".to_string()),
+        (Some(provider_raw), Some(channel_id), current_msg_id) => {
+            let provider = ProviderKind::from_str(&provider_raw).ok_or_else(|| {
+                format!(
+                    "invalid value for --report-provider: {} (expected claude, codex, or gemini)",
+                    provider_raw
+                )
+            })?;
+            Ok(Some(RestartReportContext {
+                provider,
+                channel_id,
+                current_msg_id,
+            }))
+        }
+    }
+}
 pub fn handle_restart_dcserver(
     report_context_override: Option<services::discord::restart_report::RestartReportContext>,
 ) {

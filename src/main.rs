@@ -50,7 +50,7 @@ enum Commands {
         /// Discord channel ID for restart completion report
         #[arg(long)]
         report_channel_id: Option<u64>,
-        /// Provider for restart report (claude or codex)
+        /// Provider for restart report (claude, codex, or gemini)
         #[arg(long, value_enum)]
         report_provider: Option<ReportProvider>,
         /// Existing message ID to edit for restart report
@@ -129,6 +129,9 @@ enum Commands {
         /// Path to codex binary
         #[arg(long)]
         codex_bin: String,
+        /// Optional codex model override
+        #[arg(long)]
+        codex_model: Option<String>,
         /// Working directory (defaults to ".")
         #[arg(long, default_value = ".")]
         cwd: String,
@@ -180,7 +183,14 @@ enum Commands {
         body: Option<String>,
     },
     /// Environment diagnostics
-    Doctor,
+    Doctor {
+        /// Apply safe local repairs before running diagnostics
+        #[arg(long)]
+        fix: bool,
+        /// Emit machine-readable JSON output for agent parsing
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -230,6 +240,13 @@ fn exit_for_cli(result: std::result::Result<(), String>) -> Result<()> {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+fn exit_for_json_cli(result: std::result::Result<(), String>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(_) => std::process::exit(1),
     }
 }
 
@@ -315,6 +332,7 @@ fn main() -> Result<()> {
                 codex_bin,
                 cwd,
                 input_mode,
+                ..
             }) => {
                 let mode = match input_mode {
                     InputModeArg::Pipe => services::tmux_wrapper::InputMode::Pipe,
@@ -370,8 +388,12 @@ fn main() -> Result<()> {
             Some(Commands::Api { method, path, body }) => {
                 return exit_for_cli(cli::client::cmd_api(&method, &path, body.as_deref()));
             }
-            Some(Commands::Doctor) => {
-                return exit_for_cli(cli::doctor::cmd_doctor());
+            Some(Commands::Doctor { fix, json }) => {
+                return if json {
+                    exit_for_json_cli(cli::doctor::cmd_doctor(fix, json))
+                } else {
+                    exit_for_cli(cli::doctor::cmd_doctor(fix, json))
+                };
             }
             None => {
                 // No subcommand — fall through to server start
