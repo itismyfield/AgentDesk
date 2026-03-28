@@ -31,24 +31,27 @@ var autoQueue = {
   // kanban-rules.js does NOT touch auto_queue_entries (removed in #110).
   onCardTerminal: function(payload) {
     var cards = agentdesk.db.query(
-      "SELECT assigned_agent_id, latest_dispatch_id FROM kanban_cards WHERE id = ?",
+      "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?",
       [payload.card_id]
     );
     if (cards.length === 0 || !cards[0].assigned_agent_id) return;
 
     var agentId = cards[0].assigned_agent_id;
-    var latestDispatchId = cards[0].latest_dispatch_id;
 
-    // #145: Use dispatch_id to find the exact run this dispatch belongs to.
-    // Eliminates card_id ambiguity when same card is in multiple runs.
-    var doneEntries = latestDispatchId ? agentdesk.db.query(
+    // #145: Find the auto-queue entry that was just marked 'done' for this card.
+    // Use dispatch_id IS NOT NULL to filter to auto-queue entries only (non-auto-queue
+    // entries don't have dispatch_id). ORDER BY completed_at DESC picks the most
+    // recently completed entry. Avoids latest_dispatch_id which gets overwritten
+    // by review/review-decision dispatches.
+    var doneEntries = agentdesk.db.query(
       "SELECT e.run_id FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
-      "WHERE e.dispatch_id = ? AND e.status = 'done' " +
+      "WHERE e.kanban_card_id = ? AND e.status = 'done' " +
+      "AND e.dispatch_id IS NOT NULL " +
       "AND r.status IN ('active', 'paused') " +
-      "LIMIT 1",
-      [latestDispatchId]
-    ) : [];
+      "ORDER BY e.completed_at DESC LIMIT 1",
+      [payload.card_id]
+    );
     if (doneEntries.length === 0) return;
 
     var runId = doneEntries[0].run_id;
