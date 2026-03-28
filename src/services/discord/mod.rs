@@ -898,58 +898,83 @@ async fn execute_handoff_turns(
 /// but the in-memory intervention_queue was lost. Or the notification was interrupted
 /// mid-flight. This function identifies truly orphan dispatches and re-delivers them.
 ///
-/// **Safety**: Runs exactly once at startup, between handoff execution and idle queue kickoff.
-/// Five AND conditions must ALL be met before re-delivery (see issue #164).
+/// **Safety**:
+/// - Process-global once guard via `std::sync::Once` — safe across multiple provider instances
+/// - Startup boot timestamp from dcserver.pid mtime — not wall clock
+/// - Newer-dispatch check uses rowid (monotonic) instead of created_at (second-granularity)
+/// - Five AND conditions must ALL be met before re-delivery (see issue #164)
 async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
+    // Process-global once guard: prevents duplicate execution when multiple
+    // provider instances (Claude + Codex) call this from their own setup paths.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let mut should_run = false;
+    ONCE.call_once(|| should_run = true);
+    if !should_run {
+        return;
+    }
+
     let db = match shared.db.as_ref() {
         Some(d) => d,
         None => return,
     };
 
-    // Collect boot time — only re-deliver dispatches created BEFORE this boot
+    // Boot timestamp from dcserver.pid mtime — represents actual process start,
+    // not a wall-clock offset that could mis-classify old pending dispatches.
     let boot_time: String = {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        // dcserver.pid file mtime serves as boot timestamp; fall back to 5 min ago
-        conn.query_row("SELECT datetime('now', '-5 minutes')", [], |row| row.get(0))
-            .unwrap_or_default()
+        let pid_path = crate::cli::agentdesk_runtime_root()
+            .map(|r| r.join("dcserver.pid"));
+        let mtime = pid_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        match mtime {
+            Some(t) => {
+                let dt: chrono::DateTime<chrono::Utc> = t.into();
+                dt.format("%Y-%m-%d %H:%M:%S").to_string()
+            }
+            None => {
+                // No pid file — cannot determine boot time safely, skip recovery
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ⚠ #164: No dcserver.pid — skipping orphan dispatch recovery");
+                return;
+            }
+        }
     };
 
     // Query orphan pending dispatches with all 5 safety conditions:
     // 1. status = 'pending'
     // 2. card is assigned to the dispatch target agent
     // 3. agent has NO working session (idle)
-    // 4. created_at < boot_time (pre-restart)
-    // 5. no newer dispatch exists for the same card
+    // 4. created_at < boot_time (pre-restart, using pid mtime)
+    // 5. no newer dispatch for the same card (using rowid for monotonic ordering,
+    //    avoids same-second ambiguity with created_at)
     let orphans: Vec<(String, String, String, String, String)> = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
         };
-        let mut stmt = conn
-            .prepare(
-                "SELECT d.id, d.to_agent_id, d.kanban_card_id, d.title, d.dispatch_type
-                 FROM task_dispatches d
-                 JOIN kanban_cards kc ON kc.id = d.kanban_card_id
-                 WHERE d.status = 'pending'
-                   AND d.created_at < ?1
-                   AND kc.assigned_agent_id = d.to_agent_id
-                   AND NOT EXISTS (
-                     SELECT 1 FROM sessions s
-                     WHERE s.agent_id = d.to_agent_id
-                       AND s.status = 'working'
-                   )
-                   AND NOT EXISTS (
-                     SELECT 1 FROM task_dispatches d2
-                     WHERE d2.kanban_card_id = d.kanban_card_id
-                       AND d2.id != d.id
-                       AND d2.created_at > d.created_at
-                       AND d2.status NOT IN ('cancelled', 'failed')
-                   )",
-            )
-            .unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT d.id, d.to_agent_id, d.kanban_card_id, d.title, d.dispatch_type
+             FROM task_dispatches d
+             JOIN kanban_cards kc ON kc.id = d.kanban_card_id
+             WHERE d.status = 'pending'
+               AND d.created_at < ?1
+               AND kc.assigned_agent_id = d.to_agent_id
+               AND NOT EXISTS (
+                 SELECT 1 FROM sessions s
+                 WHERE s.agent_id = d.to_agent_id
+                   AND s.status = 'working'
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM task_dispatches d2
+                 WHERE d2.kanban_card_id = d.kanban_card_id
+                   AND d2.rowid > d.rowid
+                   AND d2.status NOT IN ('cancelled', 'failed')
+               )",
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
         stmt.query_map([&boot_time], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -975,7 +1000,9 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
     );
 
     for (dispatch_id, agent_id, card_id, title, dtype) in &orphans {
-        // Remove the dispatch_notified guard so send_dispatch_to_discord can proceed
+        // Remove the dispatch_notified guard so send_dispatch_to_discord can proceed.
+        // This is safe because the Once guard ensures only one caller reaches here,
+        // and the 5-condition query already validated this dispatch is truly orphan.
         {
             let conn = match db.lock() {
                 Ok(c) => c,
