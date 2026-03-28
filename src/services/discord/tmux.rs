@@ -460,9 +460,8 @@ pub(super) async fn tmux_output_watcher(
             {
                 let hostname = crate::services::platform::hostname_short();
                 let session_key = format!("{}:{}", hostname, tmux_session_name);
-                super::adk_session::save_claude_session_id(
+                super::adk_session::clear_claude_session_id(
                     &session_key,
-                    "",
                     shared.api_port,
                 )
                 .await;
