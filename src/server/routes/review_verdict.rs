@@ -510,6 +510,17 @@ pub async fn submit_verdict(
 
     // #100: release marker was already stamped before dispatch completion (above).
 
+    // Emit kanban_card_updated for real-time dashboard
+    if let Ok(conn) = state.db.lock() {
+        if let Ok(card) = conn.query_row(
+            &format!("{} WHERE kc.id = ?1", super::kanban::CARD_SELECT),
+            [&card_id],
+            |row| super::kanban::card_row_to_json(row),
+        ) {
+            crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+        }
+    }
+
     (
         StatusCode::OK,
         Json(json!({
@@ -696,6 +707,16 @@ pub async fn submit_review_decision(
             // #117: Update canonical review state
             update_card_review_state(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
 
+            // Emit kanban_card_updated for real-time dashboard
+            if let Ok(conn) = state.db.lock() {
+                if let Ok(card) = conn.query_row(
+                    &format!("{} WHERE kc.id = ?1", super::kanban::CARD_SELECT),
+                    [&body.card_id],
+                    |row| super::kanban::card_row_to_json(row),
+                ) {
+                    crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+                }
+            }
             return (
                 StatusCode::OK,
                 Json(json!({
@@ -716,8 +737,17 @@ pub async fn submit_review_decision(
                 )
                 .ok();
             }
+            // #155: Use intents for review_status mutation (executor boundary)
+            use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+            let dispute_intents = vec![
+                TransitionIntent::SetReviewStatus { card_id: body.card_id.clone(), review_status: Some("reviewing".to_string()) },
+                TransitionIntent::SyncReviewState { card_id: body.card_id.clone(), state: "reviewing".to_string() },
+            ];
+            for intent in &dispute_intents {
+                execute_intent_on_conn(&conn, intent).ok();
+            }
             conn.execute(
-                "UPDATE kanban_cards SET review_status = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
+                "UPDATE kanban_cards SET review_entered_at = datetime('now') WHERE id = ?1",
                 [&body.card_id],
             ).ok();
             drop(conn);
@@ -801,6 +831,16 @@ pub async fn submit_review_decision(
                 }
             }
 
+            // Emit kanban_card_updated for real-time dashboard
+            if let Ok(conn) = state.db.lock() {
+                if let Ok(card) = conn.query_row(
+                    &format!("{} WHERE kc.id = ?1", super::kanban::CARD_SELECT),
+                    [&body.card_id],
+                    |row| super::kanban::card_row_to_json(row),
+                ) {
+                    crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+                }
+            }
             return (
                 StatusCode::OK,
                 Json(json!({
@@ -854,13 +894,12 @@ pub async fn submit_review_decision(
                     [&body.card_id],
                 )
                 .ok();
-                // Belt-and-suspenders: ensure review_status is cleared even if transition_status
-                // failed silently (the `let _ =` above discards errors).
-                conn.execute(
-                    "UPDATE kanban_cards SET review_status = NULL WHERE id = ?1",
-                    [&body.card_id],
-                )
-                .ok();
+                // #155: Belt-and-suspenders via intent (executor boundary)
+                use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+                execute_intent_on_conn(&conn, &TransitionIntent::SetReviewStatus {
+                    card_id: body.card_id.clone(),
+                    review_status: None,
+                }).ok();
                 // Clear thread mappings so dismissed review threads are not reused.
                 super::dispatches::clear_all_threads(&conn, &body.card_id);
             }
@@ -884,6 +923,17 @@ pub async fn submit_review_decision(
         pending_rd_id.as_deref(),
     );
     spawn_aggregate_if_needed(&state.db);
+
+    // Emit kanban_card_updated for real-time dashboard
+    if let Ok(conn) = state.db.lock() {
+        if let Ok(card) = conn.query_row(
+            &format!("{} WHERE kc.id = ?1", super::kanban::CARD_SELECT),
+            [&body.card_id],
+            |row| super::kanban::card_row_to_json(row),
+        ) {
+            crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+        }
+    }
 
     (
         StatusCode::OK,
@@ -1167,11 +1217,7 @@ mod tests {
     async fn submit_verdict_pass_marks_done_and_clears_review_status() {
         let db = test_db();
         seed_review_card(&db, "dispatch-pass");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, _) = submit_verdict(
             State(state),
@@ -1216,11 +1262,7 @@ mod tests {
     async fn submit_verdict_improve_creates_review_decision_dispatch() {
         let db = test_db();
         seed_review_card(&db, "dispatch-improve");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, _) = submit_verdict(
             State(state),
@@ -1270,11 +1312,7 @@ mod tests {
     async fn review_verdict_allows_same_agent_submission() {
         let db = test_db();
         seed_review_card(&db, "dispatch-counter");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1315,11 +1353,7 @@ mod tests {
         ).unwrap();
         drop(conn);
 
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1359,11 +1393,7 @@ mod tests {
         ).unwrap();
         drop(conn);
 
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1409,11 +1439,7 @@ mod tests {
         ).unwrap();
         drop(conn);
 
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_review_decision(
             State(state),
@@ -1476,11 +1502,7 @@ mod tests {
         ).unwrap();
         drop(conn);
 
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1550,11 +1572,7 @@ mod tests {
     async fn cross_provider_verdict_allowed() {
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-cross", "claude", "codex");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         // CDX (codex) submitting verdict for a review where from=claude, target=codex → allowed
         let (status, body) = submit_verdict(
@@ -1579,11 +1597,7 @@ mod tests {
     async fn same_provider_verdict_rejected() {
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-self-prov", "claude", "codex");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         // CC (claude) submitting verdict for own work → self-review rejection
         let (status, body) = submit_verdict(
@@ -1608,11 +1622,7 @@ mod tests {
     async fn verdict_without_provider_rejected_for_counter_model_dispatch() {
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-no-prov", "claude", "codex");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         // No provider specified on counter-model dispatch → rejected to prevent bypass
         let (status, body) = submit_verdict(
@@ -1642,11 +1652,7 @@ mod tests {
     async fn reverse_cross_provider_verdict_allowed() {
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-rev-cross", "codex", "claude");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         // CC (claude) submitting verdict where from=codex, target=claude → allowed
         let (status, body) = submit_verdict(
@@ -1672,11 +1678,7 @@ mod tests {
         // "Claude" (capitalized) submitting for from=claude → should normalize and reject
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-case-self", "claude", "codex");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1701,11 +1703,7 @@ mod tests {
         // "Codex" (capitalized) submitting for from=claude, target=codex → normalize and allow
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-case-cross", "claude", "codex");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1730,11 +1728,7 @@ mod tests {
         // "gemini" or random string → reject as unknown provider
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-unknown-prov", "claude", "codex");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1764,11 +1758,7 @@ mod tests {
         // from=codex, target=claude, submitter=codex → self-review blocked (submitter == from)
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-mismatch", "codex", "claude");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1794,11 +1784,7 @@ mod tests {
         // This exercises line 341-351 (mismatch branch), not 329-339 (self-review branch)
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-mismatch2", "claude", "claude");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1829,11 +1815,7 @@ mod tests {
         // should still allow verdicts without provider field
         let db = test_db();
         seed_review_card(&db, "dispatch-legacy");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -1875,11 +1857,7 @@ mod tests {
             ).unwrap();
         }
 
-        let state = AppState {
-            db: db.clone(),
-            engine,
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), engine);
 
         let (status, _body) = submit_review_decision(
             State(state),
@@ -1932,11 +1910,7 @@ mod tests {
             ).unwrap();
         }
 
-        let state = AppState {
-            db: db.clone(),
-            engine,
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), engine);
 
         let (status, _) = submit_review_decision(
             State(state),
@@ -1987,11 +1961,7 @@ mod tests {
             ).unwrap();
         }
 
-        let state = AppState {
-            db: db.clone(),
-            engine,
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), engine);
 
         // First accept should succeed
         let (status1, _) = submit_review_decision(
@@ -2040,11 +2010,7 @@ mod tests {
             ).unwrap();
         }
 
-        let state = AppState {
-            db: db.clone(),
-            engine,
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), engine);
 
         // Accept consumes the dispatch
         let (status1, _) = submit_review_decision(
@@ -2110,11 +2076,7 @@ mod tests {
             ).unwrap();
         }
 
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, _) = submit_verdict(
             State(state),
@@ -2176,11 +2138,7 @@ mod tests {
     async fn accept_verdict_is_rejected_by_submit_verdict() {
         let db = test_db();
         seed_review_card(&db, "dispatch-accept-v");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
@@ -2302,11 +2260,7 @@ mod tests {
             ).unwrap();
         }
 
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, _) = submit_review_decision(
             State(state),

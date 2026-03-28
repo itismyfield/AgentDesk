@@ -109,10 +109,18 @@ fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 return JSON.parse(json);
             };
             agentdesk.db.execute = function(sql, params) {
-                // Block direct status updates on kanban_cards — use agentdesk.kanban.setStatus() instead
-                // Only blocks "status =" but not "review_status =", "blocked_reason =" etc.
-                if (/UPDATE\s+kanban_cards\b/i.test(sql) && /(?<![_a-z])status\s*=/i.test(sql)) {
-                    throw new Error("Direct kanban_cards status UPDATE is blocked. Use agentdesk.kanban.setStatus(cardId, newStatus) instead.");
+                // #155: Block direct mutations on kanban_cards CardState fields.
+                // status, review_status, latest_dispatch_id must go through controlled helpers.
+                if (/UPDATE\s+kanban_cards\b/i.test(sql)) {
+                    if (/(?<![_a-z])status\s*=/i.test(sql)) {
+                        throw new Error("Direct kanban_cards status UPDATE is blocked. Use agentdesk.kanban.setStatus(cardId, newStatus) instead.");
+                    }
+                    if (/review_status\s*=/i.test(sql)) {
+                        throw new Error("Direct kanban_cards review_status UPDATE is blocked. Use agentdesk.kanban.setReviewStatus(cardId, status, opts) instead.");
+                    }
+                    if (/latest_dispatch_id\s*=/i.test(sql)) {
+                        throw new Error("Direct kanban_cards latest_dispatch_id UPDATE is blocked. Use the dispatch API instead.");
+                    }
                 }
                 // Block direct INSERT/UPDATE on task_dispatches — use agentdesk.dispatch.create() instead.
                 // Direct writes bypass send_dispatch_to_discord(), unified thread routing,
@@ -864,6 +872,113 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         })?,
     )?;
 
+    // #155: setReviewStatus — controlled path for review_status + clock updates.
+    // Replaces direct SQL UPDATEs so the ExecuteSQL guard can block bare review_status writes.
+    let db_review = db.clone();
+    kanban_obj.set(
+        "__setReviewStatusRaw",
+        Function::new(ctx.clone(), move |card_id: String, opts_json: String| -> String {
+            let opts: serde_json::Value = match serde_json::from_str(&opts_json) {
+                Ok(v) => v,
+                Err(e) => return format!(r#"{{"error":"bad opts: {}"}}"#, e),
+            };
+            let conn = match db_review.separate_conn() {
+                Ok(c) => c,
+                Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
+            };
+
+            // Build dynamic SET clause
+            let mut sets = vec!["updated_at = datetime('now')".to_string()];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+
+            if let Some(rs) = opts.get("review_status") {
+                if rs.is_null() {
+                    sets.push("review_status = NULL".to_string());
+                } else if let Some(s) = rs.as_str() {
+                    params.push(Box::new(s.to_string()));
+                    sets.push(format!("review_status = ?{}", params.len()));
+                }
+            }
+            if let Some(v) = opts.get("suggestion_pending_at") {
+                if v.is_null() {
+                    sets.push("suggestion_pending_at = NULL".to_string());
+                } else if v.as_str() == Some("now") {
+                    sets.push("suggestion_pending_at = datetime('now')".to_string());
+                }
+            }
+            if let Some(v) = opts.get("review_entered_at") {
+                if v.is_null() {
+                    sets.push("review_entered_at = NULL".to_string());
+                } else if v.as_str() == Some("now") {
+                    sets.push("review_entered_at = datetime('now')".to_string());
+                }
+            }
+            if let Some(v) = opts.get("awaiting_dod_at") {
+                if v.is_null() {
+                    sets.push("awaiting_dod_at = NULL".to_string());
+                } else if v.as_str() == Some("now") {
+                    sets.push("awaiting_dod_at = datetime('now')".to_string());
+                }
+            }
+            if let Some(v) = opts.get("blocked_reason") {
+                if v.is_null() {
+                    sets.push("blocked_reason = NULL".to_string());
+                } else if let Some(s) = v.as_str() {
+                    params.push(Box::new(s.to_string()));
+                    sets.push(format!("blocked_reason = ?{}", params.len()));
+                }
+            }
+
+            // Optional terminal guard: only update if status != terminal
+            let where_clause = if let Some(excl) = opts.get("exclude_status") {
+                if let Some(s) = excl.as_str() {
+                    params.push(Box::new(s.to_string()));
+                    params.push(Box::new(card_id.clone()));
+                    format!("WHERE id = ?{} AND status != ?{}", params.len(), params.len() - 1)
+                } else {
+                    params.push(Box::new(card_id.clone()));
+                    format!("WHERE id = ?{}", params.len())
+                }
+            } else {
+                params.push(Box::new(card_id.clone()));
+                format!("WHERE id = ?{}", params.len())
+            };
+
+            let sql = format!("UPDATE kanban_cards SET {} {}", sets.join(", "), where_clause);
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+            if let Err(e) = conn.execute(&sql, param_refs.as_slice()) {
+                return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
+            }
+
+            // Sync card_review_state (#117)
+            if let Some(rs) = opts.get("review_status") {
+                if rs.is_null() {
+                    conn.execute(
+                        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, 'idle', datetime('now')) \
+                         ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
+                        [&card_id],
+                    ).ok();
+                } else if let Some(s) = rs.as_str() {
+                    let canonical_state = match s {
+                        "reviewing" => "reviewing",
+                        "suggestion_pending" => "suggestion_pending",
+                        "rework_pending" => "rework_pending",
+                        "awaiting_dod" => "awaiting_dod",
+                        "dilemma_pending" => "dilemma_pending",
+                        _ => s,
+                    };
+                    conn.execute(
+                        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, ?2, datetime('now')) \
+                         ON CONFLICT(card_id) DO UPDATE SET state = ?2, updated_at = datetime('now')",
+                        rusqlite::params![card_id, canonical_state],
+                    ).ok();
+                }
+            }
+
+            r#"{"ok":true}"#.to_string()
+        })?,
+    )?;
+
     ad.set("kanban", kanban_obj)?;
 
     // JS wrapper that parses JSON and accumulates transitions for post-hook processing.
@@ -895,6 +1010,14 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
             agentdesk.kanban.getCard = function(cardId) {
                 var result = JSON.parse(getRaw(cardId));
                 if (result.error) return null;
+                return result;
+            };
+            var reviewRaw = agentdesk.kanban.__setReviewStatusRaw;
+            agentdesk.kanban.setReviewStatus = function(cardId, reviewStatus, opts) {
+                var o = opts || {};
+                o.review_status = reviewStatus;
+                var result = JSON.parse(reviewRaw(cardId, JSON.stringify(o)));
+                if (result.error) throw new Error(result.error);
                 return result;
             };
         })();

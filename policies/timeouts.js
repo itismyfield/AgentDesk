@@ -156,10 +156,7 @@ var timeouts = {
           var dodOnly = reasons.length === 1 && reasons[0].indexOf("DoD 미완료") === 0;
           if (dodOnly) {
             agentdesk.kanban.setStatus(card.id, rReview);
-            agentdesk.db.execute(
-              "UPDATE kanban_cards SET review_status = 'awaiting_dod', awaiting_dod_at = datetime('now') WHERE id = ?",
-              [card.id]
-            );
+            agentdesk.kanban.setReviewStatus(card.id, "awaiting_dod", {awaiting_dod_at: "now"});
             // #117: sync canonical review state
             agentdesk.db.execute(
               "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'awaiting_dod', datetime('now')) " +
@@ -170,10 +167,7 @@ var timeouts = {
             continue;
           }
           agentdesk.kanban.setStatus(card.id, rPending);
-          agentdesk.db.execute(
-            "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
-            [card.id]
-          );
+          agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
           // #117: sync canonical review state
           agentdesk.db.execute(
             "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
@@ -320,7 +314,7 @@ var timeouts = {
     );
     for (var k = 0; k < staleReviews.length; k++) {
       agentdesk.kanban.setStatus(staleReviews[k].card_id, cPending);
-      agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?", [staleReviews[k].card_id]);
+      agentdesk.kanban.setReviewStatus(staleReviews[k].card_id, null, {suggestion_pending_at: null});
       // #117: sync canonical review state
       agentdesk.db.execute(
         "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
@@ -347,7 +341,7 @@ var timeouts = {
     );
     for (var d = 0; d < stuckDod.length; d++) {
       agentdesk.kanban.setStatus(stuckDod[d].id, dPending);
-      agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?", [stuckDod[d].id]);
+      agentdesk.kanban.setReviewStatus(stuckDod[d].id, null, {suggestion_pending_at: null});
       // #117: sync canonical review state
       agentdesk.db.execute(
         "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
@@ -387,10 +381,7 @@ var timeouts = {
           );
           // Dispatch succeeded — now transition to rework target + rework_pending
           agentdesk.kanban.setStatus(sc.id, eReworkTarget);
-          agentdesk.db.execute(
-            "UPDATE kanban_cards SET review_status = 'rework_pending', suggestion_pending_at = NULL, updated_at = datetime('now') WHERE id = ?",
-            [sc.id]
-          );
+          agentdesk.kanban.setReviewStatus(sc.id, "rework_pending", {suggestion_pending_at: null});
           // #119: Record tuning outcome (auto-accept = true_positive) BEFORE transition clears last_verdict
           var reviewState = agentdesk.db.query(
             "SELECT review_round, last_verdict FROM card_review_state WHERE card_id = ?",

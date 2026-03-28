@@ -270,10 +270,7 @@ var rules = {
         if (dodOnly) {
           // DoD 미완료만 → awaiting_dod (15분 유예, timeouts.js [D]가 만료 시 pendingState)
           agentdesk.kanban.setStatus(card.id, reviewState);
-          agentdesk.db.execute(
-            "UPDATE kanban_cards SET review_status = 'awaiting_dod', awaiting_dod_at = datetime('now') WHERE id = ?",
-            [card.id]
-          );
+          agentdesk.kanban.setReviewStatus(card.id, "awaiting_dod", {awaiting_dod_at: "now"});
           // #117: sync canonical review state
           agentdesk.db.execute(
             "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'awaiting_dod', datetime('now')) " +
@@ -285,10 +282,7 @@ var rules = {
         }
         // Other gate failures → pendingState
         agentdesk.kanban.setStatus(card.id, pendingState);
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
-          [card.id]
-        );
+        agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
         // #117: sync canonical review state
         agentdesk.db.execute(
           "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
