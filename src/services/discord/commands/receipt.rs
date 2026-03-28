@@ -57,10 +57,11 @@ pub(in crate::services::discord) async fn cmd_receipt(
     // Render HTML
     let html = receipt::render_html(&data);
 
-    // Write HTML to temp file
+    // Write HTML to temp file (unique per invocation to avoid race conditions)
     let tmp_dir = std::env::temp_dir();
-    let html_path = tmp_dir.join("agentdesk_receipt.html");
-    let png_path = tmp_dir.join("agentdesk_receipt.png");
+    let unique_id = uuid::Uuid::new_v4();
+    let html_path = tmp_dir.join(format!("agentdesk_receipt_{unique_id}.html"));
+    let png_path = tmp_dir.join(format!("agentdesk_receipt_{unique_id}.png"));
     std::fs::write(&html_path, &html).map_err(|e| format!("failed to write HTML: {e}"))?;
 
     // Playwright screenshot

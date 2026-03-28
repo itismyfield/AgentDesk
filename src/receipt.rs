@@ -220,7 +220,10 @@ fn parse_codex(path: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> (Vec<Us
         let rtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         if rtype == "session_meta" {
-            sid = v.get("id").and_then(|s| s.as_str()).map(String::from);
+            // Codex stores session id in payload.id (not top-level id)
+            sid = v.get("payload").and_then(|p| p.get("id")).and_then(|s| s.as_str())
+                .or_else(|| v.get("id").and_then(|s| s.as_str()))
+                .map(String::from);
             continue;
         }
         if rtype == "turn_context" {

@@ -32,7 +32,10 @@ pub async fn get_receipt(
             let ws = state.db.lock().ok().and_then(|conn| receipt::ratelimit_window_start(&conn));
             (ws.unwrap_or_else(|| now - chrono::Duration::days(7)), "Rate Limit Window")
         }
-        "all" => (now - chrono::Duration::days(365), "All Time"),
+        "all" => {
+            // Use Unix epoch as start to capture entire subscription history
+            (chrono::DateTime::from_timestamp(0, 0).unwrap_or(now - chrono::Duration::days(3650)), "All Time")
+        }
         _ => (now - chrono::Duration::days(30), "Last 30 Days"),
     };
 
