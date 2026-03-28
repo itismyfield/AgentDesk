@@ -169,11 +169,14 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 // ── Claude Code JSONL parsing ──────────────────────────────────
 
 fn parse_claude(path: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> (Vec<UsageRecord>, u64, Option<String>) {
-    let mut records = Vec::new();
-    let mut msgs = 0u64;
     let mut sid: Option<String> = None;
+    // Deduplicate by requestId: a single API request can produce multiple
+    // assistant entries in the JSONL (streaming chunks). Only the last entry
+    // per requestId carries the final cumulative usage.
+    let mut by_request: HashMap<String, UsageRecord> = HashMap::new();
+    let mut no_reqid_records: Vec<UsageRecord> = Vec::new();
 
-    let Ok(file) = fs::File::open(path) else { return (records, 0, None) };
+    let Ok(file) = fs::File::open(path) else { return (Vec::new(), 0, None) };
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if line.is_empty() { continue; }
         let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
@@ -192,16 +195,26 @@ fn parse_claude(path: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> (Vec<U
         let model = message.get("model").and_then(|m| m.as_str()).unwrap_or("unknown");
         if model == "<synthetic>" { continue; }
 
-        msgs += 1;
-        records.push(UsageRecord {
+        let rec = UsageRecord {
             model: model.into(),
             input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             cache_read_tokens: usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             cache_creation_tokens: usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
             provider: "Claude".into(),
-        });
+        };
+
+        // Use requestId to deduplicate — last entry wins (cumulative usage)
+        if let Some(req_id) = v.get("requestId").and_then(|r| r.as_str()) {
+            by_request.insert(req_id.to_string(), rec);
+        } else {
+            no_reqid_records.push(rec);
+        }
     }
+
+    let msgs = (by_request.len() + no_reqid_records.len()) as u64;
+    let mut records: Vec<UsageRecord> = by_request.into_values().collect();
+    records.extend(no_reqid_records);
     (records, msgs, sid)
 }
 
