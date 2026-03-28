@@ -224,7 +224,7 @@ pub struct HookBindings {
     pub on_exit: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClockConfig {
     pub set: String,
     #[serde(default)]
