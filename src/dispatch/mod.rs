@@ -419,9 +419,18 @@ fn apply_dispatch_attached_intents(
         return Err(anyhow::anyhow!("{}", reason));
     }
 
-    for intent in &decision.intents {
-        transition::execute_intent_on_conn(conn, intent)?;
+    conn.execute_batch("BEGIN")?;
+    let exec_result = (|| -> anyhow::Result<()> {
+        for intent in &decision.intents {
+            transition::execute_intent_on_conn(conn, intent)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = exec_result {
+        conn.execute_batch("ROLLBACK").ok();
+        return Err(e);
     }
+    conn.execute_batch("COMMIT")?;
 
     Ok(())
 }

@@ -428,6 +428,19 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    // Kanban audit logs — transition history for cards (#155)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS kanban_audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id TEXT,
+            from_status TEXT,
+            to_status TEXT,
+            source TEXT,
+            result TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );",
+    )?;
+
     // Audit logs table for analytics dashboard
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS audit_logs (

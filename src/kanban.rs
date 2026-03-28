@@ -73,7 +73,15 @@ pub fn transition_status_with_opts(
             "SELECT status, review_status, latest_dispatch_id, repo_id, assigned_agent_id \
              FROM kanban_cards WHERE id = ?1",
             [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .map_err(|_| anyhow::anyhow!("card not found: {card_id}"))?;
 
@@ -150,10 +158,19 @@ pub fn transition_status_with_opts(
         });
     }
 
-    // ── 4. Execute intents (DB writes, still holding lock) ──
-    for intent in &decision.intents {
-        transition::execute_intent_on_conn(&conn, intent)?;
+    // ── 4. Execute intents atomically (DB writes, still holding lock) ──
+    conn.execute_batch("BEGIN")?;
+    let exec_result = (|| -> anyhow::Result<()> {
+        for intent in &decision.intents {
+            transition::execute_intent_on_conn(&conn, intent)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = exec_result {
+        conn.execute_batch("ROLLBACK").ok();
+        return Err(e);
     }
+    conn.execute_batch("COMMIT")?;
 
     drop(conn);
 

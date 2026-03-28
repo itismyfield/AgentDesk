@@ -601,9 +601,20 @@ pub fn execute_decision(db: &crate::db::Db, decision: &TransitionDecision) -> an
         TransitionOutcome::NoOp => Ok(false),
         TransitionOutcome::Allowed => {
             let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-            for intent in &decision.intents {
-                execute_intent(&conn, intent)?;
+            conn.execute_batch("BEGIN")
+                .map_err(|e| anyhow::anyhow!("BEGIN: {e}"))?;
+            let exec_result = (|| -> anyhow::Result<()> {
+                for intent in &decision.intents {
+                    execute_intent(&conn, intent)?;
+                }
+                Ok(())
+            })();
+            if let Err(e) = exec_result {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
             }
+            conn.execute_batch("COMMIT")
+                .map_err(|e| anyhow::anyhow!("COMMIT: {e}"))?;
             Ok(true)
         }
     }
