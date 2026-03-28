@@ -110,8 +110,22 @@ fn ensure_tables(conn: &rusqlite::Connection) {
         )
         .unwrap_or(false);
     if !has_dispatch_id {
+        conn.execute_batch("ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;")
+            .ok();
+        // Backfill dispatch_id for existing active/dispatched/done entries (#145).
+        // Without this, legacy entries have dispatch_id = NULL and the policy JS
+        // `e.dispatch_id IS NOT NULL` filter skips them on terminal run lookup.
+        // Match each entry to the latest implementation dispatch for the same card+agent.
         conn.execute_batch(
-            "ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;",
+            "UPDATE auto_queue_entries SET dispatch_id = (
+                SELECT td.id FROM task_dispatches td
+                WHERE td.kanban_card_id = auto_queue_entries.kanban_card_id
+                  AND td.to_agent_id = auto_queue_entries.agent_id
+                  AND td.dispatch_type = 'implementation'
+                ORDER BY td.created_at DESC LIMIT 1
+            )
+            WHERE auto_queue_entries.status IN ('dispatched', 'done')
+              AND auto_queue_entries.dispatch_id IS NULL;",
         )
         .ok();
     }
@@ -806,7 +820,11 @@ pub async fn activate(
         .ok();
         drop(conn_reacquired);
         super::dispatches::queue_dispatch_notify(
-            &state.db, &dispatch_id, &agent_id, &card_id, &title,
+            &state.db,
+            &dispatch_id,
+            &agent_id,
+            &card_id,
+            &title,
         );
 
         let conn_inner = state.db.separate_conn().unwrap();
