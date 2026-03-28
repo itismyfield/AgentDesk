@@ -629,19 +629,9 @@ pub async fn submit_review_decision(
             // the same turn that called this API.
             drop(conn);
 
-            // #143: Complete review-decision dispatch via shared helper
-            if let Some(ref rd_id) = pending_rd_id {
-                crate::dispatch::mark_dispatch_completed(
-                    &state.db,
-                    rd_id,
-                    &json!({"decision": "accept", "completion_source": "review_decision_api"}),
-                )
-                .ok();
-            }
-
-            // #119: Record tuning outcome
-            record_decision_tuning(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
-            spawn_aggregate_if_needed(&state.db);
+            // #155: Validate transition BEFORE consuming the review-decision dispatch.
+            // If transition fails (e.g., terminal card), we must NOT mark the dispatch
+            // completed — otherwise the card is stranded with no active pending_rd_id.
 
             // Transition card back to review for re-review of the rework
             let (card_status_now, card_repo_id, card_agent_id): (
@@ -697,7 +687,8 @@ pub async fn submit_review_decision(
                 })
                 .unwrap_or_else(|| "review".to_string());
 
-            // #155: Fail closed if transition is blocked (e.g., terminal card)
+            // #155: Fail closed if transition is blocked (e.g., terminal card).
+            // Dispatch is NOT yet consumed — on failure, pending_rd_id remains active.
             if let Err(e) = crate::kanban::transition_status(
                 &state.db,
                 &state.engine,
@@ -713,6 +704,20 @@ pub async fn submit_review_decision(
                     })),
                 );
             }
+
+            // Transition succeeded — now safe to consume the review-decision dispatch
+            if let Some(ref rd_id) = pending_rd_id {
+                crate::dispatch::mark_dispatch_completed(
+                    &state.db,
+                    rd_id,
+                    &json!({"decision": "accept", "completion_source": "review_decision_api"}),
+                )
+                .ok();
+            }
+
+            // #119: Record tuning outcome
+            record_decision_tuning(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
+            spawn_aggregate_if_needed(&state.db);
 
             // #117: Update canonical review state
             update_card_review_state(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
