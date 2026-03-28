@@ -8,6 +8,65 @@ use crate::services::tmux_common::tmux_exact_target;
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 use crate::utils::format::{safe_suffix, tail_with_ellipsis};
 
+/// Auto-retry a failed resume by fetching recent Discord history and re-sending
+/// the original message via announce bot with context prepended.
+async fn auto_retry_with_history(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    user_text: &str,
+    api_port: u16,
+) {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    eprintln!("  [{ts}] ↻ auto-retry: fetching last 10 messages for channel {channel_id}");
+
+    // Fetch last 10 messages from Discord
+    let history = match channel_id
+        .messages(
+            http,
+            serenity::builder::GetMessages::new().limit(10),
+        )
+        .await
+    {
+        Ok(msgs) => {
+            let mut lines = Vec::new();
+            // Messages come newest-first, reverse for chronological order
+            for msg in msgs.iter().rev() {
+                let author = &msg.author.name;
+                let content = msg.content.chars().take(300).collect::<String>();
+                if !content.trim().is_empty() {
+                    lines.push(format!("{}: {}", author, content));
+                }
+            }
+            if lines.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n{}\n\n",
+                    lines.join("\n")
+                )
+            }
+        }
+        Err(e) => {
+            eprintln!("  [{ts}] ⚠ auto-retry: failed to fetch history: {e}");
+            String::new()
+        }
+    };
+
+    let retry_content = format!("{}{}", history, user_text);
+    let retry_ch = channel_id.get().to_string();
+
+    let _ = reqwest::Client::new()
+        .post(local_api_url(api_port, "/api/send"))
+        .json(&serde_json::json!({
+            "target": format!("channel:{retry_ch}"),
+            "content": retry_content,
+            "source": "session-retry",
+            "bot": "announce",
+        }))
+        .send()
+        .await;
+}
+
 /// Decide the final response text when a Done event arrives.
 ///
 /// Returns the text that should be used as `full_response`.
@@ -1298,22 +1357,12 @@ pub(super) fn spawn_turn_bridge(
                                 .await;
                         });
                     }
-                    // Auto-retry: clear stale session and re-send original message
-                    // via announce bot so the agent gets a fresh session automatically.
-                    let retry_port = shared_owned.api_port;
-                    let retry_ch = channel_id.get().to_string();
+                    // Auto-retry with Discord history context
+                    let http_c = http.clone();
                     let retry_text = user_text_owned.clone();
+                    let retry_port = shared_owned.api_port;
                     tokio::spawn(async move {
-                        let _ = reqwest::Client::new()
-                            .post(crate::config::local_api_url(retry_port, "/api/send"))
-                            .json(&serde_json::json!({
-                                "target": format!("channel:{retry_ch}"),
-                                "content": retry_text,
-                                "source": "session-retry",
-                                "bot": "announce",
-                            }))
-                            .send()
-                            .await;
+                        auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
                     });
                     full_response = String::new(); // Suppress error message to user
                 } else if full_response.is_empty() {
@@ -1382,21 +1431,12 @@ pub(super) fn spawn_turn_bridge(
                                             .await;
                                     });
                                 }
-                                // Auto-retry with fresh session
-                                let retry_port = shared_owned.api_port;
-                                let retry_ch = channel_id.get().to_string();
+                                // Auto-retry with Discord history context
+                                let http_c = http.clone();
                                 let retry_text = user_text_owned.clone();
+                                let retry_port = shared_owned.api_port;
                                 tokio::spawn(async move {
-                                    let _ = reqwest::Client::new()
-                                        .post(crate::config::local_api_url(retry_port, "/api/send"))
-                                        .json(&serde_json::json!({
-                                            "target": format!("channel:{retry_ch}"),
-                                            "content": retry_text,
-                                            "source": "session-retry",
-                                            "bot": "announce",
-                                        }))
-                                        .send()
-                                        .await;
+                                    auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
                                 });
                                 full_response = String::new(); // Suppress error message
                             }
@@ -1457,20 +1497,12 @@ pub(super) fn spawn_turn_bridge(
                                 });
                             }
                             // Auto-retry with fresh session
-                            let retry_port = shared_owned.api_port;
-                            let retry_ch = channel_id.get().to_string();
+                            // Auto-retry with Discord history context
+                            let http_c = http.clone();
                             let retry_text = user_text_owned.clone();
+                            let retry_port = shared_owned.api_port;
                             tokio::spawn(async move {
-                                let _ = reqwest::Client::new()
-                                    .post(crate::config::local_api_url(retry_port, "/api/send"))
-                                    .json(&serde_json::json!({
-                                        "target": format!("channel:{retry_ch}"),
-                                        "content": retry_text,
-                                        "source": "session-retry",
-                                        "bot": "announce",
-                                    }))
-                                    .send()
-                                    .await;
+                                auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
                             });
                             full_response = String::new(); // Suppress error message
                         }
