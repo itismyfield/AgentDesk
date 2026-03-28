@@ -1248,8 +1248,15 @@ pub(super) fn spawn_turn_bridge(
             tokio::spawn(async move {
                 auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
             });
-            // Delete placeholder — no error shown
-            let _ = http.delete_message(channel_id, current_msg_id, None).await;
+            // Replace placeholder with recovery notice (don't delete — avoids visual gap)
+            let _ = channel_id
+                .edit_message(
+                    &http,
+                    current_msg_id,
+                    serenity::EditMessage::new()
+                        .content("↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다."),
+                )
+                .await;
             full_response = String::new();
         }
 
@@ -1556,11 +1563,16 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
-            // If response is empty (e.g. auto-retry on stale session), delete
-            // the placeholder and skip the response — the retry will create a new turn.
+            // If response is empty (e.g. auto-retry on stale session), show
+            // recovery notice instead of deleting — avoids visual gap.
             if full_response.trim().is_empty() {
-                let _ = http
-                    .delete_message(channel_id, current_msg_id, None)
+                let _ = channel_id
+                    .edit_message(
+                        &http,
+                        current_msg_id,
+                        serenity::EditMessage::new()
+                            .content("↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다."),
+                    )
                     .await;
             } else {
                 full_response = format_for_discord(&full_response);

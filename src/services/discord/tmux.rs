@@ -467,9 +467,16 @@ pub(super) async fn tmux_output_watcher(
                 )
                 .await;
             }
-            // Delete placeholder if exists
+            // Replace placeholder with recovery notice (don't delete — avoids visual gap)
             if let Some(msg_id) = placeholder_msg_id {
-                let _ = channel_id.delete_message(&http, msg_id).await;
+                let _ = channel_id
+                    .edit_message(
+                        &http,
+                        msg_id,
+                        serenity::EditMessage::new()
+                            .content("↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다."),
+                    )
+                    .await;
             }
             // Auto-retry: fetch Discord history and re-send via announce bot
             // The original message is in the channel — fetch last 10 and re-send the latest user message
