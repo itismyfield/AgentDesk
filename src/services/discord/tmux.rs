@@ -1106,13 +1106,28 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             // startup cleanup and reaper patterns).
             let exact = tmux_exact_target(session_name);
             let sess = session_name.to_string();
-            let _ = tokio::task::spawn_blocking(move || {
+            let sname = session_name.to_string();
+            let kill_result = tokio::task::spawn_blocking(move || {
                 record_tmux_exit_reason(&sess, "quarantine: old generation");
-                let _ = std::process::Command::new("tmux")
+                std::process::Command::new("tmux")
                     .args(["kill-session", "-t", &exact])
-                    .output();
+                    .output()
             })
             .await;
+            match &kill_result {
+                Ok(Ok(o)) if !o.status.success() => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ quarantine: tmux kill-session failed for {sname}: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    );
+                }
+                Ok(Err(e)) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!("  [{ts}] ⚠ quarantine: tmux kill-session error for {sname}: {e}");
+                }
+                _ => {}
+            }
             continue;
         }
 
