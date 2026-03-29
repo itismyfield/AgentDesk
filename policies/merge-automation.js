@@ -223,8 +223,18 @@ function cleanupMergedWorktrees() {
           }
         }
 
-        // Clear kv entries
-        agentdesk.kv.delete("merge_pending:" + branch);
+        // Clear kv entries — find cardId by PR number stored in merge_pending
+        // merge_pending is stored as merge_pending:{cardId} = prNumber
+        // Scan for matching PR number to find the right key
+        var prNum = String(merged[i].number);
+        var pendingCards = agentdesk.db.query(
+          "SELECT key FROM kv_meta WHERE key LIKE 'merge_pending:%' AND value = ?",
+          [prNum]
+        );
+        for (var pc = 0; pc < pendingCards.length; pc++) {
+          agentdesk.kv.delete(pendingCards[pc].key);
+        }
+        agentdesk.kv.delete("merge_failed:" + prNum);
       }
     } catch(e) {
       agentdesk.log.warn("[merge] Cleanup error: " + e);

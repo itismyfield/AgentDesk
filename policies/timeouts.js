@@ -201,9 +201,13 @@ var timeouts = {
     );
     for (var i = 0; i < staleRequested.length; i++) {
       var rc = staleRequested[i];
-      // Dispatch를 failed로
+      // Dispatch를 failed로 — skip state changes if dispatch was already terminal
       if (rc.latest_dispatch_id) {
-        agentdesk.dispatch.markFailed(rc.latest_dispatch_id, "Timed out waiting for agent");
+        var failResult = agentdesk.dispatch.markFailed(rc.latest_dispatch_id, "Timed out waiting for agent");
+        if (failResult.rows_affected === 0) {
+          agentdesk.log.info("[timeout] Card " + rc.id + " dispatch already terminal, skipping");
+          continue;
+        }
       }
 
       if (rc.retry_count < MAX_DISPATCH_RETRIES) {
@@ -437,7 +441,11 @@ var timeouts = {
       "SELECT id, kanban_card_id FROM task_dispatches WHERE status IN ('pending','dispatched') AND created_at < datetime('now', '-24 hours')"
     );
     for (var sd = 0; sd < staleDispatches.length; sd++) {
-      agentdesk.dispatch.markFailed(staleDispatches[sd].id, "Stale dispatch auto-failed after 24h");
+      var sfResult = agentdesk.dispatch.markFailed(staleDispatches[sd].id, "Stale dispatch auto-failed after 24h");
+      if (sfResult.rows_affected === 0) {
+        agentdesk.log.info("[timeout] Dispatch " + staleDispatches[sd].id + " already terminal, skipping");
+        continue;
+      }
       if (staleDispatches[sd].kanban_card_id) {
         var card = agentdesk.kanban.getCard(staleDispatches[sd].kanban_card_id);
         if (card && !agentdesk.pipeline.isTerminal(card.status, gCfg)) {
@@ -712,7 +720,11 @@ var timeouts = {
 
           if (dispInfo.length > 0 && (dispInfo[0].status === "pending" || dispInfo[0].status === "dispatched")) {
             var di = dispInfo[0];
-            agentdesk.dispatch.markFailed(sess.active_dispatch_id, "Deadlock auto-recovery: " + totalMin + "min timeout");
+            var dlResult = agentdesk.dispatch.markFailed(sess.active_dispatch_id, "Deadlock auto-recovery: " + totalMin + "min timeout");
+            if (dlResult.rows_affected === 0) {
+              agentdesk.log.info("[deadlock] Dispatch " + sess.active_dispatch_id + " already terminal, skipping");
+              continue;
+            }
 
             try {
               agentdesk.dispatch.create(

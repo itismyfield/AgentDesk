@@ -162,7 +162,11 @@ var rules = {
         }
 
         // 디스패치 completed 처리
-        agentdesk.dispatch.markCompleted(payload.dispatch_id, JSON.stringify({ verdict: verdict, auto_completed: true, source: "github_comment" }));
+        var mcResult = agentdesk.dispatch.markCompleted(payload.dispatch_id, JSON.stringify({ verdict: verdict, auto_completed: true, source: "github_comment" }));
+        if (mcResult.rows_affected === 0) {
+          agentdesk.log.info("[kanban] dispatch " + payload.dispatch_id + " already terminal, skipping auto-complete");
+          return;
+        }
         agentdesk.log.info("[kanban] review dispatch " + payload.dispatch_id + " auto-completed with verdict: " + verdict);
       }
     }
