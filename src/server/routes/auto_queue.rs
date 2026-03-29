@@ -1214,21 +1214,28 @@ pub async fn activate(
                 card_assigned_agent_id.as_deref(),
             );
             drop(conn);
-            if let Some(target) = effective.free_path_to_dispatchable(&card_status) {
+            if let Some(path) = effective.free_path_to_dispatchable(&card_status) {
                 tracing::info!(
-                    "[auto-queue] Silent walk: card {} from '{}' to '{}' (canonical reducer, no hooks)",
-                    card_id, card_status, target
+                    "[auto-queue] Silent walk: card {} from '{}' through {:?} (canonical reducer, no hooks)",
+                    card_id, card_status, path
                 );
-                if let Err(e) = crate::kanban::transition_status_no_hooks(
-                    &state.db,
-                    &card_id,
-                    &target,
-                    "auto-queue-walk",
-                ) {
-                    tracing::warn!(
-                        "[auto-queue] Silent walk failed for card {}: {e}",
-                        card_id
-                    );
+                let mut walk_failed = false;
+                for step in &path {
+                    if let Err(e) = crate::kanban::transition_status_no_hooks(
+                        &state.db,
+                        &card_id,
+                        step,
+                        "auto-queue-walk",
+                    ) {
+                        tracing::warn!(
+                            "[auto-queue] Silent walk failed for card {} at step '{}': {e}",
+                            card_id, step
+                        );
+                        walk_failed = true;
+                        break;
+                    }
+                }
+                if walk_failed {
                     continue;
                 }
             }

@@ -385,34 +385,56 @@ impl PipelineConfig {
             })
     }
 
-    /// Walk free transitions from `from` to the nearest dispatchable state.
-    /// Returns `Some(dispatchable_state)` if reachable, `None` if already
-    /// dispatchable or no free path exists.
-    pub fn free_path_to_dispatchable(&self, from: &str) -> Option<String> {
+    /// Walk free transitions from `from` to the nearest dispatchable state,
+    /// returning every intermediate step so callers can replay each transition
+    /// individually (preserving clock/audit/review-state for each hop).
+    ///
+    /// Returns `None` if already dispatchable or no free path exists.
+    /// Returns `Some(vec!["triage", "ready"])` for a `backlog → triage → ready` path.
+    pub fn free_path_to_dispatchable(&self, from: &str) -> Option<Vec<String>> {
         let dispatchable = self.dispatchable_states();
         if dispatchable.contains(&from) {
             return None; // already dispatchable
         }
-        // BFS over free transitions
+        // BFS over free transitions, tracking parent for path reconstruction
         let mut visited = std::collections::HashSet::new();
+        let mut parent: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(from.to_string());
         visited.insert(from.to_string());
+        let mut target: Option<String> = None;
         while let Some(cur) = queue.pop_front() {
             for t in &self.transitions {
                 if t.from == cur
                     && t.transition_type == TransitionType::Free
                     && !visited.contains(&t.to)
                 {
+                    parent.insert(t.to.clone(), cur.clone());
                     if dispatchable.contains(&t.to.as_str()) {
-                        return Some(t.to.clone());
+                        target = Some(t.to.clone());
+                        break;
                     }
                     visited.insert(t.to.clone());
                     queue.push_back(t.to.clone());
                 }
             }
+            if target.is_some() {
+                break;
+            }
         }
-        None
+        // Reconstruct path from `from` to `target` (excluding `from`)
+        let target = target?;
+        let mut path = vec![target.clone()];
+        let mut cur = target;
+        while let Some(prev) = parent.get(&cur) {
+            if prev == from {
+                break;
+            }
+            path.push(prev.clone());
+            cur = prev.clone();
+        }
+        path.reverse();
+        Some(path)
     }
 
     /// Check if a state requires a gated inbound transition (dispatch-entry states).

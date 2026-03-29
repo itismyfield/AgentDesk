@@ -1974,6 +1974,221 @@ async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
     );
 }
 
+/// #162 DoD: ready-state backward compatibility — enqueue accepts ready cards
+/// without creating side dispatches.
+#[tokio::test]
+async fn auto_queue_enqueue_accepts_ready_cards_unchanged() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-eq-ready");
+    seed_auto_queue_card(&db, "card-eq-ready", 1623, "ready", "agent-eq-ready");
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/enqueue")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "issue_number": 1623,
+                        "agent_id": "agent-eq-ready",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+
+    let conn = db.lock().unwrap();
+    let dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-eq-ready'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        dispatch_count, 0,
+        "enqueue must not create a side dispatch — dispatch happens only at activate"
+    );
+    let entry_status: String = conn
+        .query_row(
+            "SELECT e.status FROM auto_queue_entries e WHERE e.kanban_card_id = 'card-eq-ready'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entry_status, "pending");
+}
+
+/// #162 DoD: active dispatch guard — rejects enqueue for cards with pending/dispatched dispatch.
+#[tokio::test]
+async fn auto_queue_enqueue_rejects_card_with_active_dispatch() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-eq-dup");
+    seed_auto_queue_card(&db, "card-eq-dup", 1624, "ready", "agent-eq-dup");
+
+    // Pre-create an active dispatch for this card
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, title, status, created_at) \
+             VALUES ('disp-dup', 'card-eq-dup', 'agent-eq-dup', 'implementation', 'test', 'pending', datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/enqueue")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "issue_number": 1624,
+                        "agent_id": "agent-eq-dup",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("active dispatch"),
+        "must reject with active-dispatch error"
+    );
+}
+
+/// #162 DoD: unified_thread continuity — dispatches entry correctly within unified run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_unified_thread_run_dispatches_to_same_run() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-unified");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(&db, "card-unified-1", 1625, "ready", "agent-unified");
+    seed_auto_queue_card(&db, "card-unified-2", 1626, "ready", "agent-unified");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, unified_thread) \
+             VALUES ('run-unified', 'test-repo', 'agent-unified', 'active', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-u1', 'run-unified', 'card-unified-1', 'agent-unified', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-u2', 'run-unified', 'card-unified-2', 'agent-unified', 'pending', 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "agent_id": "agent-unified",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 1, "first activate dispatches one entry");
+    assert_eq!(json["dispatched"][0]["card_id"], "card-unified-1");
+
+    // Verify dispatch was created and entry was linked
+    let conn = db.lock().unwrap();
+    let (entry_status, dispatch_id): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-u1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(entry_status, "dispatched");
+    assert!(dispatch_id.is_some(), "entry must have linked dispatch_id");
+
+    // Verify the dispatch references the correct card
+    let dispatch_card: String = conn
+        .query_row(
+            "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
+            [&dispatch_id.unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatch_card, "card-unified-1");
+
+    // Second entry stays pending (sequential within group)
+    let entry2_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-u2'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entry2_status, "pending");
+
+    // Run stays active (not prematurely completed)
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-unified'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "active");
+}
+
 /// #107 regression: empty claude_session_id must be normalized to NULL at the API
 /// boundary so that stale clear paths don't poison the DB with "".
 #[tokio::test]
