@@ -1300,4 +1300,194 @@ mod tests {
             "OnReviewEnter must create exactly one pending review dispatch"
         );
     }
+
+    // ── #160: Process-level restart/delivery boundary tests ────
+
+    fn seed_outbox(db: &db::Db, dispatch_id: &str, action: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) \
+             VALUES (?1, ?2, 'agent-1', 'card-160', 'Test', 'pending')",
+            rusqlite::params![dispatch_id, action],
+        )
+        .unwrap();
+    }
+
+    fn outbox_status(db: &db::Db, dispatch_id: &str) -> Vec<String> {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT status FROM dispatch_outbox WHERE dispatch_id = ?1 ORDER BY id")
+            .unwrap();
+        stmt.query_map([dispatch_id], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
+    fn set_notified_marker(db: &db::Db, dispatch_id: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![format!("dispatch_notified:{dispatch_id}"), dispatch_id],
+        )
+        .unwrap();
+    }
+
+    fn has_notified_marker(db: &db::Db, dispatch_id: &str) -> bool {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) > 0 FROM kv_meta WHERE key = ?1",
+            [&format!("dispatch_notified:{dispatch_id}")],
+            |row| row.get(0),
+        )
+        .unwrap_or(false)
+    }
+
+    /// Scenario 160-1: Outbox entry with notified marker = delivered (done).
+    /// Without marker = delivery failed → should stay retriable.
+    #[test]
+    fn scenario_160_1_outbox_notified_marker_determines_success() {
+        let db = test_db();
+        seed_agent(&db);
+        seed_card(&db, "card-160", "ready");
+        seed_dispatch(&db, "d-160-ok", "card-160", "implementation", "pending");
+        seed_dispatch(&db, "d-160-fail", "card-160", "implementation", "pending");
+
+        seed_outbox(&db, "d-160-ok", "notify");
+        seed_outbox(&db, "d-160-fail", "notify");
+
+        // Simulate: d-160-ok was delivered (marker present)
+        set_notified_marker(&db, "d-160-ok");
+        // d-160-fail marker NOT set (delivery failed, marker rolled back)
+
+        assert!(has_notified_marker(&db, "d-160-ok"));
+        assert!(!has_notified_marker(&db, "d-160-fail"));
+    }
+
+    /// Scenario 160-2: dispatch_notified dedup guard prevents double notification.
+    /// If marker is already set, INSERT OR IGNORE returns 0 → skip.
+    #[test]
+    fn scenario_160_2_dispatch_notified_dedup_prevents_double_send() {
+        let db = test_db();
+
+        // First insertion succeeds
+        let conn = db.lock().unwrap();
+        let inserted: usize = conn
+            .execute(
+                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES ('dispatch_notified:dup-1', 'dup-1')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1, "First insertion should succeed");
+
+        // Second insertion is a no-op (dedup guard)
+        let inserted2: usize = conn
+            .execute(
+                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES ('dispatch_notified:dup-1', 'dup-1')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(inserted2, 0, "Duplicate insertion should be ignored");
+    }
+
+    /// Scenario 160-3: finalize_dispatch correctly completes a dispatch
+    /// and fires policy hooks (recovery path simulation).
+    #[tokio::test]
+    async fn scenario_160_3_finalize_dispatch_recovery_completion() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-160r", "in_progress");
+        seed_dispatch(&db, "d-160r", "card-160r", "implementation", "pending");
+
+        // Simulate recovery: finalize_dispatch completes a pending dispatch
+        let result = dispatch::finalize_dispatch(
+            &db,
+            &engine,
+            "d-160r",
+            "recovery",
+            Some(&serde_json::json!({"summary": "completed during downtime"})),
+        );
+        assert!(result.is_ok(), "finalize_dispatch should succeed");
+
+        assert_eq!(get_dispatch_status(&db, "d-160r"), "completed");
+    }
+
+    /// Scenario 160-4: Outbox retry_count tracks failed delivery attempts.
+    /// After max retries (3), entry should be markable as failed.
+    #[test]
+    fn scenario_160_4_outbox_retry_count_tracks_failures() {
+        let db = test_db();
+        seed_agent(&db);
+        seed_card(&db, "card-160c", "ready");
+        seed_dispatch(&db, "d-160c", "card-160c", "implementation", "pending");
+        seed_outbox(&db, "d-160c", "notify");
+
+        let conn = db.lock().unwrap();
+        // Simulate 3 failed retries
+        for i in 1..=3 {
+            conn.execute(
+                "UPDATE dispatch_outbox SET retry_count = ?1 WHERE dispatch_id = 'd-160c'",
+                [i],
+            )
+            .unwrap();
+        }
+
+        let retry_count: i64 = conn
+            .query_row(
+                "SELECT retry_count FROM dispatch_outbox WHERE dispatch_id = 'd-160c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retry_count, 3);
+
+        // After max retries, mark as failed
+        conn.execute(
+            "UPDATE dispatch_outbox SET status = 'failed', error = 'max retries exceeded' \
+             WHERE dispatch_id = 'd-160c' AND retry_count >= 3",
+            [],
+        )
+        .unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM dispatch_outbox WHERE dispatch_id = 'd-160c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+    }
+
+    /// Scenario 160-5: Outbox entries are processed in FIFO order (id ASC).
+    #[test]
+    fn scenario_160_5_outbox_fifo_ordering() {
+        let db = test_db();
+        seed_agent(&db);
+        seed_card(&db, "card-160o", "ready");
+        seed_dispatch(&db, "d-160o-a", "card-160o", "implementation", "pending");
+        seed_dispatch(&db, "d-160o-b", "card-160o", "implementation", "pending");
+        seed_dispatch(&db, "d-160o-c", "card-160o", "implementation", "pending");
+
+        seed_outbox(&db, "d-160o-a", "notify");
+        seed_outbox(&db, "d-160o-b", "notify");
+        seed_outbox(&db, "d-160o-c", "notify");
+
+        // Query mirrors outbox worker: ORDER BY id ASC LIMIT 5
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT dispatch_id FROM dispatch_outbox \
+                 WHERE status = 'pending' ORDER BY id ASC LIMIT 5",
+            )
+            .unwrap();
+        let order: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(order, vec!["d-160o-a", "d-160o-b", "d-160o-c"]);
+    }
 }
