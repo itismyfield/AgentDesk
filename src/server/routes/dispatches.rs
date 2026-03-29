@@ -789,6 +789,7 @@ pub(crate) async fn send_dispatch_to_discord(
     // ── Thread reuse: check if card already has an active thread ──
     let client = reqwest::Client::new();
     let dispatch_type_label = dispatch_type.as_deref().unwrap_or("implementation");
+    let message = prefix_dispatch_message(dispatch_type_label, &message);
 
     // #145/#140: Look up per-channel unified thread via dispatch_id path
     // #140: For parallel runs (thread_group_count > 1), threads are grouped:
@@ -1309,20 +1310,10 @@ async fn try_reuse_thread(
         }
     }
 
-    // 2b. Send separator message to visually distinguish dispatch phases
-    let separator = format!("── {} dispatch ──", dispatch_type);
     let msg_url = format!(
         "https://discord.com/api/v10/channels/{}/messages",
         thread_id
     );
-    let _ = client
-        .post(&msg_url)
-        .header("Authorization", format!("Bot {}", token))
-        .json(&serde_json::json!({"content": separator}))
-        .send()
-        .await;
-
-    // 3. Send the dispatch message
     let msg_ok = client
         .post(&msg_url)
         .header("Authorization", format!("Bot {}", token))
@@ -1505,6 +1496,7 @@ pub(super) async fn send_review_result_to_primary(
              카운터모델이 verdict를 제출하지 않고 세션이 종료됐습니다.\n\
              GitHub 이슈 코멘트를 확인하고 리뷰 내용이 있으면 반영해주세요.{url_line}"
         );
+        let message = prefix_dispatch_message("review-decision", &message);
 
         let url = format!(
             "https://discord.com/api/v10/channels/{}/messages",
@@ -1587,21 +1579,14 @@ pub(super) async fn send_review_result_to_primary(
          • 반론 → GitHub 코멘트로 이의 제기 후 review-decision API에 dispute 호출\n\
          • 불수용 → review-decision API에 dismiss 호출{url_line}"
     );
+    let message = prefix_dispatch_message("review-decision", &message);
 
-    // Send separator + dispatch to existing thread, or just to channel
+    // Send a single review-decision message to existing thread, or just to channel
     if sending_to_thread {
         let msg_url = format!(
             "https://discord.com/api/v10/channels/{}/messages",
             target_channel
         );
-        // Separator
-        let _ = client
-            .post(&msg_url)
-            .header("Authorization", format!("Bot {}", token))
-            .json(&serde_json::json!({"content": "── review-decision dispatch ──"}))
-            .send()
-            .await;
-        // Dispatch message
         let ok = client
             .post(&msg_url)
             .header("Authorization", format!("Bot {}", token))
@@ -1860,6 +1845,10 @@ fn format_dispatch_message(
     } else {
         format!("DISPATCH:{dispatch_id} - {title}")
     }
+}
+
+fn prefix_dispatch_message(dispatch_type: &str, message: &str) -> String {
+    format!("── {} dispatch ──\n{}", dispatch_type, message)
 }
 
 fn resolve_channel_alias(alias: &str) -> Option<u64> {
@@ -2128,7 +2117,7 @@ pub(crate) async fn dispatch_outbox_loop(db: crate::db::Db) {
 mod tests {
     use super::{
         extract_review_verdict, format_dispatch_message, handle_completed_dispatch_followups,
-        use_counter_model_channel,
+        prefix_dispatch_message, use_counter_model_channel,
     };
     use crate::db::Db;
     use std::sync::{Arc, Mutex};
@@ -2214,6 +2203,15 @@ mod tests {
         assert!(!message.contains("검토 전용"));
         // Implementation dispatches should NOT include verdict instructions
         assert!(!message.contains("review-verdict"));
+    }
+
+    #[test]
+    fn prefix_dispatch_message_merges_separator_and_body() {
+        let message = prefix_dispatch_message("review-decision", "DISPATCH:d-1 - Example");
+        assert_eq!(
+            message,
+            "── review-decision dispatch ──\nDISPATCH:d-1 - Example"
+        );
     }
 
     #[test]
