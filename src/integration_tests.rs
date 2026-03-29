@@ -1316,9 +1316,7 @@ mod tests {
     fn outbox_status(db: &db::Db, dispatch_id: &str) -> Vec<String> {
         let conn = db.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT status FROM dispatch_outbox WHERE dispatch_id = ?1 ORDER BY id",
-            )
+            .prepare("SELECT status FROM dispatch_outbox WHERE dispatch_id = ?1 ORDER BY id")
             .unwrap();
         stmt.query_map([dispatch_id], |row| row.get(0))
             .unwrap()
@@ -1330,10 +1328,7 @@ mod tests {
         let conn = db.lock().unwrap();
         conn.execute(
             "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![
-                format!("dispatch_notified:{dispatch_id}"),
-                dispatch_id
-            ],
+            rusqlite::params![format!("dispatch_notified:{dispatch_id}"), dispatch_id],
         )
         .unwrap();
     }
