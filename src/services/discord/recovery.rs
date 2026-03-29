@@ -1,8 +1,10 @@
+use super::handoff::{HandoffRecord, save_handoff};
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::services::tmux_common::tmux_exact_target;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{build_tmux_death_diagnostic, tmux_session_has_live_pane};
+use crate::utils::format::tail_with_ellipsis;
 
 #[cfg(not(unix))]
 fn tmux_session_has_live_pane(_name: &str) -> bool {
@@ -12,6 +14,40 @@ fn tmux_session_has_live_pane(_name: &str) -> bool {
 #[cfg(not(unix))]
 fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Option<String> {
     None
+}
+
+fn save_missing_session_handoff(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    best_response: &str,
+) {
+    let partial = best_response.trim();
+    let partial_context = if partial.is_empty() {
+        "(재시작 전까지 전달된 partial 응답 없음)".to_string()
+    } else {
+        tail_with_ellipsis(partial, 1200)
+    };
+    let context = format!(
+        "재시작 중 기존 tmux 세션이 사라져 동일 turn에 재연결하지 못했습니다.\n\n원래 사용자 요청:\n{}\n\n재시작 전 partial 응답:\n{}",
+        state.user_text.trim(),
+        partial_context,
+    );
+    let handoff = HandoffRecord::new(
+        provider,
+        state.channel_id,
+        state.channel_name.clone(),
+        "재시작 중 중단된 응답을 이어서 마무리",
+        context,
+        None,
+        Some(state.user_msg_id),
+    );
+    if let Err(e) = save_handoff(&handoff) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!(
+            "  [{ts}] ⚠ failed to save recovery handoff for channel {}: {e}",
+            state.channel_id
+        );
+    }
 }
 
 /// Check whether a **successful** result record exists after the given offset.
@@ -642,6 +678,7 @@ pub(super) async fn restore_inflight_turns(
                 shared,
             )
             .await;
+            save_missing_session_handoff(provider, &state, &best_response);
             clear_inflight_state(provider, state.channel_id);
             continue;
         }
@@ -951,6 +988,7 @@ pub(super) async fn restore_inflight_turns(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::provider::ProviderKind;
     use std::io::Write;
 
     #[test]
@@ -1144,5 +1182,67 @@ mod tests {
             file.path().to_str().unwrap(),
             0
         ));
+    }
+
+    #[test]
+    fn missing_session_recovery_saves_handoff_for_followup_turn() {
+        let _lock = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("agentdesk-root");
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+
+        struct EnvReset;
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+            }
+        }
+
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
+        let _reset = EnvReset;
+
+        let state = crate::services::discord::inflight::InflightTurnState {
+            version: 1,
+            provider: "codex".to_string(),
+            channel_id: 1486333430516945008,
+            channel_name: Some("adk-cdx-t1486333430516945008".to_string()),
+            request_owner_user_id: 343742347365974026,
+            user_msg_id: 1487795113240559788,
+            current_msg_id: 1487799916758827138,
+            current_msg_len: 0,
+            user_text: "릴리즈하다가 응답이 끊겼어. 이어서 설명해줘.".to_string(),
+            session_id: Some("session-1".to_string()),
+            tmux_session_name: Some("AgentDesk-codex-adk-cdx-t1486333430516945008".to_string()),
+            output_path: Some("/tmp/agentdesk-test.jsonl".to_string()),
+            input_fifo_path: Some("/tmp/agentdesk-test.input".to_string()),
+            last_offset: 123,
+            full_response: "중간까지 정리했습니다.".to_string(),
+            response_sent_offset: 0,
+            current_tool_line: None,
+            started_at: "2026-03-29 22:00:34".to_string(),
+            updated_at: "2026-03-29 22:03:53".to_string(),
+            born_generation: 7,
+            any_tool_used: true,
+            has_post_tool_text: false,
+        };
+
+        save_missing_session_handoff(
+            &ProviderKind::Codex,
+            &state,
+            "이미 확인한 내용은 여기까지입니다. 이어서 원인과 대응을 설명하겠습니다.",
+        );
+
+        let handoffs = crate::services::discord::handoff::load_handoffs(&ProviderKind::Codex);
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].channel_id, state.channel_id);
+        assert_eq!(handoffs[0].user_msg_id, Some(state.user_msg_id));
+        assert!(handoffs[0].intent.contains("중단된 응답"));
+        assert!(handoffs[0].context.contains("원래 사용자 요청"));
+        assert!(handoffs[0].context.contains("partial 응답"));
+        assert!(
+            handoffs[0]
+                .context
+                .contains("이어서 원인과 대응을 설명하겠습니다")
+        );
     }
 }
