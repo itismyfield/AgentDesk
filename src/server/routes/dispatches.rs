@@ -733,8 +733,12 @@ pub(crate) async fn send_dispatch_to_discord(
         .unwrap_or_default()
     };
 
-    // For review dispatches, look up reviewed commit SHA and target provider from context
-    let (reviewed_commit, target_provider): (Option<String>, Option<String>) = if use_alt {
+    // For review dispatches, look up reviewed commit SHA, branch, and target provider from context
+    let (reviewed_commit, target_provider, review_branch): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = if use_alt {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
@@ -760,9 +764,13 @@ pub(crate) async fn send_dispatch_to_discord(
                 .get("target_provider")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            ctx_val
+                .get("branch")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let message = format_dispatch_message(
@@ -773,6 +781,7 @@ pub(crate) async fn send_dispatch_to_discord(
         use_alt,
         reviewed_commit.as_deref(),
         target_provider.as_deref(),
+        review_branch.as_deref(),
     );
 
     // Send via Discord HTTP API using the announce bot
@@ -1804,6 +1813,7 @@ fn format_dispatch_message(
     use_alt: bool,
     reviewed_commit: Option<&str>,
     target_provider: Option<&str>,
+    review_branch: Option<&str>,
 ) -> String {
     // Format issue link as markdown hyperlink with angle brackets to suppress embed
     let issue_link = match (issue_url, issue_number) {
@@ -1821,6 +1831,16 @@ fn format_dispatch_message(
         if !issue_link.is_empty() {
             message.push('\n');
             message.push_str(&issue_link);
+        }
+        // #193: Include branch info so reviewer inspects the correct code
+        if let Some(branch) = review_branch {
+            let short_commit = reviewed_commit
+                .map(|c| &c[..8.min(c.len())])
+                .unwrap_or("?");
+            message.push_str(&format!(
+                "\n\n리뷰 대상 브랜치: `{branch}` (commit: `{short_commit}`)\n\
+                 반드시 해당 브랜치를 checkout하여 리뷰하세요. main 브랜치가 아닙니다."
+            ));
         }
         // Append verdict API call instructions for the counter-model reviewer
         let commit_arg = reviewed_commit
@@ -2150,6 +2170,7 @@ mod tests {
             true,
             Some("abc123"),
             Some("codex"),
+            None,
         );
 
         assert!(message.starts_with("DISPATCH:dispatch-1 - [Review R1] card-1"));
@@ -2168,6 +2189,24 @@ mod tests {
     }
 
     #[test]
+    fn review_dispatch_message_with_branch() {
+        let message = format_dispatch_message(
+            "dispatch-br",
+            "[Review R1] card-1",
+            Some("https://github.com/itismyfield/AgentDesk/issues/19"),
+            Some(19),
+            true,
+            Some("abc12345deadbeef"),
+            Some("codex"),
+            Some("wt/feature-branch"),
+        );
+
+        assert!(message.contains("리뷰 대상 브랜치: `wt/feature-branch`"));
+        assert!(message.contains("commit: `abc12345`"));
+        assert!(message.contains("main 브랜치가 아닙니다"));
+    }
+
+    #[test]
     fn review_dispatch_message_without_commit() {
         let message = format_dispatch_message(
             "dispatch-no-commit",
@@ -2175,6 +2214,7 @@ mod tests {
             None,
             None,
             true,
+            None,
             None,
             None,
         );
@@ -2193,6 +2233,7 @@ mod tests {
             Some("https://github.com/itismyfield/AgentDesk/issues/24"),
             Some(24),
             false,
+            None,
             None,
             None,
         );

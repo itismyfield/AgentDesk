@@ -4,6 +4,132 @@ use serde_json::json;
 use crate::db::Db;
 use crate::engine::PolicyEngine;
 
+/// Build the context JSON string for a review dispatch.
+///
+/// Injects `reviewed_commit`, `branch`, and provider info.
+/// Prefers worktree branch (if found for this card's issue) over main HEAD.
+fn build_review_context(
+    db: &Db,
+    kanban_card_id: &str,
+    to_agent_id: &str,
+    context: &serde_json::Value,
+) -> Result<String> {
+    let mut ctx_val = if context.is_object() {
+        context.clone()
+    } else {
+        json!({})
+    };
+    if let Some(obj) = ctx_val.as_object_mut() {
+        if !obj.contains_key("reviewed_commit") {
+            let repo_dir = match std::env::var("AGENTDESK_REPO_DIR") {
+                Ok(d) => d,
+                Err(_) => dirs::home_dir()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("HOME directory not found; set AGENTDESK_REPO_DIR")
+                    })?
+                    .join("AgentDesk")
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+
+            // #193: Try to find a worktree branch for this card's issue.
+            // Without this, reviews always inspect main HEAD and miss
+            // unmerged implementation commits, causing stale review loops.
+            let issue_number: Option<i64> = db
+                .separate_conn()
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+                        [kanban_card_id],
+                        |row| row.get(0),
+                    )
+                    .ok()
+                })
+                .flatten();
+
+            let wt_info = issue_number.and_then(|num| {
+                crate::services::platform::find_worktree_for_issue(&repo_dir, num)
+            });
+
+            if let Some(ref wt) = wt_info {
+                obj.insert("reviewed_commit".to_string(), json!(wt.commit));
+                obj.insert("branch".to_string(), json!(wt.branch));
+                tracing::info!(
+                    "[dispatch] Review dispatch for card {}: using worktree branch '{}' (commit {})",
+                    kanban_card_id,
+                    wt.branch,
+                    &wt.commit[..8.min(wt.commit.len())]
+                );
+            } else {
+                // Fall back: check previous review dispatch for persisted branch info
+                let prev_branch: Option<(String, String)> = db.separate_conn().ok().and_then(|conn| {
+                    let ctx_str: Option<String> = conn
+                        .query_row(
+                            "SELECT context FROM task_dispatches \
+                             WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+                             AND status IN ('completed', 'failed', 'cancelled') \
+                             ORDER BY created_at DESC LIMIT 1",
+                            [kanban_card_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+                    ctx_str.and_then(|s| {
+                        let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+                        let b = v.get("branch")?.as_str()?.to_string();
+                        let c = v.get("reviewed_commit")?.as_str()?.to_string();
+                        Some((b, c))
+                    })
+                });
+
+                if let Some((branch, commit)) = prev_branch {
+                    obj.insert("reviewed_commit".to_string(), json!(commit));
+                    obj.insert("branch".to_string(), json!(branch));
+                    tracing::info!(
+                        "[dispatch] Review dispatch for card {}: reusing previous branch '{}'",
+                        kanban_card_id,
+                        branch
+                    );
+                } else if let Some(commit) = crate::services::platform::git_head_commit(&repo_dir)
+                {
+                    obj.insert("reviewed_commit".to_string(), json!(commit));
+                }
+            }
+        }
+
+        // Inject from_provider/target_provider for cross-provider review validation
+        if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
+            if let Ok(conn) = db.separate_conn() {
+                if let Ok((ch, alt)) = conn.query_row(
+                    "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?1",
+                    [to_agent_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
+                ) {
+                    if !obj.contains_key("from_provider") {
+                        if let Some(fp) = ch.as_deref().and_then(provider_from_channel_suffix) {
+                            obj.insert("from_provider".to_string(), json!(fp));
+                        }
+                    }
+                    if !obj.contains_key("target_provider") {
+                        if let Some(tp) =
+                            alt.as_deref().and_then(provider_from_channel_suffix)
+                        {
+                            obj.insert("target_provider".to_string(), json!(tp));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(serde_json::to_string(&ctx_val)?)
+}
+
 /// Core dispatch creation: DB operations only, no hooks fired.
 ///
 /// - Inserts a record into `task_dispatches`
@@ -21,58 +147,8 @@ pub fn create_dispatch_core(
 ) -> Result<(String, String)> {
     let dispatch_id = uuid::Uuid::new_v4().to_string();
 
-    // For review dispatches, inject reviewed_commit (HEAD) and provider info
     let context_str = if dispatch_type == "review" {
-        let mut ctx_val = if context.is_object() {
-            context.clone()
-        } else {
-            json!({})
-        };
-        if let Some(obj) = ctx_val.as_object_mut() {
-            if !obj.contains_key("reviewed_commit") {
-                let repo_dir = match std::env::var("AGENTDESK_REPO_DIR") {
-                    Ok(d) => d,
-                    Err(_) => dirs::home_dir()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("HOME directory not found; set AGENTDESK_REPO_DIR")
-                        })?
-                        .join("AgentDesk")
-                        .to_string_lossy()
-                        .into_owned(),
-                };
-                if let Some(commit) = crate::services::platform::git_head_commit(&repo_dir) {
-                    obj.insert("reviewed_commit".to_string(), json!(commit));
-                }
-            }
-            // Inject from_provider/target_provider for cross-provider review validation
-            if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
-                if let Ok(conn) = db.separate_conn() {
-                    if let Ok((ch, alt)) = conn.query_row(
-                        "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?1",
-                        [to_agent_id],
-                        |row| {
-                            Ok((
-                                row.get::<_, Option<String>>(0)?,
-                                row.get::<_, Option<String>>(1)?,
-                            ))
-                        },
-                    ) {
-                        if !obj.contains_key("from_provider") {
-                            if let Some(fp) = ch.as_deref().and_then(provider_from_channel_suffix) {
-                                obj.insert("from_provider".to_string(), json!(fp));
-                            }
-                        }
-                        if !obj.contains_key("target_provider") {
-                            if let Some(tp) = alt.as_deref().and_then(provider_from_channel_suffix)
-                            {
-                                obj.insert("target_provider".to_string(), json!(tp));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        serde_json::to_string(&ctx_val)?
+        build_review_context(db, kanban_card_id, to_agent_id, context)?
     } else {
         serde_json::to_string(context)?
     };
@@ -174,57 +250,8 @@ pub fn create_dispatch_core_with_id(
     title: &str,
     context: &serde_json::Value,
 ) -> Result<(String, String)> {
-    // For review dispatches, inject reviewed_commit (HEAD) and provider info
     let context_str = if dispatch_type == "review" {
-        let mut ctx_val = if context.is_object() {
-            context.clone()
-        } else {
-            json!({})
-        };
-        if let Some(obj) = ctx_val.as_object_mut() {
-            if !obj.contains_key("reviewed_commit") {
-                let repo_dir = match std::env::var("AGENTDESK_REPO_DIR") {
-                    Ok(d) => d,
-                    Err(_) => dirs::home_dir()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("HOME directory not found; set AGENTDESK_REPO_DIR")
-                        })?
-                        .join("AgentDesk")
-                        .to_string_lossy()
-                        .into_owned(),
-                };
-                if let Some(commit) = crate::services::platform::git_head_commit(&repo_dir) {
-                    obj.insert("reviewed_commit".to_string(), json!(commit));
-                }
-            }
-            if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
-                if let Ok(conn) = db.separate_conn() {
-                    if let Ok((ch, alt)) = conn.query_row(
-                        "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?1",
-                        [to_agent_id],
-                        |row| {
-                            Ok((
-                                row.get::<_, Option<String>>(0)?,
-                                row.get::<_, Option<String>>(1)?,
-                            ))
-                        },
-                    ) {
-                        if !obj.contains_key("from_provider") {
-                            if let Some(fp) = ch.as_deref().and_then(provider_from_channel_suffix) {
-                                obj.insert("from_provider".to_string(), json!(fp));
-                            }
-                        }
-                        if !obj.contains_key("target_provider") {
-                            if let Some(tp) = alt.as_deref().and_then(provider_from_channel_suffix)
-                            {
-                                obj.insert("target_provider".to_string(), json!(tp));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        serde_json::to_string(&ctx_val)?
+        build_review_context(db, kanban_card_id, to_agent_id, context)?
     } else {
         serde_json::to_string(context)?
     };
