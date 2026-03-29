@@ -484,7 +484,10 @@ pub async fn hook_session(
                         let url = crate::config::local_api_url(port, "/api/auto-queue/activate");
                         let _ = reqwest::Client::new()
                             .post(&url)
-                            .json(&serde_json::json!({"agent_id": aid_clone}))
+                            .json(&serde_json::json!({
+                                "agent_id": aid_clone,
+                                "active_only": true,
+                            }))
                             .send()
                             .await;
                     });

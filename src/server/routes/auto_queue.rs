@@ -26,6 +26,8 @@ pub struct ActivateBody {
     pub repo: Option<String>,
     pub agent_id: Option<String>,
     pub unified_thread: Option<bool>,
+    /// Internal-only: continue only already-active runs, never promote generated drafts.
+    pub active_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +172,24 @@ fn ensure_tables(conn: &rusqlite::Connection) {
         )
         .ok();
     }
+}
+
+fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<String> {
+    let mut states: Vec<String> = pipeline
+        .dispatchable_states()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let initial_state = pipeline.initial_state().to_string();
+    if !states.iter().any(|s| s == &initial_state) {
+        states.push(initial_state);
+    }
+    // Requested is a pre-execution staging state in the default pipeline. Allow
+    // enqueueing it directly so callers do not need force-transition -> ready.
+    if pipeline.is_valid_state("requested") && !states.iter().any(|s| s == "requested") {
+        states.push("requested".to_string());
+    }
+    states
 }
 
 fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Value {
@@ -880,8 +900,14 @@ pub async fn activate(
     };
     ensure_tables(&conn);
 
-    // Find active or generated run (generated runs are activated on first activate call)
-    let mut run_filter = "status IN ('active', 'generated')".to_string();
+    let active_only = body.active_only.unwrap_or(false);
+    // Internal recovery paths must continue only active runs. Manual activation
+    // may opt into promoting the latest generated draft.
+    let mut run_filter = if active_only {
+        "status = 'active'".to_string()
+    } else {
+        "status IN ('active', 'generated')".to_string()
+    };
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref repo) = body.repo {
         run_filter.push_str(&format!(
@@ -916,12 +942,14 @@ pub async fn activate(
         );
     };
 
-    // Promote generated → active on first activate call
-    conn.execute(
-        "UPDATE auto_queue_runs SET status = 'active' WHERE id = ?1 AND status = 'generated'",
-        [&run_id],
-    )
-    .ok();
+    if !active_only {
+        // Promote generated → active on explicit activation.
+        conn.execute(
+            "UPDATE auto_queue_runs SET status = 'active' WHERE id = ?1 AND status = 'generated'",
+            [&run_id],
+        )
+        .ok();
+    }
 
     // #137: Apply unified_thread toggle if provided
     if let Some(unified) = body.unified_thread {
@@ -1600,6 +1628,7 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
                 repo: None,
                 agent_id: None,
                 unified_thread: None,
+                active_only: Some(true),
             }),
         )
         .await;
@@ -1804,11 +1833,15 @@ pub async fn enqueue(
         }
     };
 
-    let card_status: String = conn
+    let (card_status, card_repo_id, card_assigned_agent_id): (
+        String,
+        Option<String>,
+        Option<String>,
+    ) = conn
         .query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
+            "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
             [&card_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap_or_default();
 
@@ -1842,28 +1875,50 @@ pub async fn enqueue(
         }
     }
 
-    // Validate card is dispatchable AFTER duplicate check to preserve idempotent retry,
-    // but BEFORE run creation to prevent empty active runs
-    let dispatchable_states = crate::pipeline::try_get()
-        .map(|p| {
-            p.dispatchable_states()
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| vec!["ready".to_string()]);
-    if !dispatchable_states.iter().any(|s| s == &card_status) {
+    // Never enqueue a card that already has an active dispatch. Previously the
+    // caller force-transitioned such cards to ready first; with direct enqueue,
+    // we must keep that guard here.
+    let has_active_dispatch: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
+            [&card_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if has_active_dispatch {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": format!("card status is '{}', only dispatchable cards can be enqueued", card_status),
+                "error": "card already has an active dispatch; cannot enqueue duplicate work",
                 "card_id": card_id,
                 "status": card_status,
             })),
         );
     }
 
-    // Use existing run or create new one (only reached when card is ready)
+    // Accept the queue's initial staging states directly so PMD does not need
+    // force-transition -> ready (which would fire kanban hooks and side-dispatches).
+    crate::pipeline::ensure_loaded();
+    let effective_pipeline = crate::pipeline::resolve_for_card(
+        &conn,
+        card_repo_id.as_deref(),
+        card_assigned_agent_id.as_deref(),
+    );
+    let enqueueable_states = enqueueable_states_for(&effective_pipeline);
+    if !enqueueable_states.iter().any(|s| s == &card_status) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("card status is '{}', only initial/dispatchable/requested states can be enqueued", card_status),
+                "card_id": card_id,
+                "status": card_status,
+                "allowed_states": enqueueable_states,
+            })),
+        );
+    }
+
+    // Use existing run or create new one.
     let run_id = existing_run_id.unwrap_or_else(|| {
         let id = uuid::Uuid::new_v4().to_string();
         conn.execute(
