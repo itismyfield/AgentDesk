@@ -736,22 +736,32 @@ pub async fn activate(
         );
     }
 
-    // #179: When agent_id is known, search across ALL active runs for the next pending
-    // entry for that agent — prevents starvation when latest run is a global run without
-    // entries for this agent. Also checks in-flight guard across all active runs.
+    // #179: When agent_id is known, search across matching active runs for the next
+    // pending entry — prevents starvation when latest run is a global run without
+    // entries for this agent. Respects repo filter to avoid cross-repo dispatch.
     let effective_agent: Option<String> = body.agent_id.clone();
 
+    // Build repo condition for agent-scoped queries (reuses body.repo from run selection)
+    let repo_condition = if body.repo.is_some() {
+        " AND (r.repo = ?2 OR r.repo IS NULL OR r.repo = '')"
+    } else {
+        ""
+    };
+
     if let Some(ref agt) = effective_agent {
-        // In-flight guard: any dispatched entry for this agent across all active runs
-        let has_inflight: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM auto_queue_entries e \
-                 JOIN auto_queue_runs r ON e.run_id = r.id \
-                 WHERE e.agent_id = ?1 AND e.status = 'dispatched' AND r.status = 'active'",
-                [agt.as_str()],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
+        // In-flight guard: any dispatched entry for this agent across matching active runs
+        let inflight_query = format!(
+            "SELECT COUNT(*) > 0 FROM auto_queue_entries e \
+             JOIN auto_queue_runs r ON e.run_id = r.id \
+             WHERE e.agent_id = ?1 AND e.status = 'dispatched' AND r.status = 'active'{}",
+            repo_condition
+        );
+        let has_inflight: bool = if let Some(ref repo) = body.repo {
+            conn.query_row(&inflight_query, rusqlite::params![agt, repo], |row| row.get(0))
+        } else {
+            conn.query_row(&inflight_query, rusqlite::params![agt], |row| row.get(0))
+        }
+        .unwrap_or(false);
         if has_inflight {
             tracing::info!("[auto-queue] Skipping activate: agent {agt} already has a dispatched entry in-flight");
             return (
@@ -762,30 +772,33 @@ pub async fn activate(
     }
 
     // Get first pending entry only (sequential dispatch — one at a time)
-    // #179: When agent_id is known, search across all active runs for that agent's
-    // next pending entry (by priority). This avoids starvation when a newer global
-    // run masks an older agent-specific run's pending entries.
     let pending: Vec<(String, String, String)> = if let Some(ref agt) = effective_agent {
-        let mut stmt = conn
-            .prepare(
-                "SELECT e.id, e.kanban_card_id, e.agent_id
-                 FROM auto_queue_entries e
-                 JOIN auto_queue_runs r ON e.run_id = r.id
-                 WHERE e.agent_id = ?1 AND e.status = 'pending' AND r.status = 'active'
-                 ORDER BY e.priority_rank ASC
-                 LIMIT 1",
-            )
-            .unwrap();
-        stmt.query_map(rusqlite::params![agt], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+        let pending_query = format!(
+            "SELECT e.id, e.kanban_card_id, e.agent_id
+             FROM auto_queue_entries e
+             JOIN auto_queue_runs r ON e.run_id = r.id
+             WHERE e.agent_id = ?1 AND e.status = 'pending' AND r.status = 'active'{}
+             ORDER BY e.priority_rank ASC
+             LIMIT 1",
+            repo_condition
+        );
+        let mut stmt = conn.prepare(&pending_query).unwrap();
+        let result: Vec<(String, String, String)> = if let Some(ref repo) = body.repo {
+            stmt.query_map(rusqlite::params![agt, repo], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+        } else {
+            stmt.query_map(rusqlite::params![agt], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+        };
+        result
     } else {
         // No agent filter — fall back to run-scoped lookup + run-scoped in-flight guard
         let has_inflight: bool = conn
