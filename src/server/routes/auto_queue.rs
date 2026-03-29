@@ -736,21 +736,13 @@ pub async fn activate(
         );
     }
 
-    // #179: Guard — skip if there's already a dispatched entry in-flight for ANY agent
-    // in this run, across ALL active runs for that agent. Covers idle→activate, resume,
-    // and manual activate without agent_id.
-    // Resolve the effective agent: explicit param > first pending entry's agent.
-    let effective_agent: Option<String> = body.agent_id.clone().or_else(|| {
-        conn.query_row(
-            "SELECT e.agent_id FROM auto_queue_entries e \
-             WHERE e.run_id = ?1 AND e.status = 'pending' \
-             ORDER BY e.priority_rank ASC LIMIT 1",
-            [&run_id],
-            |row| row.get(0),
-        )
-        .ok()
-    });
+    // #179: When agent_id is known, search across ALL active runs for the next pending
+    // entry for that agent — prevents starvation when latest run is a global run without
+    // entries for this agent. Also checks in-flight guard across all active runs.
+    let effective_agent: Option<String> = body.agent_id.clone();
+
     if let Some(ref agt) = effective_agent {
+        // In-flight guard: any dispatched entry for this agent across all active runs
         let has_inflight: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM auto_queue_entries e \
@@ -770,27 +762,21 @@ pub async fn activate(
     }
 
     // Get first pending entry only (sequential dispatch — one at a time)
-    // #179: When agent_id is specified, restrict to that agent's entries to prevent
-    // agent A's idle→activate from dispatching agent B's card in a global run.
-    let pending_query = if effective_agent.is_some() {
-        "SELECT e.id, e.kanban_card_id, e.agent_id
-         FROM auto_queue_entries e
-         WHERE e.run_id = ?1 AND e.status = 'pending' AND e.agent_id = ?2
-         ORDER BY e.priority_rank ASC
-         LIMIT 1"
-    } else {
-        "SELECT e.id, e.kanban_card_id, e.agent_id
-         FROM auto_queue_entries e
-         WHERE e.run_id = ?1 AND e.status = 'pending'
-         ORDER BY e.priority_rank ASC
-         LIMIT 1"
-    };
-    let mut stmt = conn
-        .prepare(pending_query)
-        .unwrap();
-
+    // #179: When agent_id is known, search across all active runs for that agent's
+    // next pending entry (by priority). This avoids starvation when a newer global
+    // run masks an older agent-specific run's pending entries.
     let pending: Vec<(String, String, String)> = if let Some(ref agt) = effective_agent {
-        stmt.query_map(rusqlite::params![run_id, agt], |row| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.id, e.kanban_card_id, e.agent_id
+                 FROM auto_queue_entries e
+                 JOIN auto_queue_runs r ON e.run_id = r.id
+                 WHERE e.agent_id = ?1 AND e.status = 'pending' AND r.status = 'active'
+                 ORDER BY e.priority_rank ASC
+                 LIMIT 1",
+            )
+            .unwrap();
+        stmt.query_map(rusqlite::params![agt], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -801,6 +787,30 @@ pub async fn activate(
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
     } else {
+        // No agent filter — fall back to run-scoped lookup + run-scoped in-flight guard
+        let has_inflight: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM auto_queue_entries WHERE run_id = ?1 AND status = 'dispatched'",
+                [&run_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if has_inflight {
+            tracing::info!("[auto-queue] Skipping activate: run {run_id} already has a dispatched entry in-flight");
+            return (
+                StatusCode::OK,
+                Json(json!({ "dispatched": [], "count": 0, "message": "Already has in-flight entry" })),
+            );
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.id, e.kanban_card_id, e.agent_id
+                 FROM auto_queue_entries e
+                 WHERE e.run_id = ?1 AND e.status = 'pending'
+                 ORDER BY e.priority_rank ASC
+                 LIMIT 1",
+            )
+            .unwrap();
         stmt.query_map([&run_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -812,8 +822,6 @@ pub async fn activate(
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default()
     };
-
-    drop(stmt);
 
     let mut dispatched = Vec::new();
     for (entry_id, card_id, agent_id) in &pending {
