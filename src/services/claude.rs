@@ -415,7 +415,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
         }
     };
 
-    let mut child = match Command::new(claude_bin)
+    let mut bootstrap = Command::new(claude_bin);
+    crate::services::platform::apply_runtime_path(&mut bootstrap);
+    let mut child = match bootstrap
         .args(&args)
         .current_dir(working_dir)
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
@@ -538,7 +540,9 @@ pub fn is_ai_supported() -> bool {
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     let claude_bin = get_claude_path().ok_or("Claude CLI not found")?;
 
-    let mut child = Command::new(claude_bin)
+    let mut command = Command::new(claude_bin);
+    crate::services::platform::apply_runtime_path(&mut command);
+    let mut child = command
         .args(["-p", "--output-format", "text"])
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
         .env_remove("CLAUDECODE")
@@ -766,6 +770,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     let spawn_start = std::time::Instant::now();
     let mut command = Command::new(claude_bin);
+    crate::services::platform::apply_runtime_path(&mut command);
     command
         .args(&args)
         .current_dir(working_dir)

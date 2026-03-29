@@ -5,6 +5,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::services::provider::ProviderKind;
+use crate::services::provider_exec;
 
 /// GET /api/onboarding/status
 /// Returns whether onboarding is complete + existing config values.
@@ -91,6 +93,20 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             |row| row.get(0),
         )
         .ok();
+    let primary_provider: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = 'onboarding_provider'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    let command_provider_2: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = 'onboarding_command_provider_2'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
 
     let completed = has_bots && agent_count > 0;
 
@@ -119,6 +135,10 @@ pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_js
                 "announce": mask(announce_token),
                 "notify": mask(notify_token),
                 "command2": mask(command_token_2),
+            },
+            "bot_providers": {
+                "command": primary_provider,
+                "command2": command_provider_2,
             },
             "guild_id": guild_id,
             "owner_id": owner_id,
@@ -182,14 +202,17 @@ pub struct ChannelsQuery {
     pub token: Option<String>,
 }
 
-/// GET /api/onboarding/channels
-/// Fetches Discord guilds + text channels for the given bot token.
-pub async fn channels(
+#[derive(Debug, Deserialize)]
+pub struct ChannelsBody {
+    pub token: Option<String>,
+}
+
+async fn load_channels(
     State(state): State<AppState>,
-    axum::extract::Query(query): axum::extract::Query<ChannelsQuery>,
+    token: Option<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Use provided token or saved token
-    let token = query.token.or_else(|| {
+    let token = token.or_else(|| {
         state.db.lock().ok().and_then(|conn| {
             conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = 'onboarding_bot_token'",
@@ -270,12 +293,31 @@ pub async fn channels(
     (StatusCode::OK, Json(json!({"guilds": result_guilds})))
 }
 
+/// GET /api/onboarding/channels
+/// Fetches Discord guilds + text channels for the given bot token.
+pub async fn channels(
+    state: State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ChannelsQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    load_channels(state, query.token).await
+}
+
+/// POST /api/onboarding/channels
+/// Fetches Discord guilds + text channels for the given bot token from request body.
+pub async fn channels_post(
+    state: State<AppState>,
+    Json(body): Json<ChannelsBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    load_channels(state, body.token).await
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CompleteBody {
     pub token: String,
     pub announce_token: Option<String>,
     pub notify_token: Option<String>,
     pub command_token_2: Option<String>,
+    pub command_provider_2: Option<String>,
     pub guild_id: String,
     pub owner_id: Option<String>,
     pub provider: Option<String>,
@@ -318,6 +360,7 @@ fn write_bot_settings(
     primary_token: &str,
     primary_provider: &str,
     secondary_token: Option<&str>,
+    secondary_provider: Option<&str>,
     owner_id: Option<&str>,
 ) -> Result<(), String> {
     let config_dir = runtime_root.join("config");
@@ -343,11 +386,14 @@ fn write_bot_settings(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let secondary_provider = if primary_provider == "codex" {
-            "claude"
-        } else {
-            "codex"
-        };
+        let secondary_provider = secondary_provider
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(match primary_provider {
+                "codex" => "claude",
+                "gemini" => "codex",
+                _ => "codex",
+            });
         upsert_bot_settings_entry(obj, token, secondary_provider, owner_id);
     }
 
@@ -447,6 +493,11 @@ pub async fn complete(
         [&body.guild_id],
     )
     .ok();
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_provider', ?1)",
+        [provider],
+    )
+    .ok();
     if let Some(ref owner) = body.owner_id {
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_owner_id', ?1)",
@@ -472,6 +523,13 @@ pub async fn complete(
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_command_token_2', ?1)",
             [cmd2],
+        )
+        .ok();
+    }
+    if let Some(ref provider2) = body.command_provider_2 {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_command_provider_2', ?1)",
+            [provider2],
         )
         .ok();
     }
@@ -551,6 +609,7 @@ pub async fn complete(
         &body.token,
         provider,
         body.command_token_2.as_deref(),
+        body.command_provider_2.as_deref(),
         body.owner_id.as_deref(),
     ) {
         return (
@@ -612,6 +671,7 @@ mod tests {
             "primary-token",
             "claude",
             Some("secondary-token"),
+            Some("codex"),
             Some("42"),
         )
         .unwrap();
@@ -651,17 +711,18 @@ pub struct CheckProviderBody {
 }
 
 /// POST /api/onboarding/check-provider
-/// Checks if a CLI provider (claude/codex) is installed and authenticated.
+/// Checks if a CLI provider (claude/codex/gemini) is installed and authenticated.
 pub async fn check_provider(
     Json(body): Json<CheckProviderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let cmd = match body.provider.as_str() {
         "claude" => "claude",
         "codex" => "codex",
+        "gemini" => "gemini",
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "provider must be 'claude' or 'codex'"})),
+                Json(json!({"error": "provider must be 'claude', 'codex', or 'gemini'"})),
             );
         }
     };
@@ -674,6 +735,7 @@ pub async fn check_provider(
         tokio::task::spawn_blocking(move || match provider.as_str() {
             "claude" => crate::services::claude::resolve_claude_path(),
             "codex" => crate::services::codex::resolve_codex_path(),
+            "gemini" => crate::services::gemini::resolve_gemini_path(),
             _ => None,
         })
         .await
@@ -710,8 +772,10 @@ pub async fn check_provider(
     let home = std::env::var("HOME").unwrap_or_default();
     let config_dir = if cmd == "claude" {
         format!("{home}/.claude")
-    } else {
+    } else if cmd == "codex" {
         format!("{home}/.codex")
+    } else {
+        format!("{home}/.gemini")
     };
     let logged_in = std::path::Path::new(&config_dir).is_dir();
 
@@ -739,12 +803,11 @@ pub struct GeneratePromptBody {
 pub async fn generate_prompt(
     Json(body): Json<GeneratePromptBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let provider = body.provider.as_deref().unwrap_or("claude");
-    let cmd = if provider == "codex" {
-        "codex"
-    } else {
-        "claude"
-    };
+    let provider = body
+        .provider
+        .as_deref()
+        .and_then(ProviderKind::from_str)
+        .unwrap_or(ProviderKind::Claude);
 
     let instruction = format!(
         "다음 AI 에이전트의 시스템 프롬프트를 한국어로 작성해줘.\n\
@@ -754,26 +817,18 @@ pub async fn generate_prompt(
         body.name, body.description
     );
 
-    // Try local CLI (claude -p or codex -q)
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        tokio::process::Command::new(cmd)
-            .args(["-p", &instruction])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output(),
+        provider_exec::execute_simple(provider, instruction),
     )
     .await;
 
-    if let Ok(Ok(out)) = result {
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !text.is_empty() {
-                return (
-                    StatusCode::OK,
-                    Json(json!({ "prompt": text, "source": "ai" })),
-                );
-            }
+    if let Ok(Ok(text)) = result {
+        if !text.trim().is_empty() {
+            return (
+                StatusCode::OK,
+                Json(json!({ "prompt": text.trim(), "source": "ai" })),
+            );
         }
     }
 

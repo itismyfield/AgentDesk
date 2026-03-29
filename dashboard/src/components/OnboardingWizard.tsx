@@ -10,9 +10,66 @@ interface BotInfo {
 }
 
 interface CommandBotEntry {
-  provider: "claude" | "codex";
+  provider: "claude" | "codex" | "gemini";
   token: string;
   botInfo: BotInfo | null;
+}
+
+const COMMAND_PROVIDERS = ["claude", "codex", "gemini"] as const;
+
+function providerSuffix(provider: CommandBotEntry["provider"]) {
+  switch (provider) {
+    case "claude":
+      return "cc";
+    case "codex":
+      return "cdx";
+    case "gemini":
+      return "gm";
+  }
+}
+
+function providerLabel(provider: CommandBotEntry["provider"]) {
+  switch (provider) {
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "gemini":
+      return "Gemini";
+  }
+}
+
+function providerCliName(provider: CommandBotEntry["provider"]) {
+  switch (provider) {
+    case "claude":
+      return "Claude Code";
+    case "codex":
+      return "Codex CLI";
+    case "gemini":
+      return "Gemini CLI";
+  }
+}
+
+function providerInstallHint(provider: CommandBotEntry["provider"], isKo: boolean) {
+  switch (provider) {
+    case "claude":
+      return isKo ? "설치: npm install -g @anthropic-ai/claude-code" : "Install: npm install -g @anthropic-ai/claude-code";
+    case "codex":
+      return isKo ? "설치: npm install -g @openai/codex" : "Install: npm install -g @openai/codex";
+    case "gemini":
+      return isKo ? "설치: npm install -g @google/gemini-cli" : "Install: npm install -g @google/gemini-cli";
+  }
+}
+
+function providerLoginHint(provider: CommandBotEntry["provider"], isKo: boolean) {
+  switch (provider) {
+    case "claude":
+      return isKo ? "로그인: claude login" : "Login: claude login";
+    case "codex":
+      return isKo ? "로그인: codex login" : "Login: codex login";
+    case "gemini":
+      return isKo ? "로그인: gemini" : "Login: gemini";
+  }
 }
 
 interface AgentDef {
@@ -43,6 +100,21 @@ interface ProviderStatus {
   installed: boolean;
   logged_in: boolean;
   version?: string;
+}
+
+interface OnboardingStatusResponse {
+  owner_id?: string;
+  guild_id?: string;
+  bot_tokens?: {
+    command?: string;
+    announce?: string;
+    notify?: string;
+    command2?: string;
+  };
+  bot_providers?: {
+    command?: CommandBotEntry["provider"];
+    command2?: CommandBotEntry["provider"];
+  };
 }
 
 interface Props {
@@ -307,20 +379,30 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   useEffect(() => {
     void fetch("/api/onboarding/status", { credentials: "include" })
       .then((r) => r.json())
-      .then((d) => {
+      .then((d: OnboardingStatusResponse) => {
         if (d.owner_id) setOwnerId(d.owner_id);
         if (d.guild_id) setSelectedGuild(d.guild_id);
-        if (d.bot_tokens?.command) {
+        const commandToken = d.bot_tokens?.command;
+        const command2Token = d.bot_tokens?.command2;
+        if (commandToken) {
           setCommandBots((prev) => {
             const copy = [...prev];
-            copy[0] = { ...copy[0], token: d.bot_tokens.command };
+            copy[0] = {
+              ...copy[0],
+              provider: d.bot_providers?.command ?? copy[0].provider,
+              token: commandToken,
+            };
             return copy;
           });
         }
-        if (d.bot_tokens?.command2) {
+        if (command2Token) {
           setCommandBots((prev) => [
             ...prev,
-            { provider: prev[0].provider === "claude" ? "codex" : "claude", token: d.bot_tokens.command2, botInfo: null },
+            {
+              provider: d.bot_providers?.command2 ?? COMMAND_PROVIDERS.find((provider) => provider !== prev[0].provider) ?? "codex",
+              token: command2Token,
+              botInfo: null,
+            },
           ]);
         }
         if (d.bot_tokens?.announce) setAnnounceToken(d.bot_tokens.announce);
@@ -426,7 +508,12 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
     const token = commandBots[0]?.token || announceToken;
     if (!token) return;
     try {
-      const r = await fetch(`/api/onboarding/channels?token=${encodeURIComponent(token)}`, { credentials: "include" });
+      const r = await fetch("/api/onboarding/channels", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
       const d = await r.json();
       setGuilds(d.guilds || []);
       if (d.guilds?.length === 1) setSelectedGuild(d.guilds[0].id);
@@ -442,7 +529,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   // When agents change or guild changes, update channel assignments
   useEffect(() => {
     if (agents.length > 0) {
-      const suffix = primaryProvider === "codex" ? "cdx" : "cc";
+      const suffix = providerSuffix(primaryProvider);
       setChannelAssignments(
         agents.map((a) => ({
           agentId: a.id,
@@ -532,6 +619,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           announce_token: announceToken || null,
           notify_token: notifyToken || null,
           command_token_2: commandBots.length > 1 ? commandBots[1].token : null,
+          command_provider_2: commandBots.length > 1 ? commandBots[1].provider : null,
           guild_id: selectedGuild,
           owner_id: ownerId || null,
           provider: primaryProvider,
@@ -675,8 +763,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 {tr("실행 봇", "Command Bot")}
               </span>
               <Tip text={tr(
-                "에이전트의 AI 세션을 실행하는 봇입니다.\nDiscord에서 메시지를 받으면 이 봇이\nClaude Code 또는 Codex CLI를 실행하여\n에이전트가 작업합니다.",
-                "Runs AI sessions for agents.\nWhen a message arrives, this bot\nlaunches Claude Code or Codex CLI.",
+                "에이전트의 AI 세션을 실행하는 봇입니다.\nDiscord에서 메시지를 받으면 이 봇이\nClaude Code, Codex CLI, 또는 Gemini CLI를 실행하여\n에이전트가 작업합니다.",
+                "Runs AI sessions for agents.\nWhen a message arrives, this bot\nlaunches Claude Code, Codex CLI, or Gemini CLI.",
               )} />
             </div>
 
@@ -687,7 +775,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                     {tr(`실행 봇 ${i + 1}`, `Command Bot ${i + 1}`)}
                   </span>
                   <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: "rgba(148,163,184,0.3)" }}>
-                    {(["claude", "codex"] as const).map((p) => (
+                    {COMMAND_PROVIDERS.map((p) => (
                       <button
                         key={p}
                         onClick={() => {
@@ -703,7 +791,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                           color: bot.provider === p ? "#a5b4fc" : "var(--th-text-muted)",
                         }}
                       >
-                        {p === "claude" ? "Claude" : "Codex"}
+                        {providerLabel(p)}
                       </button>
                     ))}
                   </div>
@@ -755,8 +843,9 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             {commandBots.length < 2 && (
               <button
                 onClick={() => {
-                  const other = commandBots[0].provider === "claude" ? "codex" : "claude";
-                  setCommandBots((prev) => [...prev, { provider: other as "claude" | "codex", token: "", botInfo: null }]);
+                  const used = new Set(commandBots.map((bot) => bot.provider));
+                  const other = COMMAND_PROVIDERS.find((provider) => !used.has(provider)) ?? "claude";
+                  setCommandBots((prev) => [...prev, { provider: other, token: "", botInfo: null }]);
                 }}
                 className={btnSmall}
                 style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
@@ -895,7 +984,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           <div className="space-y-3">
             {[...new Set(commandBots.map((b) => b.provider))].map((provider) => {
               const status = providerStatuses[provider];
-              const name = provider === "claude" ? "Claude Code" : "Codex CLI";
+              const name = providerCliName(provider);
               return (
                 <div key={provider} className="rounded-xl p-4 border space-y-2" style={{ borderColor: borderLight }}>
                   <div className="flex items-center gap-3">
@@ -933,14 +1022,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   {status && !status.installed && (
                     <div className="rounded-lg p-3 text-xs space-y-1" style={{ backgroundColor: "rgba(251,191,36,0.08)" }}>
                       <div style={{ color: "#fde68a" }}>
-                        {provider === "claude"
-                          ? tr("설치: npm install -g @anthropic-ai/claude-code", "Install: npm install -g @anthropic-ai/claude-code")
-                          : tr("설치: npm install -g @openai/codex", "Install: npm install -g @openai/codex")}
+                        {providerInstallHint(provider, isKo)}
                       </div>
                       <div style={{ color: "var(--th-text-muted)" }}>
-                        {provider === "claude"
-                          ? tr("로그인: claude login", "Login: claude login")
-                          : tr("로그인: codex login", "Login: codex login")}
+                        {providerLoginHint(provider, isKo)}
                       </div>
                     </div>
                   )}
@@ -949,7 +1034,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                     <div className="rounded-lg p-3 text-xs" style={{ backgroundColor: "rgba(251,191,36,0.08)" }}>
                       <div style={{ color: "#fde68a" }}>
                         {tr("터미널에서 로그인하세요:", "Login in terminal:")}
-                        <code className="ml-2 px-1.5 py-0.5 rounded bg-white/10">{provider === "claude" ? "claude login" : "codex login"}</code>
+                        <code className="ml-2 px-1.5 py-0.5 rounded bg-white/10">{provider === "gemini" ? "gemini" : `${provider} login`}</code>
                       </div>
                     </div>
                   )}
@@ -1303,7 +1388,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               <div className="flex items-center gap-2">
                 <span style={{ color: "var(--th-text-muted)" }}>{tr("실행 봇", "Command")}</span>
                 <span>
-                  {commandBots.map((b) => `${b.provider === "claude" ? "Claude" : "Codex"}${b.botInfo?.bot_name ? ` (${b.botInfo.bot_name})` : ""}`).join(", ")}
+                  {commandBots.map((b) => `${providerLabel(b.provider)}${b.botInfo?.bot_name ? ` (${b.botInfo.bot_name})` : ""}`).join(", ")}
                 </span>
               </div>
               <div className="flex items-center gap-2">

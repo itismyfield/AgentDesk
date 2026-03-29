@@ -426,11 +426,12 @@ pub fn handle_init(reconfigure: bool) {
     // Provider selection
     let provider_idx = prompt_select(
         "AI 프로바이더를 선택하세요:",
-        &["claude (Anthropic)", "codex (OpenAI)"],
+        &["claude (Anthropic)", "codex (OpenAI)", "gemini (Google)"],
     );
     let provider = match provider_idx {
         0 => "claude",
         1 => "codex",
+        2 => "gemini",
         _ => "claude",
     };
 

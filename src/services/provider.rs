@@ -1,4 +1,5 @@
 use crate::utils::format::safe_prefix;
+use std::process::Command;
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -18,7 +19,24 @@ pub fn tmux_env_suffix() -> &'static str {
 pub enum ProviderKind {
     Claude,
     Codex,
+    Gemini,
     Unsupported(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    pub binary_name: &'static str,
+    pub supports_structured_output: bool,
+    pub supports_resume: bool,
+    pub supports_tool_stream: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderRuntimeProbe {
+    pub provider: ProviderKind,
+    pub capabilities: ProviderCapabilities,
+    pub binary_path: Option<String>,
+    pub version: Option<String>,
 }
 
 impl ProviderKind {
@@ -26,6 +44,7 @@ impl ProviderKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Gemini => "gemini",
             Self::Unsupported(s) => s.as_str(),
         }
     }
@@ -34,6 +53,7 @@ impl ProviderKind {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Gemini => "Gemini",
             Self::Unsupported(s) => s.as_str(),
         }
     }
@@ -42,8 +62,70 @@ impl ProviderKind {
         match self {
             Self::Claude => Self::Codex,
             Self::Codex => Self::Claude,
+            Self::Gemini => Self::Codex,
             Self::Unsupported(_) => self.clone(),
         }
+    }
+
+    pub fn capabilities(&self) -> Option<ProviderCapabilities> {
+        match self {
+            Self::Claude => Some(ProviderCapabilities {
+                binary_name: "claude",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            }),
+            Self::Codex => Some(ProviderCapabilities {
+                binary_name: "codex",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            }),
+            Self::Gemini => Some(ProviderCapabilities {
+                binary_name: "gemini",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            }),
+            Self::Unsupported(_) => None,
+        }
+    }
+
+    pub fn resolve_runtime_path(&self) -> Option<String> {
+        match self {
+            Self::Claude => crate::services::claude::resolve_claude_path(),
+            Self::Codex => crate::services::codex::resolve_codex_path(),
+            Self::Gemini => crate::services::gemini::resolve_gemini_path(),
+            Self::Unsupported(_) => None,
+        }
+    }
+
+    pub fn probe_runtime(&self) -> Option<ProviderRuntimeProbe> {
+        let capabilities = self.capabilities()?;
+        let binary_path = self.resolve_runtime_path();
+        let version = binary_path.as_ref().and_then(|path| {
+            let mut command = Command::new(path);
+            crate::services::platform::apply_runtime_path(&mut command);
+            command
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| {
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if stdout.is_empty() {
+                        None
+                    } else {
+                        Some(stdout)
+                    }
+                })
+        });
+        Some(ProviderRuntimeProbe {
+            provider: self.clone(),
+            capabilities,
+            binary_path,
+            version,
+        })
     }
 
     /// Parse a known provider string. Returns None for unknown providers.
@@ -51,6 +133,7 @@ impl ProviderKind {
         match raw.trim().to_ascii_lowercase().as_str() {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -60,7 +143,7 @@ impl ProviderKind {
         Self::from_str(raw).unwrap_or_else(|| Self::Unsupported(raw.trim().to_string()))
     }
 
-    /// Returns true if this is a known, supported provider (Claude or Codex).
+    /// Returns true if this is a known, supported provider.
     pub fn is_supported(&self) -> bool {
         !matches!(self, Self::Unsupported(_))
     }
@@ -80,6 +163,10 @@ impl ProviderKind {
 
         if channel_name.ends_with("-cc") {
             return matches!(self, Self::Claude);
+        }
+
+        if channel_name.ends_with("-gm") {
+            return matches!(self, Self::Gemini);
         }
 
         matches!(self, Self::Claude)
@@ -127,7 +214,6 @@ pub fn parse_provider_and_channel_from_tmux_name(
 ) -> Option<(ProviderKind, String)> {
     let prefix = format!("{}-", TMUX_SESSION_PREFIX);
     let stripped = session_name.strip_prefix(&prefix)?;
-    // Strip env suffix (e.g. "-dev") from the end before parsing
     let suffix = tmux_env_suffix();
     let without_suffix = if !suffix.is_empty() {
         stripped.strip_suffix(suffix).unwrap_or(stripped)
@@ -139,6 +225,9 @@ pub fn parse_provider_and_channel_from_tmux_name(
     }
     if let Some(rest) = without_suffix.strip_prefix("codex-") {
         return Some((ProviderKind::Codex, rest.to_string()));
+    }
+    if let Some(rest) = without_suffix.strip_prefix("gemini-") {
+        return Some((ProviderKind::Gemini, rest.to_string()));
     }
     Some((ProviderKind::Claude, without_suffix.to_string()))
 }
@@ -156,17 +245,20 @@ mod tests {
         assert!(ProviderKind::Codex.is_channel_supported(Some("cookingheart-dev-cdx"), false));
         assert!(!ProviderKind::Codex.is_channel_supported(Some("cookingheart-dev-cc"), false));
         assert!(ProviderKind::Codex.is_channel_supported(None, true));
+        assert!(ProviderKind::Gemini.is_channel_supported(Some("research-gm"), false));
+        assert!(!ProviderKind::Gemini.is_channel_supported(Some("research-cc"), false));
+        assert!(ProviderKind::Gemini.is_channel_supported(None, true));
     }
 
     #[test]
     fn test_unsupported_provider() {
-        let p = ProviderKind::from_str_or_unsupported("gemini");
+        let p = ProviderKind::from_str_or_unsupported("gpt");
         assert!(!p.is_supported());
-        assert_eq!(p.as_str(), "gemini");
-        assert_eq!(p.display_name(), "gemini");
+        assert_eq!(p.as_str(), "gpt");
+        assert_eq!(p.display_name(), "gpt");
         assert!(!p.is_channel_supported(Some("test-cc"), false));
         assert!(!p.is_channel_supported(Some("test"), false));
-        assert!(!p.is_channel_supported(None, true)); // unsupported even in DM
+        assert!(!p.is_channel_supported(None, true));
     }
 
     #[test]
@@ -178,6 +270,10 @@ mod tests {
         assert_eq!(
             ProviderKind::from_str_or_unsupported("Codex"),
             ProviderKind::Codex
+        );
+        assert_eq!(
+            ProviderKind::from_str_or_unsupported("Gemini"),
+            ProviderKind::Gemini
         );
     }
 
@@ -192,12 +288,14 @@ mod tests {
             Some((ProviderKind::Codex, "cookingheart-dev-cdx".to_string()))
         );
         assert_eq!(
+            parse_provider_and_channel_from_tmux_name("AgentDesk-gemini-research-gm"),
+            Some((ProviderKind::Gemini, "research-gm".to_string()))
+        );
+        assert_eq!(
             parse_provider_and_channel_from_tmux_name("AgentDesk-mac-mini"),
             Some((ProviderKind::Claude, "mac-mini".to_string()))
         );
     }
-
-    // ── P0 tests ─────────────────────────────────────────────────────────
 
     #[test]
     fn test_provider_from_str_claude() {
@@ -210,16 +308,21 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_from_str_gemini() {
+        assert_eq!(ProviderKind::from_str("gemini"), Some(ProviderKind::Gemini));
+    }
+
+    #[test]
     fn test_provider_from_str_case_insensitive() {
         assert_eq!(ProviderKind::from_str("Claude"), Some(ProviderKind::Claude));
         assert_eq!(ProviderKind::from_str("CLAUDE"), Some(ProviderKind::Claude));
         assert_eq!(ProviderKind::from_str("CODEX"), Some(ProviderKind::Codex));
         assert_eq!(ProviderKind::from_str("Codex"), Some(ProviderKind::Codex));
+        assert_eq!(ProviderKind::from_str("Gemini"), Some(ProviderKind::Gemini));
     }
 
     #[test]
     fn test_provider_from_str_unknown() {
-        assert_eq!(ProviderKind::from_str("gemini"), None);
         assert_eq!(ProviderKind::from_str("gpt"), None);
         assert_eq!(ProviderKind::from_str(""), None);
     }
@@ -233,11 +336,14 @@ mod tests {
         let name2 = ProviderKind::Codex.build_tmux_session_name("dev-cdx");
         assert!(name2.starts_with("AgentDesk-codex-"));
         assert!(name2.contains("dev-cdx"));
+
+        let name3 = ProviderKind::Gemini.build_tmux_session_name("research-gm");
+        assert!(name3.starts_with("AgentDesk-gemini-"));
+        assert!(name3.contains("research-gm"));
     }
 
     #[test]
     fn test_parse_provider_and_channel_from_tmux_name() {
-        // Roundtrip: build then parse
         let channel = "my-test-channel";
         let session = ProviderKind::Claude.build_tmux_session_name(channel);
         let (provider, parsed_channel) =
@@ -250,18 +356,22 @@ mod tests {
             parse_provider_and_channel_from_tmux_name(&session2).unwrap();
         assert_eq!(provider2, ProviderKind::Codex);
         assert_eq!(parsed_channel2, channel);
+
+        let session3 = ProviderKind::Gemini.build_tmux_session_name("research-gm");
+        let (provider3, parsed_channel3) =
+            parse_provider_and_channel_from_tmux_name(&session3).unwrap();
+        assert_eq!(provider3, ProviderKind::Gemini);
+        assert_eq!(parsed_channel3, "research-gm");
     }
 
     #[test]
     fn test_is_channel_supported_cc_suffix() {
-        // "-cc" channel → Claude only
         assert!(ProviderKind::Claude.is_channel_supported(Some("dev-cc"), false));
         assert!(!ProviderKind::Codex.is_channel_supported(Some("dev-cc"), false));
     }
 
     #[test]
     fn test_is_channel_supported_cdx_suffix() {
-        // "-cdx" channel → Codex only
         assert!(ProviderKind::Codex.is_channel_supported(Some("dev-cdx"), false));
         assert!(!ProviderKind::Claude.is_channel_supported(Some("dev-cdx"), false));
     }
@@ -464,11 +574,27 @@ mod tests {
     fn test_counterpart_provider() {
         assert_eq!(ProviderKind::Claude.counterpart(), ProviderKind::Codex);
         assert_eq!(ProviderKind::Codex.counterpart(), ProviderKind::Claude);
+        assert_eq!(ProviderKind::Gemini.counterpart(), ProviderKind::Codex);
 
-        let unsupported = ProviderKind::Unsupported("gemini".to_string());
+        let unsupported = ProviderKind::Unsupported("gpt".to_string());
         assert_eq!(
             unsupported.counterpart(),
-            ProviderKind::Unsupported("gemini".to_string())
+            ProviderKind::Unsupported("gpt".to_string())
         );
+    }
+
+    #[test]
+    fn test_provider_capabilities_known_providers_support_agent_contract() {
+        for provider in [
+            ProviderKind::Claude,
+            ProviderKind::Codex,
+            ProviderKind::Gemini,
+        ] {
+            let capabilities = provider.capabilities().expect("supported provider");
+            assert!(capabilities.supports_structured_output);
+            assert!(capabilities.supports_resume);
+            assert!(capabilities.supports_tool_stream);
+            assert!(!capabilities.binary_name.is_empty());
+        }
     }
 }

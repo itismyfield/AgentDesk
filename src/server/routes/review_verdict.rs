@@ -200,7 +200,7 @@ pub struct SubmitVerdictBody {
     /// The commit SHA that was actually reviewed. When provided, the
     /// review-passed marker stamps this commit instead of the current HEAD.
     pub commit: Option<String>,
-    /// Provider identifier (e.g. "claude", "codex") of the verdict submitter.
+    /// Provider identifier (e.g. "claude", "codex", "gemini") of the verdict submitter.
     /// Used for cross-provider validation in counter-model reviews.
     pub provider: Option<String>,
 }
@@ -312,7 +312,7 @@ pub async fn submit_verdict(
                             StatusCode::BAD_REQUEST,
                             Json(json!({
                                 "error": format!(
-                                    "unknown provider '{}' — expected 'claude' or 'codex'",
+                                    "unknown provider '{}' — expected a supported provider like 'claude', 'codex', or 'gemini'",
                                     raw_submitter
                                 )
                             })),
@@ -922,7 +922,6 @@ pub async fn submit_review_decision(
         &body.decision,
         pending_rd_id.as_deref(),
     );
-
     // #119: Record tuning outcome (dismiss falls through here; accept/dispute call helper before returning)
     record_decision_tuning(
         &state.db,
@@ -1766,8 +1765,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gemini_cross_provider_allowed() {
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-gemini-cross", "claude", "gemini");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-gemini-cross".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: Some("gemini".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    }
+
+    #[tokio::test]
     async fn unknown_provider_string_rejected() {
-        // "gemini" or random string → reject as unknown provider
+        // Unknown provider string → reject
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-unknown-prov", "claude", "codex");
         let state = AppState::test_state(db.clone(), test_engine(&db));
@@ -1781,7 +1808,7 @@ mod tests {
                 notes: None,
                 feedback: None,
                 commit: None,
-                provider: Some("gemini".to_string()),
+                provider: Some("gpt".to_string()),
             }),
         )
         .await;

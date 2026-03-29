@@ -22,8 +22,12 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 AD_HOME="${AGENTDESK_HOME:-$HOME/.adk/release}"
 BIN_DIR="$AD_HOME/bin"
+LIBEXEC_DIR="$AD_HOME/libexec"
+WRAPPER_BIN="$BIN_DIR/agentdesk"
+REAL_BIN="$LIBEXEC_DIR/agentdesk"
 HEALTH_PORT="${AGENTDESK_SERVER_PORT:-$ADK_DEFAULT_PORT}"
 LABEL="com.agentdesk.release"
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
 SKIP_BUILD=false
 SKIP_DASHBOARD=false
@@ -39,6 +43,96 @@ info()  { printf "\033[1;34m[deploy]\033[0m %s\n" "$*"; }
 ok()    { printf "\033[1;32m[deploy]\033[0m %s\n" "$*"; }
 fail()  { printf "\033[1;31m[deploy]\033[0m %s\n" "$*"; exit 1; }
 
+BACKUP_WRAPPER=""
+BACKUP_REAL=""
+
+cleanup_backup() {
+  if [ -n "${BACKUP_WRAPPER:-}" ] && [ -f "$BACKUP_WRAPPER" ]; then
+    rm -f "$BACKUP_WRAPPER"
+  fi
+  if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
+    rm -f "$BACKUP_REAL"
+  fi
+}
+
+trap cleanup_backup EXIT
+
+print_recent_macos_binary_logs() {
+  if [ "$OS" != "darwin" ]; then
+    return
+  fi
+
+  local log_cmd="/usr/bin/log"
+  if [ ! -x "$log_cmd" ]; then
+    return
+  fi
+
+  echo "  Recent macOS policy logs for $BIN_DIR/agentdesk:"
+  "$log_cmd" show --last 2m --style compact \
+    --predicate "eventMessage CONTAINS[c] \"$WRAPPER_BIN\" OR process == \"agentdesk\"" \
+    2>/dev/null | tail -n 20 || true
+}
+
+write_wrapper_script() {
+  cat > "$WRAPPER_BIN" <<EOF
+#!/bin/bash
+exec "$REAL_BIN" "\$@"
+EOF
+  chmod +x "$WRAPPER_BIN"
+}
+
+restore_previous_install() {
+  if [ -n "${BACKUP_WRAPPER:-}" ] && [ -f "$BACKUP_WRAPPER" ]; then
+    cp "$BACKUP_WRAPPER" "$WRAPPER_BIN"
+    chmod +x "$WRAPPER_BIN"
+  else
+    rm -f "$WRAPPER_BIN"
+  fi
+
+  if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
+    cp "$BACKUP_REAL" "$REAL_BIN"
+    chmod +x "$REAL_BIN"
+  else
+    rm -f "$REAL_BIN"
+  fi
+}
+
+run_installed_binary_self_check() {
+  local stdout_file stderr_file version_line exit_code
+  stdout_file="$(mktemp)"
+  stderr_file="$(mktemp)"
+
+  if "$WRAPPER_BIN" --version >"$stdout_file" 2>"$stderr_file"; then
+    version_line="$(head -n 1 "$stdout_file" | tr -d '\r')"
+    rm -f "$stdout_file" "$stderr_file"
+    if [ -n "$version_line" ]; then
+      ok "Installed binary self-check passed: $version_line"
+    else
+      ok "Installed binary self-check passed: --version executed successfully"
+    fi
+    return 0
+  else
+    exit_code=$?
+  fi
+
+  echo "  Installed binary self-check failed (exit $exit_code)"
+  if [ -s "$stdout_file" ]; then
+    echo "  stdout:"
+    sed 's/^/    /' "$stdout_file"
+  fi
+  if [ -s "$stderr_file" ]; then
+    echo "  stderr:"
+    sed 's/^/    /' "$stderr_file"
+  fi
+  rm -f "$stdout_file" "$stderr_file"
+  print_recent_macos_binary_logs
+
+  restore_previous_install
+  ok "Restored previous install after failed self-check"
+
+  fail "Installed binary self-check failed for $WRAPPER_BIN"
+}
+
 # ── Step 1: Build ─────────────────────────────────────────────────────────────
 if [ "$SKIP_BUILD" = true ]; then
   info "Build skipped (--skip-build)"
@@ -51,30 +145,41 @@ else
   if [ "$SKIP_DASHBOARD" = true ]; then
     BUILD_ARGS+=("--skip-dashboard")
   fi
-  "$SCRIPT_DIR/build-release.sh" "${BUILD_ARGS[@]}"
+  if [ ${#BUILD_ARGS[@]} -gt 0 ]; then
+    "$SCRIPT_DIR/build-release.sh" "${BUILD_ARGS[@]}"
+  else
+    "$SCRIPT_DIR/build-release.sh"
+  fi
 fi
 
 # ── Step 2: Copy binary ──────────────────────────────────────────────────────
 info "Installing binary..."
 mkdir -p "$BIN_DIR"
-if [ "$(uname -s)" = "Darwin" ]; then
-  # Remove immutable flag if set (only deploy scripts should touch the binary)
-  chflags nouchg "$BIN_DIR/agentdesk" 2>/dev/null || true
+if [ "$OS" = "darwin" ]; then
+  # Previous installs may have been immutable; unlock before backup/replace.
+  chflags nouchg "$WRAPPER_BIN" "$REAL_BIN" 2>/dev/null || true
 fi
-cp "$PROJECT_DIR/target/release/agentdesk" "$BIN_DIR/agentdesk"
-chmod +x "$BIN_DIR/agentdesk"
-if [ "$(uname -s)" = "Darwin" ]; then
-  codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$BIN_DIR/agentdesk" 2>/dev/null || true
-  # Verify signature
-  if ! codesign -v "$BIN_DIR/agentdesk" 2>/dev/null; then
+mkdir -p "$LIBEXEC_DIR"
+if [ -e "$WRAPPER_BIN" ]; then
+  BACKUP_WRAPPER="$(mktemp "$BIN_DIR/agentdesk.wrapper.backup.XXXXXX")"
+  cp "$WRAPPER_BIN" "$BACKUP_WRAPPER"
+fi
+if [ -e "$REAL_BIN" ]; then
+  BACKUP_REAL="$(mktemp "$LIBEXEC_DIR/agentdesk.real.backup.XXXXXX")"
+  cp "$REAL_BIN" "$BACKUP_REAL"
+fi
+cp "$PROJECT_DIR/target/release/agentdesk" "$REAL_BIN"
+chmod +x "$REAL_BIN"
+if [ "$OS" = "darwin" ]; then
+  codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$REAL_BIN" 2>/dev/null || true
+  if ! codesign -v "$REAL_BIN" 2>/dev/null; then
     fail "Codesign verification failed — aborting"
   fi
-  # Lock binary to prevent unsigned overwrites
-  chflags uchg "$BIN_DIR/agentdesk"
-  ok "Binary: $BIN_DIR/agentdesk (signed + locked)"
-else
-  ok "Binary: $BIN_DIR/agentdesk"
 fi
+write_wrapper_script
+ok "Binary wrapper: $WRAPPER_BIN -> $REAL_BIN"
+run_installed_binary_self_check
+rm -f "$BIN_DIR/agentdesk-real"
 
 # Copy dashboard dist if it exists
 if [ -d "$PROJECT_DIR/dashboard/dist" ]; then
@@ -84,8 +189,6 @@ if [ -d "$PROJECT_DIR/dashboard/dist" ]; then
 fi
 
 # ── Step 3: Install/update service ────────────────────────────────────────────
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-
 install_launchd() {
   local PLIST_SRC="$SCRIPT_DIR/com.agentdesk.release.plist"
   local PLIST_DST="$HOME/Library/LaunchAgents/com.agentdesk.release.plist"

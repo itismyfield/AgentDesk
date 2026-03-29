@@ -93,6 +93,7 @@ pub struct HookSessionBody {
     pub cwd: Option<String>,
     pub dispatch_id: Option<String>,
     pub claude_session_id: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -663,7 +664,7 @@ pub async fn delete_session(
 }
 
 /// GET /api/dispatched-sessions/claude-session-id?session_key=...
-/// Returns the stored claude_session_id for the given session_key.
+/// Returns the stored provider session_id for the given session_key.
 pub async fn get_claude_session_id(
     State(state): State<AppState>,
     Query(params): Query<DeleteSessionQuery>,
@@ -685,11 +686,12 @@ pub async fn get_claude_session_id(
     ) {
         Ok(claude_session_id) => (
             StatusCode::OK,
-            Json(json!({"claude_session_id": claude_session_id})),
+            Json(json!({"claude_session_id": claude_session_id, "session_id": claude_session_id})),
         ),
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            (StatusCode::OK, Json(json!({"claude_session_id": null})))
-        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => (
+            StatusCode::OK,
+            Json(json!({"claude_session_id": null, "session_id": null})),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
@@ -698,15 +700,19 @@ pub async fn get_claude_session_id(
 }
 
 /// POST /api/dispatched-sessions/clear-stale-session-id
-/// Clears claude_session_id from ALL sessions that have the given stale ID.
+/// Clears provider session_id from ALL sessions that have the given stale ID.
 pub async fn clear_stale_session_id(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(sid) = body.get("claude_session_id").and_then(|v| v.as_str()) else {
+    let Some(sid) = body
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("claude_session_id").and_then(|v| v.as_str()))
+    else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "claude_session_id required"})),
+            Json(json!({"error": "session_id required"})),
         );
     };
     let conn = match state.db.lock() {
@@ -1198,6 +1204,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1216,6 +1223,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1288,6 +1296,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1306,6 +1315,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1375,6 +1385,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1393,6 +1404,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1468,6 +1480,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1486,6 +1499,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1559,6 +1573,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: None,
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1606,6 +1621,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some("dispatch-1".to_string()),
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1653,6 +1669,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: None,
                 claude_session_id: None,
+                session_id: None,
             }),
         )
         .await;

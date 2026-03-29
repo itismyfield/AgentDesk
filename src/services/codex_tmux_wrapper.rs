@@ -13,6 +13,7 @@ pub fn run(
     prompt_file: &str,
     working_dir: &str,
     codex_bin: &str,
+    codex_model: Option<&str>,
     input_mode: InputMode,
 ) {
     let mode_label = match input_mode {
@@ -134,6 +135,7 @@ pub fn run(
     if let Err(err) = run_turn(
         &mut output,
         codex_bin,
+        codex_model,
         &expanded_dir,
         &prompt,
         &mut thread_id,
@@ -151,6 +153,7 @@ pub fn run(
         if let Err(err) = run_turn(
             &mut output,
             codex_bin,
+            codex_model,
             &expanded_dir,
             next_prompt.trim(),
             &mut thread_id,
@@ -197,13 +200,21 @@ fn cleanup(output_file: &str, input_fifo: &str) {
 fn run_turn(
     output: &mut std::fs::File,
     codex_bin: &str,
+    codex_model: Option<&str>,
     working_dir: &str,
     prompt: &str,
     thread_id: &mut Option<String>,
 ) -> Result<(), String> {
     emit_status("[sending...]");
 
-    let mut args = vec!["exec".to_string()];
+    let mut args = Vec::new();
+    if let Some(model) = codex_model.map(str::trim).filter(|value| !value.is_empty()) {
+        args.push("-c".to_string());
+        args.push(r#"model_reasoning_effort="high""#.to_string());
+        args.push("-m".to_string());
+        args.push(model.to_string());
+    }
+    args.push("exec".to_string());
     if let Some(existing_thread_id) = thread_id.as_deref() {
         args.push("resume".to_string());
         args.push(existing_thread_id.to_string());

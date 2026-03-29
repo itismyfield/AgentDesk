@@ -189,16 +189,13 @@ pub(super) async fn clear_claude_session_id(session_key: &str, api_port: u16) {
     }
 }
 
-/// Save the Claude CLI session_id to DB so it survives dcserver restarts.
-/// Called at turn completion with the session_id returned by the Claude CLI.
-pub(super) async fn save_claude_session_id(
-    session_key: &str,
-    claude_session_id: &str,
-    api_port: u16,
-) {
+/// Save a provider session_id to DB so it survives dcserver restarts.
+/// Stored in the legacy `claude_session_id` column for compatibility.
+pub(super) async fn save_provider_session_id(session_key: &str, session_id: &str, api_port: u16) {
     let body = serde_json::json!({
         "session_key": session_key,
-        "claude_session_id": claude_session_id,
+        "session_id": session_id,
+        "claude_session_id": session_id,
     });
     match reqwest::Client::new()
         .post(local_api_url(api_port, "/api/hook/session"))
@@ -209,21 +206,21 @@ pub(super) async fn save_claude_session_id(
         Ok(resp) if !resp.status().is_success() => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
-                "  [{ts}] ⚠ save_claude_session_id failed: HTTP {}",
+                "  [{ts}] ⚠ save_provider_session_id failed: HTTP {}",
                 resp.status()
             );
         }
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ save_claude_session_id error: {e}");
+            eprintln!("  [{ts}] ⚠ save_provider_session_id error: {e}");
         }
         _ => {}
     }
 }
 
-/// Fetch the stored claude_session_id from DB for a given session_key.
-/// Returns None if no record exists or if the field is NULL.
-pub(super) async fn fetch_claude_session_id(session_key: &str, api_port: u16) -> Option<String> {
+/// Fetch the stored provider session_id from DB for a given session_key.
+/// Reads the legacy `claude_session_id` field for compatibility.
+pub(super) async fn fetch_provider_session_id(session_key: &str, api_port: u16) -> Option<String> {
     let url = local_api_url(api_port, "/api/dispatched-sessions/claude-session-id");
     let resp = reqwest::Client::new()
         .get(&url)
@@ -237,10 +234,24 @@ pub(super) async fn fetch_claude_session_id(session_key: &str, api_port: u16) ->
     let json: serde_json::Value = resp.json().await.ok()?;
     // #107: Filter empty strings — a stale clear path may have stored ""
     // instead of NULL; treat it as no session ID.
-    json.get("claude_session_id")
+    // Also try session_id field as fallback for provider-agnostic lookup.
+    json.get("session_id")
         .and_then(|v| v.as_str())
+        .or_else(|| json.get("claude_session_id").and_then(|v| v.as_str()))
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
+}
+
+pub(super) async fn save_claude_session_id(
+    session_key: &str,
+    claude_session_id: &str,
+    api_port: u16,
+) {
+    save_provider_session_id(session_key, claude_session_id, api_port).await
+}
+
+pub(super) async fn fetch_claude_session_id(session_key: &str, api_port: u16) -> Option<String> {
+    fetch_provider_session_id(session_key, api_port).await
 }
 
 fn normalize_user_task_summary(input: &str) -> Option<String> {

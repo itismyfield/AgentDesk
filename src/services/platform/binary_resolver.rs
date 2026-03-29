@@ -3,7 +3,9 @@
 //! Replaces direct `which`/`where` and `bash -lc "which X"` calls with a
 //! unified API that works across macOS, Linux, and Windows.
 
+use std::collections::BTreeSet;
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// Resolve a binary by name using the platform's standard lookup mechanism.
 ///
@@ -82,6 +84,72 @@ pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
     None
 }
 
+fn merge_path_entries(primary: &str, secondary: &str) -> Option<String> {
+    let mut seen = BTreeSet::new();
+    let mut merged = Vec::new();
+    for raw in [primary, secondary] {
+        for entry in std::env::split_paths(raw) {
+            let normalized = entry.to_string_lossy().trim().to_string();
+            if normalized.is_empty() || !seen.insert(normalized.clone()) {
+                continue;
+            }
+            merged.push(entry);
+        }
+    }
+    std::env::join_paths(merged)
+        .ok()
+        .map(|value| value.to_string_lossy().to_string())
+}
+
+#[cfg(unix)]
+fn resolve_login_shell_path_uncached() -> Option<String> {
+    for shell in &["zsh", "bash"] {
+        if let Ok(output) = Command::new(shell)
+            .args(["-lc", r#"printf '%s' "$PATH""#])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn resolve_login_shell_path_uncached() -> Option<String> {
+    None
+}
+
+pub fn resolve_login_shell_path() -> Option<String> {
+    static LOGIN_SHELL_PATH: OnceLock<Option<String>> = OnceLock::new();
+    LOGIN_SHELL_PATH
+        .get_or_init(resolve_login_shell_path_uncached)
+        .clone()
+}
+
+pub fn merged_runtime_path() -> Option<String> {
+    let current = std::env::var("PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let login_shell = resolve_login_shell_path().filter(|value| !value.trim().is_empty());
+    match (current, login_shell) {
+        (Some(current), Some(login_shell)) => merge_path_entries(&login_shell, &current),
+        (Some(current), None) => Some(current),
+        (None, Some(login_shell)) => Some(login_shell),
+        (None, None) => None,
+    }
+}
+
+pub fn apply_runtime_path(command: &mut Command) {
+    if let Some(path) = merged_runtime_path() {
+        command.env("PATH", path);
+    }
+}
+
 /// Async version of `resolve_binary_with_login_shell`.
 ///
 /// Runs the full resolution chain (which/where → login shell → known paths)
@@ -118,5 +186,21 @@ mod tests {
         assert!(resolve_binary_with_login_shell("ls").is_some());
         #[cfg(windows)]
         assert!(resolve_binary_with_login_shell("cmd.exe").is_some());
+    }
+
+    #[test]
+    fn merge_path_entries_dedupes_and_preserves_order() {
+        #[cfg(unix)]
+        let joined = merge_path_entries("/opt/homebrew/bin:/usr/bin", "/usr/bin:/bin").unwrap();
+        #[cfg(windows)]
+        let joined = merge_path_entries(r"C:\Tools;C:\Windows", r"C:\Windows;C:\Bin").unwrap();
+
+        let parts = std::env::split_paths(&joined)
+            .map(|entry| entry.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        #[cfg(unix)]
+        assert_eq!(parts, vec!["/opt/homebrew/bin", "/usr/bin", "/bin"]);
+        #[cfg(windows)]
+        assert_eq!(parts, vec![r"C:\Tools", r"C:\Windows", r"C:\Bin"]);
     }
 }

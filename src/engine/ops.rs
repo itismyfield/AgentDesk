@@ -1279,7 +1279,7 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
             let mut results = Vec::new();
             if let Some(root) = crate::cli::agentdesk_runtime_root() {
                 let inflight_dir = root.join("runtime/discord_inflight");
-                for provider in &["claude", "codex"] {
+                for provider in &["claude", "codex", "gemini"] {
                     let dir = inflight_dir.join(provider);
                     if let Ok(entries) = std::fs::read_dir(&dir) {
                         for entry in entries.flatten() {
