@@ -2339,16 +2339,23 @@ async fn try_handle_family_profile_probe_reply(
         return Ok(false);
     };
 
-    // Record the answer and clear the pending probe state as a side effect.
-    // Return Ok(false) so the message continues to the normal DM handling path,
-    // where the agent responds directly in the DM channel with contextual
-    // follow-up (health advice, profile recording, etc.) — just like a
-    // continuous conversation.
+    // Always clear the pending probe state first, regardless of whether the
+    // record succeeds.  If we only clear on success, the pending entry survives
+    // and the *next* unrelated DM will be re-matched as a probe answer.
+    let target_for_clear = target.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        clear_family_profile_probe_pending(&target_for_clear)
+    })
+    .await;
+
+    // Record the answer (best-effort). Return Ok(false) so the message
+    // continues to the normal DM handling path, where the agent responds
+    // directly in the DM channel with contextual follow-up.
     let topic_key_owned = topic_key.clone();
     let target_owned = target.clone();
     let answer_owned = answer.to_string();
     let recorded = tokio::task::spawn_blocking(move || {
-        record_and_clear_family_profile_probe_answer(&topic_key_owned, &target_owned, &answer_owned)
+        record_family_profile_probe_answer(&topic_key_owned, &target_owned, &answer_owned)
     })
     .await
     .map_err(|err| format!("profile_probe_join_failed:{err}"))?;
