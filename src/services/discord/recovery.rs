@@ -520,17 +520,16 @@ pub(super) async fn restore_inflight_turns(
                     build_tmux_death_diagnostic(name, output_path_for_check.as_deref())
                 }) {
                     println!(
-                        "  [{ts}] ⏭ skipping inflight recovery for channel {}: restart report exists, session dead, delegating to flush loop ({diag})",
+                        "  [{ts}] ↻ restart report exists but tmux session is dead for channel {}: clearing report, continuing with direct fallback recovery ({diag})",
                         state.channel_id
                     );
                 } else {
                     println!(
-                        "  [{ts}] ⏭ skipping inflight recovery for channel {}: restart report exists, session dead, delegating to flush loop",
+                        "  [{ts}] ↻ restart report exists but tmux session is dead for channel {}: clearing report, continuing with direct fallback recovery",
                         state.channel_id
                     );
                 }
-                clear_inflight_state(provider, state.channel_id);
-                continue;
+                super::restart_report::clear_restart_report(provider, state.channel_id);
             }
         }
 
