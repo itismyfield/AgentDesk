@@ -741,20 +741,24 @@ pub async fn activate(
     // entries for this agent. Respects repo filter to avoid cross-repo dispatch.
     let effective_agent: Option<String> = body.agent_id.clone();
 
-    // Build repo condition for agent-scoped queries (reuses body.repo from run selection)
-    let repo_condition = if body.repo.is_some() {
-        " AND (r.repo = ?2 OR r.repo IS NULL OR r.repo = '')"
+    // Build card-level repo condition for agent-scoped queries (#179).
+    // Uses kanban_cards.repo_id instead of auto_queue_runs.repo to handle
+    // mixed global runs (repo=NULL) that contain cards from multiple repos.
+    let card_repo_condition = if body.repo.is_some() {
+        " AND kc.repo_id = ?2"
     } else {
         ""
     };
 
     if let Some(ref agt) = effective_agent {
-        // In-flight guard: any dispatched entry for this agent across matching active runs
+        // In-flight guard: any dispatched entry for this agent across active runs,
+        // filtered by card's actual repo_id (not run-level repo).
         let inflight_query = format!(
             "SELECT COUNT(*) > 0 FROM auto_queue_entries e \
              JOIN auto_queue_runs r ON e.run_id = r.id \
+             JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
              WHERE e.agent_id = ?1 AND e.status = 'dispatched' AND r.status = 'active'{}",
-            repo_condition
+            card_repo_condition
         );
         let has_inflight: bool = if let Some(ref repo) = body.repo {
             conn.query_row(&inflight_query, rusqlite::params![agt, repo], |row| row.get(0))
@@ -777,10 +781,11 @@ pub async fn activate(
             "SELECT e.id, e.kanban_card_id, e.agent_id
              FROM auto_queue_entries e
              JOIN auto_queue_runs r ON e.run_id = r.id
+             JOIN kanban_cards kc ON e.kanban_card_id = kc.id
              WHERE e.agent_id = ?1 AND e.status = 'pending' AND r.status = 'active'{}
              ORDER BY e.priority_rank ASC
              LIMIT 1",
-            repo_condition
+            card_repo_condition
         );
         let mut stmt = conn.prepare(&pending_query).unwrap();
         let result: Vec<(String, String, String)> = if let Some(ref repo) = body.repo {
