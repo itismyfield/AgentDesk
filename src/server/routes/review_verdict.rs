@@ -1768,11 +1768,7 @@ mod tests {
     async fn gemini_cross_provider_allowed() {
         let db = test_db();
         seed_counter_model_review(&db, "dispatch-gemini-cross", "claude", "gemini");
-        let state = AppState {
-            db: db.clone(),
-            engine: test_engine(&db),
-            health_registry: None,
-        };
+        let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (status, body) = submit_verdict(
             State(state),
