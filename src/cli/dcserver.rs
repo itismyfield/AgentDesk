@@ -1061,6 +1061,80 @@ pub fn handle_dcserver(token: Option<String>) {
         // Load agentdesk.yaml (graceful: use defaults if missing)
         let ad_config = config::load_graceful();
 
+        // ── Workspace branch guard (#181) ──────────────────────────
+        // Ensure no workspace repo is checked out on a wt/* worktree branch.
+        // This can happen when an agent checks out a worktree branch on the main repo,
+        // and the worktree directory is later cleaned up by the policy merge cleaner.
+        {
+            use std::collections::HashSet;
+            let mut workspaces = HashSet::new();
+
+            // Collect workspace paths from role_map.json
+            if let Some(rm_path) = agentdesk_runtime_root()
+                .map(|r| r.join("config").join("role_map.json"))
+                .filter(|p| p.exists())
+            {
+                if let Ok(content) = std::fs::read_to_string(&rm_path) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                        for section in ["byChannelId", "byChannelName"] {
+                            if let Some(map) = json.get(section).and_then(|v| v.as_object()) {
+                                for (_key, entry) in map {
+                                    if let Some(ws) = entry.get("workspace").and_then(|v| v.as_str())
+                                    {
+                                        let expanded = if ws.starts_with("~/") {
+                                            if let Some(home) = dirs::home_dir() {
+                                                format!("{}{}", home.display(), &ws[1..])
+                                            } else {
+                                                ws.to_string()
+                                            }
+                                        } else {
+                                            ws.to_string()
+                                        };
+                                        workspaces.insert(expanded);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for ws in &workspaces {
+                let ws_path = std::path::Path::new(ws);
+                if !ws_path.join(".git").exists() {
+                    continue;
+                }
+                if let Ok(output) = std::process::Command::new("git")
+                    .args(["-C", ws, "branch", "--show-current"])
+                    .output()
+                {
+                    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if branch.starts_with("wt/") {
+                        eprintln!(
+                            "  ⚠ [branch-guard] Workspace {} on worktree branch '{}' — recovering to main",
+                            ws, branch
+                        );
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", ws, "stash", "--include-untracked", "-m", "auto-stash before branch-guard recovery"])
+                            .output();
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", ws, "checkout", "main"])
+                            .output();
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", ws, "pull", "--ff-only"])
+                            .output();
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", ws, "worktree", "prune"])
+                            .output();
+                        eprintln!(
+                            "  ✓ [branch-guard] Recovered {} to main (was: {})",
+                            ws, branch
+                        );
+                    }
+                }
+            }
+        }
+
         // ── Discord bot setup (before HTTP server so registry is available) ──
         // Process-global counters shared across all providers for deferred restart barrier
         let global_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

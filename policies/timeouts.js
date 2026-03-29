@@ -16,6 +16,7 @@
  * [J] Failed 디스패치 자동 재시도 (30초 쿨다운, ~60초 cadence, 최대 10회 + 즉시 Discord 알림)
  * [I] 턴 데드락 감지 + 자동 복구 (15분 주기, 최대 3회 연장 후 강제 중단 + 재디스패치)
  * [K] 고아 디스패치 복구 (5분) — in_progress 카드 + pending 디스패치 + 활성 세션 없음 → review 전이
+ * [M] Workspace branch 보호 (5분) — 메인 repo가 wt/* 브랜치로 이탈하면 자동 복구 (#181)
  */
 
 // Send notification via notify bot (system alerts, not agent communication)
@@ -932,6 +933,68 @@ var timeouts = {
     }
   },
 
+  // ─── [M] Workspace branch 보호 (#181) ────────────────────
+  // 메인 workspace repo가 wt/* 브랜치로 checkout되면 자동으로 main 복구.
+  // 원인: Claude Code 에이전트가 메인 repo에서 worktree 브랜치를 checkout → policy
+  // merge cleaner가 worktree 삭제 → 경로 깨짐 → 전체 세션 장애.
+  _section_M: function() {
+    // Get unique workspace paths from sessions table
+    var workspaces = agentdesk.db.query(
+      "SELECT DISTINCT json_extract(metadata, '$.workspace') as ws FROM sessions " +
+      "WHERE json_extract(metadata, '$.workspace') IS NOT NULL"
+    );
+    // Also check known workspaces from agents table
+    var agentWorkspaces = agentdesk.db.query(
+      "SELECT DISTINCT workspace FROM agents WHERE workspace IS NOT NULL AND workspace != ''"
+    );
+    // Deduplicate
+    var seen = {};
+    var paths = [];
+    for (var w = 0; w < workspaces.length; w++) {
+      if (workspaces[w].ws && !seen[workspaces[w].ws]) {
+        seen[workspaces[w].ws] = true;
+        paths.push(workspaces[w].ws);
+      }
+    }
+    for (var aw = 0; aw < agentWorkspaces.length; aw++) {
+      if (agentWorkspaces[aw].workspace && !seen[agentWorkspaces[aw].workspace]) {
+        seen[agentWorkspaces[aw].workspace] = true;
+        paths.push(agentWorkspaces[aw].workspace);
+      }
+    }
+    // If no workspaces found from DB, check the server's own workspace
+    if (paths.length === 0) {
+      var serverWs = agentdesk.config.get("workspace");
+      if (serverWs) paths.push(serverWs);
+    }
+
+    for (var p = 0; p < paths.length; p++) {
+      var ws = paths[p];
+      try {
+        var branch = agentdesk.exec("git", JSON.stringify(["-C", ws, "branch", "--show-current"]));
+        if (!branch) continue;
+        branch = branch.replace(/\s+/g, "");
+        if (branch.indexOf("wt/") === 0) {
+          agentdesk.log.warn("[branch-guard] Workspace " + ws + " on worktree branch '" + branch + "' — recovering to main");
+          // Stash any changes before switching
+          agentdesk.exec("git", JSON.stringify(["-C", ws, "stash", "--include-untracked", "-m", "auto-stash before branch-guard recovery"]));
+          var checkoutResult = agentdesk.exec("git", JSON.stringify(["-C", ws, "checkout", "main"]));
+          agentdesk.exec("git", JSON.stringify(["-C", ws, "pull", "--ff-only"]));
+          agentdesk.exec("git", JSON.stringify(["-C", ws, "worktree", "prune"]));
+          agentdesk.log.warn("[branch-guard] Recovered " + ws + " to main (was: " + branch + ")");
+          sendDeadlockAlert(
+            "🔧 [branch-guard] Workspace 브랜치 자동 복구\n" +
+            "경로: `" + ws + "`\n" +
+            "이탈 브랜치: `" + branch + "` → `main`\n" +
+            "원인: 에이전트가 worktree 브랜치를 메인 repo에서 checkout (#181)"
+          );
+        }
+      } catch(e) {
+        agentdesk.log.warn("[branch-guard] Error checking " + ws + ": " + e);
+      }
+    }
+  },
+
   // ─── [I] 컨텍스트 윈도우 자동 관리 ─────────────────────
   // onTick에서 세션 토큰 사용량을 모니터링하고 compact/clear 자동 호출
   onContextCheck: function() {
@@ -1078,6 +1141,8 @@ timeouts.onTick5min = function(ev) {
   agentdesk.log.debug("[tick5min][G] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_H(); } catch(e) { agentdesk.log.warn("[tick5min] H error: " + e); }
   agentdesk.log.debug("[tick5min][H] " + (Date.now() - t) + "ms");
+  t = Date.now(); try { timeouts._section_M(); } catch(e) { agentdesk.log.warn("[tick5min] M error: " + e); }
+  agentdesk.log.debug("[tick5min][M] " + (Date.now() - t) + "ms");
   if (timeouts.onContextCheck) {
     t = Date.now(); try { timeouts.onContextCheck(); } catch(e) { agentdesk.log.warn("[tick5min] ctx error: " + e); }
     agentdesk.log.debug("[tick5min][ctx] " + (Date.now() - t) + "ms");
