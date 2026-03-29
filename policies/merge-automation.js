@@ -334,8 +334,13 @@ function cleanupMergedWorktrees() {
 }
 
 /**
- * Detect open PRs with merge conflicts.
- * If a PR is conflicting, notify the assigned agent's channel.
+ * Detect open PRs with merge conflicts and dispatch rebase tasks.
+ *
+ * For each conflicting PR:
+ *   1. Find the thread session that owns the worktree branch
+ *   2. If thread is alive → send rebase instruction message directly
+ *   3. If thread is dead → create a new dispatch (spawns new thread)
+ *   4. Fallback: notify agent's main channel if no session found
  */
 function detectConflictingPrs() {
   var repos = agentdesk.db.query("SELECT id FROM github_repos", []);
@@ -355,38 +360,111 @@ function detectConflictingPrs() {
       for (var i = 0; i < prs.length; i++) {
         if (prs[i].mergeable !== "CONFLICTING") continue;
 
-        var kvKey = "conflict_notified:" + prs[i].number;
-        if (agentdesk.kv.get(kvKey)) continue; // Already notified
-
-        agentdesk.log.warn("[merge] PR #" + prs[i].number + " has conflicts: " + prs[i].title);
-
-        // Find the card associated with this PR's branch
+        var prNum = prs[i].number;
         var branch = prs[i].headRefName;
+        var title = prs[i].title;
+        var dirSuffix = branch.replace(/^wt\//, "");
+
+        agentdesk.log.warn("[merge] PR #" + prNum + " has conflicts: " + title);
+
+        // Find session with thread info for this branch
         var sessions = agentdesk.db.query(
-          "SELECT agent_id FROM sessions WHERE cwd LIKE ? LIMIT 1",
-          ["%" + branch.replace("wt/", "") + "%"]
+          "SELECT agent_id, thread_channel_id, status, session_key, cwd " +
+          "FROM sessions WHERE cwd LIKE ? ORDER BY last_heartbeat DESC LIMIT 1",
+          ["%/worktrees/%" + dirSuffix + "%"]
         );
 
-        if (sessions.length > 0) {
-          var agent = agentdesk.db.query(
-            "SELECT discord_channel_id FROM agents WHERE id = ?",
-            [sessions[0].agent_id]
-          );
-          if (agent.length > 0) {
-            agentdesk.message.queue(
-              agent[0].discord_channel_id,
-              "⚠️ PR #" + prs[i].number + " (" + prs[i].title + ") has merge conflicts with main. Please rebase: `git rebase main`"
-            );
-          }
-        }
+        if (sessions.length > 0 && sessions[0].thread_channel_id) {
+          var session = sessions[0];
+          var isAlive = session.status === "working" || session.status === "idle";
 
-        // Mark as notified (24h TTL)
-        agentdesk.kv.set(kvKey, "true", 86400);
+          if (isAlive) {
+            // Path A: thread session alive → send message directly
+            var msgKey = "conflict_messaged:" + prNum;
+            if (agentdesk.kv.get(msgKey)) continue;
+
+            agentdesk.message.queue(
+              session.thread_channel_id,
+              "⚠️ PR #" + prNum + " has merge conflicts with main.\n" +
+              "Please rebase: `git fetch origin main && git rebase origin/main`\n" +
+              "Then force push: `git push --force-with-lease`",
+              "announce",
+              "merge-automation"
+            );
+            agentdesk.kv.set(msgKey, "true", 1800); // 30min TTL
+            agentdesk.log.info("[merge] Sent rebase message to thread " + session.thread_channel_id);
+          } else {
+            // Path B: thread session dead → create dispatch for new thread
+            var dispKey = "conflict_dispatched:" + prNum;
+            if (agentdesk.kv.get(dispKey)) continue;
+
+            var card = findCardForAgent(session.agent_id);
+            if (card) {
+              try {
+                agentdesk.dispatch.create(
+                  card.id,
+                  session.agent_id,
+                  "implementation",
+                  "[Rebase] PR #" + prNum + " — resolve merge conflicts with main"
+                );
+                agentdesk.kv.set(dispKey, "true", 7200); // 2h TTL
+                agentdesk.log.info("[merge] Created rebase dispatch for agent " + session.agent_id);
+              } catch(e) {
+                agentdesk.log.info("[merge] Dispatch create failed (likely pending exists): " + e);
+                // Fallback to main channel message
+                notifyAgentMainChannel(session.agent_id, prNum, title);
+              }
+            } else {
+              notifyAgentMainChannel(session.agent_id, prNum, title);
+            }
+          }
+        } else if (sessions.length > 0) {
+          // Session found but no thread — notify main channel
+          notifyAgentMainChannel(sessions[0].agent_id, prNum, title);
+        } else {
+          agentdesk.log.info("[merge] No session found for branch " + branch);
+        }
       }
     } catch(e) {
       agentdesk.log.warn("[merge] Conflict detection error: " + e);
     }
   }
+}
+
+/**
+ * Find an active (non-terminal) card assigned to the given agent.
+ * Prefers cards in review/in_progress states.
+ */
+function findCardForAgent(agentId) {
+  var cards = agentdesk.db.query(
+    "SELECT id, status FROM kanban_cards " +
+    "WHERE assigned_agent_id = ? AND status NOT IN ('done', 'archived') " +
+    "ORDER BY updated_at DESC LIMIT 1",
+    [agentId]
+  );
+  return cards.length > 0 ? cards[0] : null;
+}
+
+/**
+ * Fallback: notify agent's main Discord channel about conflicts.
+ */
+function notifyAgentMainChannel(agentId, prNum, title) {
+  var kvKey = "conflict_notified:" + prNum;
+  if (agentdesk.kv.get(kvKey)) return;
+
+  var agent = agentdesk.db.query(
+    "SELECT discord_channel_id FROM agents WHERE id = ?",
+    [agentId]
+  );
+  if (agent.length > 0) {
+    agentdesk.message.queue(
+      agent[0].discord_channel_id,
+      "⚠️ PR #" + prNum + " (" + title + ") has merge conflicts with main. Please rebase.",
+      "announce",
+      "merge-automation"
+    );
+  }
+  agentdesk.kv.set(kvKey, "true", 7200); // 2h TTL
 }
 
 agentdesk.registerPolicy(mergeAutomation);

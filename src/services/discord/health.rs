@@ -293,6 +293,7 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str,
         "pipeline",
         "system",
         "timeouts",
+        "merge-automation",
     ];
     if !INTERNAL_SOURCES.contains(&source) && !super::settings::is_known_agent(source) {
         return (
