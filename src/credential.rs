@@ -1,14 +1,7 @@
 use std::path::PathBuf;
 
-/// Resolve the AgentDesk root directory (same as runtime_store::agentdesk_root).
 fn agentdesk_root() -> Option<PathBuf> {
-    if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
-        let trimmed = override_root.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-    dirs::home_dir().map(|h| h.join(".adk").join("release"))
+    crate::config::runtime_root()
 }
 
 /// Read a bot token from `<AGENTDESK_ROOT>/credential/<name>_bot_token`.

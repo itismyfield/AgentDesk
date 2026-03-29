@@ -31,6 +31,7 @@ import {
   ActivityFeedWidget,
 } from "./dashboard/ExtraWidgets";
 import RateLimitWidget from "./dashboard/RateLimitWidget";
+import ReceiptWidget from "./dashboard/ReceiptWidget";
 
 interface DashboardPageViewProps {
   stats: DashboardStats | null;
@@ -180,6 +181,7 @@ export default function DashboardPageView({
       <DashboardHudStats hudStats={hudStats} numberFormatter={numberFormatter} />
 
       <RateLimitWidget t={t} />
+      <ReceiptWidget t={t} />
 
       {/* Dashboard sub-tabs */}
       <div className="flex gap-1" style={{ borderBottom: "1px solid var(--th-border)" }}>

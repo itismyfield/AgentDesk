@@ -20,6 +20,7 @@ pub mod offices;
 pub mod onboarding;
 pub mod pipeline;
 mod queue_api;
+pub mod receipt;
 pub mod review_verdict;
 pub mod reviews;
 mod session_activity;
@@ -408,6 +409,7 @@ pub fn api_router(
         .route("/audit-logs", get(analytics::audit_logs))
         .route("/machine-status", get(analytics::machine_status))
         .route("/rate-limits", get(analytics::rate_limits))
+        .route("/receipt", get(receipt::get_receipt))
         .route("/skills-trend", get(analytics::skills_trend))
         // Docs
         .route("/docs", get(docs::api_docs))

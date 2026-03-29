@@ -1554,6 +1554,7 @@ pub async fn run_bot(
                 commands::cmd_debug(),
                 commands::cmd_adduser(),
                 commands::cmd_removeuser(),
+                commands::cmd_receipt(),
                 commands::cmd_help(),
                 commands::cmd_meeting(),
             ],

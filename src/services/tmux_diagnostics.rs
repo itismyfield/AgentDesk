@@ -7,57 +7,12 @@ fn tmux_exit_reason_path(tmux_session_name: &str) -> String {
     crate::services::tmux_common::session_temp_path(tmux_session_name, "exit_reason")
 }
 
-#[cfg(unix)]
 pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
-    let exact = crate::services::tmux_common::tmux_exact_target(tmux_session_name);
-    std::process::Command::new("tmux")
-        .args(["has-session", "-t", &exact])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::services::platform::tmux::has_session(tmux_session_name)
 }
 
-#[cfg(not(unix))]
-pub fn tmux_session_exists(_tmux_session_name: &str) -> bool {
-    false
-}
-
-fn pane_list_has_live_pane(stdout: &str) -> bool {
-    stdout.lines().any(|line| line.trim() == "0")
-}
-
-#[cfg(unix)]
 pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
-    if !tmux_session_exists(tmux_session_name) {
-        return false;
-    }
-
-    let exact = crate::services::tmux_common::tmux_exact_target(tmux_session_name);
-    // Retry once on failure — tmux server can be momentarily busy during
-    // dcserver restart, causing false-negative that blocks session adopt.
-    for attempt in 0..2 {
-        let result = std::process::Command::new("tmux")
-            .args(["list-panes", "-t", &exact, "-F", "#{pane_dead}"])
-            .output();
-        match result {
-            Ok(output) if output.status.success() => {
-                return pane_list_has_live_pane(&String::from_utf8_lossy(&output.stdout));
-            }
-            _ => {
-                if attempt == 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            }
-        }
-    }
-    false
-}
-
-#[cfg(not(unix))]
-pub fn tmux_session_has_live_pane(_tmux_session_name: &str) -> bool {
-    false
+    crate::services::platform::tmux::has_live_pane(tmux_session_name)
 }
 
 pub fn clear_tmux_exit_reason(tmux_session_name: &str) {
@@ -112,6 +67,38 @@ fn read_recent_output_hint(output_path: &str) -> Option<String> {
     ))
 }
 
+/// Whether a follow-up FIFO error indicates the session should be killed and
+/// recreated.  Returns `true` for infrastructure failures (broken pipe, file
+/// not found, bad descriptor) but *not* for permission errors or unrelated I/O
+/// failures — those indicate a deeper issue that blind retry won't fix.
+pub fn should_recreate_session_after_followup_fifo_error(err: &str) -> bool {
+    if err.is_empty() {
+        return false;
+    }
+    // Broken pipe on write/flush — process on the other end is dead
+    if err.contains("Broken pipe") {
+        return true;
+    }
+    // FIFO file was deleted or doesn't exist
+    if err.contains("No such file or directory") || err.contains("entity not found") {
+        return true;
+    }
+    // Bad file descriptor — FIFO was closed or became invalid
+    if err.contains("Bad file descriptor") {
+        return true;
+    }
+    // No such device — FIFO target disappeared
+    if err.contains("No such device") {
+        return true;
+    }
+    false
+}
+
+/// Helper: returns true if tmux pane list output indicates at least one live pane.
+pub fn pane_list_has_live_pane(output: &str) -> bool {
+    output.lines().any(|line| line.trim() == "0")
+}
+
 pub fn build_tmux_death_diagnostic(
     tmux_session_name: &str,
     output_path: Option<&str>,
@@ -130,19 +117,6 @@ pub fn build_tmux_death_diagnostic(
     } else {
         Some(parts.join("; "))
     }
-}
-
-pub fn should_recreate_session_after_followup_fifo_error(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-
-    lower.contains("failed to write to input fifo: broken pipe")
-        || lower.contains("failed to flush input fifo: broken pipe")
-        || (lower.contains("failed to open input fifo:")
-            && (lower.contains("no such file")
-                || lower.contains("not found")
-                || lower.contains("broken pipe")
-                || lower.contains("no such device")
-                || lower.contains("bad file descriptor")))
 }
 
 #[cfg(test)]
@@ -171,14 +145,39 @@ mod tests {
 
     #[test]
     fn test_should_recreate_session_after_followup_fifo_error() {
+        // FIFO write broken pipe
         assert!(should_recreate_session_after_followup_fifo_error(
             "Failed to write to input FIFO: Broken pipe (os error 32)"
         ));
+        // FIFO flush broken pipe
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to flush input FIFO: Broken pipe (os error 32)"
+        ));
+        // FIFO open — file not found
         assert!(should_recreate_session_after_followup_fifo_error(
             "Failed to open input FIFO: No such file or directory (os error 2)"
         ));
+        // FIFO open — not found (alternative wording)
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to open input FIFO: entity not found"
+        ));
+        // FIFO open — bad file descriptor
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to open input FIFO: Bad file descriptor (os error 9)"
+        ));
+        // FIFO open — no such device
+        assert!(should_recreate_session_after_followup_fifo_error(
+            "Failed to open input FIFO: No such device or address (os error 6)"
+        ));
+        // Unrelated error should NOT trigger recreation
         assert!(!should_recreate_session_after_followup_fifo_error(
             "Failed to read Codex output: unexpected EOF"
         ));
+        // Permission error should NOT trigger recreation
+        assert!(!should_recreate_session_after_followup_fifo_error(
+            "Failed to open input FIFO: Permission denied (os error 13)"
+        ));
+        // Empty string should NOT trigger
+        assert!(!should_recreate_session_after_followup_fifo_error(""));
     }
 }

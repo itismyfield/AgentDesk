@@ -37,6 +37,9 @@ AI can read, edit, and run commands in your session.
 `/allowed +name` — Add tool (e.g. `/allowed +Bash`)
 `/allowed -name` — Remove tool
 
+**Analytics**
+`/receipt [month|ratelimit]` — Show token usage receipt (PNG)
+
 **Skills**
 `/cc <skill>` — Run a provider skill (autocomplete)
 

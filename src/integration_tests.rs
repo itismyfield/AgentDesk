@@ -1360,14 +1360,11 @@ mod tests {
             });
         }
 
-        async fn handle_followup(
-            &self,
-            _db: crate::db::Db,
-            dispatch_id: String,
-        ) {
-            self.calls.lock().unwrap().push(MockCall::Followup {
-                dispatch_id,
-            });
+        async fn handle_followup(&self, _db: crate::db::Db, dispatch_id: String) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::Followup { dispatch_id });
         }
     }
 
@@ -1384,9 +1381,7 @@ mod tests {
     fn outbox_status(db: &db::Db, dispatch_id: &str) -> Vec<String> {
         let conn = db.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT status FROM dispatch_outbox WHERE dispatch_id = ?1 ORDER BY id",
-            )
+            .prepare("SELECT status FROM dispatch_outbox WHERE dispatch_id = ?1 ORDER BY id")
             .unwrap();
         stmt.query_map([dispatch_id], |row| row.get(0))
             .unwrap()
@@ -1433,7 +1428,11 @@ mod tests {
         let processed = process_outbox_batch(&db, &mock).await;
 
         assert_eq!(processed, 1, "Batch should process exactly 1 entry");
-        assert_eq!(mock.notify_count(), 1, "Mock should receive exactly 1 notify call");
+        assert_eq!(
+            mock.notify_count(),
+            1,
+            "Mock should receive exactly 1 notify call"
+        );
         assert_eq!(
             mock.call_log(),
             vec![MockCall::Notify {
@@ -1472,7 +1471,10 @@ mod tests {
             "recovery_completed_during_downtime",
             Some(&serde_json::json!({"summary": "completed during downtime"})),
         );
-        assert!(result.is_ok(), "finalize_dispatch happy path should succeed");
+        assert!(
+            result.is_ok(),
+            "finalize_dispatch happy path should succeed"
+        );
         assert_eq!(get_dispatch_status(&db, "d-160r"), "completed");
 
         // Step 2: Simulate the fallback path — when finalize_dispatch fails,

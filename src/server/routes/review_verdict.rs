@@ -167,18 +167,14 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), Strin
             }
         }
     };
-    let root = match std::env::var("AGENTDESK_ROOT_DIR") {
-        Ok(d) => d,
-        Err(_) => resolve_home()?
-            .join(".adk/release")
-            .to_string_lossy()
-            .into_owned(),
-    };
-    let dir = format!("{}/runtime/review_passed", root);
+    let root = crate::config::runtime_root().ok_or_else(|| {
+        "runtime root not found; set AGENTDESK_ROOT_DIR or ensure HOME exists".to_string()
+    })?;
+    let dir = root.join("runtime").join("review_passed");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("stamp_review_passed_marker: failed to create dir: {e}");
     }
-    if let Err(e) = std::fs::write(format!("{}/{}", dir, commit), "") {
+    if let Err(e) = std::fs::write(dir.join(&commit), "") {
         eprintln!("stamp_review_passed_marker: failed to write marker: {e}");
     }
     Ok(())
@@ -409,7 +405,15 @@ pub async fn submit_verdict(
     };
 
     if updated == 0 {
-        let conn = state.db.lock().unwrap();
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("database lock poisoned: {e}")})),
+                );
+            }
+        };
         let current_status: Option<String> = conn
             .query_row(
                 "SELECT status FROM task_dispatches WHERE id = ?1",
@@ -669,7 +673,15 @@ pub async fn submit_review_decision(
                 .unwrap_or_default();
             crate::pipeline::ensure_loaded();
             let effective_pipeline = {
-                let conn = state.db.lock().unwrap();
+                let conn = match state.db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("database lock poisoned: {e}")})),
+                        );
+                    }
+                };
                 crate::pipeline::resolve_for_card(
                     &conn,
                     card_repo_id.as_deref(),
@@ -862,7 +874,15 @@ pub async fn submit_review_decision(
             drop(conn);
             crate::pipeline::ensure_loaded();
             let terminal_state = {
-                let conn_lock = state.db.lock().unwrap();
+                let conn_lock = match state.db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("database lock poisoned: {e}")})),
+                        );
+                    }
+                };
                 let (repo_id, agent_id): (Option<String>, Option<String>) = conn_lock
                     .query_row(
                         "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
@@ -1198,14 +1218,8 @@ pub async fn aggregate_review_tuning(
 }
 
 /// Well-known path for review tuning guidance file.
-/// Uses ~/.adk/release/runtime/ (same logic as agentdesk_runtime_root).
 pub fn review_tuning_guidance_path() -> std::path::PathBuf {
-    let root = std::env::var("AGENTDESK_ROOT_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".adk").join("release")))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let root = crate::config::runtime_root().unwrap_or_else(|| std::path::PathBuf::from("."));
     root.join("runtime").join("review-tuning-guidance.txt")
 }
 

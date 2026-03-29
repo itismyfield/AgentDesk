@@ -203,14 +203,7 @@ pub fn restart_windows_dcserver_and_verify(timeout: Duration) -> Result<(), Stri
 }
 
 pub fn agentdesk_runtime_root() -> Option<PathBuf> {
-    if let Ok(override_root) = env::var(AGENTDESK_ROOT_DIR_ENV) {
-        let trimmed = override_root.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
-    }
-
-    dirs::home_dir().map(|h| h.join(".adk").join("release"))
+    crate::config::runtime_root()
 }
 
 pub fn current_dcserver_launchd_label() -> String {
@@ -910,31 +903,17 @@ pub fn handle_restart_dcserver(
     let tmux_session = "AgentDesk-dcserver";
 
     // Kill existing tmux session if it exists
-    let _ = std::process::Command::new("tmux")
-        .args(["kill-session", "-t", tmux_session])
-        .output();
+    crate::services::platform::tmux::kill_session(tmux_session);
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let launcher_str = launcher_path.to_string_lossy();
-    let child = std::process::Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            tmux_session,
-            launcher_str.as_ref(),
-        ])
-        .spawn();
+    let create_result =
+        crate::services::platform::tmux::create_session(tmux_session, None, launcher_str.as_ref());
 
-    match child {
-        Ok(_) => {
+    match create_result {
+        Ok(output) if output.status.success() => {
             // Verify the session exists
-            let check = std::process::Command::new("tmux")
-                .args(["has-session", "-t", tmux_session])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            if check.map(|s| s.success()).unwrap_or(false) {
+            if crate::services::platform::tmux::has_session(tmux_session) {
                 // Use current log size as offset to avoid matching stale "Bot connected" lines
                 let log_offset = dcserver_stdout_log_path()
                     .and_then(|p| fs::metadata(&p).ok())
@@ -978,6 +957,14 @@ pub fn handle_restart_dcserver(
                     format!("tmux fallback restart 실패\n- session: `{}`", tmux_session),
                 );
             }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("❌ tmux new-session failed: {}", stderr.trim());
+            write_restart_report(
+                "failed",
+                format!("tmux fallback restart 실패\n- stderr: `{}`", stderr.trim()),
+            );
         }
         Err(e) => {
             eprintln!("❌ Failed to start tmux session: {}", e);
@@ -1073,6 +1060,80 @@ pub fn handle_dcserver(token: Option<String>) {
         // ── AgentDesk HTTP server ──────────────────────────────────
         // Load agentdesk.yaml (graceful: use defaults if missing)
         let ad_config = config::load_graceful();
+
+        // ── Workspace branch guard (#181) ──────────────────────────
+        // Ensure no workspace repo is checked out on a wt/* worktree branch.
+        // This can happen when an agent checks out a worktree branch on the main repo,
+        // and the worktree directory is later cleaned up by the policy merge cleaner.
+        {
+            use std::collections::HashSet;
+            let mut workspaces = HashSet::new();
+
+            // Collect workspace paths from role_map.json
+            if let Some(rm_path) = agentdesk_runtime_root()
+                .map(|r| r.join("config").join("role_map.json"))
+                .filter(|p| p.exists())
+            {
+                if let Ok(content) = std::fs::read_to_string(&rm_path) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                        for section in ["byChannelId", "byChannelName"] {
+                            if let Some(map) = json.get(section).and_then(|v| v.as_object()) {
+                                for (_key, entry) in map {
+                                    if let Some(ws) = entry.get("workspace").and_then(|v| v.as_str())
+                                    {
+                                        let expanded = if ws.starts_with("~/") {
+                                            if let Some(home) = dirs::home_dir() {
+                                                format!("{}{}", home.display(), &ws[1..])
+                                            } else {
+                                                ws.to_string()
+                                            }
+                                        } else {
+                                            ws.to_string()
+                                        };
+                                        workspaces.insert(expanded);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for ws in &workspaces {
+                let ws_path = std::path::Path::new(ws);
+                if !ws_path.join(".git").exists() {
+                    continue;
+                }
+                if let Ok(output) = std::process::Command::new("git")
+                    .args(["-C", ws, "branch", "--show-current"])
+                    .output()
+                {
+                    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if branch.starts_with("wt/") {
+                        eprintln!(
+                            "  ⚠ [branch-guard] Workspace {} on worktree branch '{}' — recovering to main",
+                            ws, branch
+                        );
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", ws, "stash", "--include-untracked", "-m", "auto-stash before branch-guard recovery"])
+                            .output();
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", ws, "checkout", "main"])
+                            .output();
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", ws, "pull", "--ff-only"])
+                            .output();
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", ws, "worktree", "prune"])
+                            .output();
+                        eprintln!(
+                            "  ✓ [branch-guard] Recovered {} to main (was: {})",
+                            ws, branch
+                        );
+                    }
+                }
+            }
+        }
 
         // ── Discord bot setup (before HTTP server so registry is available) ──
         // Process-global counters shared across all providers for deferred restart barrier

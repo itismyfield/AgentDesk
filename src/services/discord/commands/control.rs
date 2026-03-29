@@ -119,11 +119,9 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
     #[cfg(unix)]
     if *provider == crate::services::provider::ProviderKind::Claude {
         if let Some(ref name) = tmux_name {
-            let exact_target = tmux_exact_target(name);
+            let name = name.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                std::process::Command::new("tmux")
-                    .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
-                    .output()
+                crate::services::platform::tmux::send_keys(&name, &["/clear", "Enter"])
             })
             .await;
         }

@@ -98,6 +98,11 @@ React 19 + TypeScript + Vite + Tailwind. Uses Pixi.js for the office visualizati
 - **Config** is loaded once at startup from `agentdesk.yaml` (searched in CWD, then `~/.agentdesk/`).
 - **Auto-Queue Storage** — Uses `auto_queue_runs` and `auto_queue_entries` tables (not `dispatch_queue`).
 
+## Git Safety Rules
+
+- **NEVER checkout `wt/*` branches on the main workspace repo.** These branches belong to git worktrees only. Checking them out on the main repo breaks all sessions when the worktree directory is cleaned up. If you need to inspect a worktree branch, use `git log wt/branch-name` or `git diff wt/branch-name` without switching branches.
+- **NEVER run `git checkout` to switch away from `main`** on the workspace root unless explicitly instructed by the user. Feature work should use git worktrees (`git worktree add`), not branch switching on the main repo.
+
 ## Environment Variables
 
 - `AGENTDESK_TOKEN` — Auth token for the HTTP server

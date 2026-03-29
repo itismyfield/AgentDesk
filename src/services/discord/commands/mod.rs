@@ -3,6 +3,7 @@ mod control;
 mod diagnostics;
 mod help;
 mod meeting_cmd;
+mod receipt;
 mod session;
 mod skill;
 
@@ -21,5 +22,6 @@ pub(super) use diagnostics::{
 };
 pub(super) use help::cmd_help;
 pub(super) use meeting_cmd::cmd_meeting;
+pub(super) use receipt::cmd_receipt;
 pub(super) use session::{cmd_pwd, cmd_start};
 pub(super) use skill::cmd_cc;

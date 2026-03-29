@@ -483,5 +483,21 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         }
     }
 
+    // #174: Add retry_count column to dispatch_outbox for retry tracking
+    {
+        let has_retry: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('dispatch_outbox') WHERE name = 'retry_count'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_retry {
+            conn.execute_batch(
+                "ALTER TABLE dispatch_outbox ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+    }
+
     Ok(())
 }

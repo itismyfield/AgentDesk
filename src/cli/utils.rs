@@ -214,37 +214,22 @@ pub fn handle_reset_tmux() {
     println!("Done.");
 }
 
-#[cfg(unix)]
 fn kill_agentdesk_tmux_sessions_local() -> usize {
-    let output = match std::process::Command::new("tmux")
-        .args(["list-sessions", "-F", "#{session_name}"])
-        .output()
-    {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return 0,
+    let names = match crate::services::platform::tmux::list_session_names() {
+        Ok(n) => n,
+        Err(_) => return 0,
     };
 
     let mut count = 0;
-    for line in output.lines() {
-        let name = line.trim();
+    for name in &names {
         if name.starts_with("AgentDesk-") {
-            if std::process::Command::new("tmux")
-                .args(["kill-session", "-t", name])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            {
+            if crate::services::platform::tmux::kill_session(name) {
                 println!("   killed: {}", name);
                 count += 1;
             }
         }
     }
     count
-}
-
-#[cfg(not(unix))]
-fn kill_agentdesk_tmux_sessions_local() -> usize {
-    0
 }
 
 fn clean_agentdesk_tmp_files() -> usize {

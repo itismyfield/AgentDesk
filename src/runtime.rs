@@ -96,16 +96,8 @@ impl SessionRuntime for TmuxRuntime {
     }
 
     fn kill_session(&self, session_name: &str) -> Result<()> {
-        let status = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", session_name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            anyhow::bail!("tmux kill-session failed for {}", session_name)
-        }
+        crate::services::platform::tmux::kill_session_checked(session_name)
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     fn record_exit_reason(&self, session_name: &str, reason: &str) {

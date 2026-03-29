@@ -9,6 +9,7 @@ mod error;
 mod github;
 pub(crate) mod kanban;
 pub(crate) mod pipeline;
+pub(crate) mod receipt;
 pub(crate) mod runtime;
 mod server;
 mod services;

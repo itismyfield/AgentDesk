@@ -148,10 +148,7 @@ pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, 
                             .unwrap_or(false);
                     if !is_unified {
                         record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
-                        let exact_target = tmux_exact_target(&name);
-                        let _ = std::process::Command::new("tmux")
-                            .args(["kill-session", "-t", &exact_target])
-                            .output();
+                        crate::services::platform::tmux::kill_session(&name);
                     }
                 }
                 #[cfg(not(unix))]
@@ -1193,11 +1190,9 @@ pub(super) fn spawn_turn_bridge(
                     println!(
                         "  [{ts}] ⚡ Auto-compact: {tmux_name} at {pct}% ({total_tokens} tokens)"
                     );
-                    let exact_target = tmux_exact_target(tmux_name);
+                    let name = tmux_name.to_string();
                     let _ = tokio::task::spawn_blocking(move || {
-                        std::process::Command::new("tmux")
-                            .args(["send-keys", "-t", &exact_target, "/compact", "Enter"])
-                            .output()
+                        crate::services::platform::tmux::send_keys(&name, &["/compact", "Enter"])
                     })
                     .await;
                 }
@@ -1806,11 +1801,9 @@ pub(super) fn spawn_turn_bridge(
                         name,
                         "dispatch turn completed — killing thread session",
                     );
-                    let exact_target = tmux_exact_target(&name);
+                    let name_c = name.to_string();
                     let kill_result = tokio::task::spawn_blocking(move || {
-                        std::process::Command::new("tmux")
-                            .args(["kill-session", "-t", &exact_target])
-                            .output()
+                        crate::services::platform::tmux::kill_session_output(&name_c)
                     })
                     .await;
                     let kill_ok = matches!(&kill_result, Ok(Ok(o)) if o.status.success());
