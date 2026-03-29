@@ -246,14 +246,15 @@ fn build_workspace_map() -> HashMap<PathBuf, String> {
 ///    (build_workspace_map resolves worktrees → parent workspace via .git file)
 /// 3. cwd path: check `workspaces/` path marker (worktrees excluded — their
 ///    directory names are ephemeral and don't correspond to agent names)
-/// 4. Fallback to provider name
+/// 4. cwd path: find git repo root and use its directory name as project label
+/// 5. Fallback to provider name
 fn resolve_agent(
     file_path: &Path,
     cwd: Option<&str>,
     ws_map: &HashMap<PathBuf, String>,
     default: &str,
 ) -> String {
-    // 1. Claude JSONL file path: encoded workspace name in directory
+    // 1. Claude JSONL file path: encoded workspace dir always contains `workspaces-{name}`
     for ancestor in file_path.ancestors() {
         if let Some(name) = ancestor.file_name().and_then(|n| n.to_str()) {
             if name.starts_with('-') && name.contains("workspaces-") {
@@ -269,7 +270,7 @@ fn resolve_agent(
         }
     }
 
-    // 2-3. cwd-based resolution
+    // 2-4. cwd-based resolution
     if let Some(cwd) = cwd {
         let cwd_path = Path::new(cwd);
 
@@ -282,8 +283,6 @@ fn resolve_agent(
         }
 
         // 3. Path marker heuristic — only `workspaces/` (NOT `worktrees/`)
-        //    Worktree directory names are ephemeral (e.g. codex-adk-cdx-t...,
-        //    claude-unknown-20260329-...) and do not correspond to agent names.
         let mut found_marker = false;
         for component in cwd_path.components() {
             if found_marker {
@@ -295,6 +294,18 @@ fn resolve_agent(
             let s = component.as_os_str().to_string_lossy();
             if s == "workspaces" {
                 found_marker = true;
+            }
+        }
+
+        // 4. Git repo root — walk cwd ancestors looking for .git dir/file.
+        //    Uses the repo directory name as the project label so non-ADK
+        //    sessions get a meaningful name instead of the provider fallback.
+        for ancestor in cwd_path.ancestors() {
+            if ancestor.join(".git").exists() {
+                if let Some(name) = ancestor.file_name().and_then(|n| n.to_str()) {
+                    return name.to_string();
+                }
+                break;
             }
         }
     }
