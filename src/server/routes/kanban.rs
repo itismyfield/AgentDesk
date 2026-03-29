@@ -81,6 +81,8 @@ pub struct DeferDodBody {
 pub struct BulkActionBody {
     pub action: String,
     pub card_ids: Vec<String>,
+    /// Target status for "transition" action (e.g. "ready", "backlog").
+    pub target_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1249,9 +1251,18 @@ pub async fn bulk_action(
         .expect("Pipeline must have at least one terminal state");
     let initial_state = pipeline.initial_state();
     let target_status = match body.action.as_str() {
-        "pass" => terminal_state,
-        "reset" => initial_state,
-        "cancel" => terminal_state, // cancelled 상태 제거됨 — cancel은 terminal로 처리
+        "pass" => terminal_state.to_string(),
+        "reset" => initial_state.to_string(),
+        "cancel" => terminal_state.to_string(),
+        "transition" => match body.target_status {
+            Some(ref s) => s.clone(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "transition action requires target_status field"})),
+                );
+            }
+        },
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1266,7 +1277,7 @@ pub async fn bulk_action(
             &state.db,
             &state.engine,
             card_id,
-            target_status,
+            &target_status,
             "bulk-action",
             true,
         ) {

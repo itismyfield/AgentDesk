@@ -1167,13 +1167,16 @@ pub async fn activate(
             continue;
         }
 
-        // Busy-agent guard (#110): skip if agent has active cards outside auto-queue
+        // Busy-agent guard (#110): skip if agent has active cards outside auto-queue.
+        // Exclude the card being dispatched (#162) — its own pre-dispatch state
+        // (e.g. 'requested') must not block its own activation.
         let conn = state.db.separate_conn().unwrap();
         let busy: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM kanban_cards \
-                 WHERE assigned_agent_id = ?1 AND status IN ('requested', 'in_progress', 'review')",
-                [&agent_id],
+                 WHERE assigned_agent_id = ?1 AND status IN ('requested', 'in_progress', 'review') \
+                 AND id != ?2",
+                rusqlite::params![agent_id, card_id],
                 |row| row.get(0),
             )
             .unwrap_or(false);
@@ -1182,6 +1185,53 @@ pub async fn activate(
         if busy {
             tracing::info!("[auto-queue] Skipping activate for {agent_id}: agent has active cards");
             continue;
+        }
+
+        // #162: If card is in a non-dispatchable state (e.g. backlog, requested),
+        // walk it through free transitions to the dispatchable state using the
+        // canonical reducer path (preserves ApplyClock, AuditLog, SyncReviewState)
+        // but without firing policy hooks that would create side-dispatches.
+        {
+            let conn = state.db.separate_conn().unwrap();
+            let card_status: String = conn
+                .query_row(
+                    "SELECT status FROM kanban_cards WHERE id = ?1",
+                    [&card_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
+            let (card_repo_id, card_assigned_agent_id): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                    [&card_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or_default();
+            crate::pipeline::ensure_loaded();
+            let effective = crate::pipeline::resolve_for_card(
+                &conn,
+                card_repo_id.as_deref(),
+                card_assigned_agent_id.as_deref(),
+            );
+            drop(conn);
+            if let Some(target) = effective.free_path_to_dispatchable(&card_status) {
+                tracing::info!(
+                    "[auto-queue] Silent walk: card {} from '{}' to '{}' (canonical reducer, no hooks)",
+                    card_id, card_status, target
+                );
+                if let Err(e) = crate::kanban::transition_status_no_hooks(
+                    &state.db,
+                    &card_id,
+                    &target,
+                    "auto-queue-walk",
+                ) {
+                    tracing::warn!(
+                        "[auto-queue] Silent walk failed for card {}: {e}",
+                        card_id
+                    );
+                    continue;
+                }
+            }
         }
 
         // Get card title

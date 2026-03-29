@@ -385,6 +385,36 @@ impl PipelineConfig {
             })
     }
 
+    /// Walk free transitions from `from` to the nearest dispatchable state.
+    /// Returns `Some(dispatchable_state)` if reachable, `None` if already
+    /// dispatchable or no free path exists.
+    pub fn free_path_to_dispatchable(&self, from: &str) -> Option<String> {
+        let dispatchable = self.dispatchable_states();
+        if dispatchable.contains(&from) {
+            return None; // already dispatchable
+        }
+        // BFS over free transitions
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(from.to_string());
+        visited.insert(from.to_string());
+        while let Some(cur) = queue.pop_front() {
+            for t in &self.transitions {
+                if t.from == cur
+                    && t.transition_type == TransitionType::Free
+                    && !visited.contains(&t.to)
+                {
+                    if dispatchable.contains(&t.to.as_str()) {
+                        return Some(t.to.clone());
+                    }
+                    visited.insert(t.to.clone());
+                    queue.push_back(t.to.clone());
+                }
+            }
+        }
+        None
+    }
+
     /// Check if a state requires a gated inbound transition (dispatch-entry states).
     /// These states should only be entered via dispatch API, not direct PATCH.
     pub fn requires_dispatch_entry(&self, state: &str) -> bool {
