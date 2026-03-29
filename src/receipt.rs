@@ -276,9 +276,12 @@ fn parse_codex(
     end: DateTime<Utc>,
 ) -> (Vec<UsageRecord>, u64, Option<String>) {
     let mut records = Vec::new();
-    let mut msgs = 0u64;
     let mut sid: Option<String> = None;
     let mut current_model = String::from("codex");
+    // Deduplicate: Codex emits many token_count snapshots per turn.
+    // Only the last snapshot before the next turn_context (or EOF) carries
+    // the final cumulative usage for that turn.
+    let mut pending_snapshot: Option<UsageRecord> = None;
 
     let Ok(file) = fs::File::open(path) else {
         return (records, 0, None);
@@ -293,7 +296,6 @@ fn parse_codex(
         let rtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         if rtype == "session_meta" {
-            // Codex stores session id in payload.id (not top-level id)
             sid = v
                 .get("payload")
                 .and_then(|p| p.get("id"))
@@ -303,6 +305,10 @@ fn parse_codex(
             continue;
         }
         if rtype == "turn_context" {
+            // Flush previous turn's last snapshot
+            if let Some(snap) = pending_snapshot.take() {
+                records.push(snap);
+            }
             if let Some(m) = v
                 .get("payload")
                 .and_then(|p| p.get("model"))
@@ -354,8 +360,8 @@ fn parse_codex(
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        msgs += 1;
-        records.push(UsageRecord {
+        // Overwrite pending snapshot — only the last one per turn matters.
+        pending_snapshot = Some(UsageRecord {
             model: current_model.clone(),
             input_tokens: input.saturating_sub(cached),
             output_tokens: output,
@@ -364,6 +370,11 @@ fn parse_codex(
             provider: "Codex".into(),
         });
     }
+    // Flush final turn
+    if let Some(snap) = pending_snapshot.take() {
+        records.push(snap);
+    }
+    let msgs = records.len() as u64;
     (records, msgs, sid)
 }
 
@@ -656,8 +667,9 @@ pub fn render_html(data: &ReceiptData) -> String {
         }
     }
 
-    // Savings calculation
-    let savings = data.total - subscription_cost;
+    // Savings calculation — clamp negative to show "UNDER BUDGET" instead of
+    // a misleading "YOU SAVED -$150".
+    let raw_savings = data.total - subscription_cost;
     let savings_multiplier = if subscription_cost > 0.0 {
         data.total / subscription_cost
     } else {
@@ -710,7 +722,7 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
 <div class="tl"><span>API COST</span><span>{api_cost}</span></div>
 <hr class="sp">
 <div class="sl b"><span>SUBSCRIPTION</span><span>$200</span></div>
-<div class="sl sv"><span>YOU SAVED</span><span>{savings} ({multiplier:.0}x)</span></div>
+{savings_row}
 <hr class="ds">
 <div class="ss">
 <div class="st">MODEL USAGE</div>
@@ -747,8 +759,18 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
         },
         api_cost = fmt_cost(data.total),
         no_cache_cost = fmt_cost(data.subtotal),
-        savings = fmt_cost(savings),
-        multiplier = savings_multiplier,
+        savings_row = if raw_savings > 0.0 {
+            format!(
+                r#"<div class="sl sv"><span>YOU SAVED</span><span>{} ({:.0}x)</span></div>"#,
+                fmt_cost(raw_savings),
+                savings_multiplier,
+            )
+        } else {
+            format!(
+                r#"<div class="sl sv"><span>UNDER BUDGET</span><span>{}</span></div>"#,
+                fmt_cost(subscription_cost - data.total),
+            )
+        },
         model_pct_rows = model_pct_rows,
         messages = fmt_num(data.stats.total_messages),
         sessions = fmt_num(data.stats.total_sessions),
