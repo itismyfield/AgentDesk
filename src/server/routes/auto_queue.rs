@@ -736,33 +736,37 @@ pub async fn activate(
         );
     }
 
-    // #179: Guard — skip if there's already a dispatched entry in-flight for this agent
-    // across ANY active run (not just the selected run). Prevents multi-active-run scenarios
-    // where run B bypasses the guard because run A holds the in-flight entry.
-    let agent_filter = body.agent_id.as_deref().unwrap_or("");
-    let has_inflight: bool = if !agent_filter.is_empty() {
+    // #179: Guard — skip if there's already a dispatched entry in-flight for ANY agent
+    // in this run, across ALL active runs for that agent. Covers idle→activate, resume,
+    // and manual activate without agent_id.
+    // Resolve the effective agent: explicit param > first pending entry's agent.
+    let effective_agent: Option<String> = body.agent_id.clone().or_else(|| {
         conn.query_row(
-            "SELECT COUNT(*) > 0 FROM auto_queue_entries e \
-             JOIN auto_queue_runs r ON e.run_id = r.id \
-             WHERE e.agent_id = ?1 AND e.status = 'dispatched' AND r.status = 'active'",
-            [agent_filter],
-            |row| row.get(0),
-        )
-        .unwrap_or(false)
-    } else {
-        conn.query_row(
-            "SELECT COUNT(*) > 0 FROM auto_queue_entries WHERE run_id = ?1 AND status = 'dispatched'",
+            "SELECT e.agent_id FROM auto_queue_entries e \
+             WHERE e.run_id = ?1 AND e.status = 'pending' \
+             ORDER BY e.priority_rank ASC LIMIT 1",
             [&run_id],
             |row| row.get(0),
         )
-        .unwrap_or(false)
-    };
-    if has_inflight {
-        tracing::info!("[auto-queue] Skipping activate: agent already has a dispatched entry in-flight");
-        return (
-            StatusCode::OK,
-            Json(json!({ "dispatched": [], "count": 0, "message": "Already has in-flight entry" })),
-        );
+        .ok()
+    });
+    if let Some(ref agt) = effective_agent {
+        let has_inflight: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM auto_queue_entries e \
+                 JOIN auto_queue_runs r ON e.run_id = r.id \
+                 WHERE e.agent_id = ?1 AND e.status = 'dispatched' AND r.status = 'active'",
+                [agt.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if has_inflight {
+            tracing::info!("[auto-queue] Skipping activate: agent {agt} already has a dispatched entry in-flight");
+            return (
+                StatusCode::OK,
+                Json(json!({ "dispatched": [], "count": 0, "message": "Already has in-flight entry" })),
+            );
+        }
     }
 
     // Get first pending entry only (sequential dispatch — one at a time)
