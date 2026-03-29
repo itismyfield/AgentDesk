@@ -383,9 +383,11 @@ fn execute_sql(db: &crate::db::Db, sql: &str, params: &[serde_json::Value]) -> a
         ));
     }
     // Block direct card_review_state mutation (#158 — same guard as ops.rs)
-    if sql_upper.contains("CARD_REVIEW_STATE")
-        && (sql_upper.contains("INSERT") || sql_upper.contains("UPDATE"))
-    {
+    let re_review_state = regex::Regex::new(
+        r"(?i)\b(?:INSERT(?:\s+OR\s+REPLACE)?\s+INTO|UPDATE|DELETE\s+FROM)\s+card_review_state\b",
+    )
+    .unwrap();
+    if re_review_state.is_match(sql) {
         return Err(anyhow::anyhow!(
             "Direct card_review_state mutation is blocked. Use reviewState.sync bridge."
         ));
@@ -703,5 +705,30 @@ mod tests {
             dispatch_id.is_none(),
             "idle state must clear pending_dispatch_id"
         );
+    }
+
+    // #158: ExecuteSQL guard blocks direct card_review_state INSERT OR REPLACE
+    #[test]
+    fn test_blocked_card_review_state_insert_or_replace_sql() {
+        let db = test_db();
+        let intents = vec![Intent::ExecuteSQL {
+            sql: "INSERT OR REPLACE INTO card_review_state (card_id, state) VALUES ('c1', 'idle')"
+                .into(),
+            params: vec![],
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 1);
+    }
+
+    // #158: ExecuteSQL guard blocks direct card_review_state DELETE
+    #[test]
+    fn test_blocked_card_review_state_delete_sql() {
+        let db = test_db();
+        let intents = vec![Intent::ExecuteSQL {
+            sql: "DELETE FROM card_review_state WHERE card_id = 'c1'".into(),
+            params: vec![],
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 1);
     }
 }

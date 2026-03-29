@@ -994,7 +994,10 @@ mod tests {
     // ── #158: card_review_state write centralisation tests ──────────
 
     /// Helper: query card_review_state for a card.
-    fn get_review_state(db: &db::Db, card_id: &str) -> Option<(String, Option<String>, Option<String>)> {
+    fn get_review_state(
+        db: &db::Db,
+        card_id: &str,
+    ) -> Option<(String, Option<String>, Option<String>)> {
         let conn = db.lock().unwrap();
         conn.query_row(
             "SELECT state, last_verdict, last_decision FROM card_review_state WHERE card_id = ?1",
@@ -1017,9 +1020,13 @@ mod tests {
             &db,
             r#"{"card_id":"card-158a","state":"reviewing","review_round":1}"#,
         );
-        assert!(result.contains("\"ok\":true"), "sync to reviewing must succeed: {result}");
+        assert!(
+            result.contains("\"ok\":true"),
+            "sync to reviewing must succeed: {result}"
+        );
 
-        let (state, _, _) = get_review_state(&db, "card-158a").expect("card_review_state row must exist");
+        let (state, _, _) =
+            get_review_state(&db, "card-158a").expect("card_review_state row must exist");
         assert_eq!(state, "reviewing", "bridge must create reviewing state");
 
         // Step 2: Update with verdict
@@ -1027,28 +1034,35 @@ mod tests {
             &db,
             r#"{"card_id":"card-158a","state":"suggestion_pending","last_verdict":"improve"}"#,
         );
-        assert!(result2.contains("\"ok\":true"), "sync to suggestion_pending must succeed: {result2}");
+        assert!(
+            result2.contains("\"ok\":true"),
+            "sync to suggestion_pending must succeed: {result2}"
+        );
 
         let (state2, verdict, _) = get_review_state(&db, "card-158a").unwrap();
         assert_eq!(state2, "suggestion_pending");
         assert_eq!(verdict.as_deref(), Some("improve"));
 
         // Step 3: Set to idle — must clear pending_dispatch_id
-        let result3 = crate::engine::ops::review_state_sync(
-            &db,
-            r#"{"card_id":"card-158a","state":"idle"}"#,
+        let result3 =
+            crate::engine::ops::review_state_sync(&db, r#"{"card_id":"card-158a","state":"idle"}"#);
+        assert!(
+            result3.contains("\"ok\":true"),
+            "sync to idle must succeed: {result3}"
         );
-        assert!(result3.contains("\"ok\":true"), "sync to idle must succeed: {result3}");
 
         let (state3, _, _) = get_review_state(&db, "card-158a").unwrap();
         assert_eq!(state3, "idle", "bridge must allow idle transition");
 
         // Step 4: Verify JS bridge is registered and callable (smoke test)
         let engine = test_engine(&db);
-        let js_check: String = engine.eval_js(
-            r#"typeof agentdesk.reviewState.sync === "function" ? "ok" : "missing""#
-        ).unwrap();
-        assert_eq!(js_check, "ok", "agentdesk.reviewState.sync must be registered as a function");
+        let js_check: String = engine
+            .eval_js(r#"typeof agentdesk.reviewState.sync === "function" ? "ok" : "missing""#)
+            .unwrap();
+        assert_eq!(
+            js_check, "ok",
+            "agentdesk.reviewState.sync must be registered as a function"
+        );
     }
 
     /// #158: ExecuteSQL intent rejects direct card_review_state mutations.
@@ -1064,15 +1078,44 @@ mod tests {
             params: vec![],
         };
         let result = crate::engine::intent::execute_intents(&db, vec![insert_intent]);
-        assert_eq!(result.errors, 1, "INSERT into card_review_state via ExecuteSQL must be rejected");
+        assert_eq!(
+            result.errors, 1,
+            "INSERT into card_review_state via ExecuteSQL must be rejected"
+        );
+
+        // Attempt INSERT OR REPLACE via ExecuteSQL intent — must also fail
+        let replace_intent = crate::engine::intent::Intent::ExecuteSQL {
+            sql: "INSERT OR REPLACE INTO card_review_state (card_id, state, updated_at) VALUES ('card-158b', 'idle', datetime('now'))".to_string(),
+            params: vec![],
+        };
+        let result_replace = crate::engine::intent::execute_intents(&db, vec![replace_intent]);
+        assert_eq!(
+            result_replace.errors, 1,
+            "INSERT OR REPLACE into card_review_state via ExecuteSQL must be rejected"
+        );
 
         // Attempt UPDATE via ExecuteSQL intent — must also fail
         let update_intent = crate::engine::intent::Intent::ExecuteSQL {
-            sql: "UPDATE card_review_state SET state = 'idle' WHERE card_id = 'card-158b'".to_string(),
+            sql: "UPDATE card_review_state SET state = 'idle' WHERE card_id = 'card-158b'"
+                .to_string(),
             params: vec![],
         };
         let result2 = crate::engine::intent::execute_intents(&db, vec![update_intent]);
-        assert_eq!(result2.errors, 1, "UPDATE card_review_state via ExecuteSQL must be rejected");
+        assert_eq!(
+            result2.errors, 1,
+            "UPDATE card_review_state via ExecuteSQL must be rejected"
+        );
+
+        // Attempt DELETE via ExecuteSQL intent — must also fail
+        let delete_intent = crate::engine::intent::Intent::ExecuteSQL {
+            sql: "DELETE FROM card_review_state WHERE card_id = 'card-158b'".to_string(),
+            params: vec![],
+        };
+        let result3 = crate::engine::intent::execute_intents(&db, vec![delete_intent]);
+        assert_eq!(
+            result3.errors, 1,
+            "DELETE from card_review_state via ExecuteSQL must be rejected"
+        );
 
         // Verify no row was created
         assert!(
@@ -1102,7 +1145,28 @@ mod tests {
                 }
             "#)
             .unwrap();
-        assert_eq!(insert_result, "blocked", "JS db.execute INSERT into card_review_state must be blocked");
+        assert_eq!(
+            insert_result, "blocked",
+            "JS db.execute INSERT into card_review_state must be blocked"
+        );
+
+        // Try INSERT OR REPLACE via agentdesk.db.execute — must throw
+        let replace_result: String = engine
+            .eval_js(r#"
+                try {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO card_review_state (card_id, state, updated_at) VALUES ('card-158c', 'idle', datetime('now'))"
+                    );
+                    "unexpected_success"
+                } catch(e) {
+                    e.message.indexOf("card_review_state") >= 0 ? "blocked" : "wrong_error: " + e.message
+                }
+            "#)
+            .unwrap();
+        assert_eq!(
+            replace_result, "blocked",
+            "JS db.execute INSERT OR REPLACE into card_review_state must be blocked"
+        );
 
         // Try UPDATE via agentdesk.db.execute — must throw
         let update_result: String = engine
@@ -1117,7 +1181,28 @@ mod tests {
                 }
             "#)
             .unwrap();
-        assert_eq!(update_result, "blocked", "JS db.execute UPDATE on card_review_state must be blocked");
+        assert_eq!(
+            update_result, "blocked",
+            "JS db.execute UPDATE on card_review_state must be blocked"
+        );
+
+        // Try DELETE via agentdesk.db.execute — must throw
+        let delete_result: String = engine
+            .eval_js(r#"
+                try {
+                    agentdesk.db.execute(
+                        "DELETE FROM card_review_state WHERE card_id = 'card-158c'"
+                    );
+                    "unexpected_success"
+                } catch(e) {
+                    e.message.indexOf("card_review_state") >= 0 ? "blocked" : "wrong_error: " + e.message
+                }
+            "#)
+            .unwrap();
+        assert_eq!(
+            delete_result, "blocked",
+            "JS db.execute DELETE on card_review_state must be blocked"
+        );
 
         // Verify no row was created by blocked operations
         assert!(
@@ -1143,7 +1228,11 @@ mod tests {
             "d-158d",
             &serde_json::json!({"completion_source": "test_harness"}),
         );
-        assert!(result.is_ok(), "complete_dispatch should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "complete_dispatch should succeed: {:?}",
+            result.err()
+        );
 
         // Card should be in review
         assert_eq!(get_card_status(&db, "card-158d"), "review");
@@ -1151,15 +1240,64 @@ mod tests {
         // card_review_state must be "reviewing" (synced via single entrypoint during transition)
         let (state, _, _) = get_review_state(&db, "card-158d")
             .expect("card_review_state must exist after review transition");
-        assert_eq!(state, "reviewing", "canonical review state must be 'reviewing' after entering review");
+        assert_eq!(
+            state, "reviewing",
+            "canonical review state must be 'reviewing' after entering review"
+        );
 
         // Force card to done — review state must reset to idle
         assert!(
-            kanban::transition_status_with_opts(&db, &engine, "card-158d", "done", "test", true).is_ok()
+            kanban::transition_status_with_opts(&db, &engine, "card-158d", "done", "test", true)
+                .is_ok()
         );
         assert_eq!(get_card_status(&db, "card-158d"), "done");
 
         let (state2, _, _) = get_review_state(&db, "card-158d").unwrap();
-        assert_eq!(state2, "idle", "canonical review state must be 'idle' after terminal transition");
+        assert_eq!(
+            state2, "idle",
+            "canonical review state must be 'idle' after terminal transition"
+        );
+    }
+
+    /// #158: review-automation.js OnReviewEnter hook uses reviewState.sync bridge.
+    #[test]
+    fn scenario_158e_on_review_enter_js_hook_syncs_canonical_state() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-158e", "review");
+
+        kanban::fire_enter_hooks(&db, &engine, "card-158e", "review");
+
+        let (state, _, _) = get_review_state(&db, "card-158e")
+            .expect("card_review_state must exist after OnReviewEnter hook");
+        assert_eq!(
+            state, "reviewing",
+            "OnReviewEnter policy hook must sync canonical review state via bridge"
+        );
+
+        let conn = db.lock().unwrap();
+        let review_round: i64 = conn
+            .query_row(
+                "SELECT review_round FROM kanban_cards WHERE id = 'card-158e'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(review_round, 1, "OnReviewEnter must increment review_round");
+
+        let review_dispatch_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-158e' AND dispatch_type = 'review' \
+                 AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            review_dispatch_count, 1,
+            "OnReviewEnter must create exactly one pending review dispatch"
+        );
     }
 }

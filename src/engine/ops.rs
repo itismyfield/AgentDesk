@@ -126,8 +126,8 @@ fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 if (/(?:INSERT\s+INTO|UPDATE)\s+task_dispatches\b/i.test(sql)) {
                     throw new Error("Direct task_dispatches mutation is blocked. Use agentdesk.dispatch.create() instead.");
                 }
-                // Block direct INSERT/UPDATE on card_review_state — use agentdesk.reviewState.sync() instead (#158).
-                if (/(?:INSERT\s+INTO|UPDATE)\s+card_review_state\b/i.test(sql)) {
+                // Block direct INSERT/UPDATE/DELETE on card_review_state — use agentdesk.reviewState.sync() instead (#158).
+                if (/(?:INSERT(?:\s+OR\s+REPLACE)?\s+INTO|UPDATE|DELETE\s+FROM)\s+card_review_state\b/i.test(sql)) {
                     throw new Error("Direct card_review_state mutation is blocked. Use agentdesk.reviewState.sync(cardId, state, opts) instead.");
                 }
                 // Direct write — db.execute remains synchronous by design.
@@ -805,10 +805,14 @@ mod tests {
         )
         .unwrap();
 
-        let n =
-            review_state_sync_on_conn(&conn, "rs-1", "idle", None, None, None, None, None, None)
-                .unwrap();
-        assert_eq!(n, 1);
+        let result = review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({"card_id": "rs-1", "state": "idle"}).to_string(),
+        );
+        assert!(
+            result.contains("\"ok\":true"),
+            "sync should succeed: {result}"
+        );
 
         let (state, pd): (String, Option<String>) = conn
             .query_row(
@@ -821,6 +825,47 @@ mod tests {
         assert!(pd.is_none(), "idle should clear pending_dispatch_id");
     }
 
+    // #158: leaving suggestion_pending must clear stale pending_dispatch_id
+    #[test]
+    fn test_review_state_sync_non_suggestion_pending_clears_pending_dispatch_id() {
+        let db = test_db();
+        let conn = db.separate_conn().unwrap();
+        seed_card_for_review(&conn, "rs-1b");
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at) \
+             VALUES ('rs-1b', 'suggestion_pending', 'disp-2', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let result = review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({
+                "card_id": "rs-1b",
+                "state": "rework_pending",
+                "last_decision": "pm_rework"
+            })
+            .to_string(),
+        );
+        assert!(
+            result.contains("\"ok\":true"),
+            "sync should succeed: {result}"
+        );
+
+        let (state, pd): (String, Option<String>) = conn
+            .query_row(
+                "SELECT state, pending_dispatch_id FROM card_review_state WHERE card_id = 'rs-1b'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "rework_pending");
+        assert!(
+            pd.is_none(),
+            "non-suggestion_pending states must clear stale pending_dispatch_id"
+        );
+    }
+
     // #158: review_state_sync_on_conn — reviewing state auto-sets review_entered_at
     #[test]
     fn test_review_state_sync_reviewing() {
@@ -828,8 +873,12 @@ mod tests {
         let conn = db.separate_conn().unwrap();
         seed_card_for_review(&conn, "rs-2");
 
-        review_state_sync_on_conn(&conn, "rs-2", "reviewing", Some(1), None, None, None, None, None)
-            .unwrap();
+        let result = review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({"card_id": "rs-2", "state": "reviewing", "review_round": 1})
+                .to_string(),
+        );
+        assert!(result.contains("\"ok\":true"));
 
         let (state, rr, entered): (String, Option<i64>, Option<String>) = conn
             .query_row(
@@ -859,18 +908,14 @@ mod tests {
         )
         .unwrap();
 
-        review_state_sync_on_conn(
+        let result = review_state_sync_on_conn(
             &conn,
-            "rs-3",
-            "clear_verdict",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+            &serde_json::json!({"card_id": "rs-3", "state": "clear_verdict"}).to_string(),
+        );
+        assert!(
+            result.contains("\"ok\":true"),
+            "sync should succeed: {result}"
+        );
 
         let (state, verdict): (String, Option<String>) = conn
             .query_row(
@@ -1425,6 +1470,18 @@ pub fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &str) ->
         return r#"{"error":"card_id and state are required"}"#.to_string();
     }
 
+    // Special case: clear_verdict only NULLs last_verdict without changing state
+    if state == "clear_verdict" {
+        let result = conn.execute(
+            "UPDATE card_review_state SET last_verdict = NULL, updated_at = datetime('now') WHERE card_id = ?1",
+            rusqlite::params![card_id],
+        );
+        return match result {
+            Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+            Err(e) => format!(r#"{{"error":"sql error: {}"}}"#, e),
+        };
+    }
+
     // Build dynamic SET clause based on provided fields
     let review_round = params["review_round"].as_i64();
     let last_verdict = params["last_verdict"].as_str();
@@ -1442,7 +1499,11 @@ pub fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &str) ->
          review_round = COALESCE(?3, review_round), \
          last_verdict = COALESCE(?4, last_verdict), \
          last_decision = COALESCE(?5, last_decision), \
-         pending_dispatch_id = CASE WHEN ?2 = 'idle' THEN NULL ELSE COALESCE(?6, pending_dispatch_id) END, \
+         pending_dispatch_id = CASE \
+             WHEN ?6 IS NOT NULL THEN ?6 \
+             WHEN ?2 = 'suggestion_pending' THEN pending_dispatch_id \
+             ELSE NULL \
+         END, \
          approach_change_round = COALESCE(?7, approach_change_round), \
          review_entered_at = COALESCE(?8, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END), \
          updated_at = datetime('now')",
