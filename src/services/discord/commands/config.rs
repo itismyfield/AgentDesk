@@ -169,7 +169,9 @@ const GEMINI_MODEL_ALIASES: &[(&str, &str)] = &[
     ("gemini-2.0-flash", "gemini-2.0-flash"),
 ];
 
-pub(in crate::services::discord) fn provider_supports_model_override(provider: &ProviderKind) -> bool {
+pub(in crate::services::discord) fn provider_supports_model_override(
+    provider: &ProviderKind,
+) -> bool {
     matches!(
         provider,
         ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Gemini
@@ -278,8 +280,12 @@ fn doctor_guidance_suffix(provider: &ProviderKind) -> String {
 fn runtime_probe_detail(provider: &ProviderKind) -> (String, String, String) {
     match provider.probe_runtime() {
         Some(probe) => {
-            let binary_path = probe.binary_path.unwrap_or_else(|| "(not found)".to_string());
-            let version = probe.version.unwrap_or_else(|| "(version unavailable)".to_string());
+            let binary_path = probe
+                .binary_path
+                .unwrap_or_else(|| "(not found)".to_string());
+            let version = probe
+                .version
+                .unwrap_or_else(|| "(version unavailable)".to_string());
             let runtime_status = if binary_path == "(not found)" {
                 "missing"
             } else if version == "(version unavailable)" {
@@ -420,7 +426,8 @@ pub(in crate::services::discord) async fn build_model_picker_embed(
     channel_id: serenity::ChannelId,
     provider: &ProviderKind,
 ) -> serenity::CreateEmbed {
-    let (_, _, effective, source, default_model) = effective_model_snapshot(shared, channel_id).await;
+    let (_, _, effective, source, default_model) =
+        effective_model_snapshot(shared, channel_id).await;
     let mut description = format!(
         "Provider: **{}** (fixed)\nCurrent model: **{}**\nDefault: **{}**\nSource: **{}**\nApply: next turn\n\nSelect menu changes the server value immediately.",
         provider.display_name(),
@@ -476,13 +483,20 @@ async fn autocomplete_model<'a>(
 
     for keyword in ["info", "list", "default"] {
         if partial.is_empty() || keyword.contains(&partial_lower) {
-            let label = format!("{} — {}", keyword, match keyword {
-                "info" => "show provider, model, and source",
-                "list" => "show known model examples",
-                "default" => "clear runtime override",
-                _ => "",
-            });
-            choices.push(serenity::AutocompleteChoice::new(label, keyword.to_string()));
+            let label = format!(
+                "{} — {}",
+                keyword,
+                match keyword {
+                    "info" => "show provider, model, and source",
+                    "list" => "show known model examples",
+                    "default" => "clear runtime override",
+                    _ => "",
+                }
+            );
+            choices.push(serenity::AutocompleteChoice::new(
+                label,
+                keyword.to_string(),
+            ));
         }
     }
 
@@ -537,34 +551,24 @@ pub(in crate::services::discord) async fn cmd_model(
             println!("  [{ts}] ◀ [{user_name}] /model {m}");
 
             if normalize_keyword(&m, MODEL_LIST_KEYWORDS).is_some() {
-                let embed = build_model_picker_embed(
-                    &ctx.data().shared,
-                    channel_id,
-                    &ctx.data().provider,
-                )
-                .await;
+                let embed =
+                    build_model_picker_embed(&ctx.data().shared, channel_id, &ctx.data().provider)
+                        .await;
                 let components = build_model_picker_components(
                     &ctx.data().shared,
                     channel_id,
                     &ctx.data().provider,
                 )
                 .await;
-                ctx.send(
-                    CreateReply::default()
-                        .embed(embed)
-                        .components(components),
-                )
-                .await?;
+                ctx.send(CreateReply::default().embed(embed).components(components))
+                    .await?;
                 return Ok(());
             }
 
             if normalize_keyword(&m, MODEL_INFO_KEYWORDS).is_some() {
-                let msg = build_model_info_message(
-                    &ctx.data().shared,
-                    channel_id,
-                    &ctx.data().provider,
-                )
-                .await;
+                let msg =
+                    build_model_info_message(&ctx.data().shared, channel_id, &ctx.data().provider)
+                        .await;
                 ctx.say(msg).await?;
                 return Ok(());
             }
@@ -593,12 +597,9 @@ pub(in crate::services::discord) async fn cmd_model(
                 .shared
                 .model_overrides
                 .insert(channel_id, validated.clone());
-            let msg = build_model_status_message(
-                &ctx.data().shared,
-                channel_id,
-                &ctx.data().provider,
-            )
-            .await;
+            let msg =
+                build_model_status_message(&ctx.data().shared, channel_id, &ctx.data().provider)
+                    .await;
             ctx.say(format!(
                 "Model set to **{}** for this channel.\n{}",
                 validated, msg
@@ -610,18 +611,11 @@ pub(in crate::services::discord) async fn cmd_model(
             let embed =
                 build_model_picker_embed(&ctx.data().shared, channel_id, &ctx.data().provider)
                     .await;
-            let components = build_model_picker_components(
-                &ctx.data().shared,
-                channel_id,
-                &ctx.data().provider,
-            )
-            .await;
-            ctx.send(
-                CreateReply::default()
-                    .embed(embed)
-                    .components(components),
-            )
-            .await?;
+            let components =
+                build_model_picker_components(&ctx.data().shared, channel_id, &ctx.data().provider)
+                    .await;
+            ctx.send(CreateReply::default().embed(embed).components(components))
+                .await?;
         }
     }
     Ok(())

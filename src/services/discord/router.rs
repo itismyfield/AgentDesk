@@ -2543,7 +2543,10 @@ Any other message is sent to {p}.
                         let _ = msg
                             .reply(
                                 &ctx.http,
-                                format!("Model set to **{}** for this channel.\n{}", validated, status),
+                                format!(
+                                    "Model set to **{}** for this channel.\n{}",
+                                    validated, status
+                                ),
                             )
                             .await;
                     }
@@ -2583,14 +2586,14 @@ Any other message is sent to {p}.
                 }
                 _ => {
                     // Treat bare arg as shorthand for "set"
-                    let validated = match super::commands::validate_model_input(&data.provider, arg1)
-                    {
-                        Ok(model) => model,
-                        Err(message) => {
-                            let _ = msg.reply(&ctx.http, message).await;
-                            return Ok(true);
-                        }
-                    };
+                    let validated =
+                        match super::commands::validate_model_input(&data.provider, arg1) {
+                            Ok(model) => model,
+                            Err(message) => {
+                                let _ = msg.reply(&ctx.http, message).await;
+                                return Ok(true);
+                            }
+                        };
                     data.shared
                         .model_overrides
                         .insert(channel_id, validated.clone());
@@ -2603,7 +2606,10 @@ Any other message is sent to {p}.
                     let _ = msg
                         .reply(
                             &ctx.http,
-                            format!("Model set to **{}** for this channel.\n{}", validated, status),
+                            format!(
+                                "Model set to **{}** for this channel.\n{}",
+                                validated, status
+                            ),
                         )
                         .await;
                 }
