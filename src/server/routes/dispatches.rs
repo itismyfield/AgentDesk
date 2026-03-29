@@ -1428,15 +1428,17 @@ pub(super) async fn send_review_result_to_primary(
         &serde_json::json!({"verdict": verdict}),
     ) {
         Ok((id, _old_status)) => {
-            // #117: Update canonical card_review_state with pending_dispatch_id
+            // #117/#158: Update canonical card_review_state via unified entrypoint
             if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, last_verdict, updated_at) \
-                     VALUES (?1, 'suggestion_pending', ?2, ?3, datetime('now')) \
-                     ON CONFLICT(card_id) DO UPDATE SET \
-                       pending_dispatch_id = ?2, last_verdict = ?3, updated_at = datetime('now')",
-                    rusqlite::params![card_id, id, verdict],
-                ).ok();
+                crate::engine::ops::review_state_sync_on_conn(
+                    &conn,
+                    &serde_json::json!({
+                        "card_id": card_id,
+                        "state": "suggestion_pending",
+                        "pending_dispatch_id": id,
+                        "last_verdict": verdict,
+                    }).to_string(),
+                );
             }
             id
         }

@@ -692,35 +692,18 @@ fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> any
             .ok();
         }
         TransitionIntent::SyncReviewState { card_id, state } => {
-            match state.as_str() {
-                "idle" => {
-                    conn.execute(
-                        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, 'idle', datetime('now')) \
-                         ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-                        [card_id],
-                    ).ok();
-                }
-                "reviewing" => {
-                    conn.execute(
-                        "INSERT INTO card_review_state (card_id, state, review_entered_at, updated_at) VALUES (?1, 'reviewing', datetime('now'), datetime('now')) \
-                         ON CONFLICT(card_id) DO UPDATE SET state = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now')",
-                        [card_id],
-                    ).ok();
-                }
-                "clear_verdict" => {
-                    // Work state re-entry: clear last_verdict
-                    conn.execute(
-                        "UPDATE card_review_state SET last_verdict = NULL, updated_at = datetime('now') WHERE card_id = ?1",
-                        [card_id],
-                    ).ok();
-                }
-                other => {
-                    conn.execute(
-                        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, ?2, datetime('now')) \
-                         ON CONFLICT(card_id) DO UPDATE SET state = ?2, updated_at = datetime('now')",
-                        rusqlite::params![card_id, other],
-                    ).ok();
-                }
+            // #158: Route all card_review_state mutations through unified entrypoint.
+            // "clear_verdict" is a synthetic state that only clears last_verdict on work re-entry.
+            if state == "clear_verdict" {
+                conn.execute(
+                    "UPDATE card_review_state SET last_verdict = NULL, updated_at = datetime('now') WHERE card_id = ?1",
+                    [card_id],
+                ).ok();
+            } else {
+                crate::engine::ops::review_state_sync_on_conn(
+                    conn,
+                    &serde_json::json!({"card_id": card_id, "state": state}).to_string(),
+                );
             }
         }
         TransitionIntent::AuditLog {
@@ -1124,5 +1107,109 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i, TransitionIntent::AuditLog { .. }))
         );
+    }
+
+    // ── #158: SyncReviewState executor routes through unified entrypoint ──
+
+    fn test_db() -> crate::db::Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        crate::db::wrap_conn(conn)
+    }
+
+    fn insert_test_card(conn: &rusqlite::Connection, card_id: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Test', '111')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+             VALUES (?1, 'Test', 'in_progress', 'agent-1', datetime('now'), datetime('now'))",
+            [card_id],
+        ).unwrap();
+    }
+
+    #[test]
+    fn execute_sync_review_state_idle() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        insert_test_card(&conn, "card-exec-1");
+        execute_intent(
+            &conn,
+            &TransitionIntent::SyncReviewState {
+                card_id: "card-exec-1".to_string(),
+                state: "idle".to_string(),
+            },
+        )
+        .unwrap();
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM card_review_state WHERE card_id = 'card-exec-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "idle");
+    }
+
+    #[test]
+    fn execute_sync_review_state_reviewing() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        insert_test_card(&conn, "card-exec-2");
+        execute_intent(
+            &conn,
+            &TransitionIntent::SyncReviewState {
+                card_id: "card-exec-2".to_string(),
+                state: "reviewing".to_string(),
+            },
+        )
+        .unwrap();
+        let (state, entered): (String, String) = conn
+            .query_row(
+                "SELECT state, review_entered_at FROM card_review_state WHERE card_id = 'card-exec-2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "reviewing");
+        assert!(!entered.is_empty(), "review_entered_at should be set");
+    }
+
+    #[test]
+    fn execute_sync_review_state_clear_verdict() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        insert_test_card(&conn, "card-exec-3");
+        // Set up state with a verdict
+        crate::engine::ops::review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({
+                "card_id": "card-exec-3",
+                "state": "suggestion_pending",
+                "last_verdict": "improve",
+            })
+            .to_string(),
+        );
+
+        // Clear verdict
+        execute_intent(
+            &conn,
+            &TransitionIntent::SyncReviewState {
+                card_id: "card-exec-3".to_string(),
+                state: "clear_verdict".to_string(),
+            },
+        )
+        .unwrap();
+
+        let verdict: Option<String> = conn
+            .query_row(
+                "SELECT last_verdict FROM card_review_state WHERE card_id = 'card-exec-3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(verdict.is_none(), "clear_verdict must set last_verdict to NULL");
     }
 }
