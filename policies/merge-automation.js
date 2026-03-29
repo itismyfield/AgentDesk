@@ -234,7 +234,19 @@ function cleanupMergedWorktrees() {
         for (var pc = 0; pc < pendingCards.length; pc++) {
           agentdesk.kv.delete(pendingCards[pc].key);
         }
-        agentdesk.kv.delete("merge_failed:" + prNum);
+        // merge_failed is also stored as merge_failed:{cardId}
+        var failedCards = agentdesk.db.query(
+          "SELECT key FROM kv_meta WHERE key LIKE 'merge_failed:%'",
+          []
+        );
+        for (var fc = 0; fc < failedCards.length; fc++) {
+          try {
+            var val = agentdesk.kv.get(failedCards[fc].key);
+            if (val && JSON.parse(val).pr_number === merged[i].number) {
+              agentdesk.kv.delete(failedCards[fc].key);
+            }
+          } catch(e2) {}
+        }
       }
     } catch(e) {
       agentdesk.log.warn("[merge] Cleanup error: " + e);
