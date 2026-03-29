@@ -64,6 +64,7 @@ function isEnabled() {
 
 /**
  * Enable auto-merge on a PR (shared by auto and manual paths).
+ * Returns true on success, false on failure.
  */
 function enableAutoMerge(prNumber, repo, trackingKey) {
   var strategy = agentdesk.config.get("merge_strategy") || "squash";
@@ -80,10 +81,12 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
       error: result,
       timestamp: new Date().toISOString()
     }), 86400);
-  } else {
-    agentdesk.log.info("[merge] Auto-merge enabled for PR #" + prNumber + " (" + strategy + ")");
-    agentdesk.kv.set("merge_pending:" + trackingKey, String(prNumber), 86400);
+    return false;
   }
+
+  agentdesk.log.info("[merge] Auto-merge enabled for PR #" + prNumber + " (" + strategy + ")");
+  agentdesk.kv.set("merge_pending:" + trackingKey, String(prNumber), 86400);
+  return true;
 }
 
 /**
@@ -105,7 +108,7 @@ function getPrAuthor(prNumber, repo) {
 /**
  * Check if author is in the allowed list for auto-merge.
  * Reads merge_allowed_authors from kv_meta (comma-separated).
- * If not configured, falls back to repo owner.
+ * If not configured, rejects all auto-merges (safe default).
  */
 function isAllowedAuthor(author) {
   if (!author) return false;
@@ -133,8 +136,12 @@ function processManualMergeRequests() {
     var prNumber = requests[i].key.replace("merge_request:", "");
     var repo = requests[i].value;
     agentdesk.log.info("[merge] Processing manual merge request for PR #" + prNumber + " in " + repo);
-    enableAutoMerge(parseInt(prNumber, 10), repo, "manual:" + prNumber);
-    agentdesk.kv.delete(requests[i].key);
+    var ok = enableAutoMerge(parseInt(prNumber, 10), repo, "manual:" + prNumber);
+    if (ok) {
+      agentdesk.kv.delete(requests[i].key);
+    } else {
+      agentdesk.log.warn("[merge] Manual merge request for PR #" + prNumber + " failed, will retry next tick");
+    }
   }
 }
 
