@@ -30,6 +30,148 @@ fn session_belongs_to_current_runtime(session_name: &str, current_owner_marker: 
         .unwrap_or(false)
 }
 
+fn build_restart_handoff_context(
+    state: &super::inflight::InflightTurnState,
+    best_response: &str,
+) -> String {
+    let partial = best_response.trim();
+    let partial_context = if partial.is_empty() {
+        "(재시작 전까지 전달된 partial 응답 없음)".to_string()
+    } else {
+        tail_with_ellipsis(partial, 1200)
+    };
+    format!(
+        "재시작 중 기존 tmux 세션이 종료되어 동일 turn에 재연결하지 못했습니다.\n\n원래 사용자 요청:\n{}\n\n재시작 전 partial 응답:\n{}",
+        state.user_text.trim(),
+        partial_context,
+    )
+}
+
+async fn resume_aborted_restart_turn(
+    channel_id: ChannelId,
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+    output_path: &str,
+) -> bool {
+    let Some((provider_kind, _)) = parse_provider_and_channel_from_tmux_name(tmux_session_name)
+    else {
+        return false;
+    };
+    let Some(state) = super::inflight::load_inflight_state(&provider_kind, channel_id.get()) else {
+        return false;
+    };
+
+    let tmux_matches = state.tmux_session_name.as_deref() == Some(tmux_session_name);
+    let output_matches = state.output_path.as_deref() == Some(output_path);
+    if !tmux_matches && !output_matches {
+        return false;
+    }
+
+    let extracted_full = super::recovery::extract_response_from_output_pub(output_path, 0);
+    let best_response = if !extracted_full.trim().is_empty() {
+        extracted_full
+    } else {
+        state.full_response.clone()
+    };
+    let stale_text = super::turn_bridge::stale_inflight_message(&best_response);
+    let _ = super::formatting::replace_long_message_raw(
+        http,
+        channel_id,
+        serenity::MessageId::new(state.current_msg_id),
+        &stale_text,
+        shared,
+    )
+    .await;
+
+    let context = build_restart_handoff_context(&state, &best_response);
+    let handoff_prompt = format!(
+        "dcserver가 재시작되었습니다. 재시작 전 작업의 후속 조치를 이어서 진행해주세요.\n\n## 재시작 전 컨텍스트\n{}\n\n## 요청 사항\n재시작 중 중단된 응답을 이어서 마무리",
+        context
+    );
+    let placeholder_id = match channel_id
+        .send_message(
+            http,
+            serenity::CreateMessage::new()
+                .content("📎 **Post-restart handoff** — 재시작 후속 작업을 자동으로 이어받습니다."),
+        )
+        .await
+    {
+        Ok(msg) => msg.id,
+        Err(e) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] ⚠ failed to send watcher-handoff placeholder for channel {}: {}",
+                channel_id.get(),
+                e
+            );
+            serenity::MessageId::new(state.current_msg_id)
+        }
+    };
+
+    let author_id = serenity::UserId::new(1);
+    let mut started_immediately = false;
+    if let (Some(ctx), Some(token)) = (
+        shared.cached_serenity_ctx.get(),
+        shared.cached_bot_token.get(),
+    ) {
+        match super::router::handle_text_message(
+            ctx,
+            channel_id,
+            placeholder_id,
+            author_id,
+            "system",
+            &handoff_prompt,
+            shared,
+            token,
+            true,
+            false,
+            false,
+            None,
+        )
+        .await
+        {
+            Ok(()) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ↻ watcher death recovery: started immediate handoff turn for channel {}",
+                    channel_id.get()
+                );
+                started_immediately = true;
+            }
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ⚠ watcher death recovery: immediate handoff start failed for channel {}: {}",
+                    channel_id.get(),
+                    e
+                );
+            }
+        }
+    }
+
+    if !started_immediately {
+        let mut data = shared.core.lock().await;
+        let queue = data.intervention_queue.entry(channel_id).or_default();
+        queue.push(super::Intervention {
+            author_id,
+            message_id: placeholder_id,
+            text: handoff_prompt,
+            mode: super::InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+        });
+        super::save_channel_queue(&provider_kind, channel_id, queue);
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] ↻ watcher death recovery: queued fallback handoff for channel {}",
+            channel_id.get()
+        );
+    }
+
+    super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
+    true
+}
+
 /// Background watcher that continuously tails a tmux output file.
 /// When Claude produces output from terminal input (not Discord), relay it to Discord.
 pub(super) async fn tmux_output_watcher(
@@ -132,12 +274,22 @@ pub(super) async fn tmux_output_watcher(
                     .map(|r| r.contains("dispatch turn completed"))
                     .unwrap_or(false);
                 if !is_normal_completion {
-                    let _ = channel_id
-                        .say(
-                            &http,
-                            "⚠️ 작업 세션이 종료되었습니다. 다음 메시지를 보내면 새 세션이 시작됩니다.",
-                        )
-                        .await;
+                    let resumed = resume_aborted_restart_turn(
+                        channel_id,
+                        &http,
+                        &shared,
+                        &tmux_session_name,
+                        &output_path,
+                    )
+                    .await;
+                    if !resumed {
+                        let _ = channel_id
+                            .say(
+                                &http,
+                                "⚠️ 작업 세션이 종료되었습니다. 다음 메시지를 보내면 새 세션이 시작됩니다.",
+                            )
+                            .await;
+                    }
                 }
             }
             break;
