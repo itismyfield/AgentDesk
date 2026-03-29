@@ -292,16 +292,21 @@ var autoQueue = {
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
       "WHERE e.status = 'dispatched' AND r.status = 'active' " +
       "AND e.dispatch_id IS NOT NULL " +
-      "AND EXISTS (" +
-      "  SELECT 1 FROM task_dispatches td " +
-      "  WHERE td.id = e.dispatch_id " +
-      "  AND td.status IN ('cancelled', 'failed')" +
+      "AND (" +
+      "  EXISTS (" +
+      "    SELECT 1 FROM task_dispatches td " +
+      "    WHERE td.id = e.dispatch_id " +
+      "    AND td.status IN ('cancelled', 'failed')" +
+      "  )" +
+      "  OR NOT EXISTS (" +
+      "    SELECT 1 FROM task_dispatches td WHERE td.id = e.dispatch_id" +
+      "  )" +
       ")",
       []
     );
     for (var j = 0; j < stuckDispatched.length; j++) {
       var stuck = stuckDispatched[j];
-      agentdesk.log.info("[auto-queue] onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + stuck.dispatch_id + " is cancelled/failed)");
+      agentdesk.log.info("[auto-queue] onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + stuck.dispatch_id + " is cancelled/failed/phantom)");
       agentdesk.db.execute(
         "UPDATE auto_queue_entries SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL WHERE id = ?",
         [stuck.id]
