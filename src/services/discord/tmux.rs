@@ -982,6 +982,31 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 }
             }
         }
+
+        // Fallback for thread sessions: guild.channels() doesn't return threads.
+        // Extract thread_id from the channel name suffix (-t{id}) and use it
+        // as the channel_id directly, since Discord thread IDs are channel IDs.
+        let still_unresolved: Vec<&&str> = agent_sessions
+            .iter()
+            .filter(|s| !name_to_channel.contains_key(**s))
+            .collect();
+        for session_name in &still_unresolved {
+            if let Some((_, ch_name)) =
+                parse_provider_and_channel_from_tmux_name(session_name)
+            {
+                if let Some(pos) = ch_name.rfind("-t") {
+                    let suffix = &ch_name[pos + 2..];
+                    if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                        if let Ok(thread_id) = suffix.parse::<u64>() {
+                            let channel_id = ChannelId::new(thread_id);
+                            name_to_channel
+                                .entry(session_name.to_string())
+                                .or_insert((channel_id, ch_name.clone()));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Collect sessions to restore
@@ -1297,6 +1322,20 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
                         continue;
                     }
                 }
+
+                // #181: Don't kill sessions with live processes in their pane.
+                // During restart, dispatch threads may not yet be registered in
+                // data.sessions (recover_orphan_pending_dispatches runs AFTER this).
+                // A tmux pane with a running process is proof the session is in use.
+                if tmux_session_has_live_pane(session_name) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}]   skipped orphan (live pane): {}",
+                        session_name
+                    );
+                    continue;
+                }
+
                 result.push(session_name.to_string());
             }
         }
