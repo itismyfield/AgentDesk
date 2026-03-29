@@ -7,3 +7,12 @@ node_modules/
 dashboard/dist/
 .DS_Store
 agentdesk.yaml
+
+# Generated/temp files
+agentdesk.db
+.playwright-cli/
+dist/
+output/
+reports/
+__pycache__/
+*.pyc

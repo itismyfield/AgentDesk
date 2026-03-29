@@ -7,7 +7,7 @@ use super::super::formatting::send_long_message_ctx;
 use super::super::runtime_store::{self, workspace_root};
 use super::super::{
     Context, DiscordSession, Error, WorktreeInfo, auto_restore_session, check_auth,
-    create_git_worktree, detect_worktree_conflict, load_existing_session, resolve_channel_category,
+    create_git_worktree, detect_worktree_conflict, resolve_channel_category,
     save_bot_settings, scan_skills,
 };
 
@@ -203,17 +203,13 @@ pub(in crate::services::discord) async fn cmd_start(
         .map(|wt| wt.worktree_path.clone())
         .unwrap_or_else(|| canonical_path.clone());
 
-    // Try to load existing session for this path
-    let existing = load_existing_session(&effective_path, Some(ctx.channel_id().get()));
-
+    // Session ID comes from DB (sessions.claude_session_id column),
+    // not from ai_sessions JSON files.
     let mut response_lines = Vec::new();
 
     {
         let mut data = ctx.data().shared.core.lock().await;
         let channel_id = ctx.channel_id();
-
-        // Check if session already exists in memory (e.g. user already ran /remote off)
-        let session_existed = data.sessions.contains_key(&channel_id);
 
         let session = data
             .sessions
@@ -238,6 +234,7 @@ pub(in crate::services::discord) async fn cmd_start(
         session.channel_name = ch_name;
         session.category_name = cat_name;
         session.last_active = tokio::time::Instant::now();
+        session.current_path = Some(effective_path.clone());
 
         // Apply remote override from /start parameter
         if let Some(ref new_remote) = remote_override {
@@ -251,25 +248,9 @@ pub(in crate::services::discord) async fn cmd_start(
         // Apply worktree info if created
         session.worktree = worktree_info.clone();
 
-        if let Some((session_data, _)) = &existing {
-            session.current_path = Some(effective_path.clone());
-            session.history = session_data.history.clone();
-            // Only restore remote_profile_name from file if session is newly created.
-            // If session already existed in memory, the user may have explicitly set
-            // remote to off (/remote off), so don't overwrite with saved value.
-            if !session_existed && session.remote_profile_name.is_none() {
-                session.remote_profile_name = session_data.remote_profile_name.clone();
-            }
-            // Only restore session_id if remote context matches
-            // (don't resume a remote session locally or vice versa)
-            let saved_is_remote = session_data.remote_profile_name.is_some();
-            let current_is_remote = session.remote_profile_name.is_some();
-            if saved_is_remote == current_is_remote {
-                session.session_id = Some(session_data.session_id.clone());
-            } else {
-                session.session_id = None; // Mismatch: start fresh
-            }
+        let has_existing_session = session.session_id.is_some();
 
+        if has_existing_session {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let remote_info = session
                 .remote_profile_name
@@ -281,31 +262,7 @@ pub(in crate::services::discord) async fn cmd_start(
                 "Session restored at `{}`{}.",
                 effective_path, remote_info
             ));
-            response_lines.push(String::new());
-
-            // Show last 5 conversation items
-            let history_len = session_data.history.len();
-            let start_idx = if history_len > 5 { history_len - 5 } else { 0 };
-            for item in &session_data.history[start_idx..] {
-                let prefix = match item.item_type {
-                    crate::ui::ai_screen::HistoryType::User => "You",
-                    crate::ui::ai_screen::HistoryType::Assistant => "AI",
-                    crate::ui::ai_screen::HistoryType::Error => "Error",
-                    crate::ui::ai_screen::HistoryType::System => "System",
-                    crate::ui::ai_screen::HistoryType::ToolUse => "Tool",
-                    crate::ui::ai_screen::HistoryType::ToolResult => "Result",
-                };
-                let content: String = item.content.chars().take(200).collect();
-                let truncated = if item.content.chars().count() > 200 {
-                    "..."
-                } else {
-                    ""
-                };
-                response_lines.push(format!("[{}] {}{}", prefix, content, truncated));
-            }
         } else {
-            session.session_id = None;
-            session.current_path = Some(effective_path.clone());
             session.history.clear();
 
             let ts = chrono::Local::now().format("%H:%M:%S");

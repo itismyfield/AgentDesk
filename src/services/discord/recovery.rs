@@ -373,9 +373,40 @@ pub(super) async fn restore_inflight_turns(
                     state.channel_id
                 );
                 super::restart_report::clear_restart_report(provider, state.channel_id);
-                // Session is alive — skip read_output_file_until_result entirely.
-                // restore_tmux_watchers will adopt the session and attach a watcher.
-                // No recovery turn needed — the session continues where it left off.
+                // Register session in-memory so restore_tmux_watchers can find it.
+                // Derive channel_name from tmux session name if not in inflight state.
+                let effective_channel_name = state.channel_name.clone().or_else(|| {
+                    tmux_name.as_deref().and_then(|name| {
+                        crate::services::provider::parse_provider_and_channel_from_tmux_name(name)
+                            .map(|(_, ch)| ch)
+                    })
+                });
+                let channel_id = ChannelId::new(state.channel_id);
+                {
+                    let mut data = shared.core.lock().await;
+                    let session = data
+                        .sessions
+                        .entry(channel_id)
+                        .or_insert_with(|| DiscordSession {
+                            session_id: state.session_id.clone(),
+                            current_path: None,
+                            history: Vec::new(),
+                            pending_uploads: Vec::new(),
+                            cleared: false,
+                            remote_profile_name: None,
+                            channel_id: Some(state.channel_id),
+                            channel_name: effective_channel_name.clone(),
+                            category_name: None,
+                            last_active: tokio::time::Instant::now(),
+                            worktree: None,
+                            born_generation: super::runtime_store::load_generation(),
+                        });
+                    session.channel_id = Some(state.channel_id);
+                    session.last_active = tokio::time::Instant::now();
+                    if session.channel_name.is_none() {
+                        session.channel_name = effective_channel_name;
+                    }
+                }
                 clear_inflight_state(provider, state.channel_id);
                 continue;
             } else {
@@ -602,6 +633,45 @@ pub(super) async fn restore_inflight_turns(
                 "  [{ts}] ↻ inflight recovery: pane alive for channel {}, skipping reader → watcher adopt",
                 state.channel_id
             );
+            // Register session in-memory so restore_tmux_watchers can find it.
+            // Derive channel_name from tmux session name if not in inflight state.
+            let effective_channel_name = channel_name.clone().or_else(|| {
+                crate::services::provider::parse_provider_and_channel_from_tmux_name(
+                    &tmux_session_name,
+                )
+                .map(|(_, ch)| ch)
+            });
+            {
+                let channel_key = channel_id.get().to_string();
+                let last_path = settings_snapshot.last_sessions.get(&channel_key).cloned();
+                let saved_remote = settings_snapshot.last_remotes.get(&channel_key).cloned();
+                let mut data = shared.core.lock().await;
+                let session = data
+                    .sessions
+                    .entry(channel_id)
+                    .or_insert_with(|| DiscordSession {
+                        session_id: state.session_id.clone(),
+                        current_path: None,
+                        history: Vec::new(),
+                        pending_uploads: Vec::new(),
+                        cleared: false,
+                        remote_profile_name: saved_remote,
+                        channel_id: Some(channel_id.get()),
+                        channel_name: effective_channel_name.clone(),
+                        category_name: None,
+                        last_active: tokio::time::Instant::now(),
+                        worktree: None,
+                        born_generation: super::runtime_store::load_generation(),
+                    });
+                session.channel_id = Some(channel_id.get());
+                session.last_active = tokio::time::Instant::now();
+                if session.current_path.is_none() {
+                    session.current_path = last_path;
+                }
+                if session.channel_name.is_none() {
+                    session.channel_name = effective_channel_name;
+                }
+            }
             clear_inflight_state(provider, state.channel_id);
             continue;
         }

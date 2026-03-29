@@ -900,8 +900,8 @@ pub(super) async fn handle_text_message(
                         .unwrap_or_else(|| canonical.clone());
                     let (ch_name_resolved, cat_name) =
                         resolve_channel_category(ctx, channel_id).await;
-                    let existing = load_existing_session(&eff_path, Some(channel_id.get()));
                     {
+                        // Session ID comes from DB (sessions.claude_session_id), not from file.
                         let mut data = shared.core.lock().await;
                         let session =
                             data.sessions
@@ -927,14 +927,6 @@ pub(super) async fn handle_text_message(
                         session.channel_id = Some(channel_id.get());
                         session.last_active = tokio::time::Instant::now();
                         session.worktree = wt_info;
-                        if let Some((session_data, _)) = &existing {
-                            session.history = session_data.history.clone();
-                            session.session_id = if session_data.session_id.is_empty() {
-                                None
-                            } else {
-                                Some(session_data.session_id.clone())
-                            };
-                        }
                     }
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ▶ Auto-started session from workspace: {eff_path}");
@@ -1928,9 +1920,6 @@ async fn handle_file_upload(
                     content: upload_record.clone(),
                 });
                 session.pending_uploads.push(upload_record);
-                if let Some(ref path) = session.current_path {
-                    save_session_to_file(session, path);
-                }
             }
         }
     }

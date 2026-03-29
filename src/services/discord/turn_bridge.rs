@@ -1359,7 +1359,56 @@ pub(super) fn spawn_turn_bridge(
                 channel_id
             );
         } else {
-            if full_response.is_empty() {
+            // Check for resume failure BEFORE any other response handling.
+            // This must be outside the is_empty() block because StreamMessage::Error
+            // sets full_response to "Error: No conversation found..." which is non-empty.
+            let resume_error_in_response = full_response.contains("No conversation found")
+                || full_response.contains("Error: No conversation");
+            if resume_error_in_response {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ Resume failed (error in response), clearing session_id (channel {})",
+                    channel_id
+                );
+                // Clear all 3 locations
+                let stale_sid = {
+                    let mut data = shared_owned.core.lock().await;
+                    let old = data
+                        .sessions
+                        .get(&channel_id)
+                        .and_then(|s| s.session_id.clone());
+                    if let Some(session) = data.sessions.get_mut(&channel_id) {
+                        session.session_id = None;
+                    }
+                    old
+                };
+                if let Some(ref key) = adk_session_key {
+                    super::adk_session::clear_claude_session_id(key, shared_owned.api_port)
+                        .await;
+                }
+                if let Some(ref sid) = stale_sid {
+                    let port = shared_owned.api_port;
+                    let sid_c = sid.clone();
+                    tokio::spawn(async move {
+                        let _ = reqwest::Client::new()
+                            .post(crate::config::local_api_url(
+                                port,
+                                "/api/dispatched-sessions/clear-stale-session-id",
+                            ))
+                            .json(&serde_json::json!({"claude_session_id": sid_c}))
+                            .send()
+                            .await;
+                    });
+                }
+                // Auto-retry with Discord history context
+                let http_c = http.clone();
+                let retry_text = user_text_owned.clone();
+                let retry_port = shared_owned.api_port;
+                tokio::spawn(async move {
+                    auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
+                });
+                full_response = String::new(); // Suppress error message to user
+            } else if full_response.is_empty() {
                 // Fallback: try to extract response from tmux output file
                 if let Some(ref path) = inflight_state.output_path {
                     let recovered = super::recovery::extract_response_from_output_pub(
@@ -1377,17 +1426,16 @@ pub(super) fn spawn_turn_bridge(
                     }
                 }
 
-                // Check for resume failure BEFORE other response handling.
-                // Covers both empty response AND error text in response.
-                let resume_error_in_response = full_response.contains("No conversation found")
-                    || full_response.contains("Error: No conversation");
-                if resume_error_in_response {
+                // Check for resume failure in recovered output
+                let resume_error_in_recovered =
+                    full_response.contains("No conversation found")
+                        || full_response.contains("Error: No conversation");
+                if resume_error_in_recovered {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     eprintln!(
-                        "  [{ts}] ⚠ Resume failed (error in response), clearing session_id (channel {})",
+                        "  [{ts}] ⚠ Resume failed (stale session_id in recovered output), auto-retrying (channel {})",
                         channel_id
                     );
-                    // Clear all 3 locations
                     let stale_sid = {
                         let mut data = shared_owned.core.lock().await;
                         let old = data
@@ -1404,10 +1452,6 @@ pub(super) fn spawn_turn_bridge(
                             .await;
                     }
                     if let Some(ref sid) = stale_sid {
-                        if let Some(root) = crate::cli::agentdesk_runtime_root() {
-                            let f = root.join("ai_sessions").join(format!("{sid}.json"));
-                            let _ = std::fs::remove_file(&f);
-                        }
                         let port = shared_owned.api_port;
                         let sid_c = sid.clone();
                         tokio::spawn(async move {
@@ -1421,20 +1465,18 @@ pub(super) fn spawn_turn_bridge(
                                 .await;
                         });
                     }
-                    // Auto-retry with Discord history context
                     let http_c = http.clone();
                     let retry_text = user_text_owned.clone();
                     let retry_port = shared_owned.api_port;
                     tokio::spawn(async move {
-                        auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
+                        auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port)
+                            .await;
                     });
-                    full_response = String::new(); // Suppress error message to user
-                } else if full_response.is_empty() {
+                    full_response = String::new();
+                } else {
                     // Check for resume failure via other methods
                     let mut resume_failed = false;
                     let quick_exit = turn_start.elapsed().as_secs() < 10;
-                    let _had_session_id =
-                        new_session_id.is_none() && bridge.new_session_id.is_none();
                     // Method 1: check tmux output file
                     if let Some(ref path) = inflight_state.output_path {
                         if let Ok(content) = std::fs::read_to_string(path) {
@@ -1444,11 +1486,9 @@ pub(super) fn spawn_turn_bridge(
                                 resume_failed = true;
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 eprintln!(
-                                    "  [{ts}] ⚠ Resume failed (stale session_id), auto-retrying with fresh session (channel {})",
+                                    "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
                                     channel_id
                                 );
-                                // Clear stale session_id from ALL 3 storage locations:
-                                // 1. In-memory
                                 let stale_sid = {
                                     let mut data = shared_owned.core.lock().await;
                                     let old_sid = data
@@ -1460,7 +1500,6 @@ pub(super) fn spawn_turn_bridge(
                                     }
                                     old_sid
                                 };
-                                // 2. DB
                                 if let Some(ref key) = adk_session_key {
                                     super::adk_session::clear_claude_session_id(
                                         key,
@@ -1468,17 +1507,6 @@ pub(super) fn spawn_turn_bridge(
                                     )
                                     .await;
                                 }
-                                // 3. Session file on disk (ai_sessions/{id}.json)
-                                if let Some(ref sid) = stale_sid {
-                                    if let Some(root) = crate::cli::agentdesk_runtime_root() {
-                                        let session_file =
-                                            root.join("ai_sessions").join(format!("{sid}.json"));
-                                        if session_file.exists() {
-                                            let _ = std::fs::remove_file(&session_file);
-                                        }
-                                    }
-                                }
-                                // Also clear any other sessions in DB with same stale ID via API
                                 if let Some(ref sid) = stale_sid {
                                     let port = shared_owned.api_port;
                                     let sid_clone = sid.clone();
@@ -1494,7 +1522,6 @@ pub(super) fn spawn_turn_bridge(
                                             .await;
                                     });
                                 }
-                                // Auto-retry with Discord history context
                                 let http_c = http.clone();
                                 let retry_text = user_text_owned.clone();
                                 let retry_port = shared_owned.api_port;
@@ -1507,7 +1534,7 @@ pub(super) fn spawn_turn_bridge(
                                     )
                                     .await;
                                 });
-                                full_response = String::new(); // Suppress error message
+                                full_response = String::new();
                             }
                         }
                     }
@@ -1527,7 +1554,6 @@ pub(super) fn spawn_turn_bridge(
                                 "  [{ts}] ⚠ Quick exit with empty response — auto-retrying with fresh session (channel {})",
                                 channel_id
                             );
-                            // Clear all 3 locations
                             let stale_sid = {
                                 let mut data = shared_owned.core.lock().await;
                                 let old = data
@@ -1547,10 +1573,6 @@ pub(super) fn spawn_turn_bridge(
                                 .await;
                             }
                             if let Some(ref sid) = stale_sid {
-                                if let Some(root) = crate::cli::agentdesk_runtime_root() {
-                                    let f = root.join("ai_sessions").join(format!("{sid}.json"));
-                                    let _ = std::fs::remove_file(&f);
-                                }
                                 let port = shared_owned.api_port;
                                 let sid_c = sid.clone();
                                 tokio::spawn(async move {
@@ -1564,8 +1586,6 @@ pub(super) fn spawn_turn_bridge(
                                         .await;
                                 });
                             }
-                            // Auto-retry with fresh session
-                            // Auto-retry with Discord history context
                             let http_c = http.clone();
                             let retry_text = user_text_owned.clone();
                             let retry_port = shared_owned.api_port;
@@ -1578,7 +1598,7 @@ pub(super) fn spawn_turn_bridge(
                                 )
                                 .await;
                             });
-                            full_response = String::new(); // Suppress error message
+                            full_response = String::new();
                         }
                     }
                     if !resume_failed {
@@ -1711,9 +1731,8 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
-        // Update in-memory session under lock, then do file I/O outside the
-        // lock to avoid blocking other tasks (including health checks).
-        let (file_save_info, session_id_to_persist) = {
+        // Update in-memory session under lock.
+        let session_id_to_persist = {
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
                 if !session.cleared && !is_prompt_too_long {
@@ -1728,25 +1747,14 @@ pub(super) fn spawn_turn_bridge(
                         item_type: HistoryType::Assistant,
                         content: full_response.clone(),
                     });
-                    let current_path = session.current_path.clone();
-                    let channel_name = session.channel_name.clone();
-                    let persisted_sid = session.session_id.clone();
-                    let info = current_path.map(|path| {
-                        let snapshot = session.clone();
-                        (path, channel_name, snapshot)
-                    });
-                    (info, persisted_sid)
+                    session.session_id.clone()
                 } else {
-                    (None, None)
+                    None
                 }
             } else {
-                (None, None)
+                None
             }
         };
-        // File I/O runs without holding core lock
-        if let Some((path, _channel_name, session_snapshot)) = file_save_info {
-            save_session_to_file(&session_snapshot, &path);
-        }
 
         // Persist provider session_id to DB so it survives dcserver restarts.
         if let (Some(ref session_key), Some(ref persisted_sid)) =

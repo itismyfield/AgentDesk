@@ -1,0 +1,5 @@
+# macOS TCC 보호 경로 제외 (FDA 팝업 방지)
+Library/
+Applications/
+.Trash/
+

@@ -39,7 +39,7 @@ use crate::services::claude::{
 use crate::services::codex;
 use crate::services::gemini;
 use crate::services::provider::ProviderKind;
-use crate::ui::ai_screen::{self, HistoryItem, HistoryType, SessionData};
+use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
 
 use adk_session::{
     build_adk_session_key, derive_adk_session_info, parse_dispatch_id, post_adk_session_status,
@@ -1562,7 +1562,6 @@ pub async fn run_bot(
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
-            let ctx_clone = ctx.clone();
             let shared_for_migrate = shared_clone.clone();
             let health_registry_for_setup = health_registry.clone();
             let provider_for_setup = provider.clone();
@@ -1599,11 +1598,7 @@ pub async fn run_bot(
                 // Enrich role_map.json with channelId for reliable name→ID resolution
                 enrich_role_map_with_channel_ids();
 
-                // Background: resolve category names for all known channels
                 let shared_for_tmux = shared_for_migrate.clone();
-                tokio::spawn(async move {
-                    migrate_session_categories(&ctx_clone, &shared_for_migrate).await;
-                });
 
                 // Background: poll for deferred restart marker when idle
                 let shared_for_deferred = shared_for_tmux.clone();
@@ -2514,8 +2509,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
 // Command functions removed — see commands/ submodule.
 // Remaining in mod.rs: detect_worktree_conflict, create_git_worktree, cleanup_git_worktree,
 // send_file_to_channel, send_message_to_channel, send_message_to_user, auto_restore_session,
-// bootstrap_thread_session, load_existing_session, cleanup_session_files, resolve_channel_category,
-// and other non-command functions.
+// bootstrap_thread_session, resolve_channel_category, and other non-command functions.
 
 // ─── Text message → Claude AI ───────────────────────────────────────────────
 
@@ -2795,7 +2789,8 @@ pub(super) async fn auto_restore_session(
 
     if let Some(last_path) = last_path {
         if is_remote || Path::new(&last_path).is_dir() {
-            let existing = load_existing_session(&last_path, Some(channel_id.get()));
+            // Session ID is restored from DB (sessions.claude_session_id column)
+            // which is already loaded into DiscordSession.session_id at startup.
             let session = data
                 .sessions
                 .entry(channel_id)
@@ -2818,22 +2813,6 @@ pub(super) async fn auto_restore_session(
             session.channel_id = Some(channel_id.get());
             session.last_active = tokio::time::Instant::now();
             session.current_path = Some(last_path.clone());
-            let current_gen = runtime_store::load_generation();
-            if let Some((session_data, _)) = existing {
-                // Restore session_id and history regardless of generation.
-                // If the session_id is stale (Claude CLI died), auto-retry
-                // will detect "No conversation found" and create a fresh session
-                // with Discord history context.
-                session.session_id = Some(session_data.session_id.clone());
-                session.history = session_data.history.clone();
-                if session_data.born_generation < current_gen && current_gen > 0 {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ↻ Adopting old-gen session for {last_path} (gen {} → {current_gen})",
-                        session_data.born_generation
-                    );
-                }
-            }
             drop(data);
 
             // Rescan skills with project path
@@ -2868,13 +2847,12 @@ async fn bootstrap_thread_session(
         // Not a thread (shouldn't happen here) — fall back to resolved name
         _thread_title
     };
-    let existing = load_existing_session(parent_path, Some(thread_channel_id.get()));
-
     let mut data = shared.core.lock().await;
     if data.sessions.contains_key(&thread_channel_id) {
         return;
     }
 
+    // Session ID comes from DB (sessions.claude_session_id), not from file.
     let session = data
         .sessions
         .entry(thread_channel_id)
@@ -2893,105 +2871,8 @@ async fn bootstrap_thread_session(
             born_generation: runtime_store::load_generation(),
         });
     session.current_path = Some(parent_path.to_string());
-    if let Some((session_data, _)) = existing {
-        session.session_id = Some(session_data.session_id.clone());
-        session.history = session_data.history.clone();
-    }
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!("  [{ts}] ↻ Bootstrapped thread session from parent path: {parent_path}");
-}
-
-/// Load existing session from ai_sessions directory.
-/// Prefers sessions with a non-empty session_id. Among those, picks the most recently modified.
-pub(super) fn load_existing_session(
-    current_path: &str,
-    channel_id: Option<u64>,
-) -> Option<(SessionData, std::time::SystemTime)> {
-    let sessions_dir = ai_screen::ai_sessions_dir()?;
-
-    if !sessions_dir.exists() {
-        return None;
-    }
-
-    let mut best_with_id: Option<(SessionData, std::time::SystemTime)> = None;
-    let mut best_without_id: Option<(SessionData, std::time::SystemTime)> = None;
-
-    if let Ok(entries) = fs::read_dir(&sessions_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(session_data) = serde_json::from_str::<SessionData>(&content) {
-                        if session_data.current_path == current_path {
-                            // Strict channel-aware restore when channel_id is provided.
-                            if let Some(cid) = channel_id {
-                                if session_data.discord_channel_id != Some(cid) {
-                                    continue;
-                                }
-                            }
-
-                            if let Ok(metadata) = path.metadata() {
-                                if let Ok(modified) = metadata.modified() {
-                                    let has_id = !session_data.session_id.is_empty();
-                                    let target = if has_id {
-                                        &mut best_with_id
-                                    } else {
-                                        &mut best_without_id
-                                    };
-                                    match target {
-                                        None => *target = Some((session_data, modified)),
-                                        Some((_, latest_time)) if modified > *latest_time => {
-                                            *target = Some((session_data, modified));
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Prefer sessions with a valid session_id
-    best_with_id.or(best_without_id)
-}
-
-/// Clean up stale session files for a given path, keeping only the one matching current_session_id.
-pub(super) fn cleanup_session_files(current_path: &str, current_session_id: Option<&str>) {
-    let Some(sessions_dir) = ai_screen::ai_sessions_dir() else {
-        return;
-    };
-    if !sessions_dir.exists() {
-        return;
-    }
-
-    let Ok(entries) = fs::read_dir(&sessions_dir) else {
-        return;
-    };
-
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if !path.extension().map(|e| e == "json").unwrap_or(false) {
-            continue;
-        }
-        // Don't delete the current session file
-        if let Some(sid) = current_session_id {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem == sid {
-                    continue;
-                }
-            }
-        }
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(old) = serde_json::from_str::<SessionData>(&content) {
-                if old.current_path == current_path {
-                    let _ = fs::remove_file(&path);
-                }
-            }
-        }
-    }
 }
 
 /// Resolve the channel name and parent category name for a Discord channel.
@@ -3182,179 +3063,6 @@ fn enrich_role_map_with_channel_ids() {
         if let Ok(pretty) = serde_json::to_string_pretty(&json) {
             let _ = runtime_store::atomic_write(&path, &pretty);
         }
-    }
-}
-
-/// On startup, resolve category names for all known channels and update session files.
-async fn migrate_session_categories(ctx: &serenity::prelude::Context, shared: &Arc<SharedData>) {
-    let sessions_dir = match ai_screen::ai_sessions_dir() {
-        Some(d) if d.exists() => d,
-        _ => return,
-    };
-
-    // Collect channel IDs from bot_settings.last_sessions
-    let channel_keys: Vec<(String, String)> = {
-        let settings = shared.settings.read().await;
-        settings
-            .last_sessions
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
-    };
-
-    let mut updated = 0usize;
-    for (channel_key, session_path) in &channel_keys {
-        let Ok(cid) = channel_key.parse::<u64>() else {
-            continue;
-        };
-        let channel_id = serenity::model::id::ChannelId::new(cid);
-        let (ch_name, cat_name) = resolve_channel_category(ctx, channel_id).await;
-        if ch_name.is_none() && cat_name.is_none() {
-            continue;
-        }
-
-        // Find the session file for this channel's path
-        let existing = load_existing_session(session_path, Some(cid));
-        if let Some((session_data, _)) = existing {
-            let file_path = sessions_dir.join(format!("{}.json", session_data.session_id));
-            if file_path.exists() {
-                // Read, update category fields, write back
-                if let Ok(content) = fs::read_to_string(&file_path) {
-                    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(obj) = val.as_object_mut() {
-                            obj.insert(
-                                "discord_channel_id".to_string(),
-                                serde_json::Value::Number(serde_json::Number::from(cid)),
-                            );
-                            if let Some(ref name) = ch_name {
-                                obj.insert(
-                                    "discord_channel_name".to_string(),
-                                    serde_json::Value::String(name.clone()),
-                                );
-                            }
-                            if let Some(ref cat) = cat_name {
-                                obj.insert(
-                                    "discord_category_name".to_string(),
-                                    serde_json::Value::String(cat.clone()),
-                                );
-                            }
-                            if let Ok(json) = serde_json::to_string_pretty(&val) {
-                                let _ = fs::write(&file_path, json);
-                                updated += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if updated > 0 {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] ✓ Updated {updated} session(s) with channel/category info");
-    }
-}
-
-/// Save session to file in the ai_sessions directory
-fn save_session_to_file(session: &DiscordSession, current_path: &str) {
-    let Some(ref session_id) = session.session_id else {
-        return;
-    };
-
-    if session.history.is_empty() {
-        return;
-    }
-
-    let Some(sessions_dir) = ai_screen::ai_sessions_dir() else {
-        return;
-    };
-
-    if fs::create_dir_all(&sessions_dir).is_err() {
-        return;
-    }
-
-    let saveable_history: Vec<HistoryItem> = session
-        .history
-        .iter()
-        .filter(|item| !matches!(item.item_type, HistoryType::System))
-        .cloned()
-        .collect();
-
-    if saveable_history.is_empty() {
-        return;
-    }
-
-    let file_path = sessions_dir.join(format!("{}.json", session_id));
-
-    if let Some(parent) = file_path.parent() {
-        if parent != sessions_dir {
-            return;
-        }
-    }
-
-    // Preserve existing category/channel names from the file when in-memory values are None
-    let (effective_channel_name, effective_category_name) =
-        if session.channel_name.is_none() || session.category_name.is_none() {
-            if let Ok(content) = fs::read_to_string(&file_path) {
-                if let Ok(existing) = serde_json::from_str::<SessionData>(&content) {
-                    (
-                        session
-                            .channel_name
-                            .clone()
-                            .or(existing.discord_channel_name),
-                        session
-                            .category_name
-                            .clone()
-                            .or(existing.discord_category_name),
-                    )
-                } else {
-                    (session.channel_name.clone(), session.category_name.clone())
-                }
-            } else {
-                (session.channel_name.clone(), session.category_name.clone())
-            }
-        } else {
-            (session.channel_name.clone(), session.category_name.clone())
-        };
-
-    // Clean up old session files for the same Discord channel (different session_id)
-    if let Ok(entries) = fs::read_dir(&sessions_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.extension().map(|e| e == "json").unwrap_or(false) {
-                let fname = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                if fname == session_id {
-                    continue;
-                } // keep current
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(old) = serde_json::from_str::<SessionData>(&content) {
-                        let same_channel = match (session.channel_id, old.discord_channel_id) {
-                            (Some(cid), Some(old_cid)) => cid == old_cid,
-                            _ => old.discord_channel_name == effective_channel_name,
-                        };
-                        if same_channel {
-                            let _ = fs::remove_file(&path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let session_data = SessionData {
-        session_id: session_id.clone(),
-        history: saveable_history,
-        current_path: current_path.to_string(),
-        created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        discord_channel_id: session.channel_id,
-        discord_channel_name: effective_channel_name,
-        discord_category_name: effective_category_name,
-        remote_profile_name: session.remote_profile_name.clone(),
-        born_generation: session.born_generation,
-    };
-
-    if let Ok(json) = serde_json::to_string_pretty(&session_data) {
-        let _ = fs::write(file_path, json);
     }
 }
 
