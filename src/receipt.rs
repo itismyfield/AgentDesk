@@ -141,7 +141,11 @@ fn shorten_model(model: &str) -> String {
         m if m.contains("gpt-5") => "GPT-5".into(),
         _ => {
             let s = model.to_string();
-            if s.len() > 20 { format!("{}...", &s[..18]) } else { s }
+            if s.len() > 20 {
+                format!("{}...", &s[..18])
+            } else {
+                s
+            }
         }
     }
 }
@@ -155,7 +159,9 @@ fn find_jsonl(root: &Path) -> Vec<PathBuf> {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -168,7 +174,11 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 
 // ── Claude Code JSONL parsing ──────────────────────────────────
 
-fn parse_claude(path: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> (Vec<UsageRecord>, u64, Option<String>) {
+fn parse_claude(
+    path: &Path,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> (Vec<UsageRecord>, u64, Option<String>) {
     let mut sid: Option<String> = None;
     // Deduplicate by requestId: a single API request can produce multiple
     // assistant entries in the JSONL (streaming chunks). Only the last entry
@@ -176,31 +186,67 @@ fn parse_claude(path: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> (Vec<U
     let mut by_request: HashMap<String, UsageRecord> = HashMap::new();
     let mut no_reqid_records: Vec<UsageRecord> = Vec::new();
 
-    let Ok(file) = fs::File::open(path) else { return (Vec::new(), 0, None) };
+    let Ok(file) = fs::File::open(path) else {
+        return (Vec::new(), 0, None);
+    };
     for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if line.is_empty() { continue; }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
 
-        let Some(ts_str) = v.get("timestamp").and_then(|t| t.as_str()) else { continue };
+        let Some(ts_str) = v.get("timestamp").and_then(|t| t.as_str()) else {
+            continue;
+        };
         let Some(ts) = parse_ts(ts_str) else { continue };
-        if ts < start || ts > end { continue; }
-
-        if sid.is_none() {
-            sid = v.get("sessionId").and_then(|s| s.as_str()).map(String::from);
+        if ts < start || ts > end {
+            continue;
         }
 
-        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") { continue; }
-        let Some(message) = v.get("message") else { continue };
-        let Some(usage) = message.get("usage") else { continue };
-        let model = message.get("model").and_then(|m| m.as_str()).unwrap_or("unknown");
-        if model == "<synthetic>" { continue; }
+        if sid.is_none() {
+            sid = v
+                .get("sessionId")
+                .and_then(|s| s.as_str())
+                .map(String::from);
+        }
+
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(message) = v.get("message") else {
+            continue;
+        };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        let model = message
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown");
+        if model == "<synthetic>" {
+            continue;
+        }
 
         let rec = UsageRecord {
             model: model.into(),
-            input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            cache_read_tokens: usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            cache_creation_tokens: usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+            input_tokens: usage
+                .get("input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            output_tokens: usage
+                .get("output_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            cache_read_tokens: usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            cache_creation_tokens: usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
             provider: "Claude".into(),
         };
 
@@ -220,47 +266,89 @@ fn parse_claude(path: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> (Vec<U
 
 // ── Codex JSONL parsing ────────────────────────────────────────
 
-fn parse_codex(path: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> (Vec<UsageRecord>, u64, Option<String>) {
+fn parse_codex(
+    path: &Path,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> (Vec<UsageRecord>, u64, Option<String>) {
     let mut records = Vec::new();
     let mut msgs = 0u64;
     let mut sid: Option<String> = None;
     let mut current_model = String::from("codex");
 
-    let Ok(file) = fs::File::open(path) else { return (records, 0, None) };
+    let Ok(file) = fs::File::open(path) else {
+        return (records, 0, None);
+    };
     for line in BufReader::new(file).lines().map_while(Result::ok) {
-        if line.is_empty() { continue; }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let rtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         if rtype == "session_meta" {
             // Codex stores session id in payload.id (not top-level id)
-            sid = v.get("payload").and_then(|p| p.get("id")).and_then(|s| s.as_str())
+            sid = v
+                .get("payload")
+                .and_then(|p| p.get("id"))
+                .and_then(|s| s.as_str())
                 .or_else(|| v.get("id").and_then(|s| s.as_str()))
                 .map(String::from);
             continue;
         }
         if rtype == "turn_context" {
-            if let Some(m) = v.get("payload").and_then(|p| p.get("model")).and_then(|m| m.as_str()) {
+            if let Some(m) = v
+                .get("payload")
+                .and_then(|p| p.get("model"))
+                .and_then(|m| m.as_str())
+            {
                 current_model = m.into();
             }
             continue;
         }
-        if rtype != "event_msg" { continue; }
+        if rtype != "event_msg" {
+            continue;
+        }
 
-        let Some(payload) = v.get("payload") else { continue };
-        if payload.get("type").and_then(|t| t.as_str()) != Some("token_count") { continue; }
+        let Some(payload) = v.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(|t| t.as_str()) != Some("token_count") {
+            continue;
+        }
 
-        let Some(ts_str) = v.get("timestamp").and_then(|t| t.as_str()) else { continue };
+        let Some(ts_str) = v.get("timestamp").and_then(|t| t.as_str()) else {
+            continue;
+        };
         let Some(ts) = parse_ts(ts_str) else { continue };
-        if ts < start || ts > end { continue; }
+        if ts < start || ts > end {
+            continue;
+        }
 
-        let Some(info) = payload.get("info") else { continue };
-        if info.is_null() { continue; }
-        let Some(last) = info.get("last_token_usage") else { continue };
+        let Some(info) = payload.get("info") else {
+            continue;
+        };
+        if info.is_null() {
+            continue;
+        }
+        let Some(last) = info.get("last_token_usage") else {
+            continue;
+        };
 
-        let input = last.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let cached = last.get("cached_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let output = last.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let input = last
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cached = last
+            .get("cached_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = last
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
 
         msgs += 1;
         records.push(UsageRecord {
@@ -290,7 +378,11 @@ fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
 
 pub fn ratelimit_window_start(conn: &rusqlite::Connection) -> Option<DateTime<Utc>> {
     let data: String = conn
-        .query_row("SELECT data FROM rate_limit_cache WHERE provider = 'claude' LIMIT 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT data FROM rate_limit_cache WHERE provider = 'claude' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
         .ok()?;
     let parsed: Value = serde_json::from_str(&data).ok()?;
     let buckets = parsed.get("buckets")?.as_array()?;
@@ -319,7 +411,9 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
         let (recs, msgs, sid) = parse_claude(f, start, end);
         if !recs.is_empty() {
             total_msgs += msgs;
-            if let Some(s) = sid { sessions.insert(s); }
+            if let Some(s) = sid {
+                sessions.insert(s);
+            }
             all.extend(recs);
         }
     }
@@ -327,7 +421,9 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
         let (recs, msgs, sid) = parse_codex(f, start, end);
         if !recs.is_empty() {
             total_msgs += msgs;
-            if let Some(s) = sid { sessions.insert(s); }
+            if let Some(s) = sid {
+                sessions.insert(s);
+            }
             all.extend(recs);
         }
     }
@@ -340,7 +436,9 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
         acc.output_tokens += r.output_tokens;
         acc.cache_read_tokens += r.cache_read_tokens;
         acc.cache_creation_tokens += r.cache_creation_tokens;
-        if acc.provider.is_empty() { acc.provider.clone_from(&r.provider); }
+        if acc.provider.is_empty() {
+            acc.provider.clone_from(&r.provider);
+        }
     }
 
     // Sort by cost descending
@@ -368,7 +466,10 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
             output_tokens: acc.output_tokens,
             cache_read_tokens: acc.cache_read_tokens,
             cache_creation_tokens: acc.cache_creation_tokens,
-            total_tokens: acc.input_tokens + acc.output_tokens + acc.cache_read_tokens + acc.cache_creation_tokens,
+            total_tokens: acc.input_tokens
+                + acc.output_tokens
+                + acc.cache_read_tokens
+                + acc.cache_creation_tokens,
             cost,
             cost_without_cache: sub,
             provider: acc.provider.clone(),
@@ -387,10 +488,18 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
         .map(|(prov, tok)| ProviderShare {
             provider: prov,
             tokens: tok,
-            percentage: if total_tok > 0 { tok as f64 / total_tok as f64 * 100.0 } else { 0.0 },
+            percentage: if total_tok > 0 {
+                tok as f64 / total_tok as f64 * 100.0
+            } else {
+                0.0
+            },
         })
         .collect();
-    providers.sort_by(|a, b| b.percentage.partial_cmp(&a.percentage).unwrap_or(cmp::Ordering::Equal));
+    providers.sort_by(|a, b| {
+        b.percentage
+            .partial_cmp(&a.percentage)
+            .unwrap_or(cmp::Ordering::Equal)
+    });
 
     let start_local = start.with_timezone(&Local);
     let end_local = end.with_timezone(&Local);
@@ -403,9 +512,59 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
         subtotal: grand_sub,
         cache_discount: (grand_sub - grand_total).max(0.0),
         total: grand_total,
-        stats: ReceiptStats { total_messages: total_msgs, total_sessions: sessions.len() as u64 },
+        stats: ReceiptStats {
+            total_messages: total_msgs,
+            total_sessions: sessions.len() as u64,
+        },
         providers,
     }
+}
+
+/// Split a receipt into per-provider receipts — each contains only models from
+/// one provider.  This is used by the Discord command to render separate PNG
+/// receipts per provider.
+pub fn split_by_provider(data: &ReceiptData) -> Vec<ReceiptData> {
+    use std::collections::HashMap;
+
+    let mut order: Vec<String> = Vec::new();
+    let mut by_prov: HashMap<String, Vec<ModelLineItem>> = HashMap::new();
+    for m in &data.models {
+        by_prov
+            .entry(m.provider.clone())
+            .or_default()
+            .push(m.clone());
+        if !order.contains(&m.provider) {
+            order.push(m.provider.clone());
+        }
+    }
+
+    if order.len() <= 1 {
+        return vec![data.clone()];
+    }
+
+    order
+        .into_iter()
+        .map(|prov| {
+            let models = by_prov.remove(&prov).unwrap_or_default();
+            let subtotal: f64 = models.iter().map(|m| m.cost).sum();
+            let total_tokens: u64 = models.iter().map(|m| m.total_tokens).sum();
+            ReceiptData {
+                period_label: data.period_label.clone(),
+                period_start: data.period_start.clone(),
+                period_end: data.period_end.clone(),
+                subtotal,
+                cache_discount: 0.0,
+                total: subtotal,
+                stats: data.stats.clone(),
+                providers: vec![ProviderShare {
+                    provider: prov,
+                    tokens: total_tokens,
+                    percentage: 100.0,
+                }],
+                models,
+            }
+        })
+        .collect()
 }
 
 // ── HTML rendering ─────────────────────────────────────────────
@@ -457,7 +616,8 @@ pub fn render_html(data: &ReceiptData) -> String {
                 model_pct_rows.push_str(&format!(
                     r#"<div class="sl sm"><span>{}</span><span>{:.1}%</span></div>
 "#,
-                    esc(&m.display_name), pct,
+                    esc(&m.display_name),
+                    pct,
                 ));
             }
         }
@@ -465,7 +625,11 @@ pub fn render_html(data: &ReceiptData) -> String {
 
     // Savings calculation
     let savings = data.total - subscription_cost;
-    let savings_multiplier = if subscription_cost > 0.0 { data.total / subscription_cost } else { 0.0 };
+    let savings_multiplier = if subscription_cost > 0.0 {
+        data.total / subscription_cost
+    } else {
+        0.0
+    };
 
     format!(
         r##"<!DOCTYPE html>
@@ -506,14 +670,14 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
 <div class="pr">{period_start} ~ {period_end}</div>
 <hr class="sp">
 <div class="ch"><span class="cm">MODEL</span><span class="ct">TOKENS</span><span class="cc">API COST</span></div>
-{model_rows}<hr class="sp">
+{provider_sections}<hr class="sp">
 <div class="sl b"><span>SUBTOTAL</span><span>{no_cache_cost}</span></div>
 {cache_discount_row}
 <hr class="ds">
 <div class="tl"><span>API COST</span><span>{api_cost}</span></div>
 <hr class="sp">
 <div class="sl b"><span>SUBSCRIPTION</span><span>$200</span></div>
-<div class="sl sv"><span>YOU SAVED</span><span>{savings} ({multiplier:.0f}x)</span></div>
+<div class="sl sv"><span>YOU SAVED</span><span>{savings} ({multiplier:.0}x)</span></div>
 <hr class="ds">
 <div class="ss">
 <div class="st">MODEL USAGE</div>
@@ -530,8 +694,8 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
 <div class="vr">AgentDesk v{version}</div>
 </div>
 </body></html>"##,
-        title = if single_provider && !provider_name.is_empty() {
-            format!("{} TOKEN RECEIPT", esc(provider_name).to_uppercase())
+        title = if providers_order.len() == 1 && !providers_order[0].is_empty() {
+            format!("{} TOKEN RECEIPT", esc(&providers_order[0]).to_uppercase())
         } else {
             "AI TOKEN RECEIPT".into()
         },
@@ -539,9 +703,12 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
         period_label = esc(&data.period_label),
         period_start = esc(&data.period_start),
         period_end = esc(&data.period_end),
-        model_rows = model_rows,
+        provider_sections = provider_sections,
         cache_discount_row = if data.cache_discount > 0.001 {
-            format!(r#"<div class="sl sv"><span>CACHE DISCOUNT</span><span>-{}</span></div>"#, fmt_cost(data.cache_discount))
+            format!(
+                r#"<div class="sl sv"><span>CACHE DISCOUNT</span><span>-{}</span></div>"#,
+                fmt_cost(data.cache_discount)
+            )
         } else {
             String::new()
         },
@@ -559,25 +726,42 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
 // ── Helpers ────────────────────────────────────────────────────
 
 fn fmt_tok(t: u64) -> String {
-    if t >= 1_000_000_000 { format!("{:.1}B", t as f64 / 1e9) }
-    else if t >= 1_000_000 { format!("{:.1}M", t as f64 / 1e6) }
-    else if t >= 1_000 { format!("{:.1}K", t as f64 / 1e3) }
-    else { t.to_string() }
+    if t >= 1_000_000_000 {
+        format!("{:.1}B", t as f64 / 1e9)
+    } else if t >= 1_000_000 {
+        format!("{:.1}M", t as f64 / 1e6)
+    } else if t >= 1_000 {
+        format!("{:.1}K", t as f64 / 1e3)
+    } else {
+        t.to_string()
+    }
 }
 
 fn fmt_cost(c: f64) -> String {
-    if c >= 100.0 { format!("${:.0}", c) }
-    else if c >= 1.0 { format!("${:.2}", c) }
-    else if c >= 0.01 { format!("${:.3}", c) }
-    else { format!("${:.4}", c) }
+    if c >= 100.0 {
+        format!("${:.0}", c)
+    } else if c >= 1.0 {
+        format!("${:.2}", c)
+    } else if c >= 0.01 {
+        format!("${:.3}", c)
+    } else {
+        format!("${:.4}", c)
+    }
 }
 
 fn fmt_num(n: u64) -> String {
-    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1e6) }
-    else if n >= 1_000 { format!("{},{:03}", n / 1000, n % 1000) }
-    else { n.to_string() }
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1e6)
+    } else if n >= 1_000 {
+        format!("{},{:03}", n / 1000, n % 1000)
+    } else {
+        n.to_string()
+    }
 }
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }

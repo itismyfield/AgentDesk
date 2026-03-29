@@ -67,6 +67,38 @@ fn read_recent_output_hint(output_path: &str) -> Option<String> {
     ))
 }
 
+/// Whether a follow-up FIFO error indicates the session should be killed and
+/// recreated.  Returns `true` for infrastructure failures (broken pipe, file
+/// not found, bad descriptor) but *not* for permission errors or unrelated I/O
+/// failures — those indicate a deeper issue that blind retry won't fix.
+pub fn should_recreate_session_after_followup_fifo_error(err: &str) -> bool {
+    if err.is_empty() {
+        return false;
+    }
+    // Broken pipe on write/flush — process on the other end is dead
+    if err.contains("Broken pipe") {
+        return true;
+    }
+    // FIFO file was deleted or doesn't exist
+    if err.contains("No such file or directory") || err.contains("entity not found") {
+        return true;
+    }
+    // Bad file descriptor — FIFO was closed or became invalid
+    if err.contains("Bad file descriptor") {
+        return true;
+    }
+    // No such device — FIFO target disappeared
+    if err.contains("No such device") {
+        return true;
+    }
+    false
+}
+
+/// Helper: returns true if tmux pane list output indicates at least one live pane.
+pub fn pane_list_has_live_pane(output: &str) -> bool {
+    output.lines().any(|line| line.trim() == "0")
+}
+
 pub fn build_tmux_death_diagnostic(
     tmux_session_name: &str,
     output_path: Option<&str>,
@@ -91,7 +123,7 @@ pub fn build_tmux_death_diagnostic(
 mod tests {
     use super::{
         build_tmux_death_diagnostic, clear_tmux_exit_reason, pane_list_has_live_pane,
-        record_tmux_exit_reason,
+        record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
     };
 
     #[test]

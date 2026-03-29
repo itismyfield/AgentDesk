@@ -907,11 +907,8 @@ pub fn handle_restart_dcserver(
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let launcher_str = launcher_path.to_string_lossy();
-    let create_result = crate::services::platform::tmux::create_session(
-        tmux_session,
-        None,
-        launcher_str.as_ref(),
-    );
+    let create_result =
+        crate::services::platform::tmux::create_session(tmux_session, None, launcher_str.as_ref());
 
     match create_result {
         Ok(output) if output.status.success() => {

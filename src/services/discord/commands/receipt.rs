@@ -10,8 +10,7 @@ use crate::receipt;
 #[poise::command(slash_command, rename = "receipt")]
 pub(in crate::services::discord) async fn cmd_receipt(
     ctx: Context<'_>,
-    #[description = "Period: month (30d) or ratelimit (current 7d window)"]
-    period: Option<String>,
+    #[description = "Period: month (30d) or ratelimit (current 7d window)"] period: Option<String>,
 ) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
@@ -31,7 +30,9 @@ pub(in crate::services::discord) async fn cmd_receipt(
     let (start, label) = match period_str {
         "ratelimit" => {
             let window_start = ctx.data().shared.db.as_ref().and_then(|db| {
-                db.lock().ok().and_then(|conn| receipt::ratelimit_window_start(&conn))
+                db.lock()
+                    .ok()
+                    .and_then(|conn| receipt::ratelimit_window_start(&conn))
             });
             (
                 window_start.unwrap_or_else(|| now - chrono::Duration::days(7)),
@@ -43,14 +44,13 @@ pub(in crate::services::discord) async fn cmd_receipt(
 
     // Collect data in blocking task (reads many JSONL files)
     let label_owned = label.to_string();
-    let data = tokio::task::spawn_blocking(move || {
-        receipt::collect(start, now, &label_owned)
-    })
-    .await
-    .map_err(|e| format!("receipt collection failed: {e}"))?;
+    let data = tokio::task::spawn_blocking(move || receipt::collect(start, now, &label_owned))
+        .await
+        .map_err(|e| format!("receipt collection failed: {e}"))?;
 
     if data.models.is_empty() {
-        ctx.say("No token usage data found for the selected period.").await?;
+        ctx.say("No token usage data found for the selected period.")
+            .await?;
         return Ok(());
     }
 
@@ -67,7 +67,11 @@ pub(in crate::services::discord) async fn cmd_receipt(
     ));
 
     for (i, r) in receipts.iter().enumerate() {
-        let prov_name = r.providers.first().map(|p| p.provider.as_str()).unwrap_or("unknown");
+        let prov_name = r
+            .providers
+            .first()
+            .map(|p| p.provider.as_str())
+            .unwrap_or("unknown");
         let html = receipt::render_html(r);
 
         let html_path = tmp_dir.join(format!("adk_receipt_{unique_id}_{i}.html"));
@@ -78,7 +82,8 @@ pub(in crate::services::discord) async fn cmd_receipt(
         let output = tokio::process::Command::new("playwright")
             .args([
                 "screenshot",
-                "--browser", "chromium",
+                "--browser",
+                "chromium",
                 "--full-page",
                 "--viewport-size=400,1",
                 &format!("file://{}", html_path.display()),
@@ -98,7 +103,8 @@ pub(in crate::services::discord) async fn cmd_receipt(
         }
 
         if Path::new(&png_path).exists() {
-            let attachment = CreateAttachment::path(&png_path).await
+            let attachment = CreateAttachment::path(&png_path)
+                .await
                 .map_err(|e| format!("failed to read PNG: {e}"))?;
             reply = reply.attachment(attachment);
         }
@@ -111,11 +117,18 @@ pub(in crate::services::discord) async fn cmd_receipt(
         let _ = std::fs::remove_file(f);
     }
 
-    println!("  [{ts}] \u{25b6} [{user_name}] Receipt sent ({} providers, total: {})",
-        receipts.len(), receipt_fmt_cost(data.total));
+    println!(
+        "  [{ts}] \u{25b6} [{user_name}] Receipt sent ({} providers, total: {})",
+        receipts.len(),
+        receipt_fmt_cost(data.total)
+    );
     Ok(())
 }
 
 fn receipt_fmt_cost(c: f64) -> String {
-    if c >= 1.0 { format!("${:.2}", c) } else { format!("${:.4}", c) }
+    if c >= 1.0 {
+        format!("${:.2}", c)
+    } else {
+        format!("${:.4}", c)
+    }
 }

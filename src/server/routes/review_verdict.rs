@@ -1219,8 +1219,7 @@ pub async fn aggregate_review_tuning(
 
 /// Well-known path for review tuning guidance file.
 pub fn review_tuning_guidance_path() -> std::path::PathBuf {
-    let root = crate::config::runtime_root()
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let root = crate::config::runtime_root().unwrap_or_else(|| std::path::PathBuf::from("."));
     root.join("runtime").join("review-tuning-guidance.txt")
 }
 

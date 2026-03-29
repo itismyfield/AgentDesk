@@ -1356,9 +1356,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
     // List all tmux sessions
     let output = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::task::spawn_blocking(|| {
-            crate::services::platform::tmux::list_session_names()
-        }),
+        tokio::task::spawn_blocking(|| crate::services::platform::tmux::list_session_names()),
     )
     .await
     {
