@@ -487,6 +487,130 @@ pub(super) fn clear_all_threads(conn: &rusqlite::Connection, card_id: &str) {
     .ok();
 }
 
+// ── Outbox worker trait ───────────────────────────────────────
+
+/// Trait for outbox side-effects (Discord notifications, followups).
+/// Extracted from `dispatch_outbox_loop` to allow mock injection in tests.
+pub(crate) trait OutboxNotifier: Send + Sync {
+    fn notify_dispatch(
+        &self,
+        db: crate::db::Db,
+        agent_id: String,
+        title: String,
+        card_id: String,
+        dispatch_id: String,
+    ) -> impl std::future::Future<Output = ()> + Send;
+
+    fn handle_followup(
+        &self,
+        db: crate::db::Db,
+        dispatch_id: String,
+    ) -> impl std::future::Future<Output = ()> + Send;
+}
+
+/// Production notifier that calls the real Discord functions.
+pub(crate) struct RealOutboxNotifier;
+
+impl OutboxNotifier for RealOutboxNotifier {
+    async fn notify_dispatch(
+        &self,
+        db: crate::db::Db,
+        agent_id: String,
+        title: String,
+        card_id: String,
+        dispatch_id: String,
+    ) {
+        send_dispatch_to_discord(&db, &agent_id, &title, &card_id, &dispatch_id).await;
+    }
+
+    async fn handle_followup(
+        &self,
+        db: crate::db::Db,
+        dispatch_id: String,
+    ) {
+        handle_completed_dispatch_followups(&db, &dispatch_id).await;
+    }
+}
+
+/// Process one batch of pending outbox entries.
+/// Returns the number of entries processed (0 if queue was empty).
+pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
+    db: &crate::db::Db,
+    notifier: &N,
+) -> usize {
+    let pending: Vec<(
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT id, dispatch_id, action, agent_id, card_id, title \
+             FROM dispatch_outbox WHERE status = 'pending' ORDER BY id ASC LIMIT 5",
+        ) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    };
+
+    let count = pending.len();
+    for (id, dispatch_id, action, agent_id, card_id, title) in pending {
+        // Mark as processing
+        if let Ok(conn) = db.lock() {
+            conn.execute(
+                "UPDATE dispatch_outbox SET status = 'processing' WHERE id = ?1",
+                [id],
+            )
+            .ok();
+        }
+
+        match action.as_str() {
+            "notify" => {
+                if let (Some(aid), Some(cid), Some(t)) = (agent_id, card_id, title) {
+                    notifier
+                        .notify_dispatch(db.clone(), aid, t, cid, dispatch_id.clone())
+                        .await;
+                }
+            }
+            "followup" => {
+                notifier.handle_followup(db.clone(), dispatch_id.clone()).await;
+            }
+            other => {
+                tracing::warn!("[dispatch-outbox] Unknown action: {other}");
+            }
+        }
+
+        // Mark done
+        if let Ok(conn) = db.lock() {
+            conn.execute(
+                "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now') WHERE id = ?1",
+                [id],
+            )
+            .ok();
+        }
+    }
+    count
+}
+
 /// Send a dispatch notification to the target agent's Discord channel.
 /// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
 /// The `DISPATCH:<uuid>` prefix is required for the dcserver to link the
@@ -1981,86 +2105,18 @@ pub(crate) async fn dispatch_outbox_loop(db: crate::db::Db) {
     tokio::time::sleep(Duration::from_secs(3)).await;
     tracing::info!("[dispatch-outbox] Worker started (adaptive backoff 500ms-5s)");
 
+    let notifier = RealOutboxNotifier;
     let mut poll_interval = Duration::from_millis(500);
     let max_interval = Duration::from_secs(5);
 
     loop {
         tokio::time::sleep(poll_interval).await;
 
-        // Fetch pending entries (oldest first, limit 5)
-        let pending: Vec<(
-            i64,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = {
-            let conn = match db.lock() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let mut stmt = match conn.prepare(
-                "SELECT id, dispatch_id, action, agent_id, card_id, title \
-                 FROM dispatch_outbox WHERE status = 'pending' ORDER BY id ASC LIMIT 5",
-            ) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            stmt.query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            })
-            .ok()
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
-        };
-
-        if pending.is_empty() {
+        let processed = process_outbox_batch(&db, &notifier).await;
+        if processed == 0 {
             poll_interval = (poll_interval.mul_f64(1.5)).min(max_interval);
-            continue;
-        }
-        poll_interval = Duration::from_millis(500);
-
-        for (id, dispatch_id, action, agent_id, card_id, title) in pending {
-            // Mark as processing
-            if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "UPDATE dispatch_outbox SET status = 'processing' WHERE id = ?1",
-                    [id],
-                )
-                .ok();
-            }
-
-            match action.as_str() {
-                "notify" => {
-                    if let (Some(ref aid), Some(ref cid), Some(ref t)) = (agent_id, card_id, title)
-                    {
-                        send_dispatch_to_discord(&db, aid, t, cid, &dispatch_id).await;
-                    }
-                }
-                "followup" => {
-                    handle_completed_dispatch_followups(&db, &dispatch_id).await;
-                }
-                other => {
-                    tracing::warn!("[dispatch-outbox] Unknown action: {other}");
-                }
-            }
-
-            // Mark done
-            if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now') WHERE id = ?1",
-                    [id],
-                )
-                .ok();
-            }
+        } else {
+            poll_interval = Duration::from_millis(500);
         }
     }
 }
