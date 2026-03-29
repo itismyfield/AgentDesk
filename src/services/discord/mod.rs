@@ -1692,6 +1692,7 @@ pub async fn run_bot(
                 let shared_for_restart_reports = shared_for_tmux.clone();
                 let provider_for_restore = provider.clone();
                 tokio::spawn(async move {
+                    gc_stale_fixed_working_sessions(&shared_for_tmux2).await;
                     restore_inflight_turns(&http_for_tmux, &shared_for_tmux2, &provider_for_restore).await;
 
                     // Restore pending intervention queues saved during previous SIGTERM
@@ -1815,10 +1816,12 @@ pub async fn run_bot(
                 // (idle/disconnected thread sessions older than 1 hour)
                 {
                     let api_port = shared_clone.api_port;
+                    let shared_for_session_gc = shared_clone.clone();
                     tokio::spawn(async move {
                         // Run every 10 minutes, initial delay 2 minutes
                         tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
                         loop {
+                            gc_stale_fixed_working_sessions(&shared_for_session_gc).await;
                             gc_stale_thread_sessions_via_api(api_port).await;
                             tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
                         }
@@ -2477,6 +2480,31 @@ async fn gc_stale_thread_sessions_via_api(api_port: u16) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!("  [{ts}] ⚠ Thread session GC error: {e}");
         }
+    }
+}
+
+/// Periodic GC: disconnect stale fixed-channel working sessions from the DB so
+/// restart recovery cannot restore dead provider session IDs.
+async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
+    let Some(db) = &shared.db else {
+        return;
+    };
+
+    let cleared = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!("  [{ts}] ⚠ Fixed-session GC lock error: {e}");
+                return;
+            }
+        };
+        crate::server::routes::dispatched_sessions::gc_stale_fixed_working_sessions_db(&conn)
+    };
+
+    if cleared > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("  [{ts}] 🧹 GC: disconnected {cleared} stale fixed-channel working session(s)");
     }
 }
 

@@ -155,9 +155,7 @@ async fn reset_session_for_auto_retry(
         .and_then(|guard| guard.clone())
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!(
-            "  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})"
-        );
+        eprintln!("  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})");
         record_tmux_exit_reason(
             &name,
             &format!("forcing fresh session before auto-retry: {reason}"),

@@ -10,6 +10,8 @@ use super::AppState;
 use super::session_activity::SessionActivityResolver;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 
+const STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL: &str = "-6 hours";
+
 /// Extract parent channel name from a thread channel name.
 /// Thread names follow the convention `{parent}-t{thread_id}` where thread_id
 /// is a numeric Discord channel ID (15+ digits).
@@ -705,6 +707,11 @@ pub async fn get_claude_session_id(
         }
     };
 
+    // Fixed-channel rows can survive a dcserver crash with status=working even
+    // when the underlying tmux/provider session is long dead. Clear those stale
+    // rows before attempting to restore a provider session_id.
+    let _ = disconnect_stale_fixed_session_by_key_db(&conn, &params.session_key);
+
     match conn.query_row(
         "SELECT claude_session_id FROM sessions WHERE session_key = ?1",
         [&params.session_key],
@@ -799,6 +806,40 @@ pub fn gc_stale_thread_sessions_db(conn: &rusqlite::Connection) -> usize {
            AND status IN ('idle', 'disconnected')
            AND last_heartbeat < datetime('now', '-1 hour')",
         [],
+    )
+    .unwrap_or(0)
+}
+
+/// Mark stale fixed-channel working sessions as disconnected so they cannot
+/// keep restoring dead provider session IDs after restart.
+pub fn gc_stale_fixed_working_sessions_db(conn: &rusqlite::Connection) -> usize {
+    conn.execute(
+        "UPDATE sessions
+         SET status = 'disconnected',
+             active_dispatch_id = NULL,
+             claude_session_id = NULL
+         WHERE thread_channel_id IS NULL
+           AND status = 'working'
+           AND COALESCE(last_heartbeat, created_at) < datetime('now', ?1)",
+        [STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL],
+    )
+    .unwrap_or(0)
+}
+
+fn disconnect_stale_fixed_session_by_key_db(
+    conn: &rusqlite::Connection,
+    session_key: &str,
+) -> usize {
+    conn.execute(
+        "UPDATE sessions
+         SET status = 'disconnected',
+             active_dispatch_id = NULL,
+             claude_session_id = NULL
+         WHERE session_key = ?1
+           AND thread_channel_id IS NULL
+           AND status = 'working'
+           AND COALESCE(last_heartbeat, created_at) < datetime('now', ?2)",
+        rusqlite::params![session_key, STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL],
     )
     .unwrap_or(0)
 }
