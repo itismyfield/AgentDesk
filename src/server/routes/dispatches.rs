@@ -2038,11 +2038,31 @@ pub(crate) async fn dispatch_outbox_loop(db: crate::db::Db) {
                 .ok();
             }
 
+            let mut should_retry = false;
+
             match action.as_str() {
                 "notify" => {
                     if let (Some(ref aid), Some(ref cid), Some(ref t)) = (agent_id, card_id, title)
                     {
                         send_dispatch_to_discord(&db, aid, t, cid, &dispatch_id).await;
+
+                        // #174: Check if dispatch_notified marker was rolled back
+                        // (indicates Discord send failure). If absent, retry.
+                        let notified = db
+                            .lock()
+                            .ok()
+                            .and_then(|conn| {
+                                conn.query_row(
+                                    "SELECT 1 FROM kv_meta WHERE key = ?1",
+                                    [&format!("dispatch_notified:{dispatch_id}")],
+                                    |_| Ok(()),
+                                )
+                                .ok()
+                            })
+                            .is_some();
+                        if !notified {
+                            should_retry = true;
+                        }
                     }
                 }
                 "followup" => {
@@ -2053,13 +2073,56 @@ pub(crate) async fn dispatch_outbox_loop(db: crate::db::Db) {
                 }
             }
 
-            // Mark done
-            if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now') WHERE id = ?1",
-                    [id],
-                )
-                .ok();
+            // #174: Retry on transient Discord failure (max 3 attempts)
+            if should_retry {
+                let retry_count: i64 = db
+                    .lock()
+                    .ok()
+                    .and_then(|conn| {
+                        conn.query_row(
+                            "SELECT retry_count FROM dispatch_outbox WHERE id = ?1",
+                            [id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                    })
+                    .unwrap_or(0);
+
+                if retry_count < 3 {
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE dispatch_outbox SET status = 'pending', retry_count = retry_count + 1, \
+                             error = 'Discord send failed, will retry' WHERE id = ?1",
+                            [id],
+                        )
+                        .ok();
+                    }
+                    tracing::warn!(
+                        "[dispatch-outbox] Discord send failed for {dispatch_id}, retry {}/3",
+                        retry_count + 1
+                    );
+                } else {
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE dispatch_outbox SET status = 'failed', processed_at = datetime('now'), \
+                             error = 'Discord send failed after 3 retries' WHERE id = ?1",
+                            [id],
+                        )
+                        .ok();
+                    }
+                    tracing::warn!(
+                        "[dispatch-outbox] Discord send failed for {dispatch_id} after 3 retries, marking failed"
+                    );
+                }
+            } else {
+                // Mark done
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
+                        "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now') WHERE id = ?1",
+                        [id],
+                    )
+                    .ok();
+                }
             }
         }
     }
