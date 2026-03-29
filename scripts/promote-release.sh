@@ -8,7 +8,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ADK_DEV="$HOME/.adk/dev"
 ADK_REL="$HOME/.adk/release"
 PLIST_REL="com.agentdesk.release"
-REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO="${AGENTDESK_REPO_DIR:-}"
+if [ -z "$REPO" ]; then
+    REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+if [ ! -d "$REPO" ]; then
+    echo "✗ Repo not found: $REPO"
+    exit 1
+fi
+REPO="$(cd "$REPO" && pwd)"
 REPORT_CHANNEL_ID="${AGENTDESK_REPORT_CHANNEL_ID:-}"
 REPORT_PROVIDER="${AGENTDESK_REPORT_PROVIDER:-}"
 PROMOTE_DETACHED_CHILD="${AGENTDESK_PROMOTE_DETACHED_CHILD:-0}"
@@ -16,6 +24,7 @@ PROMOTE_LOG_PATH="${AGENTDESK_PROMOTE_LOG_PATH:-}"
 PROMOTE_HELPER_SESSION="${AGENTDESK_PROMOTE_HELPER_SESSION:-}"
 PROMOTE_TEST_MODE="${AGENTDESK_PROMOTE_TEST_MODE:-0}"
 PROMOTE_DELAY_SECS="${AGENTDESK_PROMOTE_DELAY_SECS:-2}"
+DASHBOARD_SOURCE=""
 
 echo "═══ ADK Promote Dev → Release ═══"
 
@@ -41,6 +50,18 @@ _tail_for_summary() {
     local log_path="$1"
     [ -f "$log_path" ] || return 0
     tail -n 12 "$log_path" 2>/dev/null || true
+}
+
+_resolve_dashboard_source() {
+    if [ -d "$ADK_DEV/dashboard/dist" ] && [ -f "$ADK_DEV/dashboard/dist/index.html" ]; then
+        printf '%s\n' "$ADK_DEV/dashboard/dist"
+        return 0
+    fi
+    if [ -d "$REPO/dashboard/dist" ] && [ -f "$REPO/dashboard/dist/index.html" ]; then
+        printf '%s\n' "$REPO/dashboard/dist"
+        return 0
+    fi
+    return 1
 }
 
 _finalize_detached_helper() {
@@ -107,6 +128,7 @@ exec >>$(printf '%q' "$log_path") 2>&1
 sleep $(printf '%q' "$PROMOTE_DELAY_SECS")
 export AGENTDESK_REPORT_CHANNEL_ID=$(printf '%q' "$REPORT_CHANNEL_ID")
 export AGENTDESK_REPORT_PROVIDER=$(printf '%q' "$REPORT_PROVIDER")
+export AGENTDESK_REPO_DIR=$(printf '%q' "$REPO")
 export AGENTDESK_PROMOTE_DETACHED_CHILD=1
 export AGENTDESK_PROMOTE_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_PROMOTE_HELPER_SESSION=$(printf '%q' "$helper_session")
@@ -146,6 +168,20 @@ fi
 
 echo "▸ Dev is healthy — proceeding"
 
+if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
+    echo "✗ Dashboard dist not found in dev or workspace — aborting promotion"
+    echo "  looked for:"
+    echo "    - $ADK_DEV/dashboard/dist/index.html"
+    echo "    - $REPO/dashboard/dist/index.html"
+    echo "  Run 'cd $REPO/dashboard && npm run build' to generate it"
+    exit 1
+fi
+if [ "$DASHBOARD_SOURCE" = "$REPO/dashboard/dist" ] && [ ! -f "$ADK_DEV/dashboard/dist/index.html" ]; then
+    echo "▸ Dashboard source: workspace fallback ($DASHBOARD_SOURCE)"
+else
+    echo "▸ Dashboard source: $DASHBOARD_SOURCE"
+fi
+
 if _self_hosted_release_session; then
     _spawn_detached_helper "$@"
     exit 0
@@ -159,6 +195,13 @@ fi
 
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
+
+# Stage dashboard before stopping release so missing dist never causes downtime.
+echo "▸ Staging dashboard..."
+mkdir -p "$ADK_REL/dashboard"
+DIST_STAGED="$ADK_REL/dashboard/dist.new"
+rm -rf "$DIST_STAGED"
+cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 
 # Stop release
 echo "▸ Stopping release..."
@@ -181,22 +224,6 @@ fi
 # Lock binary to prevent unsigned overwrites
 chflags uchg "$ADK_REL/bin/agentdesk"
 
-# Copy dashboard from dev (with fallback to workspace source)
-# Stage into a temp dir first, then swap — never delete existing dist before new one is ready
-echo "▸ Copying dashboard from dev..."
-mkdir -p "$ADK_REL/dashboard"
-DIST_STAGED="$ADK_REL/dashboard/dist.new"
-rm -rf "$DIST_STAGED"
-if [ -d "$ADK_DEV/dashboard/dist" ] && [ -f "$ADK_DEV/dashboard/dist/index.html" ]; then
-    cp -r "$ADK_DEV/dashboard/dist" "$DIST_STAGED"
-elif [ -d "$REPO/dashboard/dist" ] && [ -f "$REPO/dashboard/dist/index.html" ]; then
-    echo "  ⚠ Dev dist missing, falling back to workspace source"
-    cp -r "$REPO/dashboard/dist" "$DIST_STAGED"
-else
-    echo "✗ Dashboard dist not found in dev or workspace — aborting promotion"
-    echo "  Run 'cd $REPO/dashboard && npm run build' to generate it"
-    exit 1
-fi
 # Atomic swap: old → .old, staged → dist, cleanup
 rm -rf "$ADK_REL/dashboard/dist.old"
 [ -d "$ADK_REL/dashboard/dist" ] && mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"

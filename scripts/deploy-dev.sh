@@ -7,7 +7,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ADK_DEV="$HOME/.adk/dev"
 PLIST="com.agentdesk.dev"
-REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO="${AGENTDESK_REPO_DIR:-}"
+if [ -z "$REPO" ]; then
+    REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+if [ ! -d "$REPO" ]; then
+    echo "✗ Repo not found: $REPO"
+    exit 1
+fi
+REPO="$(cd "$REPO" && pwd)"
 REPORT_CHANNEL_ID="${AGENTDESK_REPORT_CHANNEL_ID:-}"
 REPORT_PROVIDER="${AGENTDESK_REPORT_PROVIDER:-}"
 DEV_DEPLOY_DETACHED_CHILD="${AGENTDESK_DEPLOY_DEV_DETACHED_CHILD:-0}"
@@ -106,6 +114,7 @@ exec >>$(printf '%q' "$log_path") 2>&1
 sleep $(printf '%q' "$DEV_DEPLOY_DELAY_SECS")
 export AGENTDESK_REPORT_CHANNEL_ID=$(printf '%q' "$REPORT_CHANNEL_ID")
 export AGENTDESK_REPORT_PROVIDER=$(printf '%q' "$REPORT_PROVIDER")
+export AGENTDESK_REPO_DIR=$(printf '%q' "$REPO")
 export AGENTDESK_DEPLOY_DEV_DETACHED_CHILD=1
 export AGENTDESK_DEPLOY_DEV_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_DEPLOY_DEV_HELPER_SESSION=$(printf '%q' "$helper_session")
