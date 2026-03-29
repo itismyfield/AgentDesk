@@ -1302,6 +1302,71 @@ mod tests {
     }
 
     // ── #160: Process-level restart/delivery boundary tests ────
+    //
+    // Infrastructure: MockNotifier + process_outbox_batch + DB fallback helpers.
+    // Tests exercise actual outbox worker code paths, not raw SQL.
+
+    use crate::server::routes::dispatches::{OutboxNotifier, process_outbox_batch};
+
+    /// Mock Discord transport that records calls and optionally fails.
+    struct MockNotifier {
+        calls: std::sync::Mutex<Vec<MockCall>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum MockCall {
+        Notify {
+            agent_id: String,
+            dispatch_id: String,
+        },
+        Followup {
+            dispatch_id: String,
+        },
+    }
+
+    impl MockNotifier {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_log(&self) -> Vec<MockCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn notify_count(&self) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| matches!(c, MockCall::Notify { .. }))
+                .count()
+        }
+    }
+
+    impl OutboxNotifier for MockNotifier {
+        async fn notify_dispatch(
+            &self,
+            _db: crate::db::Db,
+            agent_id: String,
+            _title: String,
+            _card_id: String,
+            dispatch_id: String,
+        ) {
+            self.calls.lock().unwrap().push(MockCall::Notify {
+                agent_id,
+                dispatch_id,
+            });
+        }
+
+        async fn handle_followup(&self, _db: crate::db::Db, dispatch_id: String) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::Followup { dispatch_id });
+        }
+    }
 
     fn seed_outbox(db: &db::Db, dispatch_id: &str, action: &str) {
         let conn = db.lock().unwrap();
@@ -1324,145 +1389,144 @@ mod tests {
             .collect()
     }
 
-    fn set_notified_marker(db: &db::Db, dispatch_id: &str) {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![format!("dispatch_notified:{dispatch_id}"), dispatch_id],
-        )
-        .unwrap();
-    }
-
-    fn has_notified_marker(db: &db::Db, dispatch_id: &str) -> bool {
+    fn has_reconcile_marker(db: &db::Db, dispatch_id: &str) -> bool {
         let conn = db.lock().unwrap();
         conn.query_row(
             "SELECT COUNT(*) > 0 FROM kv_meta WHERE key = ?1",
-            [&format!("dispatch_notified:{dispatch_id}")],
+            [&format!("reconcile_dispatch:{dispatch_id}")],
             |row| row.get(0),
         )
         .unwrap_or(false)
     }
 
-    /// Scenario 160-1: Outbox entry with notified marker = delivered (done).
-    /// Without marker = delivery failed → should stay retriable.
-    #[test]
-    fn scenario_160_1_outbox_notified_marker_determines_success() {
+    fn get_dispatch_result_json(db: &db::Db, dispatch_id: &str) -> Option<String> {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT result FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    /// Scenario 160-1: DB commit → outbox worker delivers exactly 1 notification.
+    ///
+    /// Exercises `process_outbox_batch` with MockNotifier to verify:
+    /// - Outbox entry transitions pending → processing → done
+    /// - Mock Discord transport receives exactly 1 notify call
+    #[tokio::test]
+    async fn scenario_160_1_outbox_batch_delivers_exactly_once() {
         let db = test_db();
         seed_agent(&db);
         seed_card(&db, "card-160", "ready");
-        seed_dispatch(&db, "d-160-ok", "card-160", "implementation", "pending");
-        seed_dispatch(&db, "d-160-fail", "card-160", "implementation", "pending");
+        seed_dispatch(&db, "d-160-1", "card-160", "implementation", "pending");
+        seed_outbox(&db, "d-160-1", "notify");
 
-        seed_outbox(&db, "d-160-ok", "notify");
-        seed_outbox(&db, "d-160-fail", "notify");
+        let mock = MockNotifier::new();
 
-        // Simulate: d-160-ok was delivered (marker present)
-        set_notified_marker(&db, "d-160-ok");
-        // d-160-fail marker NOT set (delivery failed, marker rolled back)
+        // Run one batch — this exercises the real process_outbox_batch code path
+        let processed = process_outbox_batch(&db, &mock).await;
 
-        assert!(has_notified_marker(&db, "d-160-ok"));
-        assert!(!has_notified_marker(&db, "d-160-fail"));
+        assert_eq!(processed, 1, "Batch should process exactly 1 entry");
+        assert_eq!(
+            mock.notify_count(),
+            1,
+            "Mock should receive exactly 1 notify call"
+        );
+        assert_eq!(
+            mock.call_log(),
+            vec![MockCall::Notify {
+                agent_id: "agent-1".into(),
+                dispatch_id: "d-160-1".into(),
+            }]
+        );
+
+        // Verify outbox entry transitioned to done
+        assert_eq!(outbox_status(&db, "d-160-1"), vec!["done"]);
+
+        // Second batch should find nothing pending
+        let processed2 = process_outbox_batch(&db, &mock).await;
+        assert_eq!(processed2, 0, "No pending entries after first drain");
+        assert_eq!(mock.notify_count(), 1, "No additional calls on empty queue");
     }
 
-    /// Scenario 160-2: dispatch_notified dedup guard prevents double notification.
-    /// If marker is already set, INSERT OR IGNORE returns 0 → skip.
-    #[test]
-    fn scenario_160_2_dispatch_notified_dedup_prevents_double_send() {
-        let db = test_db();
-
-        // First insertion succeeds
-        let conn = db.lock().unwrap();
-        let inserted: usize = conn
-            .execute(
-                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES ('dispatch_notified:dup-1', 'dup-1')",
-                [],
-            )
-            .unwrap();
-        assert_eq!(inserted, 1, "First insertion should succeed");
-
-        // Second insertion is a no-op (dedup guard)
-        let inserted2: usize = conn
-            .execute(
-                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES ('dispatch_notified:dup-1', 'dup-1')",
-                [],
-            )
-            .unwrap();
-        assert_eq!(inserted2, 0, "Duplicate insertion should be ignored");
-    }
-
-    /// Scenario 160-3: finalize_dispatch correctly completes a dispatch
-    /// and fires policy hooks (recovery path simulation).
+    /// Scenario 160-2: Recovery API failure → DB fallback completes dispatch
+    /// and sets reconciliation marker for onTick hook chain.
+    ///
+    /// Simulates the turn_bridge fallback path: when finalize_dispatch fails,
+    /// the system falls back to direct DB UPDATE + reconcile marker.
     #[tokio::test]
-    async fn scenario_160_3_finalize_dispatch_recovery_completion() {
+    async fn scenario_160_2_recovery_fallback_completes_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);
         seed_agent(&db);
         seed_card(&db, "card-160r", "in_progress");
         seed_dispatch(&db, "d-160r", "card-160r", "implementation", "pending");
 
-        // Simulate recovery: finalize_dispatch completes a pending dispatch
+        // Step 1: Verify finalize_dispatch works on the happy path
         let result = dispatch::finalize_dispatch(
             &db,
             &engine,
             "d-160r",
-            "recovery",
+            "recovery_completed_during_downtime",
             Some(&serde_json::json!({"summary": "completed during downtime"})),
         );
-        assert!(result.is_ok(), "finalize_dispatch should succeed");
-
+        assert!(
+            result.is_ok(),
+            "finalize_dispatch happy path should succeed"
+        );
         assert_eq!(get_dispatch_status(&db, "d-160r"), "completed");
-    }
 
-    /// Scenario 160-4: Outbox retry_count tracks failed delivery attempts.
-    /// After max retries (3), entry should be markable as failed.
-    #[test]
-    fn scenario_160_4_outbox_retry_count_tracks_failures() {
-        let db = test_db();
-        seed_agent(&db);
-        seed_card(&db, "card-160c", "ready");
-        seed_dispatch(&db, "d-160c", "card-160c", "implementation", "pending");
-        seed_outbox(&db, "d-160c", "notify");
+        // Step 2: Simulate the fallback path — when finalize_dispatch fails,
+        // turn_bridge does a direct DB UPDATE + reconciliation marker.
+        // This is the exact SQL from turn_bridge.rs:605-617.
+        seed_card(&db, "card-160r2", "in_progress");
+        seed_dispatch(&db, "d-160r2", "card-160r2", "implementation", "pending");
 
-        let conn = db.lock().unwrap();
-        // Simulate 3 failed retries
-        for i in 1..=3 {
-            conn.execute(
-                "UPDATE dispatch_outbox SET retry_count = ?1 WHERE dispatch_id = 'd-160c'",
-                [i],
-            )
-            .unwrap();
+        // Execute the fallback SQL (mirrors turn_bridge.rs separate_conn path)
+        {
+            let fallback_conn = db.separate_conn().unwrap();
+            let changed = fallback_conn
+                .execute(
+                    "UPDATE task_dispatches SET status = 'completed', \
+                     result = '{\"completion_source\":\"turn_bridge_db_fallback\",\"needs_reconcile\":true}', \
+                     updated_at = datetime('now') WHERE id = ?1 AND status IN ('pending', 'dispatched')",
+                    ["d-160r2"],
+                )
+                .unwrap();
+            assert_eq!(changed, 1, "Fallback UPDATE should affect 1 row");
+
+            fallback_conn
+                .execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params!["reconcile_dispatch:d-160r2", "d-160r2"],
+                )
+                .unwrap();
         }
 
-        let retry_count: i64 = conn
-            .query_row(
-                "SELECT retry_count FROM dispatch_outbox WHERE dispatch_id = 'd-160c'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(retry_count, 3);
-
-        // After max retries, mark as failed
-        conn.execute(
-            "UPDATE dispatch_outbox SET status = 'failed', error = 'max retries exceeded' \
-             WHERE dispatch_id = 'd-160c' AND retry_count >= 3",
-            [],
-        )
-        .unwrap();
-
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM dispatch_outbox WHERE dispatch_id = 'd-160c'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "failed");
+        // Verify fallback outcome
+        assert_eq!(get_dispatch_status(&db, "d-160r2"), "completed");
+        assert!(
+            has_reconcile_marker(&db, "d-160r2"),
+            "Reconciliation marker must exist for onTick hook chain"
+        );
+        let result_json = get_dispatch_result_json(&db, "d-160r2").unwrap();
+        assert!(
+            result_json.contains("turn_bridge_db_fallback"),
+            "Result should record fallback completion source"
+        );
+        assert!(
+            result_json.contains("needs_reconcile"),
+            "Result should flag reconciliation needed"
+        );
     }
 
-    /// Scenario 160-5: Outbox entries are processed in FIFO order (id ASC).
-    #[test]
-    fn scenario_160_5_outbox_fifo_ordering() {
+    /// Scenario 160-3: Multiple outbox entries processed in FIFO order via
+    /// actual process_outbox_batch — mock records call sequence.
+    ///
+    /// Verifies: persisted queue order → catch-up order → no order reversal.
+    #[tokio::test]
+    async fn scenario_160_3_outbox_fifo_ordering_through_worker() {
         let db = test_db();
         seed_agent(&db);
         seed_card(&db, "card-160o", "ready");
@@ -1474,20 +1538,98 @@ mod tests {
         seed_outbox(&db, "d-160o-b", "notify");
         seed_outbox(&db, "d-160o-c", "notify");
 
-        // Query mirrors outbox worker: ORDER BY id ASC LIMIT 5
-        let conn = db.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT dispatch_id FROM dispatch_outbox \
-                 WHERE status = 'pending' ORDER BY id ASC LIMIT 5",
+        let mock = MockNotifier::new();
+        let processed = process_outbox_batch(&db, &mock).await;
+
+        assert_eq!(processed, 3);
+
+        // Verify FIFO order via mock call log
+        let ids: Vec<String> = mock
+            .call_log()
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::Notify { dispatch_id, .. } => Some(dispatch_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["d-160o-a", "d-160o-b", "d-160o-c"],
+            "Order reversal detected — outbox must process in id ASC (FIFO)"
+        );
+
+        // All entries should be done
+        assert_eq!(outbox_status(&db, "d-160o-a"), vec!["done"]);
+        assert_eq!(outbox_status(&db, "d-160o-b"), vec!["done"]);
+        assert_eq!(outbox_status(&db, "d-160o-c"), vec!["done"]);
+    }
+
+    /// Scenario 160-4: Duplicate outbox entries for the same dispatch → mock
+    /// receives calls for both (dedup is in send_dispatch_to_discord, not the loop).
+    /// But the outbox correctly processes all pending entries and transitions them.
+    #[tokio::test]
+    async fn scenario_160_4_outbox_processes_all_entries_including_duplicates() {
+        let db = test_db();
+        seed_agent(&db);
+        seed_card(&db, "card-160d", "ready");
+        seed_dispatch(&db, "d-160d", "card-160d", "implementation", "pending");
+
+        // Insert duplicate outbox entries for the same dispatch
+        seed_outbox(&db, "d-160d", "notify");
+        seed_outbox(&db, "d-160d", "notify");
+
+        let mock = MockNotifier::new();
+        let processed = process_outbox_batch(&db, &mock).await;
+
+        // Worker processes all pending entries — dedup is the notifier's job
+        assert_eq!(processed, 2, "Worker should process both pending entries");
+        assert_eq!(
+            mock.notify_count(),
+            2,
+            "Mock receives both calls (real send_dispatch_to_discord would dedup via marker)"
+        );
+
+        // Both entries should transition to done
+        assert_eq!(outbox_status(&db, "d-160d"), vec!["done", "done"]);
+    }
+
+    /// Scenario 160-5: Mixed actions (notify + followup) are dispatched to the
+    /// correct notifier methods through process_outbox_batch.
+    #[tokio::test]
+    async fn scenario_160_5_mixed_actions_route_correctly() {
+        let db = test_db();
+        seed_agent(&db);
+        seed_card(&db, "card-160m", "ready");
+        seed_dispatch(&db, "d-160m-n", "card-160m", "implementation", "pending");
+        seed_dispatch(&db, "d-160m-f", "card-160m", "implementation", "pending");
+
+        seed_outbox(&db, "d-160m-n", "notify");
+        // Insert followup entry manually (seed_outbox hardcodes card_id)
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO dispatch_outbox (dispatch_id, action, status) \
+                 VALUES ('d-160m-f', 'followup', 'pending')",
+                [],
             )
             .unwrap();
-        let order: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
+        }
 
-        assert_eq!(order, vec!["d-160o-a", "d-160o-b", "d-160o-c"]);
+        let mock = MockNotifier::new();
+        let processed = process_outbox_batch(&db, &mock).await;
+
+        assert_eq!(processed, 2);
+        assert_eq!(
+            mock.call_log(),
+            vec![
+                MockCall::Notify {
+                    agent_id: "agent-1".into(),
+                    dispatch_id: "d-160m-n".into(),
+                },
+                MockCall::Followup {
+                    dispatch_id: "d-160m-f".into(),
+                },
+            ]
+        );
     }
 }

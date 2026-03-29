@@ -469,6 +469,26 @@ pub async fn hook_session(
             // is spawned from the auto-complete path above (line ~252). Re-firing here caused
             // double hook execution → duplicate review-decision dispatches.
 
+            // #179: When session transitions to idle, trigger auto-queue to dispatch next entry.
+            // This closes the chain gap where onCardTerminal hasn't fired yet (card still in review)
+            // but the agent is already idle and could start the next queued item.
+            if status == "idle" {
+                if let Some(ref aid) = agent_id {
+                    let aid_clone = aid.clone();
+                    let port = crate::config::load_graceful().server.port;
+                    tokio::spawn(async move {
+                        // Small delay to let any in-flight card transitions settle
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        let url = crate::config::local_api_url(port, "/api/auto-queue/activate");
+                        let _ = reqwest::Client::new()
+                            .post(&url)
+                            .json(&serde_json::json!({"agent_id": aid_clone}))
+                            .send()
+                            .await;
+                    });
+                }
+            }
+
             // Emit session event for real-time dashboard update (#156)
             // Read the full session row (joined with agent data) from sessions table
             // to ensure fresh status/session_info rather than stale agents table data.

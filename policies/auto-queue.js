@@ -193,9 +193,10 @@ var autoQueue = {
     }
   },
 
-  // ── Periodic recovery: dispatch next entry for idle agents (#110, #140) ──
-  // Group-aware: finds idle agents with pending entries across all groups
-  onTick: function() {
+  // ── Periodic recovery: dispatch next entry for idle agents (#110, #140, #179) ──
+  // Group-aware: finds idle agents with pending entries across all groups.
+  // Uses 1min tick instead of 5min for faster recovery.
+  onTick1min: function() {
     var tickCfg = agentdesk.pipeline.getConfig();
     var tickKickoff = agentdesk.pipeline.kickoffState(tickCfg);
     var tickInProgress = agentdesk.pipeline.nextGatedTarget(tickKickoff, tickCfg);
@@ -277,10 +278,34 @@ var autoQueue = {
         );
         if (agentDispatched.length > 0 && agentDispatched[0].cnt >= run.mca) continue;
 
-        agentdesk.log.info("[auto-queue] onTick recovery: dispatching group " + grp + " for agent " + nextAgent);
+        agentdesk.log.info("[auto-queue] onTick1min recovery: dispatching group " + grp + " for agent " + nextAgent);
         dispatchNextEntryInGroup(nextAgent, run.id, grp);
         if (!aSet[grp]) tickDispatched++;
       }
+    }
+
+    // Recovery path 2 (#179): dispatched entries whose dispatch is stuck
+    // (cancelled/failed/completed without advancing the entry)
+    var stuckDispatched = agentdesk.db.query(
+      "SELECT e.id, e.agent_id, e.dispatch_id, e.kanban_card_id " +
+      "FROM auto_queue_entries e " +
+      "JOIN auto_queue_runs r ON e.run_id = r.id " +
+      "WHERE e.status = 'dispatched' AND r.status = 'active' " +
+      "AND e.dispatch_id IS NOT NULL " +
+      "AND EXISTS (" +
+      "  SELECT 1 FROM task_dispatches td " +
+      "  WHERE td.id = e.dispatch_id " +
+      "  AND td.status IN ('cancelled', 'failed')" +
+      ")",
+      []
+    );
+    for (var j = 0; j < stuckDispatched.length; j++) {
+      var stuck = stuckDispatched[j];
+      agentdesk.log.info("[auto-queue] onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + stuck.dispatch_id + " is cancelled/failed)");
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL WHERE id = ?",
+        [stuck.id]
+      );
     }
   }
 };
@@ -332,6 +357,19 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
 
 // Legacy helper for backward compatibility
 function dispatchNextEntry(agentId) {
+  // #179: Guard — skip if there's already a dispatched entry for this agent in the active run.
+  // Prevents onCardTerminal + onTick1min race from creating duplicate dispatches.
+  var alreadyDispatched = agentdesk.db.query(
+    "SELECT e.id FROM auto_queue_entries e " +
+    "JOIN auto_queue_runs r ON e.run_id = r.id " +
+    "WHERE e.agent_id = ? AND e.status = 'dispatched' AND r.status = 'active' LIMIT 1",
+    [agentId]
+  );
+  if (alreadyDispatched.length > 0) {
+    agentdesk.log.info("[auto-queue] Skipping dispatch for " + agentId + " — already has dispatched entry " + alreadyDispatched[0].id);
+    return;
+  }
+
   var nextEntry = agentdesk.db.query(
     "SELECT e.id, e.kanban_card_id, e.run_id, COALESCE(e.thread_group, 0) as thread_group, kc.title " +
     "FROM auto_queue_entries e " +

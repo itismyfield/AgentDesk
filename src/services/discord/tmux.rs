@@ -991,9 +991,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             .filter(|s| !name_to_channel.contains_key(**s))
             .collect();
         for session_name in &still_unresolved {
-            if let Some((_, ch_name)) =
-                parse_provider_and_channel_from_tmux_name(session_name)
-            {
+            if let Some((_, ch_name)) = parse_provider_and_channel_from_tmux_name(session_name) {
                 if let Some(pos) = ch_name.rfind("-t") {
                     let suffix = &ch_name[pos + 2..];
                     if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
@@ -1329,10 +1327,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
                 // A tmux pane with a running process is proof the session is in use.
                 if tmux_session_has_live_pane(session_name) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}]   skipped orphan (live pane): {}",
-                        session_name
-                    );
+                    println!("  [{ts}]   skipped orphan (live pane): {}", session_name);
                     continue;
                 }
 

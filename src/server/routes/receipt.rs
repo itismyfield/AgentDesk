@@ -70,8 +70,7 @@ pub async fn get_receipt(
             )
         }
         "all" => (
-            chrono::DateTime::from_timestamp(0, 0)
-                .unwrap_or(now - chrono::Duration::days(3650)),
+            chrono::DateTime::from_timestamp(0, 0).unwrap_or(now - chrono::Duration::days(3650)),
             "All Time",
         ),
         _ => (now - chrono::Duration::days(30), "Last 30 Days"),

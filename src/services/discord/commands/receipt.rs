@@ -131,8 +131,10 @@ pub(in crate::services::discord) async fn cmd_receipt(
     }
 
     if attached == 0 {
-        ctx.say("Failed to render receipt images. Check that Playwright and Chromium are installed.")
-            .await?;
+        ctx.say(
+            "Failed to render receipt images. Check that Playwright and Chromium are installed.",
+        )
+        .await?;
     } else {
         ctx.send(reply).await?;
     }
