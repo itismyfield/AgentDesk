@@ -12,6 +12,12 @@
 // Config (kv_meta):
 //   merge_automation_enabled  — "true" to enable (default: disabled)
 //   merge_strategy            — "squash" | "rebase" | "merge" (default: "squash")
+//   merge_allowed_authors     — comma-separated GitHub usernames for auto-merge
+//                               (e.g. "itismyfield,kunkunGames,bot[bot]")
+//
+// Manual merge trigger:
+//   Set kv: merge_request:{pr_number} = "{owner/repo}"
+//   OnTick5min picks it up and merges (no author check — explicit request)
 
 var mergeAutomation = {
   name: "merge-automation",
@@ -30,31 +36,21 @@ var mergeAutomation = {
       return;
     }
 
-    var strategy = agentdesk.config.get("merge_strategy") || "squash";
-    var result = agentdesk.exec("gh", [
-      "pr", "merge", String(pr.number),
-      "--auto", "--" + strategy,
-      "--repo", pr.repo
-    ]);
-
-    if (result && result.indexOf("ERROR") === 0) {
-      agentdesk.log.warn("[merge] Auto-merge failed for PR #" + pr.number + ": " + result);
-      // Store failure for dashboard visibility
-      agentdesk.kv.set("merge_failed:" + cardId, JSON.stringify({
-        pr_number: pr.number,
-        error: result,
-        timestamp: new Date().toISOString()
-      }), 86400);
-    } else {
-      agentdesk.log.info("[merge] Auto-merge enabled for PR #" + pr.number + " (" + strategy + ")");
-      agentdesk.kv.set("merge_pending:" + cardId, String(pr.number), 86400);
+    // Author check — only auto-merge PRs from allowed authors
+    var author = getPrAuthor(pr.number, pr.repo);
+    if (!isAllowedAuthor(author)) {
+      agentdesk.log.info("[merge] PR #" + pr.number + " author '" + author + "' not in allowed list, skipping auto-merge");
+      return;
     }
+
+    enableAutoMerge(pr.number, pr.repo, cardId);
   },
 
-  // ── Periodic: detect conflicts + cleanup merged branches ────────────
+  // ── Periodic: manual merge requests + conflicts + cleanup ────────────
   onTick5min: function() {
     if (!isEnabled()) return;
 
+    processManualMergeRequests();
     cleanupMergedWorktrees();
     detectConflictingPrs();
   }
@@ -64,6 +60,82 @@ var mergeAutomation = {
 
 function isEnabled() {
   return agentdesk.config.get("merge_automation_enabled") === "true";
+}
+
+/**
+ * Enable auto-merge on a PR (shared by auto and manual paths).
+ */
+function enableAutoMerge(prNumber, repo, trackingKey) {
+  var strategy = agentdesk.config.get("merge_strategy") || "squash";
+  var result = agentdesk.exec("gh", [
+    "pr", "merge", String(prNumber),
+    "--auto", "--" + strategy,
+    "--repo", repo
+  ]);
+
+  if (result && result.indexOf("ERROR") === 0) {
+    agentdesk.log.warn("[merge] Auto-merge failed for PR #" + prNumber + ": " + result);
+    agentdesk.kv.set("merge_failed:" + trackingKey, JSON.stringify({
+      pr_number: prNumber,
+      error: result,
+      timestamp: new Date().toISOString()
+    }), 86400);
+  } else {
+    agentdesk.log.info("[merge] Auto-merge enabled for PR #" + prNumber + " (" + strategy + ")");
+    agentdesk.kv.set("merge_pending:" + trackingKey, String(prNumber), 86400);
+  }
+}
+
+/**
+ * Get PR author login via gh CLI.
+ */
+function getPrAuthor(prNumber, repo) {
+  var json = agentdesk.exec("gh", [
+    "pr", "view", String(prNumber),
+    "--json", "author",
+    "--jq", ".author.login",
+    "--repo", repo
+  ]);
+  if (json && json.indexOf("ERROR") !== 0) {
+    return json.trim();
+  }
+  return "";
+}
+
+/**
+ * Check if author is in the allowed list for auto-merge.
+ * Reads merge_allowed_authors from kv_meta (comma-separated).
+ * If not configured, falls back to repo owner.
+ */
+function isAllowedAuthor(author) {
+  if (!author) return false;
+  var allowed = agentdesk.config.get("merge_allowed_authors");
+  if (allowed) {
+    var list = allowed.split(",").map(function(s) { return s.trim().toLowerCase(); });
+    return list.indexOf(author.toLowerCase()) >= 0;
+  }
+  // No allowlist configured — reject to be safe
+  agentdesk.log.info("[merge] merge_allowed_authors not configured, rejecting auto-merge");
+  return false;
+}
+
+/**
+ * Process manual merge requests from kv_meta.
+ * Set merge_request:{pr_number} = "{owner/repo}" to trigger.
+ * No author check — explicit manual request implies approval.
+ */
+function processManualMergeRequests() {
+  var requests = agentdesk.db.query(
+    "SELECT key, value FROM kv_meta WHERE key LIKE 'merge_request:%' AND (expires_at IS NULL OR expires_at > datetime('now'))",
+    []
+  );
+  for (var i = 0; i < requests.length; i++) {
+    var prNumber = requests[i].key.replace("merge_request:", "");
+    var repo = requests[i].value;
+    agentdesk.log.info("[merge] Processing manual merge request for PR #" + prNumber + " in " + repo);
+    enableAutoMerge(parseInt(prNumber, 10), repo, "manual:" + prNumber);
+    agentdesk.kv.delete(requests[i].key);
+  }
 }
 
 /**
