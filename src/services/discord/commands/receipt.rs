@@ -5,6 +5,7 @@ use serenity::CreateAttachment;
 
 use super::super::{Context, Error, check_auth};
 use crate::receipt;
+use crate::services::platform;
 
 /// /receipt — Show token usage receipts (one per provider) as PNG images
 #[poise::command(slash_command, rename = "receipt")]
@@ -54,6 +55,11 @@ pub(in crate::services::discord) async fn cmd_receipt(
         return Ok(());
     }
 
+    // Resolve playwright binary via login-shell PATH (launchd safety)
+    let playwright_bin = platform::async_resolve_binary_with_login_shell("playwright")
+        .await
+        .unwrap_or_else(|| "playwright".into());
+
     // Split into per-provider receipts
     let receipts = receipt::split_by_provider(&data);
 
@@ -61,6 +67,7 @@ pub(in crate::services::discord) async fn cmd_receipt(
     let tmp_dir = std::env::temp_dir();
     let unique_id = uuid::Uuid::new_v4();
     let mut temp_files: Vec<PathBuf> = Vec::new();
+    let mut attached = 0usize;
     let mut reply = poise::CreateReply::default().content(format!(
         "\u{1f9fe} **Token Receipt** \u{2014} {} ({} ~ {})",
         data.period_label, data.period_start, data.period_end
@@ -78,17 +85,21 @@ pub(in crate::services::discord) async fn cmd_receipt(
         let png_path = tmp_dir.join(format!("adk_receipt_{unique_id}_{i}.png"));
         std::fs::write(&html_path, &html).map_err(|e| format!("failed to write HTML: {e}"))?;
 
-        // viewport height=1 with --full-page makes Playwright fit content exactly (no bottom padding)
-        let output = tokio::process::Command::new("playwright")
-            .args([
-                "screenshot",
-                "--browser",
-                "chromium",
-                "--full-page",
-                "--viewport-size=400,1",
-                &format!("file://{}", html_path.display()),
-                &png_path.display().to_string(),
-            ])
+        let mut cmd = tokio::process::Command::new(&playwright_bin);
+        cmd.args([
+            "screenshot",
+            "--browser",
+            "chromium",
+            "--full-page",
+            "--viewport-size=400,1",
+            &format!("file://{}", html_path.display()),
+            &png_path.display().to_string(),
+        ]);
+        // Apply merged runtime PATH so playwright can find chromium in service environments
+        if let Some(merged) = platform::merged_runtime_path() {
+            cmd.env("PATH", merged);
+        }
+        let output = cmd
             .output()
             .await
             .map_err(|e| format!("playwright failed: {e}"))?;
@@ -107,10 +118,16 @@ pub(in crate::services::discord) async fn cmd_receipt(
                 .await
                 .map_err(|e| format!("failed to read PNG: {e}"))?;
             reply = reply.attachment(attachment);
+            attached += 1;
         }
     }
 
-    ctx.send(reply).await?;
+    if attached == 0 {
+        ctx.say("Failed to render receipt images. Check that Playwright and Chromium are installed.")
+            .await?;
+    } else {
+        ctx.send(reply).await?;
+    }
 
     // Cleanup temp files
     for f in &temp_files {

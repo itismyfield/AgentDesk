@@ -41,6 +41,10 @@ pub struct ModelLineItem {
 pub struct ReceiptStats {
     pub total_messages: u64,
     pub total_sessions: u64,
+    /// Per-provider message and session counts (provider → (messages, sessions)).
+    /// Populated by `collect()`, used by `split_by_provider()`.
+    #[serde(skip)]
+    pub per_provider: HashMap<String, (u64, u64)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -407,12 +411,18 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
     let mut total_msgs = 0u64;
     let mut sessions = HashSet::new();
 
+    // Per-provider stats tracking
+    let mut prov_msgs: HashMap<String, u64> = HashMap::new();
+    let mut prov_sessions: HashMap<String, HashSet<String>> = HashMap::new();
+
     for f in &claude_files {
         let (recs, msgs, sid) = parse_claude(f, start, end);
         if !recs.is_empty() {
             total_msgs += msgs;
+            *prov_msgs.entry("Claude".into()).or_default() += msgs;
             if let Some(s) = sid {
-                sessions.insert(s);
+                sessions.insert(s.clone());
+                prov_sessions.entry("Claude".into()).or_default().insert(s);
             }
             all.extend(recs);
         }
@@ -421,8 +431,10 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
         let (recs, msgs, sid) = parse_codex(f, start, end);
         if !recs.is_empty() {
             total_msgs += msgs;
+            *prov_msgs.entry("Codex".into()).or_default() += msgs;
             if let Some(s) = sid {
-                sessions.insert(s);
+                sessions.insert(s.clone());
+                prov_sessions.entry("Codex".into()).or_default().insert(s);
             }
             all.extend(recs);
         }
@@ -515,6 +527,16 @@ pub fn collect(start: DateTime<Utc>, end: DateTime<Utc>, period_label: &str) -> 
         stats: ReceiptStats {
             total_messages: total_msgs,
             total_sessions: sessions.len() as u64,
+            per_provider: prov_msgs
+                .into_iter()
+                .map(|(prov, msgs)| {
+                    let sess = prov_sessions
+                        .get(&prov)
+                        .map(|s| s.len() as u64)
+                        .unwrap_or(0);
+                    (prov, (msgs, sess))
+                })
+                .collect(),
         },
         providers,
     }
@@ -546,16 +568,27 @@ pub fn split_by_provider(data: &ReceiptData) -> Vec<ReceiptData> {
         .into_iter()
         .map(|prov| {
             let models = by_prov.remove(&prov).unwrap_or_default();
-            let subtotal: f64 = models.iter().map(|m| m.cost).sum();
+            let total: f64 = models.iter().map(|m| m.cost).sum();
+            let subtotal: f64 = models.iter().map(|m| m.cost_without_cache).sum();
             let total_tokens: u64 = models.iter().map(|m| m.total_tokens).sum();
+            let (prov_msgs, prov_sess) = data
+                .stats
+                .per_provider
+                .get(&prov)
+                .copied()
+                .unwrap_or((0, 0));
             ReceiptData {
                 period_label: data.period_label.clone(),
                 period_start: data.period_start.clone(),
                 period_end: data.period_end.clone(),
                 subtotal,
-                cache_discount: 0.0,
-                total: subtotal,
-                stats: data.stats.clone(),
+                cache_discount: (subtotal - total).max(0.0),
+                total,
+                stats: ReceiptStats {
+                    total_messages: prov_msgs,
+                    total_sessions: prov_sess,
+                    per_provider: HashMap::new(),
+                },
                 providers: vec![ProviderShare {
                     provider: prov,
                     tokens: total_tokens,
