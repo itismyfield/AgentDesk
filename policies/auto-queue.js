@@ -104,15 +104,18 @@ var autoQueue = {
     dispatchNextEntry(agentId);
   },
 
-  // ── Periodic recovery: dispatch next entry for idle agents (#110) ──
+  // ── Periodic recovery: dispatch next entry for idle agents (#110, #179) ──
   // Catches cases where onCardTerminal dispatch failed or was missed.
-  onTick: function() {
+  // Uses 1min tick instead of 5min for faster recovery.
+  onTick1min: function() {
     var tickCfg = agentdesk.pipeline.getConfig();
     var tickKickoff = agentdesk.pipeline.kickoffState(tickCfg);
     var tickInProgress = agentdesk.pipeline.nextGatedTarget(tickKickoff, tickCfg);
     var tickReview = agentdesk.pipeline.nextGatedTarget(tickInProgress, tickCfg);
     var tickActiveStates = [tickKickoff, tickInProgress, tickReview].filter(function(s) { return s; });
     var tickPlaceholders = tickActiveStates.map(function() { return "?"; }).join(",");
+
+    // Recovery path 1: pending entries with idle agent
     var idleWithQueue = agentdesk.db.query(
       "SELECT DISTINCT e.agent_id " +
       "FROM auto_queue_entries e " +
@@ -128,14 +131,51 @@ var autoQueue = {
 
     for (var i = 0; i < idleWithQueue.length; i++) {
       var agentId = idleWithQueue[i].agent_id;
-      agentdesk.log.info("[auto-queue] onTick recovery: idle agent " + agentId + " has pending entries, dispatching");
+      agentdesk.log.info("[auto-queue] onTick1min recovery: idle agent " + agentId + " has pending entries, dispatching");
       dispatchNextEntry(agentId);
+    }
+
+    // Recovery path 2 (#179): dispatched entries whose dispatch is stuck
+    // (cancelled/failed/completed without advancing the entry)
+    var stuckDispatched = agentdesk.db.query(
+      "SELECT e.id, e.agent_id, e.dispatch_id, e.kanban_card_id " +
+      "FROM auto_queue_entries e " +
+      "JOIN auto_queue_runs r ON e.run_id = r.id " +
+      "WHERE e.status = 'dispatched' AND r.status = 'active' " +
+      "AND e.dispatch_id IS NOT NULL " +
+      "AND EXISTS (" +
+      "  SELECT 1 FROM task_dispatches td " +
+      "  WHERE td.id = e.dispatch_id " +
+      "  AND td.status IN ('cancelled', 'failed')" +
+      ")",
+      []
+    );
+    for (var j = 0; j < stuckDispatched.length; j++) {
+      var stuck = stuckDispatched[j];
+      agentdesk.log.info("[auto-queue] onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + stuck.dispatch_id + " is cancelled/failed)");
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL WHERE id = ?",
+        [stuck.id]
+      );
     }
   }
 };
 
 // ── Shared dispatch helper ─────────────────────────────────────
 function dispatchNextEntry(agentId) {
+  // #179: Guard — skip if there's already a dispatched entry for this agent in the active run.
+  // Prevents onCardTerminal + onTick1min race from creating duplicate dispatches.
+  var alreadyDispatched = agentdesk.db.query(
+    "SELECT e.id FROM auto_queue_entries e " +
+    "JOIN auto_queue_runs r ON e.run_id = r.id " +
+    "WHERE e.agent_id = ? AND e.status = 'dispatched' AND r.status = 'active' LIMIT 1",
+    [agentId]
+  );
+  if (alreadyDispatched.length > 0) {
+    agentdesk.log.info("[auto-queue] Skipping dispatch for " + agentId + " — already has dispatched entry " + alreadyDispatched[0].id);
+    return;
+  }
+
   var nextEntry = agentdesk.db.query(
     "SELECT e.id, e.kanban_card_id, e.run_id, kc.title " +
     "FROM auto_queue_entries e " +
