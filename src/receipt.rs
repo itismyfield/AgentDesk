@@ -506,9 +506,11 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
 <div class="pr">{period_start} ~ {period_end}</div>
 <hr class="sp">
 <div class="ch"><span class="cm">MODEL</span><span class="ct">TOKENS</span><span class="cc">API COST</span></div>
-{model_rows}<hr class="ds">
+{model_rows}<hr class="sp">
+<div class="sl b"><span>SUBTOTAL</span><span>{no_cache_cost}</span></div>
+{cache_discount_row}
+<hr class="ds">
 <div class="tl"><span>API COST</span><span>{api_cost}</span></div>
-<div class="nc">(Without cache: {no_cache_cost})</div>
 <hr class="sp">
 <div class="sl b"><span>SUBSCRIPTION</span><span>$200</span></div>
 <div class="sl sv"><span>YOU SAVED</span><span>{savings} ({multiplier:.0f}x)</span></div>
@@ -538,6 +540,11 @@ body{{font-family:'Courier New',Courier,monospace;background:transparent;padding
         period_start = esc(&data.period_start),
         period_end = esc(&data.period_end),
         model_rows = model_rows,
+        cache_discount_row = if data.cache_discount > 0.001 {
+            format!(r#"<div class="sl sv"><span>CACHE DISCOUNT</span><span>-{}</span></div>"#, fmt_cost(data.cache_discount))
+        } else {
+            String::new()
+        },
         api_cost = fmt_cost(data.total),
         no_cache_cost = fmt_cost(data.subtotal),
         savings = fmt_cost(savings),
