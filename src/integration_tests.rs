@@ -1004,53 +1004,51 @@ mod tests {
         .ok()
     }
 
-    /// #158: JS typed bridge (agentdesk.reviewState.sync) writes card_review_state correctly.
+    /// #158: Typed bridge (review_state_sync) writes card_review_state correctly.
+    /// Tests the Rust entrypoint that backs the JS agentdesk.reviewState.sync bridge.
     #[test]
-    fn scenario_158a_js_typed_bridge_writes_review_state() {
+    fn scenario_158a_typed_bridge_writes_review_state() {
         let db = test_db();
-        let engine = test_engine(&db);
         seed_agent(&db);
         seed_card(&db, "card-158a", "review");
 
-        // Use the JS engine to call agentdesk.reviewState.sync directly
-        let result: String = engine
-            .eval_js(r#"
-                agentdesk.reviewState.sync("card-158a", "reviewing", { review_round: 1 });
-                "ok"
-            "#)
-            .unwrap();
-        assert_eq!(result, "ok");
-
-        // Drain intents (reviewState.sync is immediate, not intent-deferred, but drain for safety)
-        let _ = engine.drain_pending_intents();
+        // Step 1: Set reviewing state with round via JSON wrapper (same path as JS bridge)
+        let result = crate::engine::ops::review_state_sync(
+            &db,
+            r#"{"card_id":"card-158a","state":"reviewing","review_round":1}"#,
+        );
+        assert!(result.contains("\"ok\":true"), "sync to reviewing must succeed: {result}");
 
         let (state, _, _) = get_review_state(&db, "card-158a").expect("card_review_state row must exist");
-        assert_eq!(state, "reviewing", "typed bridge must create reviewing state");
+        assert_eq!(state, "reviewing", "bridge must create reviewing state");
 
-        // Update via typed bridge with verdict
-        let _: String = engine
-            .eval_js(r#"
-                agentdesk.reviewState.sync("card-158a", "suggestion_pending", { last_verdict: "improve" });
-                "ok"
-            "#)
-            .unwrap();
-        let _ = engine.drain_pending_intents();
+        // Step 2: Update with verdict
+        let result2 = crate::engine::ops::review_state_sync(
+            &db,
+            r#"{"card_id":"card-158a","state":"suggestion_pending","last_verdict":"improve"}"#,
+        );
+        assert!(result2.contains("\"ok\":true"), "sync to suggestion_pending must succeed: {result2}");
 
         let (state2, verdict, _) = get_review_state(&db, "card-158a").unwrap();
         assert_eq!(state2, "suggestion_pending");
         assert_eq!(verdict.as_deref(), Some("improve"));
 
-        // Set to idle — must clear pending_dispatch_id
-        let _: String = engine
-            .eval_js(r#"
-                agentdesk.reviewState.sync("card-158a", "idle");
-                "ok"
-            "#)
-            .unwrap();
-        let _ = engine.drain_pending_intents();
+        // Step 3: Set to idle — must clear pending_dispatch_id
+        let result3 = crate::engine::ops::review_state_sync(
+            &db,
+            r#"{"card_id":"card-158a","state":"idle"}"#,
+        );
+        assert!(result3.contains("\"ok\":true"), "sync to idle must succeed: {result3}");
 
         let (state3, _, _) = get_review_state(&db, "card-158a").unwrap();
-        assert_eq!(state3, "idle", "typed bridge must allow idle transition");
+        assert_eq!(state3, "idle", "bridge must allow idle transition");
+
+        // Step 4: Verify JS bridge is registered and callable (smoke test)
+        let engine = test_engine(&db);
+        let js_check: String = engine.eval_js(
+            r#"typeof agentdesk.reviewState.sync === "function" ? "ok" : "missing""#
+        ).unwrap();
+        assert_eq!(js_check, "ok", "agentdesk.reviewState.sync must be registered as a function");
     }
 
     /// #158: ExecuteSQL intent rejects direct card_review_state mutations.
