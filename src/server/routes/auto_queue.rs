@@ -658,11 +658,11 @@ pub async fn generate(
 
     let is_parallel = body.parallel.unwrap_or(false);
     let max_concurrent = if is_parallel {
-        body.max_concurrent_threads.unwrap_or(3).max(1)
+        body.max_concurrent_threads.unwrap_or(3).clamp(1, 10)
     } else {
         1 // Non-parallel: sequential dispatch, single group
     };
-    let max_per_agent = body.max_concurrent_per_agent.unwrap_or(1).max(1);
+    let max_per_agent = body.max_concurrent_per_agent.unwrap_or(1).clamp(1, 10);
 
     // ── Parallel mode: build dependency DAG, connected components, topo-sort (#140) ──
     let (grouped_entries, thread_group_count) = if is_parallel {
@@ -1055,7 +1055,7 @@ pub async fn activate(
     };
 
     // Count per-agent active dispatches (across all groups in this run)
-    let agent_dispatch_counts: HashMap<String, i64> = {
+    let mut agent_dispatch_counts: HashMap<String, i64> = {
         let mut stmt = conn
             .prepare(
                 "SELECT agent_id, COUNT(*) FROM auto_queue_entries \
@@ -1070,7 +1070,7 @@ pub async fn activate(
         .unwrap_or_default()
     };
 
-    let available_slots = (max_concurrent - active_groups.len() as i64).max(0) as usize;
+    let active_group_count = active_groups.len() as i64;
 
     // Find pending groups not currently active, ordered by group number
     let pending_groups: Vec<i64> = {
@@ -1126,8 +1126,11 @@ pub async fn activate(
         }
     }
 
-    // Add new groups from available slots
-    for &grp in pending_groups.iter().take(available_slots) {
+    // Add new groups from available slots (dynamic — check remaining capacity)
+    for &grp in &pending_groups {
+        if (active_group_count + groups_to_dispatch.len() as i64) >= max_concurrent {
+            break;
+        }
         if !groups_to_dispatch.contains(&grp) {
             groups_to_dispatch.push(grp);
         }
@@ -1295,6 +1298,9 @@ pub async fn activate(
             &card_id,
             &title,
         );
+
+        // #140: Update local per-agent count so subsequent iterations respect max_concurrent_per_agent
+        *agent_dispatch_counts.entry(agent_id.clone()).or_insert(0) += 1;
 
         let conn = state.db.separate_conn().unwrap();
         dispatched.push(entry_to_json(&conn, &entry_id));
