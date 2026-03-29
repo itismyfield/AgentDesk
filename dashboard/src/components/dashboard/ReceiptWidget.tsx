@@ -76,8 +76,8 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
 
   const periods: { id: Period; label: string }[] = [
     { id: "today", label: t({ ko: "오늘", en: "Today", ja: "今日", zh: "今天" }) },
-    { id: "week", label: t({ ko: "이번 주", en: "Week", ja: "今週", zh: "本周" }) },
-    { id: "month", label: t({ ko: "이번 달", en: "Month", ja: "今月", zh: "本月" }) },
+    { id: "week", label: t({ ko: "이번 주", en: "This Week", ja: "今週", zh: "本周" }) },
+    { id: "month", label: t({ ko: "이번 달", en: "This Month", ja: "今月", zh: "本月" }) },
     { id: "all", label: t({ ko: "전체", en: "All", ja: "全期間", zh: "全部" }) },
   ];
 
