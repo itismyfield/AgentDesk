@@ -162,10 +162,7 @@ var rules = {
         }
 
         // 디스패치 completed 처리
-        agentdesk.db.execute(
-          "UPDATE task_dispatches SET status = 'completed', result = ?, updated_at = datetime('now') WHERE id = ?",
-          [JSON.stringify({ verdict: verdict, auto_completed: true, source: "github_comment" }), payload.dispatch_id]
-        );
+        agentdesk.dispatch.markCompleted(payload.dispatch_id, JSON.stringify({ verdict: verdict, auto_completed: true, source: "github_comment" }));
         agentdesk.log.info("[kanban] review dispatch " + payload.dispatch_id + " auto-completed with verdict: " + verdict);
       }
     }

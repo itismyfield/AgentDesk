@@ -372,10 +372,17 @@ impl PolicyEngine {
                 };
 
                 let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
-                if let Err(e) = result {
-                    tracing::error!(
-                        "Dynamic hook {hook_name} in policy '{policy_name}' failed: {e}"
-                    );
+                if let Err(ref e) = result {
+                    let exception_detail = ctx.catch().into_exception()
+                        .map(|ex| {
+                            let msg = ex.message().unwrap_or_default();
+                            let stack = ex.stack().unwrap_or_default();
+                            format!("{msg}\n{stack}")
+                        })
+                        .unwrap_or_else(|| format!("{e}"));
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!("  [{ts}] ❌ Dynamic hook {hook_name} in policy '{policy_name}' failed: {exception_detail}");
+                    tracing::error!("Dynamic hook {hook_name} in policy '{policy_name}' failed: {exception_detail}");
                 }
             }
 
@@ -444,8 +451,17 @@ impl PolicyEngine {
                 };
 
                 let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
-                if let Err(e) = result {
-                    tracing::error!("Hook {} in policy '{}' failed: {e}", hook, policy_name);
+                if let Err(ref e) = result {
+                    let exception_detail = ctx.catch().into_exception()
+                        .map(|ex| {
+                            let msg = ex.message().unwrap_or_default();
+                            let stack = ex.stack().unwrap_or_default();
+                            format!("{msg}\n{stack}")
+                        })
+                        .unwrap_or_else(|| format!("{e}"));
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!("  [{ts}] ❌ Hook {hook} in policy '{policy_name}' failed: {exception_detail}");
+                    tracing::error!("Hook {hook} in policy '{policy_name}' failed: {exception_detail}");
                 }
             }
 

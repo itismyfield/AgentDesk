@@ -203,10 +203,7 @@ var timeouts = {
       var rc = staleRequested[i];
       // Dispatch를 failed로
       if (rc.latest_dispatch_id) {
-        agentdesk.db.execute(
-          "UPDATE task_dispatches SET status = 'failed', result ='Timed out waiting for agent', updated_at = datetime('now') WHERE id = ? AND status IN ('pending','dispatched')",
-          [rc.latest_dispatch_id]
-        );
+        agentdesk.dispatch.markFailed(rc.latest_dispatch_id, "Timed out waiting for agent");
       }
 
       if (rc.retry_count < MAX_DISPATCH_RETRIES) {
@@ -440,10 +437,7 @@ var timeouts = {
       "SELECT id, kanban_card_id FROM task_dispatches WHERE status IN ('pending','dispatched') AND created_at < datetime('now', '-24 hours')"
     );
     for (var sd = 0; sd < staleDispatches.length; sd++) {
-      agentdesk.db.execute(
-        "UPDATE task_dispatches SET status = 'failed', result ='Stale dispatch auto-failed after 24h', updated_at = datetime('now') WHERE id = ?",
-        [staleDispatches[sd].id]
-      );
+      agentdesk.dispatch.markFailed(staleDispatches[sd].id, "Stale dispatch auto-failed after 24h");
       if (staleDispatches[sd].kanban_card_id) {
         var card = agentdesk.kanban.getCard(staleDispatches[sd].kanban_card_id);
         if (card && !agentdesk.pipeline.isTerminal(card.status, gCfg)) {
@@ -553,10 +547,7 @@ var timeouts = {
           fd.title
         );
         // 새 디스패치에 retry_count 기록
-        agentdesk.db.execute(
-          "UPDATE task_dispatches SET retry_count = ? WHERE id = ?",
-          [newRetryCount, newDispatchId]
-        );
+        agentdesk.dispatch.setRetryCount(newDispatchId, newRetryCount);
         agentdesk.log.info("[retry] Auto-retry dispatch for card " + fd.kanban_card_id +
           " — attempt " + newRetryCount + "/" + MAX_DISPATCH_RETRIES +
           " (old: " + fd.id + " → new: " + newDispatchId + ")");
@@ -721,12 +712,7 @@ var timeouts = {
 
           if (dispInfo.length > 0 && (dispInfo[0].status === "pending" || dispInfo[0].status === "dispatched")) {
             var di = dispInfo[0];
-            agentdesk.db.execute(
-              "UPDATE task_dispatches SET status = 'failed', " +
-              "result = 'Deadlock auto-recovery: " + totalMin + "min timeout', " +
-              "updated_at = datetime('now') WHERE id = ? AND status IN ('pending','dispatched')",
-              [sess.active_dispatch_id]
-            );
+            agentdesk.dispatch.markFailed(sess.active_dispatch_id, "Deadlock auto-recovery: " + totalMin + "min timeout");
 
             try {
               agentdesk.dispatch.create(
@@ -854,12 +840,7 @@ var timeouts = {
     for (var op = 0; op < orphanedDispatches.length; op++) {
       var od = orphanedDispatches[op];
       // 1) Dispatch를 completed로 마크
-      agentdesk.db.execute(
-        "UPDATE task_dispatches SET status = 'completed', " +
-        "result = '{\"auto_completed\":true,\"completion_source\":\"orphan_recovery\"}', " +
-        "updated_at = datetime('now') WHERE id = ? AND status = 'pending'",
-        [od.dispatch_id]
-      );
+      agentdesk.dispatch.markCompleted(od.dispatch_id, '{"auto_completed":true,"completion_source":"orphan_recovery"}');
       // 2) Card를 review로 전이 → OnReviewEnter 훅이 review dispatch를 생성
       agentdesk.kanban.setStatus(od.kanban_card_id, kReview);
       agentdesk.log.warn("[orphan-recovery] Completed orphaned dispatch " + od.dispatch_id +

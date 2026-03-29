@@ -274,6 +274,13 @@ fn register_log_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
         })?,
     )?;
 
+    log_obj.set(
+        "debug",
+        Function::new(ctx.clone(), |msg: String| {
+            tracing::debug!(target: "policy", "{}", msg);
+        })?,
+    )?;
+
     ad.set("log", log_obj)?;
     Ok(())
 }
@@ -390,7 +397,7 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let dispatch_obj = Object::new(ctx.clone())?;
 
     // __dispatch_create_raw(card_id, agent_id, dispatch_type, title) → json_string
-    let db_d = db;
+    let db_d = db.clone();
     dispatch_obj.set(
         "__create_raw",
         Function::new(
@@ -404,6 +411,71 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     dispatch_create_raw(&db_d, &card_id, &agent_id, &dispatch_type, &title)
                 },
             ),
+        )?,
+    )?;
+
+    // __mark_failed_raw(dispatch_id, reason) → json_string
+    // Marks a dispatch as failed. Used by timeout handlers.
+    let db_mf = db.clone();
+    dispatch_obj.set(
+        "__mark_failed_raw",
+        Function::new(ctx.clone(), move |dispatch_id: String, reason: String| -> String {
+            let conn = match db_mf.separate_conn() {
+                Ok(c) => c,
+                Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
+            };
+            match conn.execute(
+                "UPDATE task_dispatches SET status = 'failed', result = ?1, updated_at = datetime('now') \
+                 WHERE id = ?2 AND status IN ('pending', 'dispatched')",
+                rusqlite::params![reason, dispatch_id],
+            ) {
+                Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+                Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
+            }
+        })?,
+    )?;
+
+    // __mark_completed_raw(dispatch_id, result_json) → json_string
+    // Marks a dispatch as completed. Used by orphan recovery.
+    let db_mc = db.clone();
+    dispatch_obj.set(
+        "__mark_completed_raw",
+        Function::new(ctx.clone(), move |dispatch_id: String, result_json: String| -> String {
+            let conn = match db_mc.separate_conn() {
+                Ok(c) => c,
+                Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
+            };
+            match conn.execute(
+                "UPDATE task_dispatches SET status = 'completed', result = ?1, updated_at = datetime('now') \
+                 WHERE id = ?2 AND status IN ('pending', 'dispatched')",
+                rusqlite::params![result_json, dispatch_id],
+            ) {
+                Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+                Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
+            }
+        })?,
+    )?;
+
+    // __set_retry_count_raw(dispatch_id, count) → json_string
+    // Updates retry_count for auto-retry tracking.
+    let db_rc = db;
+    dispatch_obj.set(
+        "__set_retry_count_raw",
+        Function::new(
+            ctx.clone(),
+            move |dispatch_id: String, count: i32| -> String {
+                let conn = match db_rc.separate_conn() {
+                    Ok(c) => c,
+                    Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
+                };
+                match conn.execute(
+                    "UPDATE task_dispatches SET retry_count = ?1 WHERE id = ?2",
+                    rusqlite::params![count, dispatch_id],
+                ) {
+                    Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+                    Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
+                }
+            },
         )?,
     )?;
 
@@ -432,6 +504,24 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     title: t
                 });
                 return dispatchId;
+            };
+            var rawFail = agentdesk.dispatch.__mark_failed_raw;
+            agentdesk.dispatch.markFailed = function(dispatchId, reason) {
+                var result = JSON.parse(rawFail(dispatchId, reason || ""));
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
+            var rawComplete = agentdesk.dispatch.__mark_completed_raw;
+            agentdesk.dispatch.markCompleted = function(dispatchId, resultJson) {
+                var result = JSON.parse(rawComplete(dispatchId, resultJson || "{}"));
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
+            var rawRetry = agentdesk.dispatch.__set_retry_count_raw;
+            agentdesk.dispatch.setRetryCount = function(dispatchId, count) {
+                var result = JSON.parse(rawRetry(dispatchId, count));
+                if (result.error) throw new Error(result.error);
+                return result;
             };
         })();
     "#,
@@ -1200,7 +1290,7 @@ pub fn review_state_sync(db: &Db, json_str: &str) -> String {
     // UPSERT: INSERT OR REPLACE with all fields
     let result = conn.execute(
         "INSERT INTO card_review_state (card_id, state, review_round, last_verdict, last_decision, pending_dispatch_id, approach_change_round, review_entered_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE(?8, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
+         VALUES (?1, ?2, COALESCE(?3, 0), ?4, ?5, ?6, ?7, COALESCE(?8, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
          ON CONFLICT(card_id) DO UPDATE SET \
          state = ?2, \
          review_round = COALESCE(?3, review_round), \
