@@ -401,13 +401,20 @@ fn get_thread_for_channel(
         }
     }
 
-    // Fallback: legacy active_thread_id (no channel distinction)
-    conn.query_row(
-        "SELECT active_thread_id FROM kanban_cards WHERE id = ?1 AND active_thread_id IS NOT NULL",
-        [card_id],
-        |row| row.get(0),
-    )
-    .ok()
+    // Fallback: legacy active_thread_id — only if channel_thread_map is empty/absent.
+    // When the map exists but doesn't contain this channel, the thread belongs to a
+    // different channel (e.g. CDX review thread) and must NOT be reused for the
+    // primary channel's review-decision message.
+    if map_json.as_deref().map_or(true, |s| s.is_empty() || s == "{}") {
+        return conn
+            .query_row(
+                "SELECT active_thread_id FROM kanban_cards WHERE id = ?1 AND active_thread_id IS NOT NULL",
+                [card_id],
+                |row| row.get(0),
+            )
+            .ok();
+    }
+    None
 }
 
 /// Set the thread_id for a specific channel in channel_thread_map.
@@ -1834,9 +1841,7 @@ fn format_dispatch_message(
         }
         // #193: Include branch info so reviewer inspects the correct code
         if let Some(branch) = review_branch {
-            let short_commit = reviewed_commit
-                .map(|c| &c[..8.min(c.len())])
-                .unwrap_or("?");
+            let short_commit = reviewed_commit.map(|c| &c[..8.min(c.len())]).unwrap_or("?");
             message.push_str(&format!(
                 "\n\n리뷰 대상 브랜치: `{branch}` (commit: `{short_commit}`)\n\
                  반드시 해당 브랜치를 checkout하여 리뷰하세요. main 브랜치가 아닙니다."
