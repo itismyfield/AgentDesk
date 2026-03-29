@@ -242,8 +242,10 @@ fn build_workspace_map() -> HashMap<PathBuf, String> {
 ///
 /// Resolution order:
 /// 1. Claude file path: encoded workspace dir always contains `workspaces-{name}`
-/// 2. cwd path: check `workspaces/` or `worktrees/` marker
-/// 3. cwd path: match against known workspace paths from filesystem
+/// 2. cwd path: match against known workspace/worktree paths from filesystem
+///    (build_workspace_map resolves worktrees → parent workspace via .git file)
+/// 3. cwd path: check `workspaces/` path marker (worktrees excluded — their
+///    directory names are ephemeral and don't correspond to agent names)
 /// 4. Fallback to provider name
 fn resolve_agent(
     file_path: &Path,
@@ -271,7 +273,17 @@ fn resolve_agent(
     if let Some(cwd) = cwd {
         let cwd_path = Path::new(cwd);
 
-        // 2. Look for workspaces/ or worktrees/ marker
+        // 2. Match cwd against known workspace/worktree paths (most accurate —
+        //    worktrees are resolved to their parent workspace by build_workspace_map)
+        for (ws_path, agent_name) in ws_map {
+            if cwd_path.starts_with(ws_path) {
+                return agent_name.clone();
+            }
+        }
+
+        // 3. Path marker heuristic — only `workspaces/` (NOT `worktrees/`)
+        //    Worktree directory names are ephemeral (e.g. codex-adk-cdx-t...,
+        //    claude-unknown-20260329-...) and do not correspond to agent names.
         let mut found_marker = false;
         for component in cwd_path.components() {
             if found_marker {
@@ -281,15 +293,8 @@ fn resolve_agent(
                 }
             }
             let s = component.as_os_str().to_string_lossy();
-            if s == "workspaces" || s == "worktrees" {
+            if s == "workspaces" {
                 found_marker = true;
-            }
-        }
-
-        // 3. Match cwd against known workspace paths
-        for (ws_path, agent_name) in ws_map {
-            if cwd_path.starts_with(ws_path) {
-                return agent_name.clone();
             }
         }
     }
