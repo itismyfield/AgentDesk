@@ -736,17 +736,29 @@ pub async fn activate(
         );
     }
 
-    // #179: Guard — skip if there's already a dispatched entry in-flight for this run.
-    // Prevents idle→activate from creating a second dispatch while one is still running.
-    let has_inflight: bool = conn
-        .query_row(
+    // #179: Guard — skip if there's already a dispatched entry in-flight for this agent
+    // across ANY active run (not just the selected run). Prevents multi-active-run scenarios
+    // where run B bypasses the guard because run A holds the in-flight entry.
+    let agent_filter = body.agent_id.as_deref().unwrap_or("");
+    let has_inflight: bool = if !agent_filter.is_empty() {
+        conn.query_row(
+            "SELECT COUNT(*) > 0 FROM auto_queue_entries e \
+             JOIN auto_queue_runs r ON e.run_id = r.id \
+             WHERE e.agent_id = ?1 AND e.status = 'dispatched' AND r.status = 'active'",
+            [agent_filter],
+            |row| row.get(0),
+        )
+        .unwrap_or(false)
+    } else {
+        conn.query_row(
             "SELECT COUNT(*) > 0 FROM auto_queue_entries WHERE run_id = ?1 AND status = 'dispatched'",
             [&run_id],
             |row| row.get(0),
         )
-        .unwrap_or(false);
+        .unwrap_or(false)
+    };
     if has_inflight {
-        tracing::info!("[auto-queue] Skipping activate: run {run_id} already has a dispatched entry in-flight");
+        tracing::info!("[auto-queue] Skipping activate: agent already has a dispatched entry in-flight");
         return (
             StatusCode::OK,
             Json(json!({ "dispatched": [], "count": 0, "message": "Already has in-flight entry" })),
