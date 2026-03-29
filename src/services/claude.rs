@@ -1661,10 +1661,7 @@ fn execute_streaming_local_tmux(
         )? {
             FollowupResult::Delivered => return Ok(()),
             FollowupResult::RecreateSession { error } => {
-                debug_log(&format!(
-                    "Follow-up failed, recreating session: {}",
-                    error
-                ));
+                debug_log(&format!("Follow-up failed, recreating session: {}", error));
                 record_tmux_exit_reason(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
@@ -2936,7 +2933,10 @@ mod tests {
 
         let (sender, _receiver) = mpsc::channel();
         let dir = std::env::temp_dir();
-        let output_path = dir.join(format!("agentdesk-test-followup-{}.jsonl", std::process::id()));
+        let output_path = dir.join(format!(
+            "agentdesk-test-followup-{}.jsonl",
+            std::process::id()
+        ));
         let _ = std::fs::write(&output_path, "");
 
         let result = send_followup_to_tmux(
