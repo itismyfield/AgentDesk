@@ -9,8 +9,119 @@ ADK_DEV="$HOME/.adk/dev"
 ADK_REL="$HOME/.adk/release"
 PLIST_REL="com.agentdesk.release"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPORT_CHANNEL_ID="${AGENTDESK_REPORT_CHANNEL_ID:-}"
+REPORT_PROVIDER="${AGENTDESK_REPORT_PROVIDER:-}"
+PROMOTE_DETACHED_CHILD="${AGENTDESK_PROMOTE_DETACHED_CHILD:-0}"
+PROMOTE_LOG_PATH="${AGENTDESK_PROMOTE_LOG_PATH:-}"
+PROMOTE_HELPER_SESSION="${AGENTDESK_PROMOTE_HELPER_SESSION:-}"
+PROMOTE_TEST_MODE="${AGENTDESK_PROMOTE_TEST_MODE:-0}"
+PROMOTE_DELAY_SECS="${AGENTDESK_PROMOTE_DELAY_SECS:-2}"
 
 echo "═══ ADK Promote Dev → Release ═══"
+
+_notify_channel() {
+    local content="$1"
+    [ -n "$REPORT_CHANNEL_ID" ] || return 0
+
+    local payload
+    payload=$(printf '%s' "$content" | jq -Rs --arg source "project-agentdesk" --arg target "channel:$REPORT_CHANNEL_ID" '{target:$target, content: ., source:$source, bot:"notify"}')
+
+    local rel_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
+    local dev_port="${AGENTDESK_DEV_PORT:-8799}"
+    curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${rel_port}/api/send" \
+        -H 'Content-Type: application/json' \
+        --data-binary "$payload" >/dev/null 2>&1 \
+        || curl -sf -X POST "http://${ADK_DEFAULT_LOOPBACK}:${dev_port}/api/send" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$payload" >/dev/null 2>&1 \
+        || true
+}
+
+_tail_for_summary() {
+    local log_path="$1"
+    [ -f "$log_path" ] || return 0
+    tail -n 12 "$log_path" 2>/dev/null || true
+}
+
+_finalize_detached_helper() {
+    local status="${1:-0}"
+    [ "$PROMOTE_DETACHED_CHILD" = "1" ] || return 0
+    [ -n "$REPORT_CHANNEL_ID" ] || return 0
+
+    local content
+    if [ "$status" -eq 0 ]; then
+        content="✅ release promote helper finished
+session: ${PROMOTE_HELPER_SESSION:-unknown}
+log: ${PROMOTE_LOG_PATH:-n/a}"
+    else
+        content="❌ release promote helper failed (exit ${status})
+session: ${PROMOTE_HELPER_SESSION:-unknown}
+log: ${PROMOTE_LOG_PATH:-n/a}"
+    fi
+
+    local summary
+    summary=$(_tail_for_summary "$PROMOTE_LOG_PATH")
+    if [ -n "$summary" ]; then
+        content="${content}
+
+최근 로그:
+${summary}"
+    fi
+
+    _notify_channel "$content"
+}
+
+_cleanup_on_exit() {
+    local status=$?
+    _finalize_detached_helper "$status"
+}
+
+trap _cleanup_on_exit EXIT
+
+_self_hosted_release_session() {
+    [ "$PROMOTE_DETACHED_CHILD" != "1" ] || return 1
+    [ -n "${TMUX:-}" ] || return 1
+    [ -n "$REPORT_CHANNEL_ID" ] || return 1
+    [ -n "$REPORT_PROVIDER" ] || return 1
+    return 0
+}
+
+_spawn_detached_helper() {
+    local tasks_dir="$ADK_REL/runtime/self_hosted_promote"
+    mkdir -p "$tasks_dir"
+
+    local stamp
+    stamp=$(date '+%Y%m%d-%H%M%S')
+    local helper_session="ADK-promote-${REPORT_CHANNEL_ID}-${stamp}"
+    local log_path="$tasks_dir/promote-release-${REPORT_PROVIDER}-${REPORT_CHANNEL_ID}-${stamp}.log"
+    local helper_script="$tasks_dir/promote-release-${REPORT_PROVIDER}-${REPORT_CHANNEL_ID}-${stamp}.sh"
+    local quoted_args=""
+    if [ "$#" -gt 0 ]; then
+        quoted_args=$(printf ' %q' "$@")
+    fi
+
+    cat > "$helper_script" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec >>$(printf '%q' "$log_path") 2>&1
+sleep $(printf '%q' "$PROMOTE_DELAY_SECS")
+export AGENTDESK_REPORT_CHANNEL_ID=$(printf '%q' "$REPORT_CHANNEL_ID")
+export AGENTDESK_REPORT_PROVIDER=$(printf '%q' "$REPORT_PROVIDER")
+export AGENTDESK_PROMOTE_DETACHED_CHILD=1
+export AGENTDESK_PROMOTE_LOG_PATH=$(printf '%q' "$log_path")
+export AGENTDESK_PROMOTE_HELPER_SESSION=$(printf '%q' "$helper_session")
+export AGENTDESK_PROMOTE_TEST_MODE=$(printf '%q' "$PROMOTE_TEST_MODE")
+cd $(printf '%q' "$REPO")
+exec $(printf '%q' "$SCRIPT_DIR/promote-release.sh")${quoted_args}
+EOF
+    chmod +x "$helper_script"
+    tmux new-session -d -s "$helper_session" "$helper_script"
+
+    echo "▸ Self-hosted release promotion detected — using detached helper"
+    echo "  helper tmux: $helper_session"
+    echo "  helper log: $log_path"
+    echo "  current turn will finish before dcserver restart; final result will be reported automatically"
+}
 
 # Safety check: review must be passed (unless --skip-review is passed)
 if [[ "${1:-}" != "--skip-review" ]]; then
@@ -34,6 +145,17 @@ if ! curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${DEV_PORT}/api/health
 fi
 
 echo "▸ Dev is healthy — proceeding"
+
+if _self_hosted_release_session; then
+    _spawn_detached_helper "$@"
+    exit 0
+fi
+
+if [ "$PROMOTE_TEST_MODE" = "1" ]; then
+    echo "▸ TEST MODE: skipping release bootout/copy/bootstrap"
+    echo "✓ Detached helper dry run complete"
+    exit 0
+fi
 
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
