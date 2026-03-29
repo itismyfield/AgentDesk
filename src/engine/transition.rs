@@ -1210,6 +1210,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(verdict.is_none(), "clear_verdict must set last_verdict to NULL");
+        assert!(
+            verdict.is_none(),
+            "clear_verdict must set last_verdict to NULL"
+        );
     }
 }

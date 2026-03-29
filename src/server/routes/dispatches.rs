@@ -1437,7 +1437,8 @@ pub(super) async fn send_review_result_to_primary(
                         "state": "suggestion_pending",
                         "pending_dispatch_id": id,
                         "last_verdict": verdict,
-                    }).to_string(),
+                    })
+                    .to_string(),
                 );
             }
             id

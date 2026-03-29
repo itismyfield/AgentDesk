@@ -308,7 +308,8 @@ fn execute_create_dispatch(
                 "card_id": card_id,
                 "state": "suggestion_pending",
                 "pending_dispatch_id": dispatch_id,
-            }).to_string(),
+            })
+            .to_string(),
         );
     }
 
@@ -698,6 +699,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(dispatch_id.is_none(), "idle state must clear pending_dispatch_id");
+        assert!(
+            dispatch_id.is_none(),
+            "idle state must clear pending_dispatch_id"
+        );
     }
 }
