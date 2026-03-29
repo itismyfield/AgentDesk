@@ -42,6 +42,14 @@ jobs:
         env:
           RUST_BACKTRACE: 1
 
+      - name: CLI smoke test (help)
+        run: cargo run -- --help
+
+      - name: CLI smoke test (doctor — no config)
+        run: cargo run -- doctor || true
+        env:
+          AGENTDESK_ROOT_DIR: ${{ runner.temp }}/adk-smoke
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

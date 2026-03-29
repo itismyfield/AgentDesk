@@ -329,8 +329,34 @@ pub fn load_graceful() -> Config {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_graceful_config_path;
+    use super::{resolve_graceful_config_path, runtime_root};
     use std::path::PathBuf;
+
+    #[test]
+    fn runtime_root_returns_valid_path() {
+        // runtime_root() should always return Some on systems with a home directory
+        let root = runtime_root();
+        assert!(root.is_some(), "runtime_root() returned None");
+        let path = root.unwrap();
+        // Path should end with .adk/release (unless overridden by env)
+        if std::env::var("AGENTDESK_ROOT_DIR").is_err() {
+            assert!(
+                path.ends_with(".adk/release"),
+                "expected path ending with .adk/release, got {:?}",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_root_respects_env_override() {
+        let override_path = std::env::temp_dir().join("adk-test-root");
+        // Safety: test isolation — this test is the only one touching this env var
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &override_path) };
+        let root = runtime_root();
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+        assert_eq!(root, Some(override_path));
+    }
 
     fn make_temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -408,12 +434,6 @@ impl Settings {
     }
 
     pub fn config_dir() -> Option<std::path::PathBuf> {
-        if let Ok(root) = std::env::var("AGENTDESK_ROOT_DIR") {
-            let trimmed = root.trim();
-            if !trimmed.is_empty() {
-                return Some(std::path::PathBuf::from(trimmed));
-            }
-        }
-        dirs::home_dir().map(|h| h.join(".adk").join("release"))
+        runtime_root()
     }
 }
