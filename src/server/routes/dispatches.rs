@@ -668,32 +668,42 @@ pub(crate) async fn send_dispatch_to_discord(
     let client = reqwest::Client::new();
     let dispatch_type_label = dispatch_type.as_deref().unwrap_or("implementation");
 
-    // #145: Look up per-channel unified thread via dispatch_id path
+    // #145/#140: Look up per-channel unified thread via dispatch_id path
+    // #140: For parallel runs (thread_group_count > 1), threads are grouped:
+    //   unified_thread_id = {"0": {"channel_id": "thread_id"}, "1": {"channel_id": "thread_id"}}
+    // For non-parallel (thread_group_count == 1), flat format is preserved:
+    //   unified_thread_id = {"channel_id": "thread_id"}
     let mut unified_thread_id: Option<String> = db.lock().ok().and_then(|conn| {
-        let map_json: Option<String> = conn
+        // Get both the map JSON and the entry's thread_group + run's group count
+        let row: Option<(String, i64, i64)> = conn
             .query_row(
-                "SELECT r.unified_thread_id FROM auto_queue_runs r \
-                     JOIN auto_queue_entries e ON e.run_id = r.id \
-                     WHERE e.dispatch_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
-                     AND r.unified_thread_id IS NOT NULL",
+                "SELECT r.unified_thread_id, COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
+                 FROM auto_queue_runs r \
+                 JOIN auto_queue_entries e ON e.run_id = r.id \
+                 WHERE e.dispatch_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
+                 AND r.unified_thread_id IS NOT NULL",
                 [dispatch_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
             .ok();
-        map_json.and_then(|json_str| {
-            // Try parsing as JSON map {"channel_id": "thread_id", ...}
+        row.and_then(|(json_str, thread_group, group_count)| {
             if let Ok(map) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                if map.is_object() {
-                    map.get(&channel_id_num.to_string())
+                if !map.is_object() {
+                    return None;
+                }
+                if group_count > 1 {
+                    // Parallel: nested format {"group_num": {"channel_id": "thread_id"}}
+                    map.get(&thread_group.to_string())
+                        .and_then(|group_map| group_map.get(&channel_id_num.to_string()))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                 } else {
-                    // Legacy: parsed as number/string, not a JSON object — skip
-                    // A new JSON map will be created when a thread is made for this channel
-                    None
+                    // Non-parallel: flat format {"channel_id": "thread_id"}
+                    map.get(&channel_id_num.to_string())
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
                 }
             } else {
-                // Unparseable — skip, will be overwritten with proper JSON map
                 None
             }
         })
@@ -760,45 +770,41 @@ pub(crate) async fn send_dispatch_to_discord(
     }
 
     // No existing thread or reuse failed — create a new thread
-    // #137: For unified thread, build name from all queued issue numbers
+    // #137/#140: For unified thread, build name from queued issue numbers
+    // #140: For parallel runs, only show issues in the same thread_group
     let thread_name = if unified_thread_id.is_none() {
         // First dispatch in unified run — check if we should use a combined name
         let unified_issues: Option<String> = db
             .lock()
             .ok()
             .and_then(|conn| {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT kc.github_issue_number FROM auto_queue_entries e \
+                // Check if this card is in a unified run and get thread_group info
+                let entry_info: Option<(String, i64, i64)> = conn
+                    .query_row(
+                        "SELECT e.run_id, COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
+                         FROM auto_queue_entries e \
                          JOIN auto_queue_runs r ON e.run_id = r.id \
-                         JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
-                         WHERE r.unified_thread = 1 \
-                         AND e.kanban_card_id = ?1 AND kc.github_issue_number IS NOT NULL \
-                         LIMIT 1",
+                         WHERE r.unified_thread = 1 AND e.dispatch_id = ?1",
+                        [dispatch_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
                     )
-                    .ok()?;
-                // If this card is in a unified run, gather all issue numbers
-                let is_unified: bool = stmt
-                    .query_map([card_id], |row| row.get::<_, i64>(0))
-                    .ok()
-                    .map(|rows| rows.count() > 0)
-                    .unwrap_or(false);
-                if !is_unified {
-                    return None;
-                }
-                drop(stmt);
-                let mut stmt2 = conn
-                    .prepare(
-                        "SELECT kc.github_issue_number FROM auto_queue_entries e \
-                         JOIN auto_queue_runs r ON e.run_id = r.id \
-                         JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
-                         WHERE r.unified_thread = 1 \
-                         AND e.run_id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1) \
-                         AND kc.github_issue_number IS NOT NULL \
-                         ORDER BY e.priority_rank ASC",
-                    )
-                    .ok()?;
-                // Get current card's issue number for highlighting
+                    .ok();
+                let (run_id, thread_group, group_count) = entry_info?;
+
+                // Build issue list — for parallel runs, only show group's issues
+                let group_filter = if group_count > 1 {
+                    format!(" AND COALESCE(e.thread_group, 0) = {}", thread_group)
+                } else {
+                    String::new()
+                };
+                let sql = format!(
+                    "SELECT kc.github_issue_number FROM auto_queue_entries e \
+                     JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
+                     WHERE e.run_id = ?1{} AND kc.github_issue_number IS NOT NULL \
+                     ORDER BY e.priority_rank ASC",
+                    group_filter
+                );
+                let mut stmt = conn.prepare(&sql).ok()?;
                 let current_issue: Option<i64> = conn
                     .query_row(
                         "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
@@ -806,8 +812,8 @@ pub(crate) async fn send_dispatch_to_discord(
                         |row| row.get(0),
                     )
                     .ok();
-                let nums: Vec<String> = stmt2
-                    .query_map([card_id], |row| row.get::<_, i64>(0))
+                let nums: Vec<String> = stmt
+                    .query_map([&run_id], |row| row.get::<_, i64>(0))
                     .ok()?
                     .filter_map(|r| r.ok())
                     .map(|n| {
@@ -821,7 +827,12 @@ pub(crate) async fn send_dispatch_to_discord(
                 if nums.is_empty() {
                     None
                 } else {
-                    Some(nums.join(" "))
+                    // For parallel runs, prefix with group number
+                    if group_count > 1 {
+                        Some(format!("G{} {}", thread_group, nums.join(" ")))
+                    } else {
+                        Some(nums.join(" "))
+                    }
                 }
             });
 
@@ -886,11 +897,23 @@ pub(crate) async fn send_dispatch_to_discord(
                             )
                             .ok();
                             set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
-                            // #141: Store unified thread per channel in JSON map
+                            // #141/#140: Store unified thread per channel in JSON map
                             // Save when: no existing thread for this channel (unified_thread_id is None)
                             // AND this card belongs to a unified run
                             if unified_thread_id.is_none() && is_unified_run {
-                                // Read existing map, add this channel's thread
+                                // #140: Get thread_group and group_count for this entry
+                                let (entry_group, group_count): (i64, i64) = conn
+                                    .query_row(
+                                        "SELECT COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
+                                         FROM auto_queue_entries e \
+                                         JOIN auto_queue_runs r ON e.run_id = r.id \
+                                         WHERE e.dispatch_id = ?1",
+                                        [dispatch_id],
+                                        |row| Ok((row.get(0)?, row.get(1)?)),
+                                    )
+                                    .unwrap_or((0, 1));
+
+                                // Read existing map
                                 let existing: String = conn
                                     .query_row(
                                         "SELECT COALESCE(unified_thread_id, '{}') FROM auto_queue_runs \
@@ -900,9 +923,7 @@ pub(crate) async fn send_dispatch_to_discord(
                                         |row| row.get(0),
                                     )
                                     .unwrap_or_else(|_| "{}".to_string());
-                                // #141: Ensure we have a proper JSON object — legacy plain
-                                // string/number values get upgraded to a map, preserving
-                                // the legacy thread_id under the primary channel key
+
                                 let mut map: serde_json::Value = serde_json::from_str::<
                                     serde_json::Value,
                                 >(
@@ -910,35 +931,20 @@ pub(crate) async fn send_dispatch_to_discord(
                                 )
                                 .ok()
                                 .filter(|v: &serde_json::Value| v.is_object())
-                                .unwrap_or_else(|| {
-                                    // Legacy: plain thread_id — promote to JSON map
-                                    // Preserve it under primary channel key if available
-                                    let legacy_tid = existing.trim().to_string();
-                                    if legacy_tid.is_empty() || legacy_tid == "{}" {
-                                        return serde_json::json!({});
+                                .unwrap_or_else(|| serde_json::json!({}));
+
+                                if group_count > 1 {
+                                    // #140: Parallel — nested format {"group_num": {"channel_id": "thread_id"}}
+                                    let group_key = entry_group.to_string();
+                                    if !map.get(&group_key).map(|v| v.is_object()).unwrap_or(false) {
+                                        map[group_key.clone()] = serde_json::json!({});
                                     }
-                                    let primary_ch: Option<String> = conn
-                                        .query_row(
-                                            "SELECT discord_channel_id FROM agents WHERE id = ?1",
-                                            [agent_id],
-                                            |row| row.get(0),
-                                        )
-                                        .ok();
-                                    let primary_num: Option<u64> = primary_ch.and_then(|ch| {
-                                        ch.parse().ok().or_else(|| resolve_channel_alias(&ch))
-                                    });
-                                    if let Some(pch) = primary_num {
-                                        // Backfill channel_thread_map with the legacy primary mapping
-                                        // so get_thread_for_channel() resolves correctly for primary channel
-                                        set_thread_for_channel(&conn, card_id, pch, &legacy_tid);
-                                        serde_json::json!({ pch.to_string(): legacy_tid })
-                                    } else {
-                                        serde_json::json!({})
-                                    }
-                                });
-                                map[channel_id_num.to_string()] = serde_json::json!(thread_id);
-                                // #145: Direct dispatch→entry→run association via dispatch_id.
-                                // Eliminates card_id ambiguity when same card is re-queued.
+                                    map[group_key][channel_id_num.to_string()] = serde_json::json!(thread_id);
+                                } else {
+                                    // Non-parallel: flat format {"channel_id": "thread_id"}
+                                    map[channel_id_num.to_string()] = serde_json::json!(thread_id);
+                                }
+
                                 conn.execute(
                                     "UPDATE auto_queue_runs SET unified_thread_id = ?1, unified_thread_channel_id = ?2 \
                                      WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE dispatch_id = ?3) \

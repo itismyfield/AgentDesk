@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::AppState;
 
@@ -16,6 +16,9 @@ pub struct GenerateBody {
     pub repo: Option<String>,
     pub agent_id: Option<String>,
     pub mode: Option<String>, // "priority-sort" (default) or "dependency-aware"
+    pub parallel: Option<bool>,
+    pub max_concurrent_threads: Option<i64>,
+    pub max_concurrent_per_agent: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +104,35 @@ fn ensure_tables(conn: &rusqlite::Connection) {
         )
         .ok();
     }
+    // #140: thread_group on entries — parallel thread group assignment
+    let has_thread_group: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_entries') WHERE name = 'thread_group'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_thread_group {
+        conn.execute_batch("ALTER TABLE auto_queue_entries ADD COLUMN thread_group INTEGER DEFAULT 0;")
+            .ok();
+    }
+    // #140: parallel dispatch columns on runs
+    let has_max_concurrent: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_runs') WHERE name = 'max_concurrent_threads'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_max_concurrent {
+        conn.execute_batch(
+            "ALTER TABLE auto_queue_runs ADD COLUMN max_concurrent_threads INTEGER DEFAULT 1;
+             ALTER TABLE auto_queue_runs ADD COLUMN max_concurrent_per_agent INTEGER DEFAULT 1;
+             ALTER TABLE auto_queue_runs ADD COLUMN thread_group_count INTEGER DEFAULT 1;",
+        )
+        .ok();
+    }
+
     // #145: dispatch_id on entries — direct dispatch→run association
     let has_dispatch_id: bool = conn
         .query_row(
@@ -144,7 +176,8 @@ fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Val
                 CAST(strftime('%s', e.created_at) AS INTEGER) * 1000,
                 CASE WHEN e.dispatched_at IS NOT NULL THEN CAST(strftime('%s', e.dispatched_at) AS INTEGER) * 1000 END,
                 CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
-                kc.title, kc.github_issue_number, kc.github_issue_url
+                kc.title, kc.github_issue_number, kc.github_issue_url,
+                COALESCE(e.thread_group, 0)
          FROM auto_queue_entries e
          LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
          WHERE e.id = ?1",
@@ -163,6 +196,7 @@ fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Val
                 "card_title": row.get::<_, Option<String>>(9)?,
                 "github_issue_number": row.get::<_, Option<i64>>(10)?,
                 "github_repo": row.get::<_, Option<String>>(11)?,
+                "thread_group": row.get::<_, i64>(12)?,
             }))
         },
     )
@@ -175,7 +209,10 @@ fn run_to_json(conn: &rusqlite::Connection, run_id: &str) -> serde_json::Value {
                 ai_model, ai_rationale,
                 CAST(strftime('%s', created_at) AS INTEGER) * 1000,
                 CASE WHEN completed_at IS NOT NULL THEN CAST(strftime('%s', completed_at) AS INTEGER) * 1000 END,
-                unified_thread, unified_thread_id
+                unified_thread, unified_thread_id,
+                COALESCE(max_concurrent_threads, 1),
+                COALESCE(max_concurrent_per_agent, 1),
+                COALESCE(thread_group_count, 1)
          FROM auto_queue_runs WHERE id = ?1",
         [run_id],
         |row| {
@@ -191,6 +228,9 @@ fn run_to_json(conn: &rusqlite::Connection, run_id: &str) -> serde_json::Value {
                 "completed_at": row.get::<_, Option<i64>>(8)?,
                 "unified_thread": row.get::<_, i64>(9).unwrap_or(0) != 0,
                 "unified_thread_id": row.get::<_, Option<String>>(10)?,
+                "max_concurrent_threads": row.get::<_, i64>(11)?,
+                "max_concurrent_per_agent": row.get::<_, i64>(12)?,
+                "thread_group_count": row.get::<_, i64>(13)?,
             }))
         },
     )
@@ -594,6 +634,164 @@ pub async fn generate(
         );
     }
 
+    let is_parallel = body.parallel.unwrap_or(false);
+    let max_concurrent = body.max_concurrent_threads.unwrap_or(3).max(1);
+    let max_per_agent = body.max_concurrent_per_agent.unwrap_or(1).max(1);
+
+    // ── Parallel mode: build dependency DAG, connected components, topo-sort (#140) ──
+    let (grouped_entries, thread_group_count) = if is_parallel {
+        // Build card_id → index mapping
+        let card_idx: HashMap<String, usize> = filtered_cards
+            .iter()
+            .enumerate()
+            .map(|(i, (cid, _, _))| (cid.clone(), i))
+            .collect();
+
+        // Build issue_number → card index mapping (for #N references within the queue)
+        let mut issue_to_idx: HashMap<i64, usize> = HashMap::new();
+        let mut card_issue_nums: Vec<Option<i64>> = Vec::with_capacity(filtered_cards.len());
+        for (i, (card_id, _, _)) in filtered_cards.iter().enumerate() {
+            let issue_num: Option<i64> = conn
+                .query_row(
+                    "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+            if let Some(n) = issue_num {
+                issue_to_idx.insert(n, i);
+            }
+            card_issue_nums.push(issue_num);
+        }
+
+        // Build adjacency list from #N references in metadata (queue-internal only)
+        let n = filtered_cards.len();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut in_degree: Vec<usize> = vec![0; n];
+        for (i, (card_id, _, _)) in filtered_cards.iter().enumerate() {
+            let metadata: Option<String> = conn
+                .query_row(
+                    "SELECT metadata FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+            if let Some(meta) = metadata {
+                for cap in regex::Regex::new(r"#(\d+)").unwrap().captures_iter(&meta) {
+                    if let Ok(dep_num) = cap[1].parse::<i64>() {
+                        // dep_num → i means card i depends on dep_num
+                        // So dep_num must come before i: edge dep_num → i
+                        if let Some(&dep_idx) = issue_to_idx.get(&dep_num) {
+                            if dep_idx != i {
+                                adj[dep_idx].push(i);
+                                in_degree[i] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Connected components via union-find
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(parent: &mut [usize], x: usize) -> usize {
+            if parent[x] != x {
+                parent[x] = find(parent, parent[x]);
+            }
+            parent[x]
+        }
+        fn union(parent: &mut [usize], a: usize, b: usize) {
+            let ra = find(parent, a);
+            let rb = find(parent, b);
+            if ra != rb {
+                parent[rb] = ra;
+            }
+        }
+        for (u, neighbors) in adj.iter().enumerate() {
+            for &v in neighbors {
+                union(&mut parent, u, v);
+            }
+        }
+
+        // Group by component root
+        let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
+        for i in 0..n {
+            let root = find(&mut parent, i);
+            components.entry(root).or_default().push(i);
+        }
+
+        // Sort component keys for deterministic group numbering
+        let mut comp_keys: Vec<usize> = components.keys().copied().collect();
+        comp_keys.sort();
+
+        // Topological sort within each component, assign group + rank
+        // result: Vec<(card_idx, thread_group, priority_rank_within_group)>
+        let mut result: Vec<(usize, i64, i64)> = Vec::with_capacity(n);
+        for (group_num, &comp_root) in comp_keys.iter().enumerate() {
+            let members = &components[&comp_root];
+            let member_set: HashSet<usize> = members.iter().copied().collect();
+
+            // Kahn's algorithm for topo-sort within this component
+            let mut local_in: HashMap<usize, usize> = HashMap::new();
+            for &m in members {
+                local_in.insert(m, 0);
+            }
+            for &m in members {
+                for &v in &adj[m] {
+                    if member_set.contains(&v) {
+                        *local_in.entry(v).or_default() += 1;
+                    }
+                }
+            }
+
+            let mut queue: VecDeque<usize> = VecDeque::new();
+            for &m in members {
+                if local_in[&m] == 0 {
+                    queue.push_back(m);
+                }
+            }
+
+            let mut sorted = Vec::new();
+            while let Some(u) = queue.pop_front() {
+                sorted.push(u);
+                for &v in &adj[u] {
+                    if member_set.contains(&v) {
+                        let deg = local_in.get_mut(&v).unwrap();
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(v);
+                        }
+                    }
+                }
+            }
+
+            // If cycle detected (sorted < members), append remaining in original order
+            if sorted.len() < members.len() {
+                let sorted_set: HashSet<usize> = sorted.iter().copied().collect();
+                for &m in members {
+                    if !sorted_set.contains(&m) {
+                        sorted.push(m);
+                    }
+                }
+            }
+
+            for (rank, &idx) in sorted.iter().enumerate() {
+                result.push((idx, group_num as i64, rank as i64));
+            }
+        }
+
+        let group_count = comp_keys.len() as i64;
+        (result, group_count)
+    } else {
+        // Non-parallel: all entries in group 0, sequential rank
+        let result: Vec<(usize, i64, i64)> = (0..filtered_cards.len())
+            .map(|i| (i, 0i64, i as i64))
+            .collect();
+        (result, 1i64)
+    };
+
     // Create run
     let run_id = uuid::Uuid::new_v4().to_string();
     let (ai_model, ai_rationale) = if mode == "dependency-aware" {
@@ -603,6 +801,16 @@ pub async fn generate(
                 "의존관계 기반 필터링 + 우선순위 정렬. {}개 큐잉, {}개 의존성 미충족 제외",
                 filtered_cards.len(),
                 excluded_count
+            ),
+        )
+    } else if is_parallel {
+        (
+            "parallel-thread-group",
+            format!(
+                "병렬 스레드그룹 디스패치. {}개 카드, {}개 그룹, 최대 {}개 동시 스레드",
+                filtered_cards.len(),
+                thread_group_count,
+                max_concurrent
             ),
         )
     } else {
@@ -616,24 +824,26 @@ pub async fn generate(
     };
     let ai_model_str = ai_model.to_string();
     conn.execute(
-        "INSERT INTO auto_queue_runs (id, repo, agent_id, ai_model, ai_rationale) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![run_id, body.repo, body.agent_id, ai_model_str, ai_rationale],
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, ai_model, ai_rationale, max_concurrent_threads, max_concurrent_per_agent, thread_group_count) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![run_id, body.repo, body.agent_id, ai_model_str, ai_rationale, max_concurrent, max_per_agent, thread_group_count],
     )
     .ok();
 
     // Create entries
     let mut entries = Vec::new();
-    for (rank, (card_id, agent_id, _priority)) in filtered_cards.iter().enumerate() {
+    for &(card_idx, thread_group, priority_rank) in &grouped_entries {
+        let (card_id, agent_id, _) = &filtered_cards[card_idx];
         let entry_id = uuid::Uuid::new_v4().to_string();
         let agent = if agent_id.is_empty() {
             body.agent_id.as_deref().unwrap_or("")
         } else {
-            agent_id
+            agent_id.as_str()
         };
         conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![entry_id, run_id, card_id, agent, rank as i64],
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank, thread_group)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![entry_id, run_id, card_id, agent, priority_rank, thread_group],
         )
         .ok();
         entries.push(entry_to_json(&conn, &entry_id));
@@ -653,7 +863,7 @@ pub async fn activate(
     State(state): State<AppState>,
     Json(body): Json<ActivateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let mut conn = match state.db.separate_conn() {
+    let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -736,96 +946,203 @@ pub async fn activate(
         );
     }
 
-    // Get first pending entry only (sequential dispatch — one at a time)
-    let mut stmt = conn
-        .prepare(
-            "SELECT e.id, e.kanban_card_id, e.agent_id
-             FROM auto_queue_entries e
-             WHERE e.run_id = ?1 AND e.status = 'pending'
-             ORDER BY e.priority_rank ASC
-             LIMIT 1",
+    // #140: Read run parallel config
+    let (max_concurrent, max_per_agent, thread_group_count): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(max_concurrent_threads, 1), COALESCE(max_concurrent_per_agent, 1), COALESCE(thread_group_count, 1) FROM auto_queue_runs WHERE id = ?1",
+            [&run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .unwrap();
+        .unwrap_or((1, 1, 1));
 
-    let pending: Vec<(String, String, String)> = stmt
-        .query_map([&run_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+    // Count currently active groups (groups with at least one 'dispatched' entry)
+    let active_groups: Vec<i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT COALESCE(thread_group, 0) FROM auto_queue_entries \
+                 WHERE run_id = ?1 AND status = 'dispatched'",
+            )
+            .unwrap();
+        stmt.query_map([&run_id], |row| row.get::<_, i64>(0))
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    };
+
+    // Count per-agent active dispatches (across all groups in this run)
+    let agent_dispatch_counts: HashMap<String, i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id, COUNT(*) FROM auto_queue_entries \
+                 WHERE run_id = ?1 AND status = 'dispatched' GROUP BY agent_id",
+            )
+            .unwrap();
+        stmt.query_map([&run_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
         .ok()
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
 
-    drop(stmt);
+    let available_slots = (max_concurrent - active_groups.len() as i64).max(0) as usize;
+
+    // Find pending groups not currently active, ordered by group number
+    let pending_groups: Vec<i64> = {
+        let active_set: HashSet<i64> = active_groups.iter().copied().collect();
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT COALESCE(thread_group, 0) FROM auto_queue_entries \
+                 WHERE run_id = ?1 AND status = 'pending' \
+                 ORDER BY thread_group ASC",
+            )
+            .unwrap();
+        stmt.query_map([&run_id], |row| row.get::<_, i64>(0))
+            .ok()
+            .map(|rows| {
+                rows.filter_map(|r| r.ok())
+                    .filter(|g| !active_set.contains(g))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    drop(conn);
 
     let mut dispatched = Vec::new();
-    for (entry_id, card_id, agent_id) in &pending {
-        // Busy-agent guard (#110): skip dispatch if agent already has active cards.
-        // Prevents manual /api/auto-queue/activate from bypassing serialization.
+    let mut groups_to_dispatch: Vec<i64> = Vec::new();
+
+    // Also dispatch next entry for active groups that have pending entries
+    // (continuation within same group after prior entry completed)
+    {
+        let conn = state.db.separate_conn().unwrap();
+        for &grp in &active_groups {
+            let has_pending: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM auto_queue_entries \
+                     WHERE run_id = ?1 AND COALESCE(thread_group, 0) = ?2 AND status = 'pending'",
+                    rusqlite::params![run_id, grp],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            let has_dispatched: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM auto_queue_entries \
+                     WHERE run_id = ?1 AND COALESCE(thread_group, 0) = ?2 AND status = 'dispatched'",
+                    rusqlite::params![run_id, grp],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            // Only add group if it has pending entries AND no currently dispatched entries
+            // (sequential within group)
+            if has_pending && !has_dispatched {
+                groups_to_dispatch.push(grp);
+            }
+        }
+    }
+
+    // Add new groups from available slots
+    for &grp in pending_groups.iter().take(available_slots) {
+        if !groups_to_dispatch.contains(&grp) {
+            groups_to_dispatch.push(grp);
+        }
+    }
+
+    for group in &groups_to_dispatch {
+        // Get first pending entry in this group
+        let conn = state.db.separate_conn().unwrap();
+        let entry: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT e.id, e.kanban_card_id, e.agent_id \
+                 FROM auto_queue_entries e \
+                 WHERE e.run_id = ?1 AND COALESCE(e.thread_group, 0) = ?2 AND e.status = 'pending' \
+                 ORDER BY e.priority_rank ASC LIMIT 1",
+                rusqlite::params![run_id, group],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        drop(conn);
+
+        let Some((entry_id, card_id, agent_id)) = entry else {
+            continue;
+        };
+
+        // Per-agent concurrency guard (#140)
+        let current_agent_count = agent_dispatch_counts.get(&agent_id).copied().unwrap_or(0);
+        if current_agent_count >= max_per_agent {
+            tracing::info!(
+                "[auto-queue] Skipping group {group} for {agent_id}: at max_concurrent_per_agent ({max_per_agent})"
+            );
+            continue;
+        }
+
+        // Busy-agent guard (#110): skip if agent has active cards outside auto-queue
+        let conn = state.db.separate_conn().unwrap();
         let busy: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM kanban_cards \
                  WHERE assigned_agent_id = ?1 AND status IN ('requested', 'in_progress', 'review')",
-                [agent_id],
+                [&agent_id],
                 |row| row.get(0),
             )
             .unwrap_or(false);
+        drop(conn);
+
         if busy {
             tracing::info!("[auto-queue] Skipping activate for {agent_id}: agent has active cards");
-            drop(conn);
-            conn = state.db.separate_conn().unwrap();
-            break;
+            continue;
         }
 
-        // Get card title for dispatch creation
+        // Get card title
+        let conn = state.db.separate_conn().unwrap();
         let title: String = conn
             .query_row(
                 "SELECT title FROM kanban_cards WHERE id = ?1",
-                [card_id],
+                [&card_id],
                 |row| row.get(0),
             )
             .unwrap_or_else(|_| "Dispatch".to_string());
-
         drop(conn);
 
-        // Create dispatch — use block_in_place to allow tokio to schedule
-        // other tasks while fire_hook executes blocking QuickJS
+        // Create dispatch
         let dispatch_result = tokio::task::block_in_place(|| {
             crate::dispatch::create_dispatch(
                 &state.db,
                 &state.engine,
-                card_id,
-                agent_id,
+                &card_id,
+                &agent_id,
                 "implementation",
                 &title,
-                &json!({"auto_queue": true, "entry_id": entry_id}),
+                &json!({"auto_queue": true, "entry_id": entry_id, "thread_group": group}),
             )
         });
 
-        let conn_reacquired = state.db.separate_conn().unwrap();
         if dispatch_result.is_err() {
             tracing::error!(
-                "[auto-queue] create_dispatch failed for entry {entry_id}, leaving as pending for retry"
+                "[auto-queue] create_dispatch failed for entry {entry_id} (group {group}), leaving as pending for retry"
             );
-            drop(conn_reacquired);
-            conn = state.db.separate_conn().unwrap();
             continue;
         }
 
-        // Dispatch succeeded — now mark entry with dispatch_id for direct run association (#145)
+        // Mark entry with dispatch_id (#145)
         let dispatch_id = dispatch_result.as_ref().unwrap()["id"]
             .as_str()
             .unwrap_or("")
             .to_string();
-        conn_reacquired.execute(
+        let conn = state.db.separate_conn().unwrap();
+        conn.execute(
             "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = ?1, dispatched_at = datetime('now') WHERE id = ?2",
             rusqlite::params![dispatch_id, entry_id],
         )
         .ok();
-        drop(conn_reacquired);
+        drop(conn);
+
         super::dispatches::queue_dispatch_notify(
             &state.db,
             &dispatch_id,
@@ -834,11 +1151,9 @@ pub async fn activate(
             &title,
         );
 
-        let conn_inner = state.db.separate_conn().unwrap();
-        dispatched.push(entry_to_json(&conn_inner, entry_id));
-        drop(conn_inner);
-
-        break; // Dispatch one at a time — next one starts when this one completes
+        let conn = state.db.separate_conn().unwrap();
+        dispatched.push(entry_to_json(&conn, &entry_id));
+        drop(conn);
     }
 
     // Check if all entries are done
@@ -852,16 +1167,52 @@ pub async fn activate(
         .unwrap_or(0);
 
     if remaining == 0 {
-        conn.execute(
-            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?1",
-            [&run_id],
-        )
-        .ok();
+        let still_dispatched: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1 AND status = 'dispatched'",
+                [&run_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if still_dispatched == 0 {
+            conn.execute(
+                "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?1",
+                [&run_id],
+            )
+            .ok();
+        }
     }
+
+    // Build response with group info
+    let active_group_count = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT COUNT(DISTINCT COALESCE(thread_group, 0)) FROM auto_queue_entries \
+                 WHERE run_id = ?1 AND status = 'dispatched'",
+            )
+            .unwrap();
+        stmt.query_row([&run_id], |row| row.get::<_, i64>(0))
+            .unwrap_or(0)
+    };
+    let pending_group_count = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT COUNT(DISTINCT COALESCE(thread_group, 0)) FROM auto_queue_entries \
+                 WHERE run_id = ?1 AND status = 'pending'",
+            )
+            .unwrap();
+        stmt.query_row([&run_id], |row| row.get::<_, i64>(0))
+            .unwrap_or(0)
+    };
 
     (
         StatusCode::OK,
-        Json(json!({ "dispatched": dispatched, "count": dispatched.len() })),
+        Json(json!({
+            "dispatched": dispatched,
+            "count": dispatched.len(),
+            "active_groups": active_group_count,
+            "pending_groups": pending_group_count,
+        })),
     )
 }
 
@@ -956,20 +1307,66 @@ pub async fn status(
         std::collections::HashMap::new();
     for entry in &entries {
         let agent = entry["agent_id"].as_str().unwrap_or("unknown").to_string();
-        let status = entry["status"].as_str().unwrap_or("pending");
+        let entry_status = entry["status"].as_str().unwrap_or("pending");
         let counter = agents
             .entry(agent)
             .or_insert_with(|| json!({"pending": 0, "dispatched": 0, "done": 0, "skipped": 0}));
         if let Some(obj) = counter.as_object_mut() {
-            if let Some(val) = obj.get_mut(status) {
+            if let Some(val) = obj.get_mut(entry_status) {
                 *val = json!(val.as_i64().unwrap_or(0) + 1);
             }
         }
     }
 
+    // #140: Thread group summary
+    let mut thread_groups: std::collections::HashMap<i64, serde_json::Value> =
+        std::collections::HashMap::new();
+    for entry in &entries {
+        let group = entry["thread_group"].as_i64().unwrap_or(0);
+        let entry_status = entry["status"].as_str().unwrap_or("pending");
+        let counter = thread_groups
+            .entry(group)
+            .or_insert_with(|| json!({"pending": 0, "dispatched": 0, "done": 0, "skipped": 0, "entries": []}));
+        if let Some(obj) = counter.as_object_mut() {
+            if let Some(val) = obj.get_mut(entry_status) {
+                *val = json!(val.as_i64().unwrap_or(0) + 1);
+            }
+            if let Some(arr) = obj.get_mut("entries").and_then(|v| v.as_array_mut()) {
+                arr.push(json!({
+                    "id": entry["id"],
+                    "card_id": entry["card_id"],
+                    "status": entry_status,
+                    "github_issue_number": entry["github_issue_number"],
+                }));
+            }
+        }
+    }
+
+    // Determine group-level statuses
+    let mut group_statuses: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for (group_num, summary) in &thread_groups {
+        let dispatched_count = summary["dispatched"].as_i64().unwrap_or(0);
+        let pending_count = summary["pending"].as_i64().unwrap_or(0);
+        let group_status = if dispatched_count > 0 {
+            "active"
+        } else if pending_count > 0 {
+            "pending"
+        } else {
+            "done"
+        };
+        let mut group_obj = summary.clone();
+        group_obj["status"] = json!(group_status);
+        group_statuses.insert(group_num.to_string(), group_obj);
+    }
+
     (
         StatusCode::OK,
-        Json(json!({ "run": run, "entries": entries, "agents": agents })),
+        Json(json!({
+            "run": run,
+            "entries": entries,
+            "agents": agents,
+            "thread_groups": group_statuses,
+        })),
     )
 }
 
