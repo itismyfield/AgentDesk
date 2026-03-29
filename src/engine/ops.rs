@@ -1656,10 +1656,12 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
         rquickjs::Function::new(
             ctx.clone(),
             |session_key: String, command: String| -> String {
-                let result = std::process::Command::new("tmux")
-                    .args(["send-keys", "-t", &session_key, &command, "Enter"])
-                    .output();
-                match result {
+                // session_key may be "hostname:tmux_name"
+                let tmux_name = session_key
+                    .split_once(':')
+                    .map(|(_, name)| name)
+                    .unwrap_or(&session_key);
+                match crate::services::platform::tmux::send_keys(tmux_name, &[&command, "Enter"]) {
                     Ok(out) if out.status.success() => {
                         format!(
                             r#"{{"ok":true,"session":"{}","command":"{}"}}"#,
@@ -1688,10 +1690,7 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 .split_once(':')
                 .map(|(_, name)| name)
                 .unwrap_or(&session_key);
-            let result = std::process::Command::new("tmux")
-                .args(["kill-session", "-t", tmux_name])
-                .output();
-            match result {
+            match crate::services::platform::tmux::kill_session_output(tmux_name) {
                 Ok(out) if out.status.success() => {
                     format!(r#"{{"ok":true,"session":"{}"}}"#, session_key)
                 }

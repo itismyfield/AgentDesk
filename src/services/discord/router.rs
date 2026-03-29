@@ -2280,11 +2280,9 @@ async fn handle_text_command(
             // Send /clear to the actual Claude Code session via tmux
             #[cfg(unix)]
             if let Some(ref name) = tmux_name {
-                let exact_target = tmux_exact_target(name);
+                let name = name.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("tmux")
-                        .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
-                        .output()
+                    crate::services::platform::tmux::send_keys(&name, &["/clear", "Enter"])
                 })
                 .await;
             }

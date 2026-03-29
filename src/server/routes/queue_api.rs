@@ -259,13 +259,7 @@ pub async fn cancel_turn(
     let tmux_name = session_key.split(':').last().unwrap_or(&session_key);
 
     // Kill tmux session
-    let killed = std::process::Command::new("tmux")
-        .args(["kill-session", "-t", tmux_name])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let killed = crate::services::platform::tmux::kill_session(tmux_name);
 
     // Cancel the associated dispatch if any
     if let Some(ref did) = dispatch_id {

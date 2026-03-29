@@ -341,15 +341,12 @@ pub(super) async fn tmux_output_watcher(
             );
             prompt_too_long_killed = true;
 
-            let exact_target = tmux_exact_target(&tmux_session_name);
             let sess = tmux_session_name.clone();
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tokio::task::spawn_blocking(move || {
                     record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
-                    let _ = std::process::Command::new("tmux")
-                        .args(["kill-session", "-t", &exact_target])
-                        .status();
+                    crate::services::platform::tmux::kill_session(&sess);
                 }),
             )
             .await;
@@ -378,15 +375,12 @@ pub(super) async fn tmux_output_watcher(
             );
             prompt_too_long_killed = true; // reuse flag to suppress duplicate "session ended" message
 
-            let exact_target = tmux_exact_target(&tmux_session_name);
             let sess = tmux_session_name.clone();
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tokio::task::spawn_blocking(move || {
                     record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
-                    let _ = std::process::Command::new("tmux")
-                        .args(["kill-session", "-t", &exact_target])
-                        .status();
+                    crate::services::platform::tmux::kill_session(&sess);
                 }),
             )
             .await;
@@ -616,17 +610,14 @@ pub(super) async fn tmux_output_watcher(
             let ctx_cfg = super::adk_session::fetch_context_thresholds(shared.api_port).await;
             let pct = (tokens * 100) / ctx_cfg.context_window.max(1);
             if pct >= ctx_cfg.compact_pct && !is_prompt_too_long {
-                let exact_target =
-                    crate::services::tmux_common::tmux_exact_target(&tmux_session_name);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 eprintln!(
                     "  [{ts}] ⚡ [watcher] Auto-compact: {} at {pct}% ({tokens} tokens)",
                     tmux_session_name
                 );
+                let name = tmux_session_name.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("tmux")
-                        .args(["send-keys", "-t", &exact_target, "/compact", "Enter"])
-                        .output()
+                    crate::services::platform::tmux::send_keys(&name, &["/compact", "Enter"])
                 })
                 .await;
             }
@@ -655,9 +646,7 @@ pub(super) async fn tmux_output_watcher(
                     }
                 }
                 record_tmux_exit_reason(&sess, "watcher cleanup: dead session after turn");
-                let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &exact_target])
-                    .output();
+                crate::services::platform::tmux::kill_session(&sess);
             }
         })
         .await;
@@ -927,20 +916,16 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
     // List tmux sessions matching our naming convention
     let output = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::task::spawn_blocking(|| {
-            std::process::Command::new("tmux")
-                .args(["list-sessions", "-F", "#{session_name}"])
-                .output()
-        }),
+        tokio::task::spawn_blocking(crate::services::platform::tmux::list_session_names),
     )
     .await
     {
-        Ok(Ok(Ok(o))) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(Ok(Ok(names))) => names,
         _ => return, // No tmux, timeout, or no sessions
     };
 
     let agent_sessions: Vec<&str> = output
-        .lines()
+        .iter()
         .map(|l| l.trim())
         .filter(|l| {
             parse_provider_and_channel_from_tmux_name(l)
@@ -1243,13 +1228,10 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             .await;
 
             // Kill the dead tmux session
-            let exact_target = tmux_exact_target(&dc.session_name);
             let sess = dc.session_name.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 record_tmux_exit_reason(&sess, "startup cleanup: dead session");
-                let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &exact_target])
-                    .output();
+                crate::services::platform::tmux::kill_session(&sess);
             })
             .await;
         }
@@ -1270,15 +1252,11 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
 
     let output = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::task::spawn_blocking(|| {
-            std::process::Command::new("tmux")
-                .args(["list-sessions", "-F", "#{session_name}"])
-                .output()
-        }),
+        tokio::task::spawn_blocking(crate::services::platform::tmux::list_session_names),
     )
     .await
     {
-        Ok(Ok(Ok(o))) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(Ok(Ok(names))) => names,
         _ => return,
     };
 
@@ -1286,8 +1264,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
         let data = shared.core.lock().await;
         let mut result = Vec::new();
 
-        for session_name in output.lines() {
-            let session_name = session_name.trim();
+        for session_name in output.iter().map(|s| s.trim()) {
             let Some((session_provider, _)) =
                 parse_provider_and_channel_from_tmux_name(session_name)
             else {
@@ -1344,11 +1321,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
             std::time::Duration::from_secs(10),
             tokio::task::spawn_blocking(move || {
                 record_tmux_exit_reason(&name_clone, "orphan cleanup: no owning channel session");
-                std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &exact_target])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
+                crate::services::platform::tmux::kill_session(&name_clone)
             }),
         )
         .await
@@ -1384,21 +1357,18 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
     let output = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::task::spawn_blocking(|| {
-            std::process::Command::new("tmux")
-                .args(["list-sessions", "-F", "#{session_name}"])
-                .output()
+            crate::services::platform::tmux::list_session_names()
         }),
     )
     .await
     {
-        Ok(Ok(Ok(o))) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(Ok(Ok(names))) => names,
         _ => return,
     };
 
     let mut reaped = 0u32;
 
-    for session_name in output.lines() {
-        let session_name = session_name.trim();
+    for session_name in output.iter().map(|s| s.trim()) {
         let Some((session_provider, _)) = parse_provider_and_channel_from_tmux_name(session_name)
         else {
             continue;
@@ -1493,9 +1463,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         let sess = session_name.to_string();
         let kill_result = tokio::task::spawn_blocking(move || {
             record_tmux_exit_reason(&sess, "reaper: dead session with no watcher");
-            std::process::Command::new("tmux")
-                .args(["kill-session", "-t", &exact_target])
-                .output()
+            crate::services::platform::tmux::kill_session_output(&sess)
         })
         .await;
         match &kill_result {
@@ -1544,28 +1512,16 @@ async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
         let suffix_c = full_suffix.clone();
         let provider_c = provider.clone();
         let killed = tokio::task::spawn_blocking(move || {
-            // List tmux sessions and find the one ending with -t{thread_channel_id}{env_suffix}
             let prefix = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
-            let output = std::process::Command::new("tmux")
-                .args(["list-sessions", "-F", "#{session_name}"])
-                .output()
-                .ok();
-            let mut killed_name = None;
-            if let Some(out) = output {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                for line in stdout.lines() {
-                    if line.starts_with(&prefix) && line.ends_with(&suffix_c) {
-                        record_tmux_exit_reason(line, "unified-thread run completed");
-                        let exact = tmux_exact_target(line);
-                        let _ = std::process::Command::new("tmux")
-                            .args(["kill-session", "-t", &exact])
-                            .output();
-                        killed_name = Some(line.to_string());
-                        break;
-                    }
+            let names = crate::services::platform::tmux::list_session_names().ok()?;
+            for name in &names {
+                if name.starts_with(&prefix) && name.ends_with(&suffix_c) {
+                    record_tmux_exit_reason(name, "unified-thread run completed");
+                    crate::services::platform::tmux::kill_session(name);
+                    return Some(name.clone());
                 }
             }
-            killed_name
+            None
         })
         .await
         .unwrap_or(None);

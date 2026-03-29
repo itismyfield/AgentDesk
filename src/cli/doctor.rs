@@ -759,14 +759,11 @@ fn check_discord_bot(snapshot: &HealthSnapshot) -> Check {
 }
 
 fn check_tmux() -> Check {
-    match Command::new("tmux").arg("-V").output() {
-        Ok(out) if out.status.success() => {
-            let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            Check::ok("tmux", CheckGroup::Core, "tmux", ver)
-                .with_path("tmux")
-                .with_expected_actual("tmux available in PATH", "tmux available")
-        }
-        _ => Check::warn(
+    match crate::services::platform::tmux::version() {
+        Ok(ver) => Check::ok("tmux", CheckGroup::Core, "tmux", ver)
+            .with_path("tmux")
+            .with_expected_actual("tmux available in PATH", "tmux available"),
+        Err(_) => Check::warn(
             "tmux",
             CheckGroup::Core,
             "tmux",

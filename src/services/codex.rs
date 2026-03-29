@@ -393,10 +393,7 @@ fn execute_streaming_local_tmux(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
                 );
-                let exact_target = tmux_exact_target(tmux_session_name);
-                let _ = Command::new("tmux")
-                    .args(["kill-session", "-t", &exact_target])
-                    .status();
+                crate::services::platform::tmux::kill_session(tmux_session_name);
                 // Fall through to new session creation below
             }
         }
@@ -405,10 +402,7 @@ fn execute_streaming_local_tmux(
             tmux_session_name,
             "stale local session cleanup before recreate",
         );
-        let exact_target = tmux_exact_target(tmux_session_name);
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &exact_target])
-            .status();
+        crate::services::platform::tmux::kill_session(tmux_session_name);
     }
 
     let _ = std::fs::remove_file(&output_path);
@@ -513,19 +507,11 @@ fn execute_streaming_local_tmux(
     std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Failed to write launch script: {}", e))?;
 
-    let tmux_result = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            tmux_session_name,
-            "-c",
-            working_dir,
-            &format!("bash {}", shell_escape(&script_path)),
-        ])
-        .env_remove("CLAUDECODE")
-        .output()
-        .map_err(|e| format!("Failed to create tmux session: {}", e))?;
+    let tmux_result = crate::services::platform::tmux::create_session(
+        tmux_session_name,
+        Some(working_dir),
+        &format!("bash {}", shell_escape(&script_path)),
+    )?;
 
     if !tmux_result.status.success() {
         let stderr = String::from_utf8_lossy(&tmux_result.stderr);
@@ -538,10 +524,7 @@ fn execute_streaming_local_tmux(
     }
 
     // Keep tmux session alive after process exits for post-mortem analysis
-    let exact_target = tmux_exact_target(tmux_session_name);
-    let _ = Command::new("tmux")
-        .args(["set-option", "-t", &exact_target, "remain-on-exit", "on"])
-        .output();
+    crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
     // Stamp generation marker so post-restart watcher restore can detect old sessions
     let gen_marker_path =

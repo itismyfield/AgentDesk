@@ -963,17 +963,15 @@ pub async fn force_kill_session(
     // 1. Kill tmux session
     let tmux_killed = {
         let sess = tmux_name.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             crate::services::tmux_diagnostics::record_tmux_exit_reason(
                 &sess,
                 "force-kill API invoked",
             );
-            std::process::Command::new("tmux")
-                .args(["kill-session", "-t", &sess])
-                .output()
+            crate::services::platform::tmux::kill_session(&sess)
         })
-        .await;
-        matches!(result, Ok(Ok(o)) if o.status.success())
+        .await
+        .unwrap_or(false)
     };
 
     // 2. Clear inflight state by scanning provider directory for matching tmux_session_name

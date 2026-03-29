@@ -7,46 +7,12 @@ fn tmux_exit_reason_path(tmux_session_name: &str) -> String {
     crate::services::tmux_common::session_temp_path(tmux_session_name, "exit_reason")
 }
 
-#[cfg(unix)]
 pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
-    let exact = crate::services::tmux_common::tmux_exact_target(tmux_session_name);
-    std::process::Command::new("tmux")
-        .args(["has-session", "-t", &exact])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::services::platform::tmux::has_session(tmux_session_name)
 }
 
-#[cfg(not(unix))]
-pub fn tmux_session_exists(_tmux_session_name: &str) -> bool {
-    false
-}
-
-fn pane_list_has_live_pane(stdout: &str) -> bool {
-    stdout.lines().any(|line| line.trim() == "0")
-}
-
-#[cfg(unix)]
 pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
-    if !tmux_session_exists(tmux_session_name) {
-        return false;
-    }
-
-    let exact = crate::services::tmux_common::tmux_exact_target(tmux_session_name);
-    std::process::Command::new("tmux")
-        .args(["list-panes", "-t", &exact, "-F", "#{pane_dead}"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| pane_list_has_live_pane(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-pub fn tmux_session_has_live_pane(_tmux_session_name: &str) -> bool {
-    false
+    crate::services::platform::tmux::has_live_pane(tmux_session_name)
 }
 
 pub fn clear_tmux_exit_reason(tmux_session_name: &str) {

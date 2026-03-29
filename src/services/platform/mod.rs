@@ -6,6 +6,7 @@
 pub mod binary_resolver;
 mod dump_tool;
 pub mod shell;
+pub mod tmux;
 
 pub use binary_resolver::{
     apply_runtime_path, async_resolve_binary_with_login_shell, merged_runtime_path, resolve_binary,

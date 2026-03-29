@@ -517,14 +517,7 @@ pub(super) async fn restore_inflight_turns(
         }
 
         let can_recover = tmux_session_name.as_deref().map_or(false, |name| {
-            let exact_target = tmux_exact_target(name);
-            std::process::Command::new("tmux")
-                .args(["has-session", "-t", &exact_target])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+            crate::services::platform::tmux::has_session(name)
         });
 
         if !can_recover {
