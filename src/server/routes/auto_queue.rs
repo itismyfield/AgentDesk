@@ -736,6 +736,23 @@ pub async fn activate(
         );
     }
 
+    // #179: Guard — skip if there's already a dispatched entry in-flight for this run.
+    // Prevents idle→activate from creating a second dispatch while one is still running.
+    let has_inflight: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM auto_queue_entries WHERE run_id = ?1 AND status = 'dispatched'",
+            [&run_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if has_inflight {
+        tracing::info!("[auto-queue] Skipping activate: run {run_id} already has a dispatched entry in-flight");
+        return (
+            StatusCode::OK,
+            Json(json!({ "dispatched": [], "count": 0, "message": "Already has in-flight entry" })),
+        );
+    }
+
     // Get first pending entry only (sequential dispatch — one at a time)
     let mut stmt = conn
         .prepare(
@@ -841,11 +858,11 @@ pub async fn activate(
         break; // Dispatch one at a time — next one starts when this one completes
     }
 
-    // Check if all entries are done
+    // Check if all entries are done — include 'dispatched' to avoid premature run completion (#179)
     let conn = state.db.separate_conn().unwrap();
     let remaining: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1 AND status = 'pending'",
+            "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1 AND status IN ('pending', 'dispatched')",
             [&run_id],
             |row| row.get(0),
         )
