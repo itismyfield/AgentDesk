@@ -96,6 +96,76 @@ async fn auto_retry_with_history(
         .await;
 }
 
+fn clear_local_session_state(
+    new_session_id: &mut Option<String>,
+    inflight_state: &mut InflightTurnState,
+) {
+    *new_session_id = None;
+    inflight_state.session_id = None;
+}
+
+async fn reset_session_for_auto_retry(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    cancel_token: &Arc<CancelToken>,
+    adk_session_key: Option<&str>,
+    new_session_id: &mut Option<String>,
+    inflight_state: &mut InflightTurnState,
+    reason: &str,
+) {
+    clear_local_session_state(new_session_id, inflight_state);
+    let _ = save_inflight_state(inflight_state);
+
+    let stale_sid = {
+        let mut data = shared.core.lock().await;
+        let old = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|s| s.session_id.clone());
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.session_id = None;
+        }
+        old
+    };
+
+    if let Some(key) = adk_session_key {
+        super::adk_session::clear_claude_session_id(key, shared.api_port).await;
+    }
+
+    if let Some(ref sid) = stale_sid {
+        let port = shared.api_port;
+        let sid_c = sid.clone();
+        tokio::spawn(async move {
+            let _ = reqwest::Client::new()
+                .post(crate::config::local_api_url(
+                    port,
+                    "/api/dispatched-sessions/clear-stale-session-id",
+                ))
+                .json(&serde_json::json!({"claude_session_id": sid_c}))
+                .send()
+                .await;
+        });
+    }
+
+    #[cfg(unix)]
+    if let Some(name) = cancel_token
+        .tmux_session
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+    {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!(
+            "  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})"
+        );
+        record_tmux_exit_reason(
+            &name,
+            &format!("forcing fresh session before auto-retry: {reason}"),
+        );
+        crate::services::platform::tmux::kill_session(&name);
+    }
+}
+
 /// Decide the final response text when a Done event arrives.
 ///
 /// Returns the text that should be used as `full_response`.
@@ -1261,16 +1331,16 @@ pub(super) fn spawn_turn_bridge(
                 "  [{ts}] ↻ Recovery session died — triggering auto-retry with history (channel {})",
                 channel_id
             );
-            // Clear stale session_id
-            {
-                let mut data = shared_owned.core.lock().await;
-                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.session_id = None;
-                }
-            }
-            if let Some(ref key) = adk_session_key {
-                super::adk_session::clear_claude_session_id(key, shared_owned.api_port).await;
-            }
+            reset_session_for_auto_retry(
+                &shared_owned,
+                channel_id,
+                &cancel_token,
+                adk_session_key.as_deref(),
+                &mut new_session_id,
+                &mut inflight_state,
+                "recovery session died",
+            )
+            .await;
             // Auto-retry with Discord history
             let http_c = http.clone();
             let retry_text = user_text_owned.clone();
@@ -1370,35 +1440,16 @@ pub(super) fn spawn_turn_bridge(
                     "  [{ts}] ⚠ Resume failed (error in response), clearing session_id (channel {})",
                     channel_id
                 );
-                // Clear all 3 locations
-                let stale_sid = {
-                    let mut data = shared_owned.core.lock().await;
-                    let old = data
-                        .sessions
-                        .get(&channel_id)
-                        .and_then(|s| s.session_id.clone());
-                    if let Some(session) = data.sessions.get_mut(&channel_id) {
-                        session.session_id = None;
-                    }
-                    old
-                };
-                if let Some(ref key) = adk_session_key {
-                    super::adk_session::clear_claude_session_id(key, shared_owned.api_port).await;
-                }
-                if let Some(ref sid) = stale_sid {
-                    let port = shared_owned.api_port;
-                    let sid_c = sid.clone();
-                    tokio::spawn(async move {
-                        let _ = reqwest::Client::new()
-                            .post(crate::config::local_api_url(
-                                port,
-                                "/api/dispatched-sessions/clear-stale-session-id",
-                            ))
-                            .json(&serde_json::json!({"claude_session_id": sid_c}))
-                            .send()
-                            .await;
-                    });
-                }
+                reset_session_for_auto_retry(
+                    &shared_owned,
+                    channel_id,
+                    &cancel_token,
+                    adk_session_key.as_deref(),
+                    &mut new_session_id,
+                    &mut inflight_state,
+                    "resume failed in response output",
+                )
+                .await;
                 // Auto-retry with Discord history context
                 let http_c = http.clone();
                 let retry_text = user_text_owned.clone();
@@ -1434,35 +1485,16 @@ pub(super) fn spawn_turn_bridge(
                         "  [{ts}] ⚠ Resume failed (stale session_id in recovered output), auto-retrying (channel {})",
                         channel_id
                     );
-                    let stale_sid = {
-                        let mut data = shared_owned.core.lock().await;
-                        let old = data
-                            .sessions
-                            .get(&channel_id)
-                            .and_then(|s| s.session_id.clone());
-                        if let Some(session) = data.sessions.get_mut(&channel_id) {
-                            session.session_id = None;
-                        }
-                        old
-                    };
-                    if let Some(ref key) = adk_session_key {
-                        super::adk_session::clear_claude_session_id(key, shared_owned.api_port)
-                            .await;
-                    }
-                    if let Some(ref sid) = stale_sid {
-                        let port = shared_owned.api_port;
-                        let sid_c = sid.clone();
-                        tokio::spawn(async move {
-                            let _ = reqwest::Client::new()
-                                .post(crate::config::local_api_url(
-                                    port,
-                                    "/api/dispatched-sessions/clear-stale-session-id",
-                                ))
-                                .json(&serde_json::json!({"claude_session_id": sid_c}))
-                                .send()
-                                .await;
-                        });
-                    }
+                    reset_session_for_auto_retry(
+                        &shared_owned,
+                        channel_id,
+                        &cancel_token,
+                        adk_session_key.as_deref(),
+                        &mut new_session_id,
+                        &mut inflight_state,
+                        "stale session_id in recovered output",
+                    )
+                    .await;
                     let http_c = http.clone();
                     let retry_text = user_text_owned.clone();
                     let retry_port = shared_owned.api_port;
@@ -1486,39 +1518,16 @@ pub(super) fn spawn_turn_bridge(
                                     "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
                                     channel_id
                                 );
-                                let stale_sid = {
-                                    let mut data = shared_owned.core.lock().await;
-                                    let old_sid = data
-                                        .sessions
-                                        .get(&channel_id)
-                                        .and_then(|s| s.session_id.clone());
-                                    if let Some(session) = data.sessions.get_mut(&channel_id) {
-                                        session.session_id = None;
-                                    }
-                                    old_sid
-                                };
-                                if let Some(ref key) = adk_session_key {
-                                    super::adk_session::clear_claude_session_id(
-                                        key,
-                                        shared_owned.api_port,
-                                    )
-                                    .await;
-                                }
-                                if let Some(ref sid) = stale_sid {
-                                    let port = shared_owned.api_port;
-                                    let sid_clone = sid.clone();
-                                    tokio::spawn(async move {
-                                        let url = local_api_url(
-                                            port,
-                                            "/api/dispatched-sessions/clear-stale-session-id",
-                                        );
-                                        let _ = reqwest::Client::new()
-                                            .post(&url)
-                                            .json(&serde_json::json!({"session_id": sid_clone, "claude_session_id": sid_clone}))
-                                            .send()
-                                            .await;
-                                    });
-                                }
+                                reset_session_for_auto_retry(
+                                    &shared_owned,
+                                    channel_id,
+                                    &cancel_token,
+                                    adk_session_key.as_deref(),
+                                    &mut new_session_id,
+                                    &mut inflight_state,
+                                    "stale session_id in output file",
+                                )
+                                .await;
                                 let http_c = http.clone();
                                 let retry_text = user_text_owned.clone();
                                 let retry_port = shared_owned.api_port;
@@ -1551,38 +1560,16 @@ pub(super) fn spawn_turn_bridge(
                                 "  [{ts}] ⚠ Quick exit with empty response — auto-retrying with fresh session (channel {})",
                                 channel_id
                             );
-                            let stale_sid = {
-                                let mut data = shared_owned.core.lock().await;
-                                let old = data
-                                    .sessions
-                                    .get(&channel_id)
-                                    .and_then(|s| s.session_id.clone());
-                                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                                    session.session_id = None;
-                                }
-                                old
-                            };
-                            if let Some(ref key) = adk_session_key {
-                                super::adk_session::clear_claude_session_id(
-                                    key,
-                                    shared_owned.api_port,
-                                )
-                                .await;
-                            }
-                            if let Some(ref sid) = stale_sid {
-                                let port = shared_owned.api_port;
-                                let sid_c = sid.clone();
-                                tokio::spawn(async move {
-                                    let _ = reqwest::Client::new()
-                                        .post(crate::config::local_api_url(
-                                            port,
-                                            "/api/dispatched-sessions/clear-stale-session-id",
-                                        ))
-                                        .json(&serde_json::json!({"claude_session_id": sid_c}))
-                                        .send()
-                                        .await;
-                                });
-                            }
+                            reset_session_for_auto_retry(
+                                &shared_owned,
+                                channel_id,
+                                &cancel_token,
+                                adk_session_key.as_deref(),
+                                &mut new_session_id,
+                                &mut inflight_state,
+                                "quick exit with empty response",
+                            )
+                            .await;
                             let http_c = http.clone();
                             let retry_text = user_text_owned.clone();
                             let retry_port = shared_owned.api_port;
@@ -1990,10 +1977,12 @@ pub(super) fn spawn_turn_bridge(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_verdict_payload, extract_explicit_review_verdict, extract_review_decision,
-        persisted_context_tokens, resolve_done_response, should_resume_watcher_after_turn,
-        total_context_tokens,
+        build_verdict_payload, clear_local_session_state, extract_explicit_review_verdict,
+        extract_review_decision, persisted_context_tokens, resolve_done_response,
+        should_resume_watcher_after_turn, total_context_tokens,
     };
+    use crate::services::discord::InflightTurnState;
+    use crate::services::provider::ProviderKind;
 
     #[test]
     fn chained_batch_mid_turn_keeps_watcher_paused() {
@@ -2019,6 +2008,30 @@ mod tests {
     #[test]
     fn total_context_tokens_saturates_on_overflow() {
         assert_eq!(total_context_tokens(u64::MAX, 1), u64::MAX);
+    }
+
+    #[test]
+    fn clear_local_session_state_drops_stale_resume_id_everywhere() {
+        let mut new_session_id = Some("stale-session".to_string());
+        let mut inflight_state = InflightTurnState::new(
+            ProviderKind::Claude,
+            1479671298497183835,
+            Some("adk-cc".to_string()),
+            343742347365974026,
+            1,
+            2,
+            "resume me".to_string(),
+            Some("stale-session".to_string()),
+            Some("AgentDesk-claude-adk-cc".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+
+        clear_local_session_state(&mut new_session_id, &mut inflight_state);
+
+        assert_eq!(new_session_id, None);
+        assert_eq!(inflight_state.session_id, None);
     }
 
     #[test]

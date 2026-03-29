@@ -443,19 +443,38 @@ pub(super) async fn tmux_output_watcher(
                 "  [{ts}] ⚠ Watcher detected stale session resume failure (channel {}), clearing session_id",
                 channel_id
             );
-            // Clear in-memory session_id
-            {
+            let stale_sid = {
                 let mut data = shared.core.lock().await;
+                let old = data
+                    .sessions
+                    .get(&channel_id)
+                    .and_then(|s| s.session_id.clone());
                 if let Some(session) = data.sessions.get_mut(&channel_id) {
                     session.session_id = None;
                 }
-            }
+                old
+            };
             // Clear DB session_id
             {
                 let hostname = crate::services::platform::hostname_short();
                 let session_key = format!("{}:{}", hostname, tmux_session_name);
                 super::adk_session::clear_claude_session_id(&session_key, shared.api_port).await;
             }
+            if let Some(ref sid) = stale_sid {
+                let _ = reqwest::Client::new()
+                    .post(crate::config::local_api_url(
+                        shared.api_port,
+                        "/api/dispatched-sessions/clear-stale-session-id",
+                    ))
+                    .json(&serde_json::json!({"claude_session_id": sid}))
+                    .send()
+                    .await;
+            }
+            record_tmux_exit_reason(
+                &tmux_session_name,
+                "stale session resume detected — forcing fresh session before auto-retry",
+            );
+            crate::services::platform::tmux::kill_session(&tmux_session_name);
             // Replace placeholder with recovery notice (don't delete — avoids visual gap)
             if let Some(msg_id) = placeholder_msg_id {
                 let _ = channel_id
