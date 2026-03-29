@@ -254,7 +254,7 @@ fn execute_transition(
         ).ok();
     }
 
-    // #117: Sync canonical review state
+    // #117/#158: Sync canonical review state via unified entrypoint
     let has_hooks = pipeline
         .hooks_for_state(to)
         .map_or(false, |h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
@@ -262,17 +262,15 @@ fn execute_transition(
         .hooks_for_state(to)
         .map_or(false, |h| h.on_enter.iter().any(|n| n == "OnReviewEnter"));
     if pipeline.is_terminal(to) || !has_hooks {
-        conn.execute(
-            "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, 'idle', datetime('now')) \
-             ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-            [card_id],
-        ).ok();
+        crate::engine::ops::review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({"card_id": card_id, "state": "idle"}).to_string(),
+        );
     } else if is_review_enter {
-        conn.execute(
-            "INSERT INTO card_review_state (card_id, state, review_entered_at, updated_at) VALUES (?1, 'reviewing', datetime('now'), datetime('now')) \
-             ON CONFLICT(card_id) DO UPDATE SET state = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now')",
-            [card_id],
-        ).ok();
+        crate::engine::ops::review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({"card_id": card_id, "state": "reviewing"}).to_string(),
+        );
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -302,16 +300,16 @@ fn execute_create_dispatch(
         &context,
     )?;
 
-    // #117: Update card_review_state for review-decision
+    // #117/#158: Update card_review_state via unified entrypoint
     if dispatch_type == "review-decision" {
-        if let Ok(conn) = db.separate_conn() {
-            conn.execute(
-                "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at) \
-                 VALUES (?1, 'suggestion_pending', ?2, datetime('now')) \
-                 ON CONFLICT(card_id) DO UPDATE SET pending_dispatch_id = ?2, updated_at = datetime('now')",
-                rusqlite::params![card_id, dispatch_id],
-            ).ok();
-        }
+        crate::engine::ops::review_state_sync(
+            db,
+            &serde_json::json!({
+                "card_id": card_id,
+                "state": "suggestion_pending",
+                "pending_dispatch_id": dispatch_id,
+            }).to_string(),
+        );
     }
 
     // Get issue URL for Discord notification
@@ -574,5 +572,132 @@ mod tests {
         }];
         let result = execute_intents(&db, intents);
         assert_eq!(result.errors, 1);
+    }
+
+    // ── #158: card_review_state guard tests ─────────────────────
+
+    fn insert_test_card(conn: &rusqlite::Connection, card_id: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Test', '111')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+             VALUES (?1, 'Test', 'in_progress', 'agent-1', datetime('now'), datetime('now'))",
+            [card_id],
+        ).unwrap();
+    }
+
+    #[test]
+    fn test_blocked_card_review_state_insert_sql() {
+        let db = test_db();
+        let intents = vec![Intent::ExecuteSQL {
+            sql: "INSERT INTO card_review_state (card_id, state) VALUES ('x', 'idle')".into(),
+            params: vec![],
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 1);
+    }
+
+    #[test]
+    fn test_blocked_card_review_state_update_sql() {
+        let db = test_db();
+        let intents = vec![Intent::ExecuteSQL {
+            sql: "UPDATE card_review_state SET state = 'reviewing' WHERE card_id = 'x'".into(),
+            params: vec![],
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 1);
+    }
+
+    #[test]
+    fn test_review_state_sync_on_conn_basic() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        insert_test_card(&conn, "card-sync-1");
+
+        let result = crate::engine::ops::review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({"card_id": "card-sync-1", "state": "reviewing"}).to_string(),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed["ok"].as_bool().unwrap());
+
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM card_review_state WHERE card_id = 'card-sync-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "reviewing");
+    }
+
+    #[test]
+    fn test_review_state_sync_on_conn_upsert_preserves_fields() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        insert_test_card(&conn, "card-upsert");
+
+        // First write: set state + last_verdict
+        crate::engine::ops::review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({
+                "card_id": "card-upsert",
+                "state": "suggestion_pending",
+                "last_verdict": "improve",
+                "pending_dispatch_id": "d-1",
+            })
+            .to_string(),
+        );
+
+        // Second write: update state only — last_verdict should be preserved via COALESCE
+        crate::engine::ops::review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({"card_id": "card-upsert", "state": "rework_pending"}).to_string(),
+        );
+
+        let (state, verdict): (String, String) = conn
+            .query_row(
+                "SELECT state, last_verdict FROM card_review_state WHERE card_id = 'card-upsert'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "rework_pending");
+        assert_eq!(verdict, "improve");
+    }
+
+    #[test]
+    fn test_review_state_sync_idle_clears_pending_dispatch() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        insert_test_card(&conn, "card-idle");
+
+        // Set up a suggestion_pending state with dispatch
+        crate::engine::ops::review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({
+                "card_id": "card-idle",
+                "state": "suggestion_pending",
+                "pending_dispatch_id": "d-99",
+            })
+            .to_string(),
+        );
+
+        // Transition to idle — pending_dispatch_id must be cleared
+        crate::engine::ops::review_state_sync_on_conn(
+            &conn,
+            &serde_json::json!({"card_id": "card-idle", "state": "idle"}).to_string(),
+        );
+
+        let dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT pending_dispatch_id FROM card_review_state WHERE card_id = 'card-idle'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(dispatch_id.is_none(), "idle state must clear pending_dispatch_id");
     }
 }

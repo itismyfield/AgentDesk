@@ -911,21 +911,13 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 ).ok();
             }
 
-            // #117: Sync canonical review state on status transitions (pipeline-driven)
+            // #117/#158: Sync canonical review state via unified entrypoint
             let has_hooks = pipeline.hooks_for_state(&new_status).map_or(false, |h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
             let is_review_enter = pipeline.hooks_for_state(&new_status).map_or(false, |h| h.on_enter.iter().any(|n| n == "OnReviewEnter"));
             if pipeline.is_terminal(&new_status) || !has_hooks {
-                conn.execute(
-                    "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, 'idle', datetime('now')) \
-                     ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-                    [&card_id],
-                ).ok();
+                review_state_sync_on_conn(&conn, &serde_json::json!({"card_id": card_id, "state": "idle"}).to_string());
             } else if is_review_enter {
-                conn.execute(
-                    "INSERT INTO card_review_state (card_id, state, review_entered_at, updated_at) VALUES (?1, 'reviewing', datetime('now'), datetime('now')) \
-                     ON CONFLICT(card_id) DO UPDATE SET state = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now')",
-                    [&card_id],
-                ).ok();
+                review_state_sync_on_conn(&conn, &serde_json::json!({"card_id": card_id, "state": "reviewing"}).to_string());
             }
 
             format!(
@@ -1042,28 +1034,15 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
             }
 
-            // Sync card_review_state (#117)
+            // #117/#158: Sync card_review_state via unified entrypoint
             if let Some(rs) = opts.get("review_status") {
-                if rs.is_null() {
-                    conn.execute(
-                        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, 'idle', datetime('now')) \
-                         ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
-                        [&card_id],
-                    ).ok();
-                } else if let Some(s) = rs.as_str() {
-                    let canonical_state = match s {
-                        "reviewing" => "reviewing",
-                        "suggestion_pending" => "suggestion_pending",
-                        "rework_pending" => "rework_pending",
-                        "awaiting_dod" => "awaiting_dod",
-                        "dilemma_pending" => "dilemma_pending",
-                        _ => s,
-                    };
-                    conn.execute(
-                        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, ?2, datetime('now')) \
-                         ON CONFLICT(card_id) DO UPDATE SET state = ?2, updated_at = datetime('now')",
-                        rusqlite::params![card_id, canonical_state],
-                    ).ok();
+                let review_state = if rs.is_null() {
+                    Some("idle")
+                } else {
+                    rs.as_str()
+                };
+                if let Some(s) = review_state {
+                    review_state_sync_on_conn(&conn, &serde_json::json!({"card_id": card_id, "state": s}).to_string());
                 }
             }
 
@@ -1263,6 +1242,16 @@ fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 /// Single entrypoint for all review-state mutations.
 /// Used by both the JS bridge and Rust route handlers.
 pub fn review_state_sync(db: &Db, json_str: &str) -> String {
+    let conn = match db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"db error: {}"}}"#, e),
+    };
+    review_state_sync_on_conn(&conn, json_str)
+}
+
+/// Same as `review_state_sync` but operates on an already-acquired connection.
+/// Use this inside transactions or when a lock is already held (#158).
+pub fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &str) -> String {
     let params: serde_json::Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(e) => return format!(r#"{{"error":"invalid JSON: {}"}}"#, e),
@@ -1273,11 +1262,6 @@ pub fn review_state_sync(db: &Db, json_str: &str) -> String {
     if card_id.is_empty() || state.is_empty() {
         return r#"{"error":"card_id and state are required"}"#.to_string();
     }
-
-    let conn = match db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => return format!(r#"{{"error":"db error: {}"}}"#, e),
-    };
 
     // Build dynamic SET clause based on provided fields
     let review_round = params["review_round"].as_i64();

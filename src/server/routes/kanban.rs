@@ -1855,13 +1855,11 @@ pub async fn pm_decision(
                             },
                         )
                         .ok();
-                        // #117: sync canonical review state
-                        conn.execute(
-                            "INSERT INTO card_review_state (card_id, state, last_decision, updated_at) \
-                             VALUES (?1, 'rework_pending', 'pm_rework', datetime('now')) \
-                             ON CONFLICT(card_id) DO UPDATE SET state = 'rework_pending', last_decision = 'pm_rework', pending_dispatch_id = NULL, updated_at = datetime('now')",
-                            [&body.card_id],
-                        ).ok();
+                        // #117/#158: sync canonical review state via unified entrypoint
+                        crate::engine::ops::review_state_sync_on_conn(
+                            &conn,
+                            &serde_json::json!({"card_id": body.card_id, "state": "rework_pending", "last_decision": "pm_rework"}).to_string(),
+                        );
                     }
                     "Rework dispatch created"
                 }
