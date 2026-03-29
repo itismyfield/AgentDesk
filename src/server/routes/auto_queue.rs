@@ -770,18 +770,27 @@ pub async fn activate(
     }
 
     // Get first pending entry only (sequential dispatch — one at a time)
+    // #179: When agent_id is specified, restrict to that agent's entries to prevent
+    // agent A's idle→activate from dispatching agent B's card in a global run.
+    let pending_query = if effective_agent.is_some() {
+        "SELECT e.id, e.kanban_card_id, e.agent_id
+         FROM auto_queue_entries e
+         WHERE e.run_id = ?1 AND e.status = 'pending' AND e.agent_id = ?2
+         ORDER BY e.priority_rank ASC
+         LIMIT 1"
+    } else {
+        "SELECT e.id, e.kanban_card_id, e.agent_id
+         FROM auto_queue_entries e
+         WHERE e.run_id = ?1 AND e.status = 'pending'
+         ORDER BY e.priority_rank ASC
+         LIMIT 1"
+    };
     let mut stmt = conn
-        .prepare(
-            "SELECT e.id, e.kanban_card_id, e.agent_id
-             FROM auto_queue_entries e
-             WHERE e.run_id = ?1 AND e.status = 'pending'
-             ORDER BY e.priority_rank ASC
-             LIMIT 1",
-        )
+        .prepare(pending_query)
         .unwrap();
 
-    let pending: Vec<(String, String, String)> = stmt
-        .query_map([&run_id], |row| {
+    let pending: Vec<(String, String, String)> = if let Some(ref agt) = effective_agent {
+        stmt.query_map(rusqlite::params![run_id, agt], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -790,7 +799,19 @@ pub async fn activate(
         })
         .ok()
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
+        .unwrap_or_default()
+    } else {
+        stmt.query_map([&run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    };
 
     drop(stmt);
 
