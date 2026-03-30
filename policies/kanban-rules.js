@@ -200,6 +200,9 @@ var rules = {
     // Review/decision dispatches — handled by review-automation policy
     if (dispatch.dispatch_type === "review" || dispatch.dispatch_type === "review-decision") return;
 
+    // #197: e2e-test dispatches — handled by deploy-pipeline policy
+    if (dispatch.dispatch_type === "e2e-test") return;
+
     // Rework dispatches — skip gate, go directly to review
     if (dispatch.dispatch_type === "rework") {
       agentdesk.kanban.setStatus(card.id, reviewState);

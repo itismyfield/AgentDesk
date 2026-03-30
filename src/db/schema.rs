@@ -1,6 +1,8 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
+const AGENTDESK_REPO_ID: &str = "itismyfield/AgentDesk";
+
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS kv_meta (
@@ -499,5 +501,156 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         }
     }
 
+    seed_builtin_pipeline_stages(conn)?;
+
     Ok(())
+}
+
+pub fn seed_builtin_pipeline_stages(conn: &Connection) -> Result<()> {
+    let repo_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM github_repos WHERE id = ?1)",
+            [AGENTDESK_REPO_ID],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !repo_exists {
+        return Ok(());
+    }
+
+    ensure_pipeline_stage(
+        conn,
+        AGENTDESK_REPO_ID,
+        "dev-deploy",
+        100,
+        Some("review_pass"),
+        Some("self"),
+        Some("no_rs_changes"),
+    )?;
+    ensure_pipeline_stage(
+        conn,
+        AGENTDESK_REPO_ID,
+        "e2e-test",
+        200,
+        None,
+        Some("counter"),
+        Some("no_rs_changes"),
+    )?;
+
+    Ok(())
+}
+
+fn ensure_pipeline_stage(
+    conn: &Connection,
+    repo_id: &str,
+    stage_name: &str,
+    stage_order: i64,
+    trigger_after: Option<&str>,
+    provider: Option<&str>,
+    skip_condition: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO pipeline_stages (
+            repo_id, stage_name, stage_order, trigger_after, provider, skip_condition
+         )
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6
+         WHERE NOT EXISTS (
+            SELECT 1 FROM pipeline_stages WHERE repo_id = ?1 AND stage_name = ?2
+         )",
+        rusqlite::params![
+            repo_id,
+            stage_name,
+            stage_order,
+            trigger_after,
+            provider,
+            skip_condition,
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_backfills_agentdesk_pipeline_stages_for_existing_repo() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO github_repos (id, display_name, sync_enabled) VALUES (?1, 'AgentDesk', TRUE)",
+            [AGENTDESK_REPO_ID],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let rows: Vec<(String, i64, Option<String>, Option<String>, Option<String>)> = conn
+            .prepare(
+                "SELECT stage_name, stage_order, trigger_after, provider, skip_condition
+                 FROM pipeline_stages
+                 WHERE repo_id = ?1
+                 ORDER BY stage_order ASC",
+            )
+            .unwrap()
+            .query_map([AGENTDESK_REPO_ID], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "dev-deploy");
+        assert_eq!(rows[0].1, 100);
+        assert_eq!(rows[0].2.as_deref(), Some("review_pass"));
+        assert_eq!(rows[0].3.as_deref(), Some("self"));
+        assert_eq!(rows[0].4.as_deref(), Some("no_rs_changes"));
+        assert_eq!(rows[1].0, "e2e-test");
+        assert_eq!(rows[1].1, 200);
+        assert_eq!(rows[1].3.as_deref(), Some("counter"));
+        assert_eq!(rows[1].4.as_deref(), Some("no_rs_changes"));
+    }
+
+    #[test]
+    fn seed_builtin_pipeline_stages_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO github_repos (id, display_name, sync_enabled) VALUES (?1, 'AgentDesk', TRUE)",
+            [AGENTDESK_REPO_ID],
+        )
+        .unwrap();
+
+        seed_builtin_pipeline_stages(&conn).unwrap();
+        seed_builtin_pipeline_stages(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pipeline_stages WHERE repo_id = ?1",
+                [AGENTDESK_REPO_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
 }

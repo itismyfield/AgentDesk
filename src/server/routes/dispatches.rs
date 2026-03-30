@@ -162,7 +162,11 @@ pub async fn create_dispatch(
                     &body.title,
                 );
             }
-            let status_code = if was_reused { StatusCode::OK } else { StatusCode::CREATED };
+            let status_code = if was_reused {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
             (status_code, Json(json!({"dispatch": d})))
         }
         Err(e) => {
@@ -409,7 +413,10 @@ fn get_thread_for_channel(
     // When the map exists but doesn't contain this channel, the thread belongs to a
     // different channel (e.g. CDX review thread) and must NOT be reused for the
     // primary channel's review-decision message.
-    if map_json.as_deref().map_or(true, |s| s.is_empty() || s == "{}") {
+    if map_json
+        .as_deref()
+        .map_or(true, |s| s.is_empty() || s == "{}")
+    {
         return conn
             .query_row(
                 "SELECT active_thread_id FROM kanban_cards WHERE id = ?1 AND active_thread_id IS NOT NULL",
@@ -1810,10 +1817,10 @@ pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
 }
 
 fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
-    // Only "review" goes to the counter-model channel.
+    // "review" and "e2e-test" (#197) go to the counter-model channel.
     // "review-decision" is sent to the original agent's primary channel
     // so it reuses the implementation thread.
-    matches!(dispatch_type, Some("review"))
+    matches!(dispatch_type, Some("review") | Some("e2e-test"))
 }
 
 fn format_dispatch_message(
