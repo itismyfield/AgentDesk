@@ -2321,6 +2321,10 @@ async fn auto_queue_activate_unified_thread_run_dispatches_to_same_run() {
     assert_eq!(run_status, "active");
 }
 
+// NOTE: auto_queue_activate_requested_card_not_blocked_by_own_status and
+// auto_queue_activate_walks_backlog_card_to_dispatchable_state tests already
+// defined above (from main branch merge). Duplicate definitions removed.
+
 /// #107 regression: empty claude_session_id must be normalized to NULL at the API
 /// boundary so that stale clear paths don't poison the DB with "".
 #[tokio::test]
