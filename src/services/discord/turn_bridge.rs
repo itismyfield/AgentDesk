@@ -995,6 +995,11 @@ pub(super) fn spawn_turn_bridge(
                             if result == super::recovery::RESTART_SESSION_DIED_HANDOFF_SENTINEL {
                                 restart_recovery_handoff = true;
                             } else if result == "__session_died_retry__" {
+                                // Legacy fallback: older recovery reporters used
+                                // auto-retry instead of the internal handoff
+                                // sentinel. Keep this branch for mixed-runtime
+                                // rollouts until every caller emits the new
+                                // sentinel consistently.
                                 recovery_retry = true;
                             }
                             if let Some(resolved) = resolve_done_response(
