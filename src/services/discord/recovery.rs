@@ -11,6 +11,44 @@ fn tmux_session_has_live_pane(_name: &str) -> bool {
     false
 }
 
+/// Retry-aware tmux session check for recovery after dcserver restart.
+/// The first check can false-negative if tmux CLI hasn't fully initialized yet.
+fn tmux_session_alive_with_retry(name: &str) -> bool {
+    if tmux_session_has_live_pane(name) {
+        return true;
+    }
+    // Retry up to 2 more times with 1-second gaps
+    for attempt in 1..=2 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if tmux_session_has_live_pane(name) {
+            println!(
+                "  [recovery] tmux pane alive on retry {} for {}",
+                attempt, name
+            );
+            return true;
+        }
+    }
+    false
+}
+
+/// Retry-aware tmux has_session check.
+fn tmux_has_session_with_retry(name: &str) -> bool {
+    if crate::services::platform::tmux::has_session(name) {
+        return true;
+    }
+    for attempt in 1..=2 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if crate::services::platform::tmux::has_session(name) {
+            println!(
+                "  [recovery] tmux session found on retry {} for {}",
+                attempt, name
+            );
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(not(unix))]
 fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Option<String> {
     None
@@ -412,7 +450,7 @@ pub(super) async fn restore_inflight_turns(
                 });
             let session_alive = tmux_name
                 .as_deref()
-                .map_or(false, tmux_session_has_live_pane);
+                .map_or(false, tmux_session_alive_with_retry);
 
             if session_alive {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -652,7 +690,7 @@ pub(super) async fn restore_inflight_turns(
         }
 
         let can_recover = tmux_session_name.as_deref().map_or(false, |name| {
-            crate::services::platform::tmux::has_session(name)
+            tmux_has_session_with_retry(name)
         });
 
         if !can_recover {
@@ -732,7 +770,7 @@ pub(super) async fn restore_inflight_turns(
         // instead of deferring to restore_tmux_watchers() to avoid a race
         // condition where the session could die in the gap between recovery and
         // restore_tmux_watchers (~50s), losing the response.
-        let pane_alive = tmux_session_has_live_pane(&tmux_session_name);
+        let pane_alive = tmux_session_alive_with_retry(&tmux_session_name);
         if pane_alive {
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
