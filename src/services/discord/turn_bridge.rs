@@ -135,16 +135,14 @@ async fn reset_session_for_auto_retry(
     if let Some(ref sid) = stale_sid {
         let port = shared.api_port;
         let sid_c = sid.clone();
-        tokio::spawn(async move {
-            let _ = reqwest::Client::new()
-                .post(crate::config::local_api_url(
-                    port,
-                    "/api/dispatched-sessions/clear-stale-session-id",
-                ))
-                .json(&serde_json::json!({"claude_session_id": sid_c}))
-                .send()
-                .await;
-        });
+        let _ = reqwest::Client::new()
+            .post(crate::config::local_api_url(
+                port,
+                "/api/dispatched-sessions/clear-stale-session-id",
+            ))
+            .json(&serde_json::json!({"claude_session_id": sid_c}))
+            .send()
+            .await;
     }
 
     #[cfg(unix)]
@@ -162,6 +160,75 @@ async fn reset_session_for_auto_retry(
         );
         crate::services::platform::tmux::kill_session(&name);
     }
+}
+
+pub(super) fn contains_stale_resume_error_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("no conversation found") || lower.contains("error: no conversation")
+}
+
+pub(super) fn result_event_has_stale_resume_error(value: &serde_json::Value) -> bool {
+    if value.get("type").and_then(|v| v.as_str()) != Some("result") {
+        return false;
+    }
+
+    let subtype = value.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+    let is_error = value
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || subtype.starts_with("error");
+    if !is_error {
+        return false;
+    }
+
+    if value
+        .get("result")
+        .and_then(|v| v.as_str())
+        .map(contains_stale_resume_error_text)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    value
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .map(|errors| {
+            errors.iter().any(|err| {
+                err.as_str()
+                    .map(contains_stale_resume_error_text)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn output_file_has_stale_resume_error_after_offset(output_path: &str, start_offset: u64) -> bool {
+    let Ok(bytes) = std::fs::read(output_path) else {
+        return false;
+    };
+    let start = usize::try_from(start_offset)
+        .ok()
+        .map(|offset| offset.min(bytes.len()))
+        .unwrap_or(bytes.len());
+
+    String::from_utf8_lossy(&bytes[start..])
+        .lines()
+        .any(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return false;
+            }
+            serde_json::from_str::<serde_json::Value>(trimmed)
+                .ok()
+                .map(|value| result_event_has_stale_resume_error(&value))
+                .unwrap_or(false)
+        })
+}
+
+fn stream_error_has_stale_resume_error(message: &str, stderr: &str) -> bool {
+    contains_stale_resume_error_text(message) || contains_stale_resume_error_text(stderr)
 }
 
 /// Decide the final response text when a Done event arrives.
@@ -806,6 +873,7 @@ pub(super) fn spawn_turn_bridge(
         let mut has_post_tool_text = bridge.inflight_state.has_post_tool_text;
         let mut tmux_handed_off = false;
         let mut transport_error = false;
+        let mut resume_failure_detected = false;
         let mut restart_recovery_handoff = false;
         let mut recovery_retry = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
@@ -1021,6 +1089,8 @@ pub(super) fn spawn_turn_bridge(
                         StreamMessage::Error {
                             message, stderr, ..
                         } => {
+                            let is_stale_resume =
+                                stream_error_has_stale_resume_error(&message, &stderr);
                             transport_error = true;
                             let combined = format!("{} {}", message, stderr).to_lowercase();
                             if combined.contains("prompt is too long")
@@ -1034,6 +1104,20 @@ pub(super) fn spawn_turn_bridge(
                                 // with a shorter message or /compact. Don't mark as transport error.
                                 transport_error = false;
                                 full_response = "⚠️ __prompt too long__".to_string();
+                            } else if is_stale_resume {
+                                // Recoverable stale resume: auto-retry with a fresh provider
+                                // session instead of failing the current dispatch/turn.
+                                transport_error = false;
+                                resume_failure_detected = true;
+                                if !stderr.is_empty() {
+                                    full_response = format!(
+                                        "Error: {}\nstderr: {}",
+                                        message,
+                                        truncate_str(&stderr, 500)
+                                    );
+                                } else {
+                                    full_response = format!("Error: {}", message);
+                                }
                             } else if !stderr.is_empty() {
                                 full_response = format!(
                                     "Error: {}\nstderr: {}",
@@ -1493,12 +1577,9 @@ pub(super) fn spawn_turn_bridge(
                 channel_id
             );
         } else {
-            // Check for resume failure BEFORE any other response handling.
-            // This must be outside the is_empty() block because StreamMessage::Error
-            // sets full_response to "Error: No conversation found..." which is non-empty.
-            let resume_error_in_response = full_response.contains("No conversation found")
-                || full_response.contains("Error: No conversation");
-            if resume_error_in_response {
+            // Check for stale resume failure BEFORE any other response handling.
+            // This path is driven by explicit error/result events, not assistant text.
+            if resume_failure_detected {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 eprintln!(
                     "  [{ts}] ⚠ Resume failed (error in response), clearing session_id (channel {})",
@@ -1540,10 +1621,19 @@ pub(super) fn spawn_turn_bridge(
                     }
                 }
 
-                // Check for resume failure in recovered output
-                let resume_error_in_recovered = full_response.contains("No conversation found")
-                    || full_response.contains("Error: No conversation");
-                if resume_error_in_recovered {
+                // Check for stale resume failure in recovered output
+                let stale_resume_in_output = inflight_state
+                    .output_path
+                    .as_deref()
+                    .map(|path| {
+                        output_file_has_stale_resume_error_after_offset(
+                            path,
+                            inflight_state.last_offset,
+                        )
+                    })
+                    .unwrap_or(false);
+                if stale_resume_in_output {
+                    resume_failure_detected = true;
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     eprintln!(
                         "  [{ts}] ⚠ Resume failed (stale session_id in recovered output), auto-retrying (channel {})",
@@ -1572,40 +1662,40 @@ pub(super) fn spawn_turn_bridge(
                     let quick_exit = turn_start.elapsed().as_secs() < 10;
                     // Method 1: check tmux output file
                     if let Some(ref path) = inflight_state.output_path {
-                        if let Ok(content) = std::fs::read_to_string(path) {
-                            if content.contains("No conversation found")
-                                || content.contains("Error: No conversation")
-                            {
-                                resume_failed = true;
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!(
-                                    "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
-                                    channel_id
-                                );
-                                reset_session_for_auto_retry(
-                                    &shared_owned,
+                        if output_file_has_stale_resume_error_after_offset(
+                            path,
+                            inflight_state.last_offset,
+                        ) {
+                            resume_failed = true;
+                            resume_failure_detected = true;
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!(
+                                "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
+                                channel_id
+                            );
+                            reset_session_for_auto_retry(
+                                &shared_owned,
+                                channel_id,
+                                &cancel_token,
+                                adk_session_key.as_deref(),
+                                &mut new_session_id,
+                                &mut inflight_state,
+                                "stale session_id in output file",
+                            )
+                            .await;
+                            let http_c = http.clone();
+                            let retry_text = user_text_owned.clone();
+                            let retry_port = shared_owned.api_port;
+                            tokio::spawn(async move {
+                                auto_retry_with_history(
+                                    &http_c,
                                     channel_id,
-                                    &cancel_token,
-                                    adk_session_key.as_deref(),
-                                    &mut new_session_id,
-                                    &mut inflight_state,
-                                    "stale session_id in output file",
+                                    &retry_text,
+                                    retry_port,
                                 )
                                 .await;
-                                let http_c = http.clone();
-                                let retry_text = user_text_owned.clone();
-                                let retry_port = shared_owned.api_port;
-                                tokio::spawn(async move {
-                                    auto_retry_with_history(
-                                        &http_c,
-                                        channel_id,
-                                        &retry_text,
-                                        retry_port,
-                                    )
-                                    .await;
-                                });
-                                full_response = String::new();
-                            }
+                            });
+                            full_response = String::new();
                         }
                     }
                     // Method 2: quick exit (<10s) + empty response + had a session_id to resume
@@ -1619,6 +1709,7 @@ pub(super) fn spawn_turn_bridge(
                         };
                         if attempted_resume {
                             resume_failed = true;
+                            resume_failure_detected = true;
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             eprintln!(
                                 "  [{ts}] ⚠ Quick exit with empty response — auto-retrying with fresh session (channel {})",
@@ -1784,7 +1875,9 @@ pub(super) fn spawn_turn_bridge(
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
                 if !session.cleared && !is_prompt_too_long {
-                    if let Some(sid) = new_session_id {
+                    if resume_failure_detected {
+                        session.session_id = None;
+                    } else if let Some(sid) = new_session_id {
                         session.session_id = Some(sid);
                     }
                     session.history.push(HistoryItem {
@@ -1805,15 +1898,18 @@ pub(super) fn spawn_turn_bridge(
         };
 
         // Persist provider session_id to DB so it survives dcserver restarts.
-        if let (Some(ref session_key), Some(ref persisted_sid)) =
-            (adk_session_key, session_id_to_persist)
-        {
-            super::adk_session::save_provider_session_id(
-                session_key,
-                persisted_sid,
-                shared_owned.api_port,
-            )
-            .await;
+        if !resume_failure_detected {
+            if let (Some(ref session_key), Some(ref persisted_sid)) =
+                (adk_session_key, session_id_to_persist)
+            {
+                super::adk_session::save_provider_session_id(
+                    session_key,
+                    persisted_sid,
+                    &provider,
+                    shared_owned.api_port,
+                )
+                .await;
+            }
         }
 
         // Clear restart report BEFORE clearing inflight state (which removes
@@ -2041,12 +2137,15 @@ pub(super) fn spawn_turn_bridge(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_verdict_payload, clear_local_session_state, extract_explicit_review_verdict,
-        extract_review_decision, persisted_context_tokens, resolve_done_response,
+        build_verdict_payload, clear_local_session_state, contains_stale_resume_error_text,
+        extract_explicit_review_verdict, extract_review_decision,
+        output_file_has_stale_resume_error_after_offset, persisted_context_tokens,
+        resolve_done_response, result_event_has_stale_resume_error,
         should_resume_watcher_after_turn, total_context_tokens,
     };
     use crate::services::discord::InflightTurnState;
     use crate::services::provider::ProviderKind;
+    use std::io::Write;
 
     #[test]
     fn chained_batch_mid_turn_keeps_watcher_paused() {
@@ -2096,6 +2195,118 @@ mod tests {
 
         assert_eq!(new_session_id, None);
         assert_eq!(inflight_state.session_id, None);
+    }
+
+    #[test]
+    fn stale_resume_text_helper_matches_known_error_shapes() {
+        assert!(contains_stale_resume_error_text("Error: No conversation"));
+        assert!(contains_stale_resume_error_text(
+            "No conversation found for session"
+        ));
+        assert!(!contains_stale_resume_error_text(
+            "The assistant explained why a conversation was missing context."
+        ));
+    }
+
+    #[test]
+    fn stale_resume_result_helper_requires_error_result_record() {
+        let assistant_text = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "The log said No conversation found"
+                }]
+            }
+        });
+        let success_result = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "result": "No conversation found while inspecting logs",
+        });
+        let error_result = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "errors": ["No conversation found"],
+        });
+
+        assert!(!result_event_has_stale_resume_error(&assistant_text));
+        assert!(!result_event_has_stale_resume_error(&success_result));
+        assert!(result_event_has_stale_resume_error(&error_result));
+    }
+
+    #[test]
+    fn stale_resume_output_scan_ignores_assistant_mentions() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "text",
+                        "text": "I saw `No conversation found` in the logs."
+                    }]
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "result": "analysis complete"
+            })
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        assert!(!output_file_has_stale_resume_error_after_offset(
+            file.path().to_str().unwrap(),
+            0,
+        ));
+    }
+
+    #[test]
+    fn stale_resume_output_scan_detects_error_result_after_offset() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "text",
+                        "text": "before"
+                    }]
+                }
+            })
+        )
+        .unwrap();
+        file.flush().unwrap();
+        let offset = std::fs::metadata(file.path()).unwrap().len();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "errors": ["No conversation found"]
+            })
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        assert!(output_file_has_stale_resume_error_after_offset(
+            file.path().to_str().unwrap(),
+            offset,
+        ));
     }
 
     #[test]
