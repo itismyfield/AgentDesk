@@ -101,6 +101,7 @@ pub struct HookSessionBody {
 #[derive(Debug, Deserialize)]
 pub struct DeleteSessionQuery {
     pub session_key: String,
+    pub provider: Option<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────
@@ -715,11 +716,22 @@ pub async fn get_claude_session_id(
     // rows before attempting to restore a provider session_id.
     let _ = disconnect_stale_fixed_session_by_key_db(&conn, &params.session_key);
 
-    match conn.query_row(
-        "SELECT claude_session_id FROM sessions WHERE session_key = ?1",
-        [&params.session_key],
-        |row| row.get::<_, Option<String>>(0),
-    ) {
+    let provider = params.provider.as_deref().filter(|s| !s.is_empty());
+    let result = if let Some(provider) = provider {
+        conn.query_row(
+            "SELECT claude_session_id FROM sessions WHERE session_key = ?1 AND provider = ?2",
+            rusqlite::params![&params.session_key, provider],
+            |row| row.get::<_, Option<String>>(0),
+        )
+    } else {
+        conn.query_row(
+            "SELECT claude_session_id FROM sessions WHERE session_key = ?1",
+            [&params.session_key],
+            |row| row.get::<_, Option<String>>(0),
+        )
+    };
+
+    match result {
         Ok(claude_session_id) => (
             StatusCode::OK,
             Json(json!({"claude_session_id": claude_session_id, "session_id": claude_session_id})),

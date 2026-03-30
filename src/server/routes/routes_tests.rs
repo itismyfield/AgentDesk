@@ -265,6 +265,88 @@ async fn claude_session_id_get_keeps_old_idle_fixed_session() {
 }
 
 #[tokio::test]
+async fn claude_session_id_get_returns_null_on_provider_mismatch() {
+    let db = test_db();
+    let engine = test_engine(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, provider, status, claude_session_id, last_heartbeat, created_at
+             ) VALUES (
+                'host:AgentDesk-codex-adk-cdx', 'claude', 'idle', 'claude-sid',
+                datetime('now', '-1 minutes'), datetime('now', '-1 minutes')
+             )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/dispatched-sessions/claude-session-id?session_key=host:AgentDesk-codex-adk-cdx&provider=codex",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["claude_session_id"].is_null());
+    assert!(json["session_id"].is_null());
+}
+
+#[tokio::test]
+async fn claude_session_id_get_keeps_value_on_provider_match() {
+    let db = test_db();
+    let engine = test_engine(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, provider, status, claude_session_id, last_heartbeat, created_at
+             ) VALUES (
+                'host:AgentDesk-codex-adk-cdx', 'codex', 'idle', 'codex-sid',
+                datetime('now', '-1 minutes'), datetime('now', '-1 minutes')
+             )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/dispatched-sessions/claude-session-id?session_key=host:AgentDesk-codex-adk-cdx&provider=codex",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["claude_session_id"], "codex-sid");
+    assert_eq!(json["session_id"], "codex-sid");
+}
+
+#[tokio::test]
 async fn get_agent_found() {
     let db = test_db();
     let engine = test_engine(&db);

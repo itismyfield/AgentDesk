@@ -405,13 +405,18 @@ pub(super) async fn tmux_output_watcher(
         let mut last_edit_text = String::new();
 
         // Process any complete lines we already have
-        let (mut found_result, mut is_prompt_too_long, mut is_auth_error, mut result_tokens) =
-            process_watcher_lines(
-                &mut all_data,
-                &mut state,
-                &mut full_response,
-                &mut tool_state,
-            );
+        let (
+            mut found_result,
+            mut is_prompt_too_long,
+            mut is_auth_error,
+            mut result_tokens,
+            mut stale_resume_detected,
+        ) = process_watcher_lines(
+            &mut all_data,
+            &mut state,
+            &mut full_response,
+            &mut tool_state,
+        );
 
         // Keep reading until result or timeout
         // Check if a Discord turn claimed this data since our epoch snapshot
@@ -458,7 +463,7 @@ pub(super) async fn tmux_output_watcher(
                     Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
                         all_data.push_str(&String::from_utf8_lossy(&chunk));
-                        let (fr, ptl, ae, rt) = process_watcher_lines(
+                        let (fr, ptl, ae, rt, sr) = process_watcher_lines(
                             &mut all_data,
                             &mut state,
                             &mut full_response,
@@ -467,6 +472,7 @@ pub(super) async fn tmux_output_watcher(
                         found_result = fr;
                         is_prompt_too_long = is_prompt_too_long || ptl;
                         is_auth_error = is_auth_error || ae;
+                        stale_resume_detected = stale_resume_detected || sr;
                         if rt.is_some() {
                             result_tokens = rt;
                         }
@@ -476,10 +482,9 @@ pub(super) async fn tmux_output_watcher(
                     }
                 }
 
-                // Check for stale session error during streaming — abort relay immediately
-                if full_response.contains("No conversation found")
-                    || full_response.contains("Error: No conversation")
-                {
+                // Check for stale session error during streaming — abort relay immediately.
+                // Only structured error/result events can trip this flag.
+                if stale_resume_detected {
                     found_result = true; // Exit the loop
                     break;
                 }
@@ -646,8 +651,7 @@ pub(super) async fn tmux_output_watcher(
         }
 
         // Detect stale session resume failure in watcher output
-        let is_stale_resume = full_response.contains("No conversation found")
-            || full_response.contains("Error: No conversation");
+        let is_stale_resume = stale_resume_detected;
         if is_stale_resume {
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
@@ -943,17 +947,19 @@ impl WatcherToolState {
 /// Process buffered lines for the tmux watcher.
 /// Extracts text content, tracks tool status, and detects result events.
 /// Returns true if a "result" event was found.
-/// Return value: (found_result, is_prompt_too_long, is_auth_error, result_tokens)
+/// Return value:
+/// (found_result, is_prompt_too_long, is_auth_error, result_tokens, stale_resume_detected)
 pub(super) fn process_watcher_lines(
     buffer: &mut String,
     state: &mut claude::StreamLineState,
     full_response: &mut String,
     tool_state: &mut WatcherToolState,
-) -> (bool, bool, bool, Option<u64>) {
+) -> (bool, bool, bool, Option<u64>, bool) {
     let mut found_result = false;
     let mut is_prompt_too_long = false;
     let mut is_auth_error = false;
     let mut result_tokens: Option<u64> = None;
+    let mut stale_resume_detected = false;
 
     while let Some(pos) = buffer.find('\n') {
         let line: String = buffer.drain(..=pos).collect();
@@ -1058,6 +1064,8 @@ pub(super) fn process_watcher_lines(
                     }
                 }
                 "result" => {
+                    stale_resume_detected = stale_resume_detected
+                        || super::turn_bridge::result_event_has_stale_resume_error(&val);
                     let is_error = val
                         .get("is_error")
                         .and_then(|v| v.as_bool())
@@ -1135,6 +1143,7 @@ pub(super) fn process_watcher_lines(
         is_prompt_too_long,
         is_auth_error,
         result_tokens,
+        stale_resume_detected,
     )
 }
 
@@ -1814,7 +1823,10 @@ async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RestartHandoffScope, resolve_restart_handoff_scope};
+    use super::{
+        RestartHandoffScope, WatcherToolState, process_watcher_lines, resolve_restart_handoff_scope,
+    };
+    use crate::services::claude::StreamLineState;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
 
@@ -1855,5 +1867,46 @@ mod tests {
             "/tmp/new-output.jsonl",
         );
         assert_eq!(scope, RestartHandoffScope::ProviderChannelScopedFallback);
+    }
+
+    #[test]
+    fn watcher_ignores_assistant_text_that_mentions_stale_resume_phrase() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"The log contained No conversation found while I was debugging.\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let (found_result, _, _, _, stale_resume_detected) =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(found_result);
+        assert!(!stale_resume_detected);
+        assert_eq!(
+            full_response,
+            "The log contained No conversation found while I was debugging."
+        );
+    }
+
+    #[test]
+    fn watcher_detects_structured_stale_resume_error_result() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"No conversation found\"]}\n"
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let (found_result, _, _, _, stale_resume_detected) =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(found_result);
+        assert!(stale_resume_detected);
+        assert_eq!(full_response, "partial");
     }
 }

@@ -1539,7 +1539,8 @@ pub(super) async fn handle_text_message(
     let session_id = if session_id.is_none() {
         if let Some(ref key) = adk_session_key {
             let restored =
-                super::adk_session::fetch_provider_session_id(key, shared.api_port).await;
+                super::adk_session::fetch_provider_session_id(key, &provider, shared.api_port)
+                    .await;
             if restored.is_some() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!(

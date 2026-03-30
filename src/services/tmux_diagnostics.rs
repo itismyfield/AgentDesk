@@ -35,6 +35,60 @@ pub fn read_tmux_exit_reason(tmux_session_name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn stale_resume_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("no conversation found") || lower.contains("error: no conversation")
+}
+
+fn tail_jsonl_result_hint(buf: &str) -> Option<String> {
+    for line in buf.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("result") {
+            continue;
+        }
+
+        let subtype = value.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+        let is_error = value
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            || subtype.starts_with("error");
+
+        let stale_resume = value
+            .get("result")
+            .and_then(|v| v.as_str())
+            .map(stale_resume_text)
+            .unwrap_or(false)
+            || value
+                .get("errors")
+                .and_then(|v| v.as_array())
+                .map(|errors| {
+                    errors
+                        .iter()
+                        .filter_map(|err| err.as_str())
+                        .any(stale_resume_text)
+                })
+                .unwrap_or(false);
+
+        if stale_resume {
+            return Some("recent_output=stale_resume_error".to_string());
+        }
+        if is_error {
+            return Some("recent_output=result_error_present".to_string());
+        }
+        return Some("recent_output=completed_result_present".to_string());
+    }
+
+    None
+}
+
 fn read_recent_output_hint(output_path: &str) -> Option<String> {
     let mut file = File::open(output_path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -55,8 +109,8 @@ fn read_recent_output_hint(output_path: &str) -> Option<String> {
     if lower.contains("prompt too long") || lower.contains("prompt is too long") {
         return Some("recent_output=prompt_too_long".to_string());
     }
-    if lower.contains("\"type\":\"result\"") || lower.contains("\"type\": \"result\"") {
-        return Some("recent_output=completed_result_present".to_string());
+    if let Some(hint) = tail_jsonl_result_hint(&buf) {
+        return Some(hint);
     }
 
     let last_line = buf.lines().rev().find(|line| !line.trim().is_empty())?;
@@ -146,7 +200,8 @@ pub fn build_tmux_death_diagnostic(
 mod tests {
     use super::{
         build_tmux_death_diagnostic, clear_tmux_exit_reason, pane_list_has_live_pane,
-        record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
+        read_recent_output_hint, record_tmux_exit_reason,
+        should_recreate_session_after_followup_fifo_error,
         should_recreate_session_after_stdin_error,
     };
 
@@ -233,5 +288,45 @@ mod tests {
         ));
         // Empty string
         assert!(!should_recreate_session_after_stdin_error(""));
+    }
+
+    #[test]
+    fn test_read_recent_output_hint_ignores_embedded_result_string() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"literal \"type\":\"result\" in code"}]}}"#,
+        )
+        .unwrap();
+        let hint = read_recent_output_hint(file.path().to_str().unwrap()).unwrap();
+        assert!(hint.starts_with("recent_output_tail="));
+    }
+
+    #[test]
+    fn test_read_recent_output_hint_detects_success_result_line() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"result","subtype":"success","result":"ok"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_recent_output_hint(file.path().to_str().unwrap()).as_deref(),
+            Some("recent_output=completed_result_present")
+        );
+    }
+
+    #[test]
+    fn test_read_recent_output_hint_detects_stale_resume_error() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["No conversation found"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_recent_output_hint(file.path().to_str().unwrap()).as_deref(),
+            Some("recent_output=stale_resume_error")
+        );
     }
 }
