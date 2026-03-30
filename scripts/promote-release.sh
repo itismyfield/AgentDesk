@@ -125,6 +125,35 @@ _spawn_detached_helper() {
 #!/usr/bin/env bash
 set -euo pipefail
 exec >>$(printf '%q' "$log_path") 2>&1
+# Wait for the invoking agent's turn to finish before restarting release dcserver.
+# Poll the release API for inflight turns on the reporting channel.
+REL_PORT="${AGENTDESK_REL_PORT:-$(printf '%q' "$ADK_DEFAULT_PORT")}"
+WAIT_CHANNEL=$(printf '%q' "$REPORT_CHANNEL_ID")
+MAX_WAIT=300  # 5 minutes max
+WAITED=0
+echo "▸ Waiting for turn on channel \$WAIT_CHANNEL to complete..."
+while [ \$WAITED -lt \$MAX_WAIT ]; do
+    # Check if the channel has an active turn via sessions API
+    WORKING=\$(curl -sf "http://127.0.0.1:\${REL_PORT}/api/sessions" 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    sessions = data if isinstance(data, list) else data.get('sessions', [])
+    active = [s for s in sessions if s.get('status') == 'working']
+    print(len(active))
+except: print('0')
+" 2>/dev/null || echo "0")
+    if [ "\$WORKING" = "0" ]; then
+        echo "✓ No active turns — proceeding with promotion"
+        break
+    fi
+    sleep 5
+    WAITED=\$((WAITED + 5))
+done
+if [ \$WAITED -ge \$MAX_WAIT ]; then
+    echo "⚠ Timeout waiting for turn — proceeding anyway"
+fi
 sleep $(printf '%q' "$PROMOTE_DELAY_SECS")
 export AGENTDESK_REPORT_CHANNEL_ID=$(printf '%q' "$REPORT_CHANNEL_ID")
 export AGENTDESK_REPORT_PROVIDER=$(printf '%q' "$REPORT_PROVIDER")
