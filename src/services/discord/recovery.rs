@@ -31,6 +31,9 @@ fn tmux_session_alive_with_retry(name: &str) -> bool {
     false
 }
 
+pub(super) const RESTART_SESSION_DIED_HANDOFF_SENTINEL: &str =
+    "__restart_session_died_handoff__";
+
 /// Retry-aware tmux has_session check.
 fn tmux_has_session_with_retry(name: &str) -> bool {
     if crate::services::platform::tmux::has_session(name) {
@@ -987,13 +990,15 @@ pub(super) async fn restore_inflight_turns(
                             last_offset: offset,
                         });
                     } else {
-                        // Session truly dead — auto-retry with fresh session
+                        // Session truly dead during restart recovery — hand off
+                        // to the internal post-restart follow-up path instead
+                        // of exposing Discord auto-retry history to the user.
                         eprintln!(
-                            "  [{ts}] ↻ Recovery: session died, signaling auto-retry (channel {})",
+                            "  [{ts}] ↻ Recovery: session died, signaling internal handoff (channel {})",
                             retry_channel_id
                         );
                         let _ = tx.send(StreamMessage::Done {
-                            result: "__session_died_retry__".to_string(),
+                            result: RESTART_SESSION_DIED_HANDOFF_SENTINEL.to_string(),
                             session_id: recovery_session_id,
                         });
                     }

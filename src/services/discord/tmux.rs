@@ -67,54 +67,15 @@ fn resolve_restart_handoff_scope(
     }
 }
 
-async fn resume_aborted_restart_turn(
+pub(super) async fn start_restart_handoff_from_state(
     channel_id: ChannelId,
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
-    tmux_session_name: &str,
-    output_path: &str,
+    provider_kind: &crate::services::provider::ProviderKind,
+    state: super::inflight::InflightTurnState,
+    best_response: &str,
 ) -> bool {
-    let Some((provider_kind, _)) = parse_provider_and_channel_from_tmux_name(tmux_session_name)
-    else {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] ⚠ watcher death recovery: failed to parse provider/channel from tmux session {}",
-            tmux_session_name
-        );
-        return false;
-    };
-    let Some(state) = super::inflight::load_inflight_state(&provider_kind, channel_id.get()) else {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] ⚠ watcher death recovery: no inflight state for channel {} (provider {})",
-            channel_id.get(),
-            provider_kind.as_str()
-        );
-        return false;
-    };
-
-    if matches!(
-        resolve_restart_handoff_scope(&state, tmux_session_name, output_path),
-        RestartHandoffScope::ProviderChannelScopedFallback
-    ) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] ↻ watcher death recovery: inflight metadata mismatch for channel {} (state tmux: {:?}, watcher tmux: {}, state output: {:?}, watcher output: {}) — proceeding with provider/channel scoped handoff",
-            channel_id.get(),
-            state.tmux_session_name.as_deref(),
-            tmux_session_name,
-            state.output_path.as_deref(),
-            output_path
-        );
-    }
-
-    let extracted_full = super::recovery::extract_response_from_output_pub(output_path, 0);
-    let best_response = if !extracted_full.trim().is_empty() {
-        extracted_full
-    } else {
-        state.full_response.clone()
-    };
-    let stale_text = super::turn_bridge::stale_inflight_message(&best_response);
+    let stale_text = super::turn_bridge::stale_inflight_message(best_response);
     let _ = super::formatting::replace_long_message_raw(
         http,
         channel_id,
@@ -124,7 +85,7 @@ async fn resume_aborted_restart_turn(
     )
     .await;
 
-    let context = build_restart_handoff_context(&state, &best_response);
+    let context = build_restart_handoff_context(&state, best_response);
     let handoff_prompt = format!(
         "dcserver가 재시작되었습니다. 재시작 전 작업의 후속 조치를 이어서 진행해주세요.\n\n## 재시작 전 컨텍스트\n{}\n\n## 요청 사항\n재시작 중 중단된 응답을 이어서 마무리",
         context
@@ -200,7 +161,7 @@ async fn resume_aborted_restart_turn(
             mode: super::InterventionMode::Soft,
             created_at: std::time::Instant::now(),
         });
-        super::save_channel_queue(&provider_kind, channel_id, queue);
+        super::save_channel_queue(provider_kind, channel_id, queue);
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!(
             "  [{ts}] ↻ watcher death recovery: queued fallback handoff for channel {}",
@@ -208,8 +169,66 @@ async fn resume_aborted_restart_turn(
         );
     }
 
-    super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
+    super::inflight::clear_inflight_state(provider_kind, channel_id.get());
     true
+}
+
+async fn resume_aborted_restart_turn(
+    channel_id: ChannelId,
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    tmux_session_name: &str,
+    output_path: &str,
+) -> bool {
+    let Some((provider_kind, _)) = parse_provider_and_channel_from_tmux_name(tmux_session_name)
+    else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] ⚠ watcher death recovery: failed to parse provider/channel from tmux session {}",
+            tmux_session_name
+        );
+        return false;
+    };
+    let Some(state) = super::inflight::load_inflight_state(&provider_kind, channel_id.get()) else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] ⚠ watcher death recovery: no inflight state for channel {} (provider {})",
+            channel_id.get(),
+            provider_kind.as_str()
+        );
+        return false;
+    };
+
+    let scope = resolve_restart_handoff_scope(&state, tmux_session_name, output_path);
+    if matches!(scope, RestartHandoffScope::ProviderChannelScopedFallback) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] ↻ watcher death recovery: inflight metadata mismatch for channel {} (state tmux: {:?}, watcher tmux: {}, state output: {:?}, watcher output: {}) — proceeding with provider/channel scoped handoff",
+            channel_id.get(),
+            state.tmux_session_name.as_deref(),
+            tmux_session_name,
+            state.output_path.as_deref(),
+            output_path
+        );
+    }
+
+    let extracted_full = super::recovery::extract_response_from_output_pub(output_path, 0);
+    let best_response = if matches!(scope, RestartHandoffScope::ProviderChannelScopedFallback) {
+        state.full_response.clone()
+    } else if !extracted_full.trim().is_empty() {
+        extracted_full
+    } else {
+        state.full_response.clone()
+    };
+    start_restart_handoff_from_state(
+        channel_id,
+        http,
+        shared,
+        &provider_kind,
+        state,
+        &best_response,
+    )
+    .await
 }
 
 /// Background watcher that continuously tails a tmux output file.
