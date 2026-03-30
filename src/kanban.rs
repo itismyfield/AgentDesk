@@ -1360,6 +1360,56 @@ mod tests {
         assert_eq!(count, 1, "tick hook dispatch intent should be persisted");
     }
 
+    /// #202: Verify that try_fire_hook alone (without explicit drain_hook_side_effects)
+    /// persists dispatch intents created by tick hooks. This catches the scenario where
+    /// dispatch.create() defers an INSERT intent but the intent drain is skipped.
+    #[test]
+    fn try_fire_hook_drains_dispatch_intents_without_explicit_drain() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("tick-intent.js"),
+            r#"
+            var policy = {
+                name: "tick-intent",
+                priority: 1,
+                onTick1min: function() {
+                    agentdesk.dispatch.create(
+                        "card-intent-test",
+                        "agent-1",
+                        "implementation",
+                        "Intent Drain Test"
+                    );
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, dir.path());
+        seed_card(&db, "card-intent-test", "requested");
+
+        // Fire tick hook — do NOT call drain_hook_side_effects afterwards.
+        // The intent should still be drained by try_fire_hook's internal drain.
+        engine
+            .try_fire_hook_by_name("OnTick1min", json!({}))
+            .unwrap();
+
+        let conn = db.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-intent-test' AND dispatch_type = 'implementation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "#202: tick hook dispatch intent must be persisted by try_fire_hook's internal drain"
+        );
+    }
+
     // ── Pipeline / auto-queue regression tests (#110) ──────────────
 
     /// Ensure auto_queue tables exist (created lazily by auto_queue routes, not main migration)

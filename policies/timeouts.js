@@ -1035,19 +1035,39 @@ var timeouts = {
 
     for (var n = 0; n < orphanReviews.length; n++) {
       var oc = orphanReviews[n];
-      agentdesk.log.warn("[timeout] Orphan review detected: card " + oc.id +
-        " (#" + (oc.github_issue_number || "?") + ") in review with no active dispatch — creating review dispatch directly");
 
-      // Direct dispatch creation (bounce via setStatus doesn't work inside tick hooks
-      // because __pendingTransitions are drained after hook returns, not inline)
+      // Skip cards without assigned agent
       if (!oc.assigned_agent_id) {
         agentdesk.log.warn("[timeout] Orphan review card " + oc.id + " has no assigned_agent_id — skipping");
         continue;
       }
-      var currentRound = agentdesk.db.query(
-        "SELECT review_round FROM kanban_cards WHERE id = ?", [oc.id]
+
+      // Respect OnReviewEnter safeguards (review-automation.js:58-102):
+      // - awaiting_dod cards should not get review dispatch (section D handles them)
+      // - max_review_rounds exceeded cards should go to pending_decision
+      var cardDetail = agentdesk.db.query(
+        "SELECT review_status, review_round FROM kanban_cards WHERE id = ?", [oc.id]
       );
-      var round = (currentRound.length > 0 && currentRound[0].review_round) ? currentRound[0].review_round : 1;
+      if (cardDetail.length > 0) {
+        if (cardDetail[0].review_status === "awaiting_dod") {
+          agentdesk.log.info("[timeout] Orphan review card " + oc.id + " is awaiting_dod — skipping (section D will handle)");
+          continue;
+        }
+        var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
+        if (cardDetail[0].review_round > maxRounds) {
+          var nForce = agentdesk.pipeline.forceOnlyTargets(nInProgress, nCfg);
+          var nPending = nForce[0];
+          agentdesk.kanban.setStatus(oc.id, nPending);
+          agentdesk.kanban.setReviewStatus(oc.id, "dilemma_pending");
+          agentdesk.log.warn("[timeout] Orphan review card " + oc.id + " exceeded max rounds (" + maxRounds + ") → pending_decision");
+          continue;
+        }
+      }
+
+      agentdesk.log.warn("[timeout] Orphan review detected: card " + oc.id +
+        " (#" + (oc.github_issue_number || "?") + ") in review with no active dispatch — creating review dispatch");
+
+      var round = (cardDetail.length > 0 && cardDetail[0].review_round) ? cardDetail[0].review_round : 1;
       try {
         var dispatchId = agentdesk.dispatch.create(
           oc.id,
