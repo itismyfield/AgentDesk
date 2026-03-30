@@ -1033,59 +1033,28 @@ var timeouts = {
       [nReview]
     );
 
+    // Orphan review = review state with no active dispatch after 5 min.
+    // Instead of reimplementing OnReviewEnter safeguards, escalate to
+    // pending_decision so PMD can decide the correct action.
+    // This avoids partial policy reimplementation (R1/R2 review feedback).
+    var nForce = agentdesk.pipeline.forceOnlyTargets(nInProgress, nCfg);
+    var nPending = nForce[0];
+
     for (var n = 0; n < orphanReviews.length; n++) {
       var oc = orphanReviews[n];
-
-      // Skip cards without assigned agent
-      if (!oc.assigned_agent_id) {
-        agentdesk.log.warn("[timeout] Orphan review card " + oc.id + " has no assigned_agent_id — skipping");
-        continue;
-      }
-
-      // Respect OnReviewEnter safeguards (review-automation.js:58-102):
-      // - awaiting_dod cards should not get review dispatch (section D handles them)
-      // - max_review_rounds exceeded cards should go to pending_decision
-      var cardDetail = agentdesk.db.query(
-        "SELECT review_status, review_round FROM kanban_cards WHERE id = ?", [oc.id]
-      );
-      if (cardDetail.length > 0) {
-        if (cardDetail[0].review_status === "awaiting_dod") {
-          agentdesk.log.info("[timeout] Orphan review card " + oc.id + " is awaiting_dod — skipping (section D will handle)");
-          continue;
-        }
-        var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
-        if (cardDetail[0].review_round > maxRounds) {
-          var nForce = agentdesk.pipeline.forceOnlyTargets(nInProgress, nCfg);
-          var nPending = nForce[0];
-          agentdesk.kanban.setStatus(oc.id, nPending);
-          agentdesk.kanban.setReviewStatus(oc.id, "dilemma_pending");
-          agentdesk.log.warn("[timeout] Orphan review card " + oc.id + " exceeded max rounds (" + maxRounds + ") → pending_decision");
-          continue;
-        }
-      }
-
       agentdesk.log.warn("[timeout] Orphan review detected: card " + oc.id +
-        " (#" + (oc.github_issue_number || "?") + ") in review with no active dispatch — creating review dispatch");
+        " (#" + (oc.github_issue_number || "?") + ") in review with no active dispatch → pending_decision");
 
-      var round = (cardDetail.length > 0 && cardDetail[0].review_round) ? cardDetail[0].review_round : 1;
-      try {
-        var dispatchId = agentdesk.dispatch.create(
-          oc.id,
-          oc.assigned_agent_id,
-          "review",
-          "[Review R" + round + "] " + oc.id
-        );
-        agentdesk.log.info("[timeout] Orphan review recovery: dispatched " + dispatchId + " for card " + oc.id);
-      } catch (e) {
-        agentdesk.log.warn("[timeout] Orphan review dispatch failed for " + oc.id + ": " + e);
-      }
+      agentdesk.kanban.setStatus(oc.id, nPending);
+      agentdesk.kanban.setReviewStatus(oc.id, null, {suggestion_pending_at: null});
+      agentdesk.reviewState.sync(oc.id, "idle");
 
       var kmChannel = getPMDChannel();
       if (kmChannel) {
         agentdesk.message.queue(
           kmChannel,
-          "🔄 [orphan-review] #" + (oc.github_issue_number || "?") + " " +
-          (oc.title || oc.id) + "\nreview 상태인데 dispatch 없음 → review dispatch 직접 생성",
+          "⚠️ [orphan-review] #" + (oc.github_issue_number || "?") + " " +
+          (oc.title || oc.id) + "\nreview 상태인데 dispatch 없음 → pending_decision 전환 (PMD 결정 필요)",
           "notify",
           "system"
         );
