@@ -553,7 +553,10 @@ pub(super) async fn restore_inflight_turns(
                     }
                 }
 
-                clear_inflight_state(provider, state.channel_id);
+                // Keep the inflight state until the watcher either relays the
+                // final response or triggers watcher-death handoff. Clearing it
+                // here breaks the handoff path if the recovered tmux session
+                // dies before producing a result.
                 continue;
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -661,7 +664,10 @@ pub(super) async fn restore_inflight_turns(
                 shared,
             )
             .await;
-            clear_inflight_state(provider, state.channel_id);
+            // Keep the inflight state until the watcher either relays the
+            // final response or triggers watcher-death handoff. Clearing it
+            // here breaks the handoff path if the recovered tmux session dies
+            // before producing a result.
             continue;
         }
 
