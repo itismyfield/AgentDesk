@@ -150,16 +150,20 @@ pub async fn create_dispatch(
         &context,
     ) {
         Ok(d) => {
-            // Send dispatch message to the target agent's Discord channel
             let dispatch_id = d["id"].as_str().unwrap_or("").to_string();
-            queue_dispatch_notify(
-                &state.db,
-                &dispatch_id,
-                &body.to_agent_id,
-                &body.kanban_card_id,
-                &body.title,
-            );
-            (StatusCode::CREATED, Json(json!({"dispatch": d})))
+            let was_reused = d.get("__reused").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Only send Discord notification for genuinely new dispatches (#173)
+            if !was_reused {
+                queue_dispatch_notify(
+                    &state.db,
+                    &dispatch_id,
+                    &body.to_agent_id,
+                    &body.kanban_card_id,
+                    &body.title,
+                );
+            }
+            let status_code = if was_reused { StatusCode::OK } else { StatusCode::CREATED };
+            (status_code, Json(json!({"dispatch": d})))
         }
         Err(e) => {
             let msg = format!("{e}");
@@ -1562,7 +1566,7 @@ pub(super) async fn send_review_result_to_primary(
         &format!("[리뷰 검토] {title}"),
         &serde_json::json!({"verdict": verdict}),
     ) {
-        Ok((id, _old_status)) => {
+        Ok((id, _old_status, _reused)) => {
             // #117/#158: Update canonical card_review_state via unified entrypoint
             if let Ok(conn) = db.lock() {
                 crate::engine::ops::review_state_sync_on_conn(

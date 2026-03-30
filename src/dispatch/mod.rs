@@ -21,16 +21,10 @@ fn build_review_context(
     };
     if let Some(obj) = ctx_val.as_object_mut() {
         if !obj.contains_key("reviewed_commit") {
-            let repo_dir = match std::env::var("AGENTDESK_REPO_DIR") {
-                Ok(d) => d,
-                Err(_) => dirs::home_dir()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("HOME directory not found; set AGENTDESK_REPO_DIR")
-                    })?
-                    .join("AgentDesk")
-                    .to_string_lossy()
-                    .into_owned(),
-            };
+            let repo_dir =
+                crate::services::platform::resolve_repo_dir().ok_or_else(|| {
+                    anyhow::anyhow!("Cannot resolve repo dir; set AGENTDESK_REPO_DIR")
+                })?;
 
             // #193: Try to find a worktree branch for this card's issue.
             // Without this, reviews always inspect main HEAD and miss
@@ -48,9 +42,8 @@ fn build_review_context(
                 })
                 .flatten();
 
-            let wt_info = issue_number.and_then(|num| {
-                crate::services::platform::find_worktree_for_issue(&repo_dir, num)
-            });
+            let wt_info = issue_number
+                .and_then(|num| crate::services::platform::find_worktree_for_issue(&repo_dir, num));
 
             if let Some(ref wt) = wt_info {
                 obj.insert("reviewed_commit".to_string(), json!(wt.commit));
@@ -63,25 +56,26 @@ fn build_review_context(
                 );
             } else {
                 // Fall back: check previous review dispatch for persisted branch info
-                let prev_branch: Option<(String, String)> = db.separate_conn().ok().and_then(|conn| {
-                    let ctx_str: Option<String> = conn
-                        .query_row(
-                            "SELECT context FROM task_dispatches \
+                let prev_branch: Option<(String, String)> =
+                    db.separate_conn().ok().and_then(|conn| {
+                        let ctx_str: Option<String> = conn
+                            .query_row(
+                                "SELECT context FROM task_dispatches \
                              WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
                              AND status IN ('completed', 'failed', 'cancelled') \
                              ORDER BY created_at DESC LIMIT 1",
-                            [kanban_card_id],
-                            |row| row.get(0),
-                        )
-                        .ok()
-                        .flatten();
-                    ctx_str.and_then(|s| {
-                        let v: serde_json::Value = serde_json::from_str(&s).ok()?;
-                        let b = v.get("branch")?.as_str()?.to_string();
-                        let c = v.get("reviewed_commit")?.as_str()?.to_string();
-                        Some((b, c))
-                    })
-                });
+                                [kanban_card_id],
+                                |row| row.get(0),
+                            )
+                            .ok()
+                            .flatten();
+                        ctx_str.and_then(|s| {
+                            let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+                            let b = v.get("branch")?.as_str()?.to_string();
+                            let c = v.get("reviewed_commit")?.as_str()?.to_string();
+                            Some((b, c))
+                        })
+                    });
 
                 if let Some((branch, commit)) = prev_branch {
                     obj.insert("reviewed_commit".to_string(), json!(commit));
@@ -91,8 +85,7 @@ fn build_review_context(
                         kanban_card_id,
                         branch
                     );
-                } else if let Some(commit) = crate::services::platform::git_head_commit(&repo_dir)
-                {
+                } else if let Some(commit) = crate::services::platform::git_head_commit(&repo_dir) {
                     obj.insert("reviewed_commit".to_string(), json!(commit));
                 }
             }
@@ -117,9 +110,7 @@ fn build_review_context(
                         }
                     }
                     if !obj.contains_key("target_provider") {
-                        if let Some(tp) =
-                            alt.as_deref().and_then(provider_from_channel_suffix)
-                        {
+                        if let Some(tp) = alt.as_deref().and_then(provider_from_channel_suffix) {
                             obj.insert("target_provider".to_string(), json!(tp));
                         }
                     }
@@ -137,6 +128,10 @@ fn build_review_context(
 /// - Returns `(dispatch_id, old_card_status)`
 ///
 /// Caller is responsible for firing hooks after this returns.
+///
+/// Returns `(dispatch_id, old_card_status, reused)`.
+/// When `reused` is true the returned ID belongs to an existing pending/dispatched
+/// dispatch of the same type — no new row was inserted (#173 dedup).
 pub fn create_dispatch_core(
     db: &Db,
     kanban_card_id: &str,
@@ -144,7 +139,7 @@ pub fn create_dispatch_core(
     dispatch_type: &str,
     title: &str,
     context: &serde_json::Value,
-) -> Result<(String, String)> {
+) -> Result<(String, String, bool)> {
     let dispatch_id = uuid::Uuid::new_v4().to_string();
 
     let context_str = if dispatch_type == "review" {
@@ -182,21 +177,28 @@ pub fn create_dispatch_core(
         ));
     }
 
-    // Guard: prevent creating dispatch when card already has a pending/dispatched dispatch.
-    // Prevents dispatch flooding from retry loops.
-    let existing_pending: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM task_dispatches WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
-            [kanban_card_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    // review-decision handles its own dedup below (#116: cancel previous then insert)
-    if existing_pending && dispatch_type != "review-decision" {
-        return Err(anyhow::anyhow!(
-            "Card {} already has a pending/dispatched dispatch — refusing to create another",
-            kanban_card_id
-        ));
+    // #173: Dedup — if same card already has a pending/dispatched dispatch of the SAME type,
+    // return the existing dispatch_id idempotently instead of creating a duplicate.
+    // review-decision handles its own dedup below (#116: cancel previous then insert).
+    if dispatch_type != "review-decision" {
+        let existing_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM task_dispatches \
+                 WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
+                 AND status IN ('pending', 'dispatched') LIMIT 1",
+                rusqlite::params![kanban_card_id, dispatch_type],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(eid) = existing_id {
+            tracing::info!(
+                "DEDUP: reusing existing dispatch {} for card {} type {}",
+                eid,
+                kanban_card_id,
+                dispatch_type
+            );
+            return Ok((eid, old_status, true));
+        }
     }
 
     let is_review_type = dispatch_type == "review"
@@ -236,11 +238,13 @@ pub fn create_dispatch_core(
         &context_str,
     )?;
 
-    Ok((dispatch_id, old_status))
+    Ok((dispatch_id, old_status, false))
 }
 
 /// Like `create_dispatch_core` but uses a pre-assigned dispatch ID (#121 intent model).
 /// Called by the intent executor when processing CreateDispatch intents.
+///
+/// Returns `(dispatch_id, old_card_status, reused)` — see `create_dispatch_core` docs.
 pub fn create_dispatch_core_with_id(
     db: &Db,
     dispatch_id: &str,
@@ -249,7 +253,7 @@ pub fn create_dispatch_core_with_id(
     dispatch_type: &str,
     title: &str,
     context: &serde_json::Value,
-) -> Result<(String, String)> {
+) -> Result<(String, String, bool)> {
     let context_str = if dispatch_type == "review" {
         build_review_context(db, kanban_card_id, to_agent_id, context)?
     } else {
@@ -279,6 +283,28 @@ pub fn create_dispatch_core_with_id(
             kanban_card_id,
             old_status
         ));
+    }
+
+    // #173: Dedup guard (same logic as create_dispatch_core).
+    if dispatch_type != "review-decision" {
+        let existing_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM task_dispatches \
+                 WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
+                 AND status IN ('pending', 'dispatched') LIMIT 1",
+                rusqlite::params![kanban_card_id, dispatch_type],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(eid) = existing_id {
+            tracing::info!(
+                "DEDUP: reusing existing dispatch {} for card {} type {}",
+                eid,
+                kanban_card_id,
+                dispatch_type
+            );
+            return Ok((eid, old_status, true));
+        }
     }
 
     let is_review_type = dispatch_type == "review"
@@ -314,7 +340,7 @@ pub fn create_dispatch_core_with_id(
         &context_str,
     )?;
 
-    Ok((dispatch_id.to_string(), old_status))
+    Ok((dispatch_id.to_string(), old_status, false))
 }
 
 /// Create a new dispatch for a kanban card.
@@ -332,7 +358,7 @@ pub fn create_dispatch(
     title: &str,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let (dispatch_id, old_status) = create_dispatch_core(
+    let (dispatch_id, old_status, reused) = create_dispatch_core(
         db,
         kanban_card_id,
         to_agent_id,
@@ -346,6 +372,14 @@ pub fn create_dispatch(
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
     let dispatch = query_dispatch_row(&conn, &dispatch_id)?;
+
+    // #173: If dedup'd, skip hook firing — no new dispatch was created.
+    if reused {
+        let mut d = dispatch;
+        // Signal to HTTP handler that this was a dedup'd response
+        d["__reused"] = json!(true);
+        return Ok(d);
+    }
 
     // Fire pipeline-defined on_enter hooks for the kickoff state (#134).
     // Resolve kickoff state from card's effective pipeline (repo/agent overrides).
@@ -1092,8 +1126,8 @@ mod tests {
         let engine = test_engine(&db);
         seed_card(&db, "card-core", "ready");
 
-        // create_dispatch_core returns (dispatch_id, old_status)
-        let (dispatch_id, old_status) = create_dispatch_core(
+        // create_dispatch_core returns (dispatch_id, old_status, reused)
+        let (dispatch_id, old_status, _reused) = create_dispatch_core(
             &db,
             "card-core",
             "agent-1",
@@ -1270,5 +1304,161 @@ mod tests {
         assert_eq!(completed["status"], "completed");
         assert_eq!(completed["result"]["completion_source"], "session_idle");
         assert_eq!(completed["result"]["auto_completed"], true);
+    }
+
+    // ── #173 Dedup tests ─────────────────────────────────────────────
+
+    #[test]
+    fn dedup_same_card_same_type_returns_existing_dispatch() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-dup", "ready");
+
+        let d1 = create_dispatch(
+            &db,
+            &engine,
+            "card-dup",
+            "agent-1",
+            "implementation",
+            "First",
+            &json!({}),
+        )
+        .unwrap();
+        let id1 = d1["id"].as_str().unwrap();
+
+        // Second call with same card + same type → should return existing
+        let d2 = create_dispatch(
+            &db,
+            &engine,
+            "card-dup",
+            "agent-1",
+            "implementation",
+            "Second",
+            &json!({}),
+        )
+        .unwrap();
+        let id2 = d2["id"].as_str().unwrap();
+
+        assert_eq!(id1, id2, "dedup must return existing dispatch_id");
+        assert_eq!(d2["status"], "pending");
+
+        // Only 1 row in DB
+        let conn = db.separate_conn().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-dup' AND dispatch_type = 'implementation' \
+                 AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "only one pending dispatch must exist");
+    }
+
+    #[test]
+    fn dedup_same_card_different_type_allows_creation() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-diff", "review");
+
+        // Create review dispatch
+        let d1 = create_dispatch(
+            &db,
+            &engine,
+            "card-diff",
+            "agent-1",
+            "review",
+            "Review",
+            &json!({}),
+        )
+        .unwrap();
+
+        // Create review-decision for same card → different type, should succeed
+        let d2 = create_dispatch(
+            &db,
+            &engine,
+            "card-diff",
+            "agent-1",
+            "review-decision",
+            "Decision",
+            &json!({}),
+        )
+        .unwrap();
+
+        assert_ne!(
+            d1["id"].as_str().unwrap(),
+            d2["id"].as_str().unwrap(),
+            "different types must create distinct dispatches"
+        );
+    }
+
+    #[test]
+    fn dedup_completed_dispatch_allows_new_creation() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-reopen", "ready");
+
+        let d1 = create_dispatch(
+            &db,
+            &engine,
+            "card-reopen",
+            "agent-1",
+            "implementation",
+            "First",
+            &json!({}),
+        )
+        .unwrap();
+        let id1 = d1["id"].as_str().unwrap().to_string();
+
+        // Complete the first dispatch
+        complete_dispatch(&db, &engine, &id1, &json!({"output": "done"})).unwrap();
+
+        // New dispatch of same type → should succeed (old one is completed)
+        let d2 = create_dispatch(
+            &db,
+            &engine,
+            "card-reopen",
+            "agent-1",
+            "implementation",
+            "Second",
+            &json!({}),
+        )
+        .unwrap();
+
+        assert_ne!(
+            id1,
+            d2["id"].as_str().unwrap(),
+            "completed dispatch must not block new creation"
+        );
+    }
+
+    #[test]
+    fn dedup_core_returns_reused_flag() {
+        let db = test_db();
+        seed_card(&db, "card-flag", "ready");
+
+        let (id1, _, reused1) = create_dispatch_core(
+            &db,
+            "card-flag",
+            "agent-1",
+            "implementation",
+            "First",
+            &json!({}),
+        )
+        .unwrap();
+        assert!(!reused1, "first creation must not be reused");
+
+        let (id2, _, reused2) = create_dispatch_core(
+            &db,
+            "card-flag",
+            "agent-1",
+            "implementation",
+            "Second",
+            &json!({}),
+        )
+        .unwrap();
+        assert!(reused2, "duplicate must be flagged as reused");
+        assert_eq!(id1, id2);
     }
 }
