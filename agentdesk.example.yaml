@@ -30,8 +30,3 @@ policies:
 
 data:
   dir: "~/.adk"
-
-kanban:
-  timeout_requested_minutes: 45
-  timeout_in_progress_minutes: 100
-  max_review_rounds: 3

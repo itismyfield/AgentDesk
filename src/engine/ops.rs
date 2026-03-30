@@ -41,6 +41,9 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
     // ── agentdesk.config ─────────────────────────────────────────
     register_config_ops(ctx, db.clone())?;
 
+    // ── agentdesk.runtimeConfig ──────────────────────────────────
+    register_runtime_config_ops(ctx, db.clone())?;
+
     // ── agentdesk.http ────────────────────────────────────────────
     register_http_ops(ctx)?;
 
@@ -320,6 +323,77 @@ fn register_config_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         (function() {
             var rawGet = agentdesk.config.__get_raw;
             agentdesk.config.get = function(key) {
+                return JSON.parse(rawGet(key));
+            };
+        })();
+        undefined;
+    "#,
+    )?;
+
+    Ok(())
+}
+
+// ── Runtime Config ops ──────────────────────────────────────────
+//
+// agentdesk.runtimeConfig.get(key) → value from runtime-config with defaults fallback.
+// Reads kv_meta 'runtime-config' JSON blob, merges with hardcoded defaults,
+// and returns the value for the requested key (or null).
+
+fn register_runtime_config_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+    let ad: Object<'js> = ctx.globals().get("agentdesk")?;
+    let rc_obj = Object::new(ctx.clone())?;
+
+    // __runtime_config_get_raw(key) → JSON string of the value
+    let db_c = db;
+    rc_obj.set(
+        "__get_raw",
+        Function::new(
+            ctx.clone(),
+            rquickjs::function::MutFn::from(move |key: String| -> String {
+                let defaults = crate::server::routes::settings::runtime_config_defaults();
+
+                let conn = match db_c.separate_conn() {
+                    Ok(c) => c,
+                    Err(_) => {
+                        // DB error — return default if available
+                        return defaults
+                            .get(&key)
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "null".to_string());
+                    }
+                };
+
+                let saved_str: String = conn
+                    .query_row(
+                        "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or_else(|_| "{}".to_string());
+
+                let saved: serde_json::Value =
+                    serde_json::from_str(&saved_str).unwrap_or(serde_json::json!({}));
+
+                // Saved overrides defaults
+                if let Some(val) = saved.get(&key) {
+                    return val.to_string();
+                }
+                defaults
+                    .get(&key)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "null".to_string())
+            }),
+        )?,
+    )?;
+
+    ad.set("runtimeConfig", rc_obj)?;
+
+    // JS wrapper: parse the raw JSON string
+    let _: rquickjs::Value = ctx.eval(
+        r#"
+        (function() {
+            var rawGet = agentdesk.runtimeConfig.__get_raw;
+            agentdesk.runtimeConfig.get = function(key) {
                 return JSON.parse(rawGet(key));
             };
         })();

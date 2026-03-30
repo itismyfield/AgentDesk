@@ -80,12 +80,6 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str)] = &[
         "Counter-Model Review",
     ),
     (
-        "max_review_rounds",
-        "review",
-        "최대 리뷰 라운드",
-        "Max Review Rounds",
-    ),
-    (
         "pm_decision_gate_enabled",
         "pipeline",
         "PM 판단 게이트",
@@ -179,7 +173,7 @@ pub async fn patch_config_entries(
 }
 
 /// Default runtime config values
-fn runtime_config_defaults() -> serde_json::Value {
+pub fn runtime_config_defaults() -> serde_json::Value {
     json!({
         "dispatchPollSec": 30,
         "agentSyncSec": 300,
