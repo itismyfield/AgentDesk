@@ -371,6 +371,17 @@ mod tests {
             .current_dir(repo.path())
             .output()
             .unwrap();
+        // Set git identity (CI environments may not have global user config)
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
             .current_dir(repo.path())

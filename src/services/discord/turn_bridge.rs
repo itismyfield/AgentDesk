@@ -1454,59 +1454,62 @@ pub(super) fn spawn_turn_bridge(
         }
 
         if restart_recovery_handoff {
-            let best_response =
-                if full_response == super::recovery::RESTART_SESSION_DIED_HANDOFF_SENTINEL {
-                    String::new()
-                } else {
-                    full_response.clone()
-                };
-            let handed_off = super::tmux::start_restart_handoff_from_state(
-                channel_id,
-                &http,
-                &shared_owned,
-                &provider,
-                inflight_state.clone(),
-                &best_response,
-            )
-            .await;
-            if handed_off {
-                full_response = String::new();
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
-                    "  [{ts}] ↻ Recovery session died — queued internal handoff instead of Discord auto-retry (channel {})",
-                    channel_id
-                );
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
-                    "  [{ts}] ⚠ Recovery session died — internal handoff failed, falling back to auto-retry (channel {})",
-                    channel_id
-                );
-                reset_session_for_auto_retry(
-                    &shared_owned,
+            #[cfg(unix)]
+            {
+                let best_response =
+                    if full_response == super::recovery::RESTART_SESSION_DIED_HANDOFF_SENTINEL {
+                        String::new()
+                    } else {
+                        full_response.clone()
+                    };
+                let handed_off = super::tmux::start_restart_handoff_from_state(
                     channel_id,
-                    &cancel_token,
-                    adk_session_key.as_deref(),
-                    &mut new_session_id,
-                    &mut inflight_state,
-                    "restart recovery handoff failed",
+                    &http,
+                    &shared_owned,
+                    &provider,
+                    inflight_state.clone(),
+                    &best_response,
                 )
                 .await;
-                let http_c = http.clone();
-                let retry_text = user_text_owned.clone();
-                let retry_port = shared_owned.api_port;
-                tokio::spawn(async move {
-                    auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
-                });
-                let _ = channel_id
-                    .edit_message(
-                        &http,
-                        current_msg_id,
-                        serenity::EditMessage::new()
-                            .content("↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다."),
+                if handed_off {
+                    full_response = String::new();
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ↻ Recovery session died — queued internal handoff instead of Discord auto-retry (channel {})",
+                        channel_id
+                    );
+                } else {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ Recovery session died — internal handoff failed, falling back to auto-retry (channel {})",
+                        channel_id
+                    );
+                    reset_session_for_auto_retry(
+                        &shared_owned,
+                        channel_id,
+                        &cancel_token,
+                        adk_session_key.as_deref(),
+                        &mut new_session_id,
+                        &mut inflight_state,
+                        "restart recovery handoff failed",
                     )
                     .await;
-                full_response = String::new();
+                    let http_c = http.clone();
+                    let retry_text = user_text_owned.clone();
+                    let retry_port = shared_owned.api_port;
+                    tokio::spawn(async move {
+                        auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
+                    });
+                    let _ = channel_id
+                        .edit_message(
+                            &http,
+                            current_msg_id,
+                            serenity::EditMessage::new()
+                                .content("↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다."),
+                        )
+                        .await;
+                    full_response = String::new();
+                }
             }
         } else if cancelled {
             if let Ok(guard) = cancel_token.child_pid.lock() {
