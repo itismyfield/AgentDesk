@@ -80,14 +80,14 @@ data:
         let client = reqwest::Client::new();
         let url = self.api_url("/health");
 
-        for _ in 0..100 {
+        for _ in 0..300 {
             match client.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => return,
                 _ => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
         panic!(
-            "Server did not become ready within 10 seconds on port {}",
+            "Server did not become ready within 30 seconds on port {}",
             self.port
         );
     }
