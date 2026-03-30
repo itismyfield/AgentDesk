@@ -399,11 +399,7 @@ fn main() -> Result<()> {
                 force,
                 reason,
             }) => {
-                return exit_for_cli(cli::client::cmd_resume(
-                    &card_id,
-                    force,
-                    reason.as_deref(),
-                ));
+                return exit_for_cli(cli::client::cmd_resume(&card_id, force, reason.as_deref()));
             }
             Some(Commands::Agents) => {
                 return exit_for_cli(cli::client::cmd_agents());

@@ -396,10 +396,7 @@ pub fn cmd_resume(card_id: &str, force: bool, reason: Option<&str>) -> Result<()
         body["reason"] = serde_json::json!(r);
     }
 
-    let value = post_json(
-        &format!("/api/kanban-cards/{card_id}/resume"),
-        Some(body),
-    )?;
+    let value = post_json(&format!("/api/kanban-cards/{card_id}/resume"), Some(body))?;
     print_json(&value);
     Ok(())
 }

@@ -28,9 +28,7 @@ pub async fn resume_card(
     Json(body): Json<ResumeCardBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let force = body.force.unwrap_or(false);
-    let reason = body
-        .reason
-        .unwrap_or_else(|| "manual resume".to_string());
+    let reason = body.reason.unwrap_or_else(|| "manual resume".to_string());
 
     // Resolve issue number to card ID if input is numeric
     let id = if id.chars().all(|c| c.is_ascii_digit()) {
@@ -176,8 +174,15 @@ pub async fn resume_card(
 
     // 5. Determine resume action based on current state
     let resume_result = determine_and_execute_resume(
-        &state, &id, &status, review_status.as_deref(), &latest_dispatch_id,
-        &agent_id, &card_title, force, &reason,
+        &state,
+        &id,
+        &status,
+        review_status.as_deref(),
+        &latest_dispatch_id,
+        &agent_id,
+        &card_title,
+        force,
+        &reason,
     )
     .await;
 
@@ -202,7 +207,10 @@ pub async fn resume_card(
                         "kanban_card_updated",
                         card.clone(),
                     );
-                    (StatusCode::OK, Json(json!({"card": card, "action": action})))
+                    (
+                        StatusCode::OK,
+                        Json(json!({"card": card, "action": action})),
+                    )
                 }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -233,12 +241,33 @@ async fn determine_and_execute_resume(
     write_audit_log(&state.db, card_id, status, reason);
 
     match status {
-        "requested" => resume_from_requested(state, card_id, agent_id, card_title, latest_dispatch_id),
+        "requested" => {
+            resume_from_requested(state, card_id, agent_id, card_title, latest_dispatch_id)
+        }
         "in_progress" => resume_from_in_progress(state, card_id, latest_dispatch_id),
-        "review" => resume_from_review(state, card_id, agent_id, card_title, review_status, latest_dispatch_id, force),
-        "pending_decision" => resume_from_pending_decision(state, card_id, agent_id, card_title, force),
-        "blocked" => resume_from_blocked(state, card_id, agent_id, card_title, force, latest_dispatch_id),
-        "backlog" | "ready" => resume_from_pre_dispatch(state, card_id, agent_id, card_title, status),
+        "review" => resume_from_review(
+            state,
+            card_id,
+            agent_id,
+            card_title,
+            review_status,
+            latest_dispatch_id,
+            force,
+        ),
+        "pending_decision" => {
+            resume_from_pending_decision(state, card_id, agent_id, card_title, force)
+        }
+        "blocked" => resume_from_blocked(
+            state,
+            card_id,
+            agent_id,
+            card_title,
+            force,
+            latest_dispatch_id,
+        ),
+        "backlog" | "ready" => {
+            resume_from_pre_dispatch(state, card_id, agent_id, card_title, status)
+        }
         other => Err(format!("unsupported resume from status '{other}'")),
     }
 }
@@ -255,7 +284,11 @@ fn resume_from_requested(
 ) -> Result<serde_json::Value, String> {
     cancel_and_clear(state, card_id)?;
     let dispatch = create_and_notify(
-        state, card_id, agent_id, "implementation", card_title,
+        state,
+        card_id,
+        agent_id,
+        "implementation",
+        card_title,
         &json!({"resume": true, "resumed_from": "requested"}),
     )?;
     Ok(json!({
@@ -337,7 +370,10 @@ fn resume_from_review(
             drop(conn);
 
             let dispatch = create_and_notify(
-                state, card_id, agent_id, "review",
+                state,
+                card_id,
+                agent_id,
+                "review",
                 &format!("[Review] {card_title}"),
                 &json!({"resume": true, "resumed_from": "review_reviewing"}),
             )?;
@@ -355,7 +391,11 @@ fn resume_from_review(
             // Get the rework target state from pipeline (same logic as review_verdict.rs)
             let rework_target = {
                 let conn = state.db.lock().map_err(|e| format!("{e}"))?;
-                let (repo_id, card_agent, card_status_now): (Option<String>, Option<String>, String) = conn
+                let (repo_id, card_agent, card_status_now): (
+                    Option<String>,
+                    Option<String>,
+                    String,
+                ) = conn
                     .query_row(
                         "SELECT repo_id, assigned_agent_id, status FROM kanban_cards WHERE id = ?1",
                         [card_id],
@@ -421,7 +461,10 @@ fn resume_from_review(
             }
 
             let dispatch = create_and_notify(
-                state, card_id, agent_id, "rework",
+                state,
+                card_id,
+                agent_id,
+                "rework",
                 &format!("[Rework] {card_title}"),
                 &json!({"resume": true, "resumed_from": "suggestion_pending", "auto_accept": true}),
             )?;
@@ -436,14 +479,22 @@ fn resume_from_review(
         // rework_pending with failed/orphan dispatch → new rework dispatch
         Some("rework_pending") => {
             let dispatch_status = get_dispatch_status(&state.db, latest_dispatch_id);
-            let is_active = matches!(dispatch_status.as_deref(), Some("pending") | Some("dispatched"));
+            let is_active = matches!(
+                dispatch_status.as_deref(),
+                Some("pending") | Some("dispatched")
+            );
             if is_active && !force {
-                return Err("rework dispatch may still be active — use force=true to override".to_string());
+                return Err(
+                    "rework dispatch may still be active — use force=true to override".to_string(),
+                );
             }
 
             cancel_and_clear(state, card_id)?;
             let dispatch = create_and_notify(
-                state, card_id, agent_id, "rework",
+                state,
+                card_id,
+                agent_id,
+                "rework",
                 &format!("[Rework] {card_title}"),
                 &json!({"resume": true, "resumed_from": "rework_pending"}),
             )?;
@@ -575,7 +626,10 @@ fn resume_from_pending_decision(
             .map_err(|e| format!("transition failed: {e}"))?;
 
             let dispatch = create_and_notify(
-                state, card_id, agent_id, "rework",
+                state,
+                card_id,
+                agent_id,
+                "rework",
                 &format!("[Rework] {card_title}"),
                 &json!({
                     "resume": true,
@@ -625,7 +679,11 @@ fn resume_from_pending_decision(
             .map_err(|e| format!("transition from pending_decision failed: {e}"))?;
 
             let dispatch = create_and_notify(
-                state, card_id, agent_id, "implementation", card_title,
+                state,
+                card_id,
+                agent_id,
+                "implementation",
+                card_title,
                 &json!({
                     "resume": true,
                     "resumed_from": "pending_decision",
@@ -697,7 +755,11 @@ fn resume_from_blocked(
     .map_err(|e| format!("transition from blocked failed: {e}"))?;
 
     let dispatch = create_and_notify(
-        state, card_id, agent_id, "implementation", card_title,
+        state,
+        card_id,
+        agent_id,
+        "implementation",
+        card_title,
         &json!({"resume": true, "resumed_from": "blocked"}),
     )?;
 
@@ -716,7 +778,11 @@ fn resume_from_pre_dispatch(
     current_status: &str,
 ) -> Result<serde_json::Value, String> {
     let dispatch = create_and_notify(
-        state, card_id, agent_id, "implementation", card_title,
+        state,
+        card_id,
+        agent_id,
+        "implementation",
+        card_title,
         &json!({"resume": true, "resumed_from": current_status}),
     )?;
 
@@ -731,10 +797,7 @@ fn resume_from_pre_dispatch(
 
 /// Cancel ALL active dispatches for the card and clear latest_dispatch_id.
 /// Matches the card-wide guard in kanban.rs:101-108.
-fn cancel_and_clear(
-    state: &AppState,
-    card_id: &str,
-) -> Result<(), String> {
+fn cancel_and_clear(state: &AppState, card_id: &str) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| format!("{e}"))?;
 
     // Collect all active dispatch IDs for proper cancellation + auto-queue reset
@@ -754,9 +817,11 @@ fn cancel_and_clear(
     conn.execute_batch("BEGIN").map_err(|e| format!("{e}"))?;
 
     for did in &active_ids {
-        if let Err(e) =
-            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, did, Some("resume"))
-        {
+        if let Err(e) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+            &conn,
+            did,
+            Some("resume"),
+        ) {
             conn.execute_batch("ROLLBACK").ok();
             return Err(format!("{e}"));
         }
@@ -807,13 +872,7 @@ fn create_and_notify(
         .unwrap_or(false);
 
     if !was_reused {
-        super::dispatches::queue_dispatch_notify(
-            &state.db,
-            &dispatch_id,
-            agent_id,
-            card_id,
-            title,
-        );
+        super::dispatches::queue_dispatch_notify(&state.db, &dispatch_id, agent_id, card_id, title);
     }
 
     Ok(dispatch)
@@ -830,7 +889,6 @@ fn get_dispatch_status(db: &crate::db::Db, dispatch_id: &Option<String>) -> Opti
     )
     .ok()
 }
-
 
 /// Write audit log entry for resume action
 fn write_audit_log(db: &crate::db::Db, card_id: &str, from_status: &str, reason: &str) {
