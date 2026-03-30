@@ -972,9 +972,7 @@ pub(super) async fn restore_inflight_turns(
                     // Check if tmux pane is actually alive — dcserver restart
                     // may cause SessionDied because no new output arrived, but
                     // the Claude CLI process could still be idle (waiting for input).
-                    let pane_alive = crate::services::tmux_diagnostics::tmux_session_has_live_pane(
-                        &tmux_for_reader,
-                    );
+                    let pane_alive = tmux_session_alive_with_retry(&tmux_for_reader);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     if pane_alive {
                         // Session is alive but idle — hand off to watcher instead of retrying
