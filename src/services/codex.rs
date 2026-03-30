@@ -489,7 +489,7 @@ fn execute_streaming_local_tmux(
         --input-fifo {input_fifo} \\\n  \
         --prompt-file {prompt} \\\n  \
         --cwd {wd} \\\n  \
-        --codex-bin {codex_bin}{model_arg}\n",
+        --codex-bin {codex_bin}{model_arg}{effort_arg}\n",
         env = env_lines,
         exe = shell_escape(&exe.display().to_string()),
         output = shell_escape(&output_path),
@@ -501,6 +501,11 @@ fn execute_streaming_local_tmux(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| format!(" \\\n  --codex-model {}", shell_escape(value)))
+            .unwrap_or_default(),
+        effort_arg = std::env::var("AGENTDESK_CODEX_REASONING_EFFORT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| format!(" \\\n  --reasoning-effort {}", shell_escape(&v)))
             .unwrap_or_default(),
     );
 
@@ -729,6 +734,12 @@ fn execute_streaming_local_process_codex(
             if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
                 args.push("--codex-model".to_string());
                 args.push(model.to_string());
+            }
+            if let Ok(effort) = std::env::var("AGENTDESK_CODEX_REASONING_EFFORT") {
+                if !effort.trim().is_empty() {
+                    args.push("--reasoning-effort".to_string());
+                    args.push(effort);
+                }
             }
             args
         },

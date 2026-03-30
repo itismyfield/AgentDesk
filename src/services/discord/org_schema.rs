@@ -190,6 +190,7 @@ pub(super) fn resolve_role_binding(
         prompt_file,
         provider,
         model,
+        reasoning_effort: None,
     })
 }
 

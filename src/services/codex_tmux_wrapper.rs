@@ -14,6 +14,7 @@ pub fn run(
     working_dir: &str,
     codex_bin: &str,
     codex_model: Option<&str>,
+    reasoning_effort: Option<&str>,
     input_mode: InputMode,
 ) {
     let mode_label = match input_mode {
@@ -136,6 +137,7 @@ pub fn run(
         &mut output,
         codex_bin,
         codex_model,
+        reasoning_effort,
         &expanded_dir,
         &prompt,
         &mut thread_id,
@@ -154,6 +156,7 @@ pub fn run(
             &mut output,
             codex_bin,
             codex_model,
+            reasoning_effort,
             &expanded_dir,
             next_prompt.trim(),
             &mut thread_id,
@@ -201,6 +204,7 @@ fn run_turn(
     output: &mut std::fs::File,
     codex_bin: &str,
     codex_model: Option<&str>,
+    reasoning_effort: Option<&str>,
     working_dir: &str,
     prompt: &str,
     thread_id: &mut Option<String>,
@@ -209,8 +213,12 @@ fn run_turn(
 
     let mut args = Vec::new();
     if let Some(model) = codex_model.map(str::trim).filter(|value| !value.is_empty()) {
+        let effort = reasoning_effort
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("high");
         args.push("-c".to_string());
-        args.push(r#"model_reasoning_effort="high""#.to_string());
+        args.push(format!(r#"model_reasoning_effort="{}""#, effort));
         args.push("-m".to_string());
         args.push(model.to_string());
     }

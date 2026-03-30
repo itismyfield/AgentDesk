@@ -38,11 +38,16 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
         .get("model")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let reasoning_effort = obj
+        .get("reasoningEffort")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     Some(RoleBinding {
         role_id,
         prompt_file,
         provider,
         model,
+        reasoning_effort,
     })
 }
 

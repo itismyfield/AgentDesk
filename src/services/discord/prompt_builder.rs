@@ -318,6 +318,7 @@ mod tests {
             prompt_file: "/nonexistent".to_string(),
             provider: None,
             model: None,
+            reasoning_effort: None,
         };
         let review_prompt = build_system_prompt(
             "ctx",

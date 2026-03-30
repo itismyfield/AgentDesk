@@ -42,8 +42,10 @@ pub(super) struct RoleBinding {
     pub role_id: String,
     pub prompt_file: String,
     pub provider: Option<ProviderKind>,
-    /// Optional model override (e.g. "opus", "sonnet", "haiku")
+    /// Optional model override (e.g. "opus", "sonnet", "haiku", "o3")
     pub model: Option<String>,
+    /// Optional reasoning effort for Codex (e.g. "low", "normal", "high", "xhigh")
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -842,6 +844,7 @@ mod tests {
             prompt_file: "/tmp/test.md".to_string(),
             provider: Some(ProviderKind::Claude),
             model: None,
+            reasoning_effort: None,
         };
 
         // With a role binding specifying Claude, only Claude should match

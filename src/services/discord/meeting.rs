@@ -902,6 +902,7 @@ async fn execute_agent_turn(
             prompt_file: participant.prompt_file.clone(),
             provider: None,
             model: None,
+            reasoning_effort: None,
         })
         .unwrap_or_default()
     } else {
@@ -1110,6 +1111,7 @@ async fn conclude_meeting(
             prompt_file: summary_prompt_file,
             provider: None,
             model: None,
+            reasoning_effort: None,
         })
         .unwrap_or_default()
     } else {

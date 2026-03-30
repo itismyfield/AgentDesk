@@ -1611,7 +1611,7 @@ pub(super) async fn handle_text_message(
         }
     };
 
-    let inflight_state = InflightTurnState::new(
+    let mut inflight_state = InflightTurnState::new(
         provider.clone(),
         channel_id.get(),
         channel_name.clone(),
@@ -1625,6 +1625,8 @@ pub(super) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    inflight_state.session_key = adk_session_key.clone();
+    inflight_state.dispatch_id = dispatch_id.clone();
     if let Err(e) = save_inflight_state(&inflight_state) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}]   ⚠ inflight state save failed: {e}");
@@ -1681,14 +1683,15 @@ pub(super) async fn handle_text_message(
         }
     }
 
-    // Resolve model: DashMap override > dispatch role override > role-map > default
-    let model_for_turn: Option<String> = {
+    // Resolve model + reasoning_effort: DashMap override > dispatch role override > role-map > default
+    let (model_for_turn, reasoning_effort_for_turn): (Option<String>, Option<String>) = {
         let dashmap_model = shared.model_overrides.get(&channel_id).map(|v| v.clone());
         if dashmap_model.is_some() {
-            dashmap_model
+            (dashmap_model, None)
         } else if let Some(override_ch) = shared.dispatch_role_overrides.get(&channel_id) {
             let alt_ch = *override_ch;
-            resolve_role_binding(alt_ch, None).and_then(|rb| rb.model)
+            let rb = resolve_role_binding(alt_ch, None);
+            (rb.as_ref().and_then(|r| r.model.clone()), rb.as_ref().and_then(|r| r.reasoning_effort.clone()))
         } else {
             let ch_name = {
                 let data = shared.core.lock().await;
@@ -1696,9 +1699,17 @@ pub(super) async fn handle_text_message(
                     .get(&channel_id)
                     .and_then(|s| s.channel_name.clone())
             };
-            resolve_role_binding(channel_id, ch_name.as_deref()).and_then(|rb| rb.model)
+            let rb = resolve_role_binding(channel_id, ch_name.as_deref());
+            (rb.as_ref().and_then(|r| r.model.clone()), rb.as_ref().and_then(|r| r.reasoning_effort.clone()))
         }
     };
+
+    // Pass reasoning_effort to codex via environment variable
+    if let Some(ref effort) = reasoning_effort_for_turn {
+        // SAFETY: This runs on the tokio blocking thread pool before spawning the provider.
+        // No concurrent reads of this env var occur at this point.
+        unsafe { std::env::set_var("AGENTDESK_CODEX_REASONING_EFFORT", effort); }
+    }
 
     // Run the provider in a blocking thread
     let provider_for_blocking = provider.clone();
