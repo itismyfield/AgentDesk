@@ -384,7 +384,7 @@ fn execute_sql(db: &crate::db::Db, sql: &str, params: &[serde_json::Value]) -> a
     }
     // Block direct card_review_state mutation (#158 — same guard as ops.rs)
     let re_review_state = regex::Regex::new(
-        r"(?i)\b(?:INSERT(?:\s+OR\s+REPLACE)?\s+INTO|UPDATE|DELETE\s+FROM)\s+card_review_state\b",
+        r"(?i)\b(?:INSERT(?:\s+OR\s+REPLACE)?\s+INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+card_review_state\b",
     )
     .unwrap();
     if re_review_state.is_match(sql) {
@@ -714,6 +714,18 @@ mod tests {
         let intents = vec![Intent::ExecuteSQL {
             sql: "INSERT OR REPLACE INTO card_review_state (card_id, state) VALUES ('c1', 'idle')"
                 .into(),
+            params: vec![],
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 1);
+    }
+
+    // #158: ExecuteSQL guard blocks direct card_review_state REPLACE INTO
+    #[test]
+    fn test_blocked_card_review_state_replace_into_sql() {
+        let db = test_db();
+        let intents = vec![Intent::ExecuteSQL {
+            sql: "REPLACE INTO card_review_state (card_id, state) VALUES ('c1', 'idle')".into(),
             params: vec![],
         }];
         let result = execute_intents(&db, intents);

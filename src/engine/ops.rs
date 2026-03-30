@@ -126,8 +126,8 @@ fn register_db_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 if (/(?:INSERT\s+INTO|UPDATE)\s+task_dispatches\b/i.test(sql)) {
                     throw new Error("Direct task_dispatches mutation is blocked. Use agentdesk.dispatch.create() instead.");
                 }
-                // Block direct INSERT/UPDATE/DELETE on card_review_state — use agentdesk.reviewState.sync() instead (#158).
-                if (/(?:INSERT(?:\s+OR\s+REPLACE)?\s+INTO|UPDATE|DELETE\s+FROM)\s+card_review_state\b/i.test(sql)) {
+                // Block direct INSERT/REPLACE/UPDATE/DELETE on card_review_state — use agentdesk.reviewState.sync() instead (#158).
+                if (/(?:INSERT(?:\s+OR\s+REPLACE)?\s+INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+card_review_state\b/i.test(sql)) {
                     throw new Error("Direct card_review_state mutation is blocked. Use agentdesk.reviewState.sync(cardId, state, opts) instead.");
                 }
                 // Direct write — db.execute remains synchronous by design.

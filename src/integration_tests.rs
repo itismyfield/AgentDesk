@@ -1094,6 +1094,18 @@ mod tests {
             "INSERT OR REPLACE into card_review_state via ExecuteSQL must be rejected"
         );
 
+        // Attempt REPLACE INTO via ExecuteSQL intent — must also fail
+        let replace_into_intent = crate::engine::intent::Intent::ExecuteSQL {
+            sql: "REPLACE INTO card_review_state (card_id, state, updated_at) VALUES ('card-158b', 'idle', datetime('now'))".to_string(),
+            params: vec![],
+        };
+        let result_replace_into =
+            crate::engine::intent::execute_intents(&db, vec![replace_into_intent]);
+        assert_eq!(
+            result_replace_into.errors, 1,
+            "REPLACE INTO card_review_state via ExecuteSQL must be rejected"
+        );
+
         // Attempt UPDATE via ExecuteSQL intent — must also fail
         let update_intent = crate::engine::intent::Intent::ExecuteSQL {
             sql: "UPDATE card_review_state SET state = 'idle' WHERE card_id = 'card-158b'"
@@ -1166,6 +1178,24 @@ mod tests {
         assert_eq!(
             replace_result, "blocked",
             "JS db.execute INSERT OR REPLACE into card_review_state must be blocked"
+        );
+
+        // Try REPLACE INTO via agentdesk.db.execute — must throw
+        let replace_into_result: String = engine
+            .eval_js(r#"
+                try {
+                    agentdesk.db.execute(
+                        "REPLACE INTO card_review_state (card_id, state, updated_at) VALUES ('card-158c', 'idle', datetime('now'))"
+                    );
+                    "unexpected_success"
+                } catch(e) {
+                    e.message.indexOf("card_review_state") >= 0 ? "blocked" : "wrong_error: " + e.message
+                }
+            "#)
+            .unwrap();
+        assert_eq!(
+            replace_into_result, "blocked",
+            "JS db.execute REPLACE INTO card_review_state must be blocked"
         );
 
         // Try UPDATE via agentdesk.db.execute — must throw
