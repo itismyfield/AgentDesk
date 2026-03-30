@@ -80,6 +80,12 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str)] = &[
         "Counter-Model Review",
     ),
     (
+        "max_review_rounds",
+        "review",
+        "최대 리뷰 라운드",
+        "Max Review Rounds",
+    ),
+    (
         "pm_decision_gate_enabled",
         "pipeline",
         "PM 판단 게이트",

@@ -192,7 +192,9 @@ var timeouts = {
     var aInProgress = agentdesk.pipeline.nextGatedTarget(aInitial, aCfg);
     var aForce = agentdesk.pipeline.forceOnlyTargets(aInitial, aCfg);
     var aPending = aForce[0];
-    var requestedTimeoutMin = agentdesk.runtimeConfig.get("requestedAckTimeoutMin") || 45;
+    var rawRequestedTimeout = agentdesk.runtimeConfig.get("requestedAckTimeoutMin");
+    var requestedTimeoutMin = (typeof rawRequestedTimeout === "number" && rawRequestedTimeout > 0 && rawRequestedTimeout <= 10080)
+      ? Math.floor(rawRequestedTimeout) : 45;
     var staleRequested = agentdesk.db.query(
       "SELECT kc.id, kc.assigned_agent_id, kc.latest_dispatch_id, " +
       "COALESCE(td.retry_count, 0) as retry_count " +
@@ -257,7 +259,9 @@ var timeouts = {
     var bInProgress = agentdesk.pipeline.nextGatedTarget(bInitial, bCfg);
     var bForce = agentdesk.pipeline.forceOnlyTargets(bInProgress, bCfg);
     var bBlocked = bForce.length > 1 ? bForce[1] : bForce[0];
-    var inProgressStaleMin = agentdesk.runtimeConfig.get("inProgressStaleMin") || 120;
+    var rawInProgressStale = agentdesk.runtimeConfig.get("inProgressStaleMin");
+    var inProgressStaleMin = (typeof rawInProgressStale === "number" && rawInProgressStale > 0 && rawInProgressStale <= 10080)
+      ? Math.floor(rawInProgressStale) : 120;
     var staleInProgress = agentdesk.db.query(
       "SELECT id FROM kanban_cards WHERE status = ? AND started_at IS NOT NULL AND started_at < datetime('now', '-" + inProgressStaleMin + " minutes')",
       [bInProgress]
