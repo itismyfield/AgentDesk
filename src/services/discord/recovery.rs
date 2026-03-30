@@ -537,19 +537,21 @@ pub(super) async fn restore_inflight_turns(
                             tmux_session_name, initial_offset
                         );
                         #[cfg(unix)]
-                        tokio::spawn(super::tmux::tmux_output_watcher(
-                            channel_id,
-                            http.clone(),
-                            shared.clone(),
-                            output_path,
-                            tmux_session_name.clone(),
-                            initial_offset,
-                            cancel,
-                            paused,
-                            resume_offset,
-                            pause_epoch,
-                            turn_delivered,
-                        ));
+                        {
+                            tokio::spawn(super::tmux::tmux_output_watcher(
+                                channel_id,
+                                http.clone(),
+                                shared.clone(),
+                                output_path,
+                                tmux_session_name.clone(),
+                                initial_offset,
+                                cancel,
+                                paused,
+                                resume_offset,
+                                pause_epoch,
+                                turn_delivered,
+                            ));
+                        }
                     }
                 }
 
@@ -858,19 +860,21 @@ pub(super) async fn restore_inflight_turns(
                     tmux_session_name, initial_offset
                 );
                 #[cfg(unix)]
-                tokio::spawn(super::tmux::tmux_output_watcher(
-                    channel_id,
-                    http.clone(),
-                    shared.clone(),
-                    output_path.clone(),
-                    tmux_session_name.clone(),
-                    initial_offset,
-                    cancel,
-                    paused,
-                    resume_offset,
-                    pause_epoch,
-                    turn_delivered,
-                ));
+                {
+                    tokio::spawn(super::tmux::tmux_output_watcher(
+                        channel_id,
+                        http.clone(),
+                        shared.clone(),
+                        output_path.clone(),
+                        tmux_session_name.clone(),
+                        initial_offset,
+                        cancel,
+                        paused,
+                        resume_offset,
+                        pause_epoch,
+                        turn_delivered,
+                    ));
+                }
             }
 
             clear_inflight_state(provider, state.channel_id);

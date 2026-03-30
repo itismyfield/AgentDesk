@@ -358,42 +358,41 @@ mod tests {
         let origin = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
 
-        // Init bare origin with explicit main branch (CI may default to master)
+        // Init bare origin
         Command::new("git")
-            .args(["init", "--bare", "--initial-branch=main"])
+            .args(["init", "--bare"])
             .current_dir(origin.path())
             .output()
             .unwrap();
 
-        // Clone it to get a repo with origin/main
+        // Init non-bare repo with explicit main branch and add origin
         Command::new("git")
-            .args([
-                "clone",
-                origin.path().to_str().unwrap(),
-                repo.path().to_str().unwrap(),
-            ])
+            .args(["init", "-b", "main"])
+            .current_dir(repo.path())
             .output()
             .unwrap();
-
-        // Ensure we're on main branch (some git versions default to master)
         Command::new("git")
-            .args(["checkout", "-B", "main"])
+            .args(["remote", "add", "origin", origin.path().to_str().unwrap()])
             .current_dir(repo.path())
             .output()
             .unwrap();
 
-        // Create initial commit on main
+        // Create initial commit on main and push to establish origin/main
         Command::new("git")
             .args(["commit", "--allow-empty", "-m", "initial"])
             .current_dir(repo.path())
             .output()
             .unwrap();
-
-        Command::new("git")
+        let push = Command::new("git")
             .args(["push", "-u", "origin", "main"])
             .current_dir(repo.path())
             .output()
             .unwrap();
+        assert!(
+            push.status.success(),
+            "git push failed: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
 
         (repo, origin)
     }
