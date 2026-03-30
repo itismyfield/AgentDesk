@@ -1936,10 +1936,14 @@ fn format_dispatch_message(
             "\n---\n\
              응답 첫 줄에 반드시 `VERDICT: pass|improve|reject|rework` 중 하나를 적으세요.\n\
              verdict API가 200 OK로 호출되기 전까지 리뷰는 완료로 간주되지 않습니다.\n\
+             `improve`/`reject`/`rework` 시 반드시 `notes`에 구체적 피드백을, `items`에 개별 지적 사항을 포함하세요.\n\
              리뷰 완료 후 verdict API를 호출하세요:\n\
              `curl -sf -X POST {base_url}/api/review-verdict \
              -H \"Content-Type: application/json\" \
-             -d '{{\"dispatch_id\":\"{dispatch_id}\",\"overall\":\"pass|improve|reject|rework\"{commit_arg}{provider_arg}}}'`"
+             -d '{{\"dispatch_id\":\"{dispatch_id}\",\"overall\":\"pass|improve|reject|rework\",\
+             \"notes\":\"리뷰 피드백 요약\",\
+             \"items\":[{{\"category\":\"bug|style|perf|security|logic\",\"summary\":\"개별 지적 사항\"}}]\
+             {commit_arg}{provider_arg}}}'`"
         ));
         message
     } else if !issue_link.is_empty() {
