@@ -126,6 +126,13 @@ pub async fn create_repo(
         }
     }
 
+    if let Err(e) = crate::db::schema::seed_builtin_pipeline_stages(&conn) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("seed builtin pipeline stages: {e}")})),
+        );
+    }
+
     match conn.query_row(
         "SELECT id, display_name, sync_enabled, last_synced_at, default_agent_id FROM github_repos WHERE id = ?1",
         [&body.repo],

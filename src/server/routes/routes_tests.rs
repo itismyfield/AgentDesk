@@ -1196,6 +1196,59 @@ fn seed_agent(db: &Db, agent_id: &str) {
 }
 
 #[tokio::test]
+async fn create_repo_seeds_builtin_agentdesk_pipeline_stages() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-repos")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"repo":"itismyfield/AgentDesk"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let conn = db.lock().unwrap();
+    let rows: Vec<(String, i64, Option<String>, Option<String>, Option<String>)> = conn
+        .prepare(
+            "SELECT stage_name, stage_order, trigger_after, provider, skip_condition
+             FROM pipeline_stages
+             WHERE repo_id = 'itismyfield/AgentDesk'
+             ORDER BY stage_order ASC",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, "dev-deploy");
+    assert_eq!(rows[0].1, 100);
+    assert_eq!(rows[0].2.as_deref(), Some("review_pass"));
+    assert_eq!(rows[0].3.as_deref(), Some("self"));
+    assert_eq!(rows[0].4.as_deref(), Some("no_rs_changes"));
+    assert_eq!(rows[1].0, "e2e-test");
+    assert_eq!(rows[1].1, 200);
+    assert_eq!(rows[1].3.as_deref(), Some("counter"));
+    assert_eq!(rows[1].4.as_deref(), Some("no_rs_changes"));
+}
+
+#[tokio::test]
 async fn pipeline_config_repo_get_set_override() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
@@ -2079,10 +2132,7 @@ async fn auto_queue_enqueue_rejects_card_with_active_dispatch() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(
-        json["error"]
-            .as_str()
-            .unwrap()
-            .contains("active dispatch"),
+        json["error"].as_str().unwrap().contains("active dispatch"),
         "must reject with active-dispatch error"
     );
 }

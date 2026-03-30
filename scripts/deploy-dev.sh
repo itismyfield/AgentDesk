@@ -16,6 +16,8 @@ if [ ! -d "$REPO" ]; then
     exit 1
 fi
 REPO="$(cd "$REPO" && pwd)"
+DEV_WORKSPACE_DIR="${AGENTDESK_DEV_WORKSPACE_DIR:-$ADK_DEV/workspaces/agentdesk}"
+DEV_POLICY_DIR="${AGENTDESK_DEV_POLICY_DIR:-$DEV_WORKSPACE_DIR/policies}"
 REPORT_CHANNEL_ID="${AGENTDESK_REPORT_CHANNEL_ID:-}"
 REPORT_PROVIDER="${AGENTDESK_REPORT_PROVIDER:-}"
 DEV_DEPLOY_DETACHED_CHILD="${AGENTDESK_DEPLOY_DEV_DETACHED_CHILD:-0}"
@@ -192,6 +194,12 @@ sudo "$FW" --unblockapp "$ADK_DEV/bin/agentdesk" 2>/dev/null || true
 # 3.6. Symlink dashboard dist
 mkdir -p "$ADK_DEV/dashboard"
 ln -sfn "$REPO/dashboard/dist" "$ADK_DEV/dashboard/dist"
+
+# 3.7. Sync policies used by the dev runtime.
+# Dev dcserver loads policies from its own workspace, not from the release worktree.
+echo "▸ Syncing policies..."
+mkdir -p "$DEV_POLICY_DIR"
+rsync -a --delete "$REPO/policies/" "$DEV_POLICY_DIR/"
 
 # 4. Start dev
 echo "▸ Starting dev..."

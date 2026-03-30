@@ -233,6 +233,42 @@ var reviewAutomation = {
   }
 };
 
+// #197: Check if PR has .rs file changes (skip condition for dev-deploy/e2e-test)
+function hasRsChanges(cardId) {
+  var card = agentdesk.db.query(
+    "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  if (card.length === 0) return true;
+  if (!card[0].github_issue_number || !card[0].repo_id) return true;
+
+  try {
+    var prOutput = agentdesk.exec("gh", [
+      "pr", "list", "--repo", card[0].repo_id,
+      "--state", "all", "--limit", "3",
+      "--search", "#" + card[0].github_issue_number,
+      "--json", "number"
+    ]);
+    var prs = JSON.parse(prOutput || "[]");
+    if (prs.length === 0) return true;
+
+    var filesOutput = agentdesk.exec("gh", [
+      "api", "repos/" + card[0].repo_id + "/pulls/" + prs[0].number + "/files",
+      "--jq", ".[].filename"
+    ]);
+    if (!filesOutput || filesOutput.indexOf("ERROR") === 0) return true;
+
+    var files = filesOutput.split("\n");
+    for (var i = 0; i < files.length; i++) {
+      if (files[i].trim().endsWith(".rs")) return true;
+    }
+    return false;
+  } catch (e) {
+    agentdesk.log.warn("[review] #197 Failed to check .rs changes: " + e);
+    return true;
+  }
+}
+
 // #118: Tokenize text into normalized words for similarity comparison
 function tokenize(text) {
   if (!text) return [];
@@ -322,7 +358,7 @@ function processVerdict(cardId, verdict, result) {
         );
         if (currentStageInfo.length > 0) {
           var stages = agentdesk.db.query(
-            "SELECT id, stage_name, agent_override_id FROM pipeline_stages WHERE repo_id = ? AND stage_order > ? ORDER BY stage_order ASC LIMIT 1",
+            "SELECT id, stage_name, agent_override_id, provider, skip_condition FROM pipeline_stages WHERE repo_id = ? AND stage_order > ? ORDER BY stage_order ASC LIMIT 1",
             [repoId, currentStageInfo[0].stage_order]
           );
           if (stages.length > 0) nextStage = stages[0];
@@ -330,7 +366,7 @@ function processVerdict(cardId, verdict, result) {
       } else {
         // No current stage — check for first review_pass triggered stage
         var stages = agentdesk.db.query(
-          "SELECT id, stage_name, agent_override_id FROM pipeline_stages WHERE repo_id = ? AND trigger_after = 'review_pass' ORDER BY stage_order ASC LIMIT 1",
+          "SELECT id, stage_name, agent_override_id, provider, skip_condition FROM pipeline_stages WHERE repo_id = ? AND trigger_after = 'review_pass' ORDER BY stage_order ASC LIMIT 1",
           [repoId]
         );
         if (stages.length > 0) nextStage = stages[0];
@@ -338,37 +374,76 @@ function processVerdict(cardId, verdict, result) {
     }
 
     if (nextStage) {
-      // Assign pipeline stage to card
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET pipeline_stage_id = ?, updated_at = datetime('now') WHERE id = ?",
-        [nextStage.id, cardId]
-      );
-      agentdesk.log.info("[review] Card " + cardId + " passed review, entering pipeline stage: " + nextStage.stage_name);
-
-      // Create dispatch for the pipeline stage if agent is assigned
-      var stageAgent = nextStage.agent_override_id;
-      if (!stageAgent) {
-        var cardAgent = agentdesk.db.query("SELECT assigned_agent_id FROM kanban_cards WHERE id = ?", [cardId]);
-        stageAgent = (cardAgent.length > 0 && cardAgent[0].assigned_agent_id) ? cardAgent[0].assigned_agent_id : null;
-      }
-      if (stageAgent) {
-        try {
-          agentdesk.dispatch.create(
-            cardId,
-            stageAgent,
-            "implementation",
-            "[Pipeline: " + nextStage.stage_name + "] " + cardId
+      // #197: Check skip condition — no .rs changes → skip all pipeline stages
+      if (nextStage.skip_condition === "no_rs_changes" && !hasRsChanges(cardId)) {
+        if (cardInfo.length > 0 && cardInfo[0].pipeline_stage_id) {
+          agentdesk.db.execute(
+            "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
+            [cardId]
           );
-          agentdesk.log.info("[review] Pipeline dispatch created for stage " + nextStage.stage_name);
-        } catch (e) {
-          agentdesk.log.warn("[review] Pipeline dispatch failed: " + e);
         }
+        agentdesk.kanban.setStatus(cardId, reviewPassTarget);
+        agentdesk.log.info("[review] Card " + cardId + " skipping pipeline stages (no .rs changes) → " + reviewPassTarget);
       } else {
-        agentdesk.kanban.setStatus(cardId, pendingState);
+        // Assign pipeline stage to card
         agentdesk.db.execute(
-          "UPDATE kanban_cards SET blocked_reason = ? WHERE id = ?",
-          ["Pipeline stage '" + nextStage.stage_name + "' has no assigned agent", cardId]
+          "UPDATE kanban_cards SET pipeline_stage_id = ?, updated_at = datetime('now') WHERE id = ?",
+          [nextStage.id, cardId]
         );
+        agentdesk.log.info("[review] Card " + cardId + " passed review, entering pipeline stage: " + nextStage.stage_name);
+
+        // #197: Self-hosted stage (dev-deploy) — queue for internal execution
+        if (nextStage.provider === "self") {
+          agentdesk.db.execute(
+            "UPDATE kanban_cards SET blocked_reason = 'deploy:waiting' WHERE id = ?",
+            [cardId]
+          );
+          agentdesk.kanban.setStatus(cardId, inProgressState);
+          agentdesk.log.info("[review] Card " + cardId + " queued for self-hosted stage: " + nextStage.stage_name);
+        }
+        // #197: Counter-model stage (e2e-test) — dispatch to counter agent
+        else if (nextStage.provider === "counter") {
+          var counterCardInfo = agentdesk.db.query(
+            "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?", [cardId]
+          );
+          if (counterCardInfo.length > 0 && counterCardInfo[0].assigned_agent_id) {
+            var issueNum = counterCardInfo[0].github_issue_number || "?";
+            try {
+              agentdesk.dispatch.create(
+                cardId, counterCardInfo[0].assigned_agent_id, "e2e-test",
+                "[E2E Test] #" + issueNum + " " + counterCardInfo[0].title
+              );
+              agentdesk.log.info("[review] E2E test dispatch created for stage " + nextStage.stage_name);
+            } catch (e) {
+              agentdesk.log.warn("[review] E2E test dispatch failed: " + e);
+            }
+          }
+        }
+        // Normal agent dispatch
+        else {
+          var stageAgent = nextStage.agent_override_id;
+          if (!stageAgent) {
+            var cardAgent = agentdesk.db.query("SELECT assigned_agent_id FROM kanban_cards WHERE id = ?", [cardId]);
+            stageAgent = (cardAgent.length > 0 && cardAgent[0].assigned_agent_id) ? cardAgent[0].assigned_agent_id : null;
+          }
+          if (stageAgent) {
+            try {
+              agentdesk.dispatch.create(
+                cardId, stageAgent, "implementation",
+                "[Pipeline: " + nextStage.stage_name + "] " + cardId
+              );
+              agentdesk.log.info("[review] Pipeline dispatch created for stage " + nextStage.stage_name);
+            } catch (e) {
+              agentdesk.log.warn("[review] Pipeline dispatch failed: " + e);
+            }
+          } else {
+            agentdesk.kanban.setStatus(cardId, pendingState);
+            agentdesk.db.execute(
+              "UPDATE kanban_cards SET blocked_reason = ? WHERE id = ?",
+              ["Pipeline stage '" + nextStage.stage_name + "' has no assigned agent", cardId]
+            );
+          }
+        }
       }
     } else {
       // No more stages — clear pipeline_stage_id and mark terminal

@@ -271,7 +271,8 @@ tests/
 │   ├── restart_recovery.rs
 │   ├── multi_channel.rs
 │   └── session_persistence.rs
-└── e2e/                  ← E2E 테스트 (실제 봇 + 채널)
-    ├── smoke_test.rs     ← /start → 메시지 → 응답 → /stop
+└── e2e/                  ← E2E 테스트 (실제 서버 + API)
+    ├── main.rs           ← 테스트 바이너리 엔트리
+    ├── smoke_test.rs     ← ✅ 서버 기동 → health → CRUD → settings → cleanup
     └── restart_test.rs   ← 기동 → turn → kill → 재기동 → 복구
 ```
