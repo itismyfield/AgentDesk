@@ -4,26 +4,26 @@ pub fn print_help() {
     println!("AgentDesk {} - AI agent orchestration platform", VERSION);
     println!();
     println!("USAGE:");
-    println!("    agentdesk [OPTIONS]");
+    println!("    agentdesk <COMMAND>");
     println!();
-    println!("OPTIONS:");
+    println!("COMMANDS:");
     println!("    -h, --help              Print help information");
     println!("    -v, --version           Print version information");
     println!(
-        "    --dcserver [TOKEN]      Start Discord bot server(s); without TOKEN uses bot_settings.json"
+        "    dcserver [TOKEN]        Start Discord bot server(s); without TOKEN uses bot_settings.json"
     );
     println!(
-        "    --restart-dcserver [--report-channel-id <ID> --report-provider <claude|codex|gemini> [--report-message-id <ID>]]"
+        "    restart-dcserver [--report-channel-id <ID> --report-provider <claude|codex|gemini> [--report-message-id <ID>]]"
     );
-    println!("    --discord-sendfile <PATH> --channel <ID> --key <HASH>");
-    println!("    --discord-sendmessage --channel <ID> --message <TEXT> [--key <HASH>]");
-    println!("    --discord-senddm --user <ID> --message <TEXT> [--key <HASH>]");
-    println!("    --reset-tmux             Kill all AgentDesk-* tmux sessions");
+    println!("    discord-sendfile <PATH> --channel <ID> --key <HASH>");
+    println!("    discord-sendmessage --channel <ID> --message <TEXT> [--key <HASH>]");
+    println!("    discord-senddm --user <ID> --message <TEXT> [--key <HASH>]");
+    println!("    reset-tmux              Kill all AgentDesk-* tmux sessions");
     println!(
-        "    --ismcptool <TOOL>...    Check if MCP tool(s) are registered in .claude/settings.json (CWD)"
+        "    ismcptool <TOOL>...     Check if MCP tool(s) are registered in .claude/settings.json (CWD)"
     );
     println!(
-        "    --addmcptool <TOOL>...   Add MCP tool permission(s) to .claude/settings.json (CWD)"
+        "    addmcptool <TOOL>...    Add MCP tool permission(s) to .claude/settings.json (CWD)"
     );
     println!();
 }

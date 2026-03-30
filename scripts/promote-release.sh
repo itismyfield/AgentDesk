@@ -259,6 +259,10 @@ rm -rf "$ADK_REL/dashboard/dist.old"
 mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"
 rm -rf "$ADK_REL/dashboard/dist.old"
 
+# Keep the user-facing CLI wrapper discoverable via PATH.
+echo "▸ Ensuring global agentdesk CLI..."
+"$SCRIPT_DIR/ensure-agentdesk-cli.sh"
+
 # Initialize release database if it doesn't exist (never overwrite release data)
 if [ ! -f "$ADK_REL/data/agentdesk.sqlite" ]; then
     echo "▸ Initializing release database from dev..."
