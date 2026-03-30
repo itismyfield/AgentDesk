@@ -1278,6 +1278,30 @@ pub(crate) fn process_stream_line(
 
     // Extract statusline info from result events
     if msg_type == "result" {
+        // Prefer result event's own usage field over accumulated message values.
+        // The result event usage reflects the LAST API call's context window,
+        // while accumulated values overcount for multi-call turns (tool use loops).
+        if let Some(usage) = json.get("usage") {
+            let inp = usage
+                .get("input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cache_read = usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cache_creation = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let out = usage
+                .get("output_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            state.accum_input_tokens = inp + cache_read + cache_creation;
+            state.accum_output_tokens = out;
+        }
+
         let cost_usd = json.get("cost_usd").and_then(|v| v.as_f64());
         let total_cost_usd = json.get("total_cost_usd").and_then(|v| v.as_f64());
         let duration_ms = json.get("duration_ms").and_then(|v| v.as_u64());
