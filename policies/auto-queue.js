@@ -284,16 +284,17 @@ var autoQueue = {
       }
     }
 
-    // Recovery path 2 (#179): dispatched entries whose dispatch is stuck
-    // (cancelled/failed/completed without advancing the entry)
+    // Recovery path 2 (#179/#191): dispatched entries whose dispatch is stuck
+    // Covers: cancelled/failed dispatch, phantom dispatch_id (row missing),
+    // AND orphan entries (dispatched status but dispatch_id is NULL)
     var stuckDispatched = agentdesk.db.query(
       "SELECT e.id, e.agent_id, e.dispatch_id, e.kanban_card_id " +
       "FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
       "WHERE e.status = 'dispatched' AND r.status = 'active' " +
-      "AND e.dispatch_id IS NOT NULL " +
       "AND (" +
-      "  EXISTS (" +
+      "  e.dispatch_id IS NULL" +
+      "  OR EXISTS (" +
       "    SELECT 1 FROM task_dispatches td " +
       "    WHERE td.id = e.dispatch_id " +
       "    AND td.status IN ('cancelled', 'failed')" +
@@ -306,7 +307,7 @@ var autoQueue = {
     );
     for (var j = 0; j < stuckDispatched.length; j++) {
       var stuck = stuckDispatched[j];
-      agentdesk.log.info("[auto-queue] onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + stuck.dispatch_id + " is cancelled/failed/phantom)");
+      agentdesk.log.info("[auto-queue] onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + (stuck.dispatch_id || "NULL") + " is orphan/cancelled/failed/phantom)");
       agentdesk.db.execute(
         "UPDATE auto_queue_entries SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL WHERE id = ?",
         [stuck.id]
