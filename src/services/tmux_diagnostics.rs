@@ -94,6 +94,29 @@ pub fn should_recreate_session_after_followup_fifo_error(err: &str) -> bool {
     false
 }
 
+/// #170: Classify ProcessBackend stdin pipe errors as recoverable (session recreation)
+/// or unrecoverable. Similar to `should_recreate_session_after_followup_fifo_error`
+/// but for stdin pipe errors instead of FIFO errors.
+pub fn should_recreate_session_after_stdin_error(err: &str) -> bool {
+    if err.is_empty() {
+        return false;
+    }
+    // Broken pipe — child process exited
+    if err.contains("Broken pipe") {
+        return true;
+    }
+    // Child stdin was already closed/taken
+    if err.contains("stdin already closed") {
+        return true;
+    }
+    // Write/flush failures that indicate dead process
+    if err.contains("Failed to write to child stdin") || err.contains("Failed to flush child stdin")
+    {
+        return true;
+    }
+    false
+}
+
 /// Helper: returns true if tmux pane list output indicates at least one live pane.
 pub fn pane_list_has_live_pane(output: &str) -> bool {
     output.lines().any(|line| line.trim() == "0")
@@ -124,6 +147,7 @@ mod tests {
     use super::{
         build_tmux_death_diagnostic, clear_tmux_exit_reason, pane_list_has_live_pane,
         record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
+        should_recreate_session_after_stdin_error,
     };
 
     #[test]
@@ -179,5 +203,35 @@ mod tests {
         ));
         // Empty string should NOT trigger
         assert!(!should_recreate_session_after_followup_fifo_error(""));
+    }
+
+    #[test]
+    fn test_should_recreate_session_after_stdin_error() {
+        // Broken pipe on stdin write
+        assert!(should_recreate_session_after_stdin_error(
+            "Failed to write to child stdin: Broken pipe (os error 32)"
+        ));
+        // Broken pipe on stdin flush
+        assert!(should_recreate_session_after_stdin_error(
+            "Failed to flush child stdin: Broken pipe (os error 32)"
+        ));
+        // stdin already closed
+        assert!(should_recreate_session_after_stdin_error(
+            "Child stdin already closed"
+        ));
+        // Generic write failure (includes BrokenPipe as inner cause)
+        assert!(should_recreate_session_after_stdin_error(
+            "Failed to write to child stdin: connection reset"
+        ));
+        // Lock poisoned — NOT recoverable via recreation
+        assert!(!should_recreate_session_after_stdin_error(
+            "stdin lock poisoned: PoisonError"
+        ));
+        // Unrelated error
+        assert!(!should_recreate_session_after_stdin_error(
+            "unexpected EOF in output"
+        ));
+        // Empty string
+        assert!(!should_recreate_session_after_stdin_error(""));
     }
 }

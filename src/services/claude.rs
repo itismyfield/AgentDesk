@@ -2302,13 +2302,36 @@ pub(crate) fn execute_streaming_local_process(
             if backend.is_alive(handle) {
                 debug_log("Existing process session found — sending follow-up");
                 drop(handles);
-                return send_followup_to_process(
+                match send_followup_to_process(
                     prompt,
                     &output_path,
                     session_name,
-                    sender,
-                    cancel_token,
-                );
+                    sender.clone(),
+                    cancel_token.clone(),
+                )? {
+                    FollowupResult::Delivered => return Ok(()),
+                    FollowupResult::RecreateSession { error } => {
+                        debug_log(&format!(
+                            "Process follow-up failed, recreating session: {}",
+                            error
+                        ));
+                        // Kill existing process and clean up handle
+                        if let Some(handle) = PROCESS_HANDLES.lock().unwrap().remove(session_name) {
+                            if let crate::services::session_backend::SessionHandle::Process {
+                                child,
+                                ..
+                            } = handle
+                            {
+                                let mut child_guard = child.lock().unwrap();
+                                if let Some(ref mut c) = *child_guard {
+                                    let _ = c.kill();
+                                    let _ = c.wait();
+                                }
+                            }
+                        }
+                        // Fall through to new session creation below
+                    }
+                }
             }
         }
     }
@@ -2395,8 +2418,9 @@ fn send_followup_to_process(
     session_name: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
-) -> Result<(), String> {
+) -> Result<FollowupResult, String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend};
+    use crate::services::tmux_diagnostics::should_recreate_session_after_stdin_error;
 
     debug_log(&format!(
         "=== send_followup_to_process: {} ===",
@@ -2417,7 +2441,17 @@ fn send_followup_to_process(
     let handles = PROCESS_HANDLES.lock().unwrap();
     if let Some(handle) = handles.get(session_name) {
         let backend = ProcessBackend::new();
-        backend.send_input(handle, &msg.to_string())?;
+        if let Err(e) = backend.send_input(handle, &msg.to_string()) {
+            drop(handles);
+            if should_recreate_session_after_stdin_error(&e) {
+                debug_log(&format!(
+                    "stdin pipe error triggers session recreation: {}",
+                    e
+                ));
+                return Ok(FollowupResult::RecreateSession { error: e });
+            }
+            return Err(e);
+        }
     } else {
         return Err("No process handle found for session".to_string());
     }
@@ -2448,18 +2482,16 @@ fn send_followup_to_process(
                 session_name: session_name.to_string(),
                 last_offset: offset,
             });
+            Ok(FollowupResult::Delivered)
         }
         ReadOutputResult::SessionDied { .. } => {
-            let _ = sender.send(StreamMessage::Done {
-                result: "⚠ 세션이 종료되었습니다. 새 메시지를 보내면 새 세션이 시작됩니다."
-                    .to_string(),
-                session_id: None,
-            });
+            debug_log("process session died during follow-up — requesting recreation");
             PROCESS_HANDLES.lock().unwrap().remove(session_name);
+            Ok(FollowupResult::RecreateSession {
+                error: "process died during follow-up output reading".to_string(),
+            })
         }
     }
-
-    Ok(())
 }
 
 /// Global storage for ProcessBackend session handles.
