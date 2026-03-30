@@ -28,7 +28,13 @@ cargo run
 # Dashboard (React frontend)
 cd dashboard && npm install && npm run dev    # dev server
 cd dashboard && npm run build                 # production build → dist/
+
+# Dashboard deploy (IMPORTANT: server serves from dashboard/dist/, NOT dashboard/)
+scripts/deploy-dashboard.sh release           # build + deploy to ~/.adk/release/dashboard/dist/
+scripts/deploy-dashboard.sh dev               # build + symlink to ~/.adk/dev/dashboard/dist/
 ```
+
+**Dashboard deploy path**: The server serves static files from `$RUNTIME_ROOT/dashboard/dist/` (see `src/server/mod.rs`). Never copy build output to `dashboard/` root — always target `dashboard/dist/`.
 
 ## CLI Subcommands
 
