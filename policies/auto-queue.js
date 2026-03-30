@@ -345,6 +345,11 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
   agentdesk.log.info("[auto-queue] Dispatching group " + threadGroup + " entry for " + agentId + ": " + entry.kanban_card_id);
 
   try {
+    // #173: Use dispatch.create which defers INSERT via intent.
+    // Mark entry as dispatched ONLY after dispatch.create succeeds validation.
+    // The actual dispatch INSERT happens when intents are applied (post-hook).
+    // If intent fails, recovery path 2 (onTick1min) will detect orphan entry
+    // and reset it to pending.
     var dispatchId = agentdesk.dispatch.create(
       entry.kanban_card_id,
       agentId,
@@ -352,10 +357,13 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
       entry.title
     );
 
-    agentdesk.db.execute(
-      "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = ?, dispatched_at = datetime('now') WHERE id = ?",
-      [dispatchId, entry.id]
-    );
+    // Only update entry if dispatchId is truthy (validation passed)
+    if (dispatchId) {
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = ?, dispatched_at = datetime('now') WHERE id = ?",
+        [dispatchId, entry.id]
+      );
+    }
   } catch (e) {
     agentdesk.log.warn("[auto-queue] dispatch failed for " + entry.kanban_card_id + " (group " + threadGroup + "), will retry on next tick: " + e);
   }
