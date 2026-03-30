@@ -791,6 +791,20 @@ pub(crate) async fn send_dispatch_to_discord(
         (None, None, None)
     };
 
+    // Read dispatch context for reason/source info
+    let dispatch_context: Option<String> = db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten()
+        });
+
     let message = format_dispatch_message(
         dispatch_id,
         title,
@@ -800,6 +814,8 @@ pub(crate) async fn send_dispatch_to_discord(
         reviewed_commit.as_deref(),
         target_provider.as_deref(),
         review_branch.as_deref(),
+        dispatch_type.as_deref(),
+        dispatch_context.as_deref(),
     );
 
     // Send via Discord HTTP API using the announce bot
@@ -1832,6 +1848,8 @@ fn format_dispatch_message(
     reviewed_commit: Option<&str>,
     target_provider: Option<&str>,
     review_branch: Option<&str>,
+    dispatch_type: Option<&str>,
+    dispatch_context: Option<&str>,
 ) -> String {
     // Format issue link as markdown hyperlink with angle brackets to suppress embed
     let issue_link = match (issue_url, issue_number) {
@@ -1840,9 +1858,57 @@ fn format_dispatch_message(
         _ => String::new(),
     };
 
+    // Build dispatch type label and reason line
+    let type_label = match dispatch_type {
+        Some("implementation") => "📋 구현",
+        Some("review") => "🔍 리뷰",
+        Some("rework") => "🔧 리워크",
+        Some("review-decision") => "⚖️ 리뷰 검토",
+        Some("pm-decision") => "🎯 PM 판단",
+        Some("e2e-test") => "🧪 E2E 테스트",
+        Some(other) => other,
+        None => "dispatch",
+    };
+
+    // Extract reason from context JSON
+    let reason = dispatch_context
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+        .and_then(|v| {
+            // Try common reason fields
+            v.get("resumed_from")
+                .and_then(|r| r.as_str())
+                .map(|s| format!("resume from {s}"))
+                .or_else(|| {
+                    if v.get("retry").and_then(|r| r.as_bool()).unwrap_or(false) {
+                        Some("retry".to_string())
+                    } else if v.get("redispatch")
+                        .and_then(|r| r.as_bool())
+                        .unwrap_or(false)
+                    {
+                        Some("redispatch".to_string())
+                    } else if v.get("auto_queue")
+                        .and_then(|r| r.as_bool())
+                        .unwrap_or(false)
+                    {
+                        Some("auto-queue".to_string())
+                    } else if v.get("auto_accept")
+                        .and_then(|r| r.as_bool())
+                        .unwrap_or(false)
+                    {
+                        Some("auto-accept rework".to_string())
+                    } else {
+                        None
+                    }
+                })
+        });
+
+    let reason_suffix = reason
+        .map(|r| format!(" ({r})"))
+        .unwrap_or_default();
+
     if use_alt {
         let mut message = format!(
-            "DISPATCH:{dispatch_id} - {title}\n\
+            "DISPATCH:{dispatch_id} [{type_label}] - {title}\n\
              ⚠️ 검토 전용 — 작업 착수 금지\n\
              코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
         );
@@ -1877,9 +1943,9 @@ fn format_dispatch_message(
         ));
         message
     } else if !issue_link.is_empty() {
-        format!("DISPATCH:{dispatch_id} - {title}\n{issue_link}")
+        format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")
     } else {
-        format!("DISPATCH:{dispatch_id} - {title}")
+        format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}")
     }
 }
 
@@ -2187,9 +2253,11 @@ mod tests {
             Some("abc123"),
             Some("codex"),
             None,
+            Some("review"),
+            None,
         );
 
-        assert!(message.starts_with("DISPATCH:dispatch-1 - [Review R1] card-1"));
+        assert!(message.starts_with("DISPATCH:dispatch-1 [🔍 리뷰] - [Review R1] card-1"));
         assert!(message.contains("⚠️ 검토 전용"));
         assert!(message.contains("코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."));
         assert!(message.contains(
@@ -2215,6 +2283,8 @@ mod tests {
             Some("abc12345deadbeef"),
             Some("codex"),
             Some("wt/feature-branch"),
+            Some("review"),
+            None,
         );
 
         assert!(message.contains("리뷰 대상 브랜치: `wt/feature-branch`"));
@@ -2232,6 +2302,8 @@ mod tests {
             true,
             None,
             None,
+            None,
+            Some("review"),
             None,
         );
 
@@ -2252,8 +2324,11 @@ mod tests {
             None,
             None,
             None,
+            Some("implementation"),
+            None,
         );
 
+        assert!(message.contains("[📋 구현]"));
         assert!(message.contains(
             "[Implement feature #24](<https://github.com/itismyfield/AgentDesk/issues/24>)"
         ));
