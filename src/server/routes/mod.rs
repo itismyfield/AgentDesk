@@ -21,6 +21,7 @@ pub mod onboarding;
 pub mod pipeline;
 mod queue_api;
 pub mod receipt;
+pub mod resume;
 pub mod review_verdict;
 pub mod reviews;
 mod session_activity;
@@ -156,6 +157,7 @@ pub fn api_router(
             "/kanban-cards/{id}/redispatch",
             post(kanban::redispatch_card),
         )
+        .route("/kanban-cards/{id}/resume", post(resume::resume_card))
         .route("/kanban-cards/{id}/defer-dod", patch(kanban::defer_dod))
         .route("/kanban-cards/{id}/reviews", get(kanban::list_card_reviews))
         .route(
