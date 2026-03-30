@@ -924,7 +924,9 @@ pub(crate) async fn send_dispatch_to_discord(
                     if group_count > 1 {
                         // Parallel: nested format — remove from group sub-map
                         let group_key = thread_group.to_string();
-                        if let Some(group_map) = map.get_mut(&group_key).and_then(|v| v.as_object_mut()) {
+                        if let Some(group_map) =
+                            map.get_mut(&group_key).and_then(|v| v.as_object_mut())
+                        {
                             group_map.remove(&ch_key);
                         }
                     } else {
