@@ -1036,17 +1036,36 @@ var timeouts = {
     for (var n = 0; n < orphanReviews.length; n++) {
       var oc = orphanReviews[n];
       agentdesk.log.warn("[timeout] Orphan review detected: card " + oc.id +
-        " (#" + (oc.github_issue_number || "?") + ") in review with no active dispatch — re-entering review");
-      // Bounce: review → in_progress → review to trigger dispatch creation
-      agentdesk.kanban.setStatus(oc.id, nInProgress);
-      agentdesk.kanban.setStatus(oc.id, nReview);
+        " (#" + (oc.github_issue_number || "?") + ") in review with no active dispatch — creating review dispatch directly");
+
+      // Direct dispatch creation (bounce via setStatus doesn't work inside tick hooks
+      // because __pendingTransitions are drained after hook returns, not inline)
+      if (!oc.assigned_agent_id) {
+        agentdesk.log.warn("[timeout] Orphan review card " + oc.id + " has no assigned_agent_id — skipping");
+        continue;
+      }
+      var currentRound = agentdesk.db.query(
+        "SELECT review_round FROM kanban_cards WHERE id = ?", [oc.id]
+      );
+      var round = (currentRound.length > 0 && currentRound[0].review_round) ? currentRound[0].review_round : 1;
+      try {
+        var dispatchId = agentdesk.dispatch.create(
+          oc.id,
+          oc.assigned_agent_id,
+          "review",
+          "[Review R" + round + "] " + oc.id
+        );
+        agentdesk.log.info("[timeout] Orphan review recovery: dispatched " + dispatchId + " for card " + oc.id);
+      } catch (e) {
+        agentdesk.log.warn("[timeout] Orphan review dispatch failed for " + oc.id + ": " + e);
+      }
 
       var kmChannel = getPMDChannel();
       if (kmChannel) {
         agentdesk.message.queue(
           kmChannel,
           "🔄 [orphan-review] #" + (oc.github_issue_number || "?") + " " +
-          (oc.title || oc.id) + "\nreview 상태인데 dispatch 없음 → 자동 재진입",
+          (oc.title || oc.id) + "\nreview 상태인데 dispatch 없음 → review dispatch 직접 생성",
           "notify",
           "system"
         );

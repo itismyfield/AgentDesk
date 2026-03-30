@@ -188,16 +188,18 @@ impl PolicyEngine {
         // Must drop inner (engine lock) BEFORE draining intents — intent
         // execution needs a fresh lock acquisition via drain_pending_intents.
         drop(inner);
-        // Deferred hooks (e.g. OnReviewEnter that was deferred due to lock
-        // contention) may have pushed intents to __pendingIntents. Drain them
-        // now so they don't get lost — callers of try_fire_hook don't always
-        // call drain_pending_intents themselves.
-        if had_deferred {
+        // #202: Always drain pending intents after hook execution.
+        // Hooks (including tick hooks like onTick1min) may push intents via
+        // dispatch.create() which uses deferred INSERT. Previously this was
+        // gated on had_deferred, causing tick-created dispatch intents to
+        // never be drained — resulting in phantom auto-queue entries.
+        {
             let result = self.drain_pending_intents();
             if !result.created_dispatches.is_empty() || result.errors > 0 {
                 let ts = chrono::Local::now().format("%H:%M:%S");
+                let source = if had_deferred { "deferred+direct" } else { "direct" };
                 eprintln!(
-                    "  [{ts}] 🔄 deferred hook drain: {} dispatches created, {} errors",
+                    "  [{ts}] 🔄 intent drain ({source}): {} dispatches created, {} errors",
                     result.created_dispatches.len(),
                     result.errors
                 );
