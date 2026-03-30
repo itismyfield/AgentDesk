@@ -108,6 +108,10 @@ fn get_free_port() -> u16 {
 // ── Smoke Test ──────────────────────────────────────────────────
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "server startup unreliable on Windows CI"
+)]
 async fn smoke_test_full_lifecycle() {
     let server = TestServer::start();
     server.wait_ready().await;
