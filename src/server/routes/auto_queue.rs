@@ -1217,7 +1217,9 @@ pub async fn activate(
             if let Some(path) = effective.free_path_to_dispatchable(&card_status) {
                 tracing::info!(
                     "[auto-queue] Silent walk: card {} from '{}' through {:?} (canonical reducer, no hooks)",
-                    card_id, card_status, path
+                    card_id,
+                    card_status,
+                    path
                 );
                 let mut walk_failed = false;
                 for step in &path {
@@ -1229,7 +1231,8 @@ pub async fn activate(
                     ) {
                         tracing::warn!(
                             "[auto-queue] Silent walk failed for card {} at step '{}': {e}",
-                            card_id, step
+                            card_id,
+                            step
                         );
                         walk_failed = true;
                         break;

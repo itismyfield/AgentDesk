@@ -31,8 +31,7 @@ fn tmux_session_alive_with_retry(name: &str) -> bool {
     false
 }
 
-pub(super) const RESTART_SESSION_DIED_HANDOFF_SENTINEL: &str =
-    "__restart_session_died_handoff__";
+pub(super) const RESTART_SESSION_DIED_HANDOFF_SENTINEL: &str = "__restart_session_died_handoff__";
 
 /// Retry-aware tmux has_session check.
 fn tmux_has_session_with_retry(name: &str) -> bool {
@@ -698,9 +697,9 @@ pub(super) async fn restore_inflight_turns(
             continue;
         }
 
-        let can_recover = tmux_session_name.as_deref().map_or(false, |name| {
-            tmux_has_session_with_retry(name)
-        });
+        let can_recover = tmux_session_name
+            .as_deref()
+            .map_or(false, |name| tmux_has_session_with_retry(name));
 
         if !can_recover {
             let ts = chrono::Local::now().format("%H:%M:%S");

@@ -161,11 +161,19 @@ fn ensure_global_agentdesk_cli(home: &Path) -> Result<PathBuf, String> {
     use std::os::unix::fs::PermissionsExt;
 
     let wrapper_dir = preferred_agentdesk_cli_dir(home);
-    fs::create_dir_all(&wrapper_dir)
-        .map_err(|e| format!("Failed to create CLI directory {}: {e}", wrapper_dir.display()))?;
+    fs::create_dir_all(&wrapper_dir).map_err(|e| {
+        format!(
+            "Failed to create CLI directory {}: {e}",
+            wrapper_dir.display()
+        )
+    })?;
     let wrapper_path = wrapper_dir.join("agentdesk");
-    fs::write(&wrapper_path, agentdesk_cli_wrapper_script(home))
-        .map_err(|e| format!("Failed to write CLI wrapper {}: {e}", wrapper_path.display()))?;
+    fs::write(&wrapper_path, agentdesk_cli_wrapper_script(home)).map_err(|e| {
+        format!(
+            "Failed to write CLI wrapper {}: {e}",
+            wrapper_path.display()
+        )
+    })?;
     let mut permissions = fs::metadata(&wrapper_path)
         .map_err(|e| format!("Failed to stat CLI wrapper {}: {e}", wrapper_path.display()))?
         .permissions();

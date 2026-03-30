@@ -1672,21 +1672,22 @@ mod tests {
         };
 
         // Call the review-decision handler with accept
-        let (status, json) =
-            crate::server::routes::review_verdict::submit_review_decision(
-                axum::extract::State(state),
-                axum::Json(
-                    crate::server::routes::review_verdict::ReviewDecisionBody {
-                        card_id: "card-195".to_string(),
-                        decision: "accept".to_string(),
-                        comment: None,
-                        dispatch_id: Some("rd-195".to_string()),
-                    },
-                ),
-            )
-            .await;
+        let (status, json) = crate::server::routes::review_verdict::submit_review_decision(
+            axum::extract::State(state),
+            axum::Json(crate::server::routes::review_verdict::ReviewDecisionBody {
+                card_id: "card-195".to_string(),
+                decision: "accept".to_string(),
+                comment: None,
+                dispatch_id: Some("rd-195".to_string()),
+            }),
+        )
+        .await;
 
-        assert_eq!(status, axum::http::StatusCode::OK, "accept should succeed: {json:?}");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "accept should succeed: {json:?}"
+        );
         assert_eq!(
             json.0["rework_dispatch_created"], true,
             "rework_dispatch_created must be true in response"

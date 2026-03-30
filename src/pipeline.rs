@@ -398,7 +398,8 @@ impl PipelineConfig {
         }
         // BFS over free transitions, tracking parent for path reconstruction
         let mut visited = std::collections::HashSet::new();
-        let mut parent: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut parent: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(from.to_string());
         visited.insert(from.to_string());

@@ -1691,7 +1691,10 @@ pub(super) async fn handle_text_message(
         } else if let Some(override_ch) = shared.dispatch_role_overrides.get(&channel_id) {
             let alt_ch = *override_ch;
             let rb = resolve_role_binding(alt_ch, None);
-            (rb.as_ref().and_then(|r| r.model.clone()), rb.as_ref().and_then(|r| r.reasoning_effort.clone()))
+            (
+                rb.as_ref().and_then(|r| r.model.clone()),
+                rb.as_ref().and_then(|r| r.reasoning_effort.clone()),
+            )
         } else {
             let ch_name = {
                 let data = shared.core.lock().await;
@@ -1700,7 +1703,10 @@ pub(super) async fn handle_text_message(
                     .and_then(|s| s.channel_name.clone())
             };
             let rb = resolve_role_binding(channel_id, ch_name.as_deref());
-            (rb.as_ref().and_then(|r| r.model.clone()), rb.as_ref().and_then(|r| r.reasoning_effort.clone()))
+            (
+                rb.as_ref().and_then(|r| r.model.clone()),
+                rb.as_ref().and_then(|r| r.reasoning_effort.clone()),
+            )
         }
     };
 
@@ -1708,7 +1714,9 @@ pub(super) async fn handle_text_message(
     if let Some(ref effort) = reasoning_effort_for_turn {
         // SAFETY: This runs on the tokio blocking thread pool before spawning the provider.
         // No concurrent reads of this env var occur at this point.
-        unsafe { std::env::set_var("AGENTDESK_CODEX_REASONING_EFFORT", effort); }
+        unsafe {
+            std::env::set_var("AGENTDESK_CODEX_REASONING_EFFORT", effort);
+        }
     }
 
     // Run the provider in a blocking thread

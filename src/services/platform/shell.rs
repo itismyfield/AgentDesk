@@ -401,7 +401,13 @@ mod tests {
         // Create a worktree branch with a commit referencing #42
         let wt_dir = repo.path().join("wt-42");
         Command::new("git")
-            .args(["worktree", "add", "-b", "wt/fix-42", wt_dir.to_str().unwrap()])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "wt/fix-42",
+                wt_dir.to_str().unwrap(),
+            ])
             .current_dir(repo_dir)
             .output()
             .unwrap();
@@ -447,7 +453,13 @@ mod tests {
         // Create two worktrees, both with commits mentioning #99
         let wt1_dir = repo.path().join("wt-generic");
         Command::new("git")
-            .args(["worktree", "add", "-b", "wt/generic-branch", wt1_dir.to_str().unwrap()])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "wt/generic-branch",
+                wt1_dir.to_str().unwrap(),
+            ])
             .current_dir(repo_dir)
             .output()
             .unwrap();
@@ -459,7 +471,13 @@ mod tests {
 
         let wt2_dir = repo.path().join("wt-99");
         Command::new("git")
-            .args(["worktree", "add", "-b", "wt/fix-99", wt2_dir.to_str().unwrap()])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "wt/fix-99",
+                wt2_dir.to_str().unwrap(),
+            ])
             .current_dir(repo_dir)
             .output()
             .unwrap();
@@ -495,15 +513,25 @@ mod tests {
 
         let wt1_dir = repo.path().join("wt-old");
         Command::new("git")
-            .args(["worktree", "add", "-b", "wt/old-branch", wt1_dir.to_str().unwrap()])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "wt/old-branch",
+                wt1_dir.to_str().unwrap(),
+            ])
             .current_dir(repo_dir)
             .output()
             .unwrap();
         // Older commit with backdated author date
         Command::new("git")
             .args([
-                "commit", "--allow-empty", "-m", "old work on #77",
-                "--date", "2020-01-01T00:00:00",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "old work on #77",
+                "--date",
+                "2020-01-01T00:00:00",
             ])
             .current_dir(wt1_dir.to_str().unwrap())
             .output()
@@ -511,7 +539,13 @@ mod tests {
 
         let wt2_dir = repo.path().join("wt-new");
         Command::new("git")
-            .args(["worktree", "add", "-b", "wt/new-branch", wt2_dir.to_str().unwrap()])
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "wt/new-branch",
+                wt2_dir.to_str().unwrap(),
+            ])
             .current_dir(repo_dir)
             .output()
             .unwrap();

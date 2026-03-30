@@ -197,7 +197,11 @@ impl PolicyEngine {
             let result = self.drain_pending_intents();
             if !result.created_dispatches.is_empty() || result.errors > 0 {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                let source = if had_deferred { "deferred+direct" } else { "direct" };
+                let source = if had_deferred {
+                    "deferred+direct"
+                } else {
+                    "direct"
+                };
                 eprintln!(
                     "  [{ts}] 🔄 intent drain ({source}): {} dispatches created, {} errors",
                     result.created_dispatches.len(),

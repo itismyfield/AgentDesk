@@ -1370,12 +1370,12 @@ pub(super) fn spawn_turn_bridge(
         }
 
         if restart_recovery_handoff {
-            let best_response = if full_response == super::recovery::RESTART_SESSION_DIED_HANDOFF_SENTINEL
-            {
-                String::new()
-            } else {
-                full_response.clone()
-            };
+            let best_response =
+                if full_response == super::recovery::RESTART_SESSION_DIED_HANDOFF_SENTINEL {
+                    String::new()
+                } else {
+                    full_response.clone()
+                };
             let handed_off = super::tmux::start_restart_handoff_from_state(
                 channel_id,
                 &http,
