@@ -269,14 +269,15 @@ Each agent maps to a Discord channel where it receives and responds to tasks.
 ## CLI Reference
 
 ```
-agentdesk                          # Start HTTP server (default mode)
-agentdesk --dcserver               # Start Discord control plane
-agentdesk --init                   # Interactive setup wizard
-agentdesk --reconfigure            # Re-run setup (preserves data)
-agentdesk --restart-dcserver       # Graceful restart
-agentdesk --discord-sendfile <PATH> --channel <ID> --key <HASH>
-agentdesk --discord-sendmessage --channel <ID> --message <TEXT>
-agentdesk --discord-senddm --user <ID> --message <TEXT>
+agentdesk dcserver                              # Start Discord control plane
+agentdesk init                                  # Interactive setup wizard
+agentdesk reconfigure                           # Re-run setup (preserves data)
+agentdesk restart-dcserver                      # Graceful restart
+agentdesk discord-sendfile <PATH> --channel <ID> --key <HASH>
+agentdesk discord-sendmessage --channel <ID> --message <TEXT>
+agentdesk discord-senddm --user <ID> --message <TEXT>
+agentdesk status                                # Runtime health summary
+agentdesk api GET /api/health                   # Direct API call
 ```
 
 ## API Overview

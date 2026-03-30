@@ -201,6 +201,10 @@ echo "▸ Syncing policies..."
 mkdir -p "$DEV_POLICY_DIR"
 rsync -a --delete "$REPO/policies/" "$DEV_POLICY_DIR/"
 
+# 3.8. Ensure the user-facing CLI wrapper is reachable via PATH.
+echo "▸ Ensuring global agentdesk CLI..."
+"$SCRIPT_DIR/ensure-agentdesk-cli.sh"
+
 # 4. Start dev
 echo "▸ Starting dev..."
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST.plist"

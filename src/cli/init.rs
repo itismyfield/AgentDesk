@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
@@ -103,6 +104,79 @@ fn prompt_multi_select(msg: &str, options: &[(String, String)]) -> Vec<usize> {
         }
         println!("최소 하나 이상 선택하세요.");
     }
+}
+
+#[cfg(unix)]
+fn preferred_agentdesk_cli_dir(home: &Path) -> PathBuf {
+    preferred_agentdesk_cli_dir_with_path(home, std::env::var_os("PATH").as_deref())
+}
+
+#[cfg(unix)]
+fn preferred_agentdesk_cli_dir_with_path(home: &Path, path: Option<&OsStr>) -> PathBuf {
+    let preferred_dirs = [home.join("bin"), home.join(".local").join("bin")];
+    let Some(path) = path else {
+        return preferred_dirs[0].clone();
+    };
+    for entry in std::env::split_paths(path) {
+        if preferred_dirs.iter().any(|candidate| candidate == &entry) {
+            return entry;
+        }
+    }
+    preferred_dirs[0].clone()
+}
+
+#[cfg(unix)]
+fn agentdesk_cli_wrapper_script(home: &Path) -> String {
+    format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+home_dir="${{HOME:-{home_dir}}}"
+candidates=(
+  "$home_dir/.adk/release/bin/agentdesk"
+  "$home_dir/.adk/release/agentdesk"
+  "$home_dir/.adk/dev/bin/agentdesk"
+  "$home_dir/.adk/dev/agentdesk"
+)
+
+for candidate in "${{candidates[@]}}"; do
+  if [ -x "$candidate" ]; then
+    exec "$candidate" "$@"
+  fi
+done
+
+echo "agentdesk: no installed runtime binary found" >&2
+echo "looked for:" >&2
+for candidate in "${{candidates[@]}}"; do
+  echo "  - $candidate" >&2
+done
+exit 127
+"#,
+        home_dir = home.display()
+    )
+}
+
+#[cfg(unix)]
+fn ensure_global_agentdesk_cli(home: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let wrapper_dir = preferred_agentdesk_cli_dir(home);
+    fs::create_dir_all(&wrapper_dir)
+        .map_err(|e| format!("Failed to create CLI directory {}: {e}", wrapper_dir.display()))?;
+    let wrapper_path = wrapper_dir.join("agentdesk");
+    fs::write(&wrapper_path, agentdesk_cli_wrapper_script(home))
+        .map_err(|e| format!("Failed to write CLI wrapper {}: {e}", wrapper_path.display()))?;
+    let mut permissions = fs::metadata(&wrapper_path)
+        .map_err(|e| format!("Failed to stat CLI wrapper {}: {e}", wrapper_path.display()))?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper_path, permissions).map_err(|e| {
+        format!(
+            "Failed to make CLI wrapper executable {}: {e}",
+            wrapper_path.display()
+        )
+    })?;
+    Ok(wrapper_path)
 }
 
 // ── Template definitions ───────────────────────────────────────────
@@ -575,6 +649,17 @@ pub fn handle_init(reconfigure: bool) {
             }
         }
 
+        #[cfg(unix)]
+        {
+            match ensure_global_agentdesk_cli(&home) {
+                Ok(wrapper_path) => println!("  [OK] {}", wrapper_path.display()),
+                Err(e) => {
+                    eprintln!("Failed to install global agentdesk CLI: {e}");
+                    return;
+                }
+            }
+        }
+
         // Platform-specific service installation (auto-detected)
         if let Err(e) = install_service(&home, &agentdesk_bin, reconfigure) {
             eprintln!("서비스 등록 실패: {e}");
@@ -594,6 +679,45 @@ pub fn handle_init(reconfigure: bool) {
         println!("\n다음 단계:");
         println!("  1. 프롬프트 파일을 편집하여 에이전트 성격을 정의하세요");
         println!("  2. Discord에서 봇에게 메시지를 보내 동작을 확인하세요");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn preferred_agentdesk_cli_dir_uses_first_path_match() {
+        let home = Path::new("/tmp/agentdesk-home");
+        let path = OsStr::new(
+            "/usr/local/bin:/tmp/agentdesk-home/.local/bin:/tmp/agentdesk-home/bin:/usr/bin",
+        );
+        assert_eq!(
+            preferred_agentdesk_cli_dir_with_path(home, Some(path)),
+            PathBuf::from("/tmp/agentdesk-home/.local/bin")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preferred_agentdesk_cli_dir_defaults_to_home_bin() {
+        let home = Path::new("/tmp/agentdesk-home");
+        assert_eq!(
+            preferred_agentdesk_cli_dir_with_path(home, None),
+            PathBuf::from("/tmp/agentdesk-home/bin")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agentdesk_cli_wrapper_script_prefers_release_before_dev() {
+        let script = agentdesk_cli_wrapper_script(Path::new("/tmp/agentdesk-home"));
+        let release_idx = script.find(".adk/release/bin/agentdesk").unwrap();
+        let dev_idx = script.find(".adk/dev/bin/agentdesk").unwrap();
+        assert!(release_idx < dev_idx);
+        assert!(script.contains("exec \"$candidate\" \"$@\""));
     }
 }
 
