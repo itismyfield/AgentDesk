@@ -481,6 +481,34 @@ function processVerdict(cardId, verdict, result) {
       repeatedFindings = findingsSimilar(prevNotes, newNotes);
     }
 
+    // Guard: empty notes on non-pass verdict — similarity check is blind.
+    // If consecutive rounds have no notes, escalate — the review loop cannot
+    // self-correct without feedback data.
+    // #118: Check actual prior-round notes from review_tuning_outcomes to detect
+    // truly consecutive empty notes (review_notes field persists old values).
+    if (!newNotes && currentRound >= 2 && (verdict === "improve" || verdict === "reject")) {
+      var priorRoundNotes = agentdesk.db.query(
+        "SELECT notes FROM kanban_reviews WHERE card_id = ? AND round = ? ORDER BY created_at DESC LIMIT 1",
+        [cardId, currentRound - 1]
+      );
+      var priorEmpty = priorRoundNotes.length === 0 || !priorRoundNotes[0].notes;
+      if (priorEmpty) {
+        agentdesk.log.warn("[review] #118 Empty notes for 2+ consecutive improve/reject rounds on " + cardId + " — escalating to PM");
+        agentdesk.kanban.setStatus(cardId, pendingState);
+        agentdesk.kanban.setReviewStatus(cardId, "dilemma_pending", {
+          blocked_reason: "리뷰 피드백 없이 2회 이상 연속 " + verdict + " — 유사성 검사 불가, PM 판단 필요"
+        });
+        agentdesk.reviewState.sync(cardId, "dilemma_pending", { last_verdict: verdict });
+        notifyPmdPendingDecision(cardId,
+          "리뷰 피드백(notes) 없이 2회 이상 연속 " + verdict + " — " +
+          "카운터모델이 notes 없이 verdict를 제출하여 반복 finding 검출 불가");
+        return;
+      }
+      agentdesk.log.warn("[review] #118 Empty notes on " + verdict +
+        " verdict at R" + currentRound + " for " + cardId +
+        " — similarity check skipped (no new findings to compare)");
+    }
+
     // Store review notes (overwrite previous)
     if (newNotes) {
       agentdesk.db.execute(
