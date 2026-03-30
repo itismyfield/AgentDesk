@@ -21,10 +21,9 @@ fn build_review_context(
     };
     if let Some(obj) = ctx_val.as_object_mut() {
         if !obj.contains_key("reviewed_commit") {
-            let repo_dir =
-                crate::services::platform::resolve_repo_dir().ok_or_else(|| {
-                    anyhow::anyhow!("Cannot resolve repo dir; set AGENTDESK_REPO_DIR")
-                })?;
+            let repo_dir = crate::services::platform::resolve_repo_dir().ok_or_else(|| {
+                anyhow::anyhow!("Cannot resolve repo dir; set AGENTDESK_REPO_DIR")
+            })?;
 
             // #193: Try to find a worktree branch for this card's issue.
             // Without this, reviews always inspect main HEAD and miss
@@ -121,6 +120,55 @@ fn build_review_context(
     Ok(serde_json::to_string(&ctx_val)?)
 }
 
+/// Cancel a live dispatch and reset any linked auto-queue entry back to pending.
+///
+/// The dispatch row remains the canonical source of truth. `auto_queue_entries`
+/// is a derived projection that must be cleared whenever the linked dispatch is
+/// cancelled so a stale `dispatched` entry cannot block or duplicate work.
+pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+    reason: Option<&str>,
+) -> rusqlite::Result<usize> {
+    let cancelled = if let Some(reason) = reason {
+        conn.execute(
+            "UPDATE task_dispatches \
+             SET status = 'cancelled', result = ?2, updated_at = datetime('now') \
+             WHERE id = ?1 AND status IN ('pending', 'dispatched')",
+            rusqlite::params![dispatch_id, json!({ "reason": reason }).to_string()],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE task_dispatches \
+             SET status = 'cancelled', updated_at = datetime('now') \
+             WHERE id = ?1 AND status IN ('pending', 'dispatched')",
+            [dispatch_id],
+        )?
+    };
+
+    let dispatch_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .ok();
+    if matches!(
+        dispatch_status.as_deref(),
+        Some("cancelled") | Some("failed")
+    ) {
+        conn.execute(
+            "UPDATE auto_queue_entries \
+             SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL, completed_at = NULL \
+             WHERE dispatch_id = ?1 AND status IN ('pending', 'dispatched')",
+            [dispatch_id],
+        )
+        .ok();
+    }
+
+    Ok(cancelled)
+}
+
 /// Core dispatch creation: DB operations only, no hooks fired.
 ///
 /// - Inserts a record into `task_dispatches`
@@ -208,11 +256,24 @@ pub fn create_dispatch_core(
     // #116: Cancel any existing pending review-decision for this card before creating a new one.
     // Enforces the invariant: at most 1 pending/dispatched review-decision per card.
     if dispatch_type == "review-decision" {
-        let cancelled = conn.execute(
-            "UPDATE task_dispatches SET status = 'cancelled', result = '{\"reason\":\"superseded_by_new_review_decision\"}', updated_at = datetime('now') \
-             WHERE kanban_card_id = ?1 AND dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched')",
-            [kanban_card_id],
-        ).unwrap_or(0);
+        let mut stmt = conn.prepare(
+            "SELECT id FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type = 'review-decision' \
+             AND status IN ('pending', 'dispatched')",
+        )?;
+        let stale_ids: Vec<String> = stmt
+            .query_map([kanban_card_id], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        let mut cancelled = 0;
+        for stale_id in &stale_ids {
+            cancelled += cancel_dispatch_and_reset_auto_queue_on_conn(
+                &conn,
+                stale_id,
+                Some("superseded_by_new_review_decision"),
+            )?;
+        }
         if cancelled > 0 {
             tracing::info!(
                 "[dispatch] Cancelled {} stale review-decision(s) for card {} before creating new one",
@@ -312,11 +373,24 @@ pub fn create_dispatch_core_with_id(
         || dispatch_type == "rework";
 
     if dispatch_type == "review-decision" {
-        let cancelled = conn.execute(
-            "UPDATE task_dispatches SET status = 'cancelled', result = '{\"reason\":\"superseded_by_new_review_decision\"}', updated_at = datetime('now') \
-             WHERE kanban_card_id = ?1 AND dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched')",
-            [kanban_card_id],
-        ).unwrap_or(0);
+        let mut stmt = conn.prepare(
+            "SELECT id FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type = 'review-decision' \
+             AND status IN ('pending', 'dispatched')",
+        )?;
+        let stale_ids: Vec<String> = stmt
+            .query_map([kanban_card_id], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        let mut cancelled = 0;
+        for stale_id in &stale_ids {
+            cancelled += cancel_dispatch_and_reset_auto_queue_on_conn(
+                &conn,
+                stale_id,
+                Some("superseded_by_new_review_decision"),
+            )?;
+        }
         if cancelled > 0 {
             tracing::info!(
                 "[dispatch] Cancelled {} stale review-decision(s) for card {} before creating new one",
@@ -1071,6 +1145,84 @@ mod tests {
             returned["status"], "cancelled",
             "cancelled dispatch must not be re-completed"
         );
+    }
+
+    #[test]
+    fn cancel_dispatch_resets_linked_auto_queue_entry() {
+        let db = test_db();
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+                id TEXT PRIMARY KEY,
+                repo TEXT,
+                agent_id TEXT,
+                status TEXT DEFAULT 'active'
+            );
+            CREATE TABLE IF NOT EXISTS auto_queue_entries (
+                id TEXT PRIMARY KEY,
+                run_id TEXT REFERENCES auto_queue_runs(id),
+                kanban_card_id TEXT REFERENCES kanban_cards(id),
+                agent_id TEXT,
+                status TEXT DEFAULT 'pending',
+                dispatch_id TEXT,
+                dispatched_at DATETIME,
+                completed_at DATETIME
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+             VALUES ('card-aq', 'AQ Card', 'requested', 'agent-1', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-aq', 'card-aq', 'agent-1', 'implementation', 'dispatched', 'AQ', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('run-aq', 'repo', 'agent-1', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
+             VALUES ('entry-aq', 'run-aq', 'card-aq', 'agent-1', 'dispatched', 'dispatch-aq', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let cancelled =
+            cancel_dispatch_and_reset_auto_queue_on_conn(&conn, "dispatch-aq", Some("test"))
+                .unwrap();
+        assert_eq!(cancelled, 1);
+
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-aq'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_status, "cancelled");
+
+        let (entry_status, entry_dispatch_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-aq'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(entry_status, "pending");
+        assert!(entry_dispatch_id.is_none());
     }
 
     #[test]

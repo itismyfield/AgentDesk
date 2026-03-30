@@ -227,34 +227,58 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         tracing::info!("Cleaned {cleaned} done cards with stale review_status (fix #80)");
     }
     // Cancel stale pending review/review-decision dispatches for done cards
-    let cancelled = conn
-        .execute(
-            "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') \
+    let cancelled_ids: Vec<String> = conn
+        .prepare(
+            "SELECT id FROM task_dispatches \
              WHERE status IN ('pending', 'dispatched') \
              AND dispatch_type IN ('review', 'review-decision') \
              AND kanban_card_id IN (SELECT id FROM kanban_cards WHERE status = 'done')",
-            [],
         )
-        .unwrap_or(0);
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    let mut cancelled = 0;
+    for dispatch_id in &cancelled_ids {
+        cancelled +=
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(conn, dispatch_id, None)
+                .unwrap_or(0);
+    }
     if cancelled > 0 {
         tracing::info!("Cancelled {cancelled} stale review dispatches for done cards (fix #80)");
     }
 
     // #116: Cancel duplicate pending review-decisions on non-done cards.
     // Keeps only the most recent (highest rowid) pending review-decision per card.
-    let dup_cancelled: usize = conn
-        .execute(
-            "UPDATE task_dispatches SET status = 'cancelled', \
-             result = '{\"reason\":\"startup_reconcile_duplicate\"}', updated_at = datetime('now') \
+    let duplicate_ids: Vec<String> = conn
+        .prepare(
+            "SELECT id FROM task_dispatches \
              WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched') \
              AND rowid NOT IN ( \
                  SELECT MAX(rowid) FROM task_dispatches \
                  WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched') \
                  GROUP BY kanban_card_id \
              )",
-            [],
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    let mut dup_cancelled: usize = 0;
+    for dispatch_id in &duplicate_ids {
+        dup_cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+            conn,
+            dispatch_id,
+            Some("startup_reconcile_duplicate"),
         )
         .unwrap_or(0);
+    }
     if dup_cancelled > 0 {
         tracing::info!(
             "Cancelled {dup_cancelled} duplicate pending review-decisions at startup (#116)"

@@ -716,10 +716,8 @@ fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> any
             execute_audit_log(conn, card_id, from, to, source, message);
         }
         TransitionIntent::CancelDispatch { dispatch_id } => {
-            conn.execute(
-                "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?1",
-                [dispatch_id],
-            ).ok();
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(conn, dispatch_id, None)
+                .ok();
         }
     }
     Ok(())

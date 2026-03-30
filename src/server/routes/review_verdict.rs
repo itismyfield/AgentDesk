@@ -146,9 +146,8 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), Strin
     let commit = if let Some(c) = reviewed_commit {
         c.to_string()
     } else {
-        let repo_dir = crate::services::platform::resolve_repo_dir().ok_or_else(|| {
-            "Cannot resolve repo dir; set AGENTDESK_REPO_DIR".to_string()
-        })?;
+        let repo_dir = crate::services::platform::resolve_repo_dir()
+            .ok_or_else(|| "Cannot resolve repo dir; set AGENTDESK_REPO_DIR".to_string())?;
         match crate::services::platform::git_head_commit(&repo_dir) {
             Some(c) => c,
             None => {
@@ -945,25 +944,57 @@ pub async fn submit_review_decision(
             // Post-transition cleanup: cancel remaining pending review dispatches to prevent
             // stale dispatches from re-triggering review loops after dismiss.
             if let Ok(conn) = state.db.lock() {
-                conn.execute(
-                    "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') \
-                     WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
-                     AND dispatch_type IN ('review', 'review-decision')",
-                    [&body.card_id],
-                )
-                .ok();
+                let dispatch_ids: Vec<String> = conn
+                    .prepare(
+                        "SELECT id FROM task_dispatches \
+                         WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
+                         AND dispatch_type IN ('review', 'review-decision')",
+                    )
+                    .ok()
+                    .and_then(|mut stmt| {
+                        stmt.query_map([&body.card_id], |row| row.get::<_, String>(0))
+                            .ok()
+                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    })
+                    .unwrap_or_default();
+                conn.execute_batch("BEGIN").ok();
+                for dispatch_id in &dispatch_ids {
+                    if let Err(e) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                        &conn,
+                        dispatch_id,
+                        None,
+                    ) {
+                        conn.execute_batch("ROLLBACK").ok();
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("{e}")})),
+                        );
+                    }
+                }
                 // #155: Belt-and-suspenders via intent (executor boundary)
                 use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-                execute_intent_on_conn(
+                if let Err(e) = execute_intent_on_conn(
                     &conn,
                     &TransitionIntent::SetReviewStatus {
                         card_id: body.card_id.clone(),
                         review_status: None,
                     },
-                )
-                .ok();
+                ) {
+                    conn.execute_batch("ROLLBACK").ok();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{e}")})),
+                    );
+                }
                 // Clear thread mappings so dismissed review threads are not reused.
                 super::dispatches::clear_all_threads(&conn, &body.card_id);
+                if let Err(e) = conn.execute_batch("COMMIT") {
+                    conn.execute_batch("ROLLBACK").ok();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{e}")})),
+                    );
+                }
             }
         }
         _ => {}

@@ -147,9 +147,10 @@ pub async fn cancel_dispatch(
             ),
         ),
         Some(_) => {
-            conn.execute(
-                "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?1",
-                [&dispatch_id],
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                &conn,
+                &dispatch_id,
+                None,
             )
             .ok();
             // Also clean up notification marker
@@ -204,11 +205,25 @@ pub async fn cancel_all_dispatches(
     }
 
     let sql = format!(
-        "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') WHERE {}",
+        "SELECT id FROM task_dispatches WHERE {}",
         conditions.join(" AND ")
     );
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let count = conn.execute(&sql, param_refs.as_slice()).unwrap_or(0);
+    let dispatch_ids: Vec<String> = conn
+        .prepare(&sql)
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    let mut count = 0;
+    for dispatch_id in &dispatch_ids {
+        count +=
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, dispatch_id, None)
+                .unwrap_or(0);
+    }
 
     tracing::info!(
         "[queue-api] Cancelled {count} dispatches (card={:?}, agent={:?})",
@@ -264,12 +279,7 @@ pub async fn cancel_turn(
     // Cancel the associated dispatch if any
     if let Some(ref did) = dispatch_id {
         if let Ok(conn) = state.db.lock() {
-            conn.execute(
-                "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') \
-                 WHERE id = ?1 AND status IN ('pending', 'dispatched')",
-                [did],
-            )
-            .ok();
+            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, did, None).ok();
         }
     }
 

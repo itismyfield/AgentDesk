@@ -637,7 +637,9 @@ pub async fn retry_card(
             );
         }
 
-        // Cancel existing pending dispatch
+        conn.execute_batch("BEGIN").ok();
+
+        // Cancel existing pending/dispatched dispatch
         let existing_dispatch_id: Option<String> = conn
             .query_row(
                 "SELECT latest_dispatch_id FROM kanban_cards WHERE id = ?1",
@@ -647,27 +649,43 @@ pub async fn retry_card(
             .ok()
             .flatten();
         if let Some(ref did) = existing_dispatch_id {
-            conn.execute(
-                "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?1 AND status = 'pending'",
-                [did],
-            ).ok();
+            if let Err(e) =
+                crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, did, None)
+            {
+                conn.execute_batch("ROLLBACK").ok();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
         }
 
         // #155: Clear latest_dispatch_id via intent, assignee via direct (not CardState)
         use crate::engine::transition::{TransitionIntent as TI2, execute_intent_on_conn as exec2};
         let agent_id_for_dispatch: String = if let Some(ref agent_id) = body.assignee_agent_id {
-            conn.execute(
+            if let Err(e) = conn.execute(
                 "UPDATE kanban_cards SET assigned_agent_id = ?1, updated_at = datetime('now') WHERE id = ?2",
                 rusqlite::params![agent_id, id],
-            ).ok();
-            exec2(
+            ) {
+                conn.execute_batch("ROLLBACK").ok();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+            if let Err(e) = exec2(
                 &conn,
                 &TI2::SetLatestDispatchId {
                     card_id: id.clone(),
                     dispatch_id: None,
                 },
-            )
-            .ok();
+            ) {
+                conn.execute_batch("ROLLBACK").ok();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
             agent_id.clone()
         } else {
             let current: String = conn
@@ -677,16 +695,28 @@ pub async fn retry_card(
                     |row| row.get(0),
                 )
                 .unwrap_or_default();
-            exec2(
+            if let Err(e) = exec2(
                 &conn,
                 &TI2::SetLatestDispatchId {
                     card_id: id.clone(),
                     dispatch_id: None,
                 },
-            )
-            .ok();
+            ) {
+                conn.execute_batch("ROLLBACK").ok();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
             current
         };
+        if let Err(e) = conn.execute_batch("COMMIT") {
+            conn.execute_batch("ROLLBACK").ok();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
         // Note: status → 'requested' is handled by create_dispatch() below
 
         // Get card info for dispatch creation
@@ -762,13 +792,7 @@ pub async fn redispatch_card(
             }
         };
 
-        let old_status: String = conn
-            .query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
-                [&id],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "unknown".to_string());
+        conn.execute_batch("BEGIN").ok();
 
         // Cancel existing dispatch
         let dispatch_id: Option<String> = conn
@@ -780,10 +804,15 @@ pub async fn redispatch_card(
             .ok()
             .flatten();
         if let Some(ref did) = dispatch_id {
-            conn.execute(
-                "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?1",
-                [did],
-            ).ok();
+            if let Err(e) =
+                crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, did, None)
+            {
+                conn.execute_batch("ROLLBACK").ok();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
         }
 
         // #155: Clear review_status and latest_dispatch_id via intents (executor boundary)
@@ -802,20 +831,21 @@ pub async fn redispatch_card(
                 state: "idle".to_string(),
             },
         ];
-        conn.execute_batch("BEGIN").ok();
-        let mut exec_ok = true;
         for intent in &clear_intents {
             if let Err(e) = execute_intent_on_conn(&conn, intent) {
                 conn.execute_batch("ROLLBACK").ok();
-                exec_ok = false;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("{e}")})),
                 );
             }
         }
-        if exec_ok {
-            conn.execute_batch("COMMIT").ok();
+        if let Err(e) = conn.execute_batch("COMMIT") {
+            conn.execute_batch("ROLLBACK").ok();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
         }
 
         // Get agent + title for direct dispatch creation
