@@ -2629,3 +2629,150 @@ async fn parallel_false_keeps_single_group_sequential() {
     assert_eq!(run["thread_group_count"], 1);
     assert_eq!(run["max_concurrent_threads"], 1);
 }
+
+/// Regression test for #191: onTick1min recovery must reset stuck auto-queue
+/// entries that are 'dispatched' but have orphan (NULL), phantom (missing row),
+/// or cancelled/failed dispatch_ids — while leaving valid dispatches untouched.
+#[test]
+fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+
+    seed_agent(&db, "agent-recovery");
+    seed_auto_queue_card(&db, "card-orphan", 9001, "in_progress", "agent-recovery");
+    seed_auto_queue_card(&db, "card-phantom", 9002, "in_progress", "agent-recovery");
+    seed_auto_queue_card(&db, "card-cancelled", 9003, "in_progress", "agent-recovery");
+    seed_auto_queue_card(&db, "card-valid", 9004, "in_progress", "agent-recovery");
+
+    {
+        let conn = db.lock().unwrap();
+
+        // Active run
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('run-recovery', 'test-repo', 'agent-recovery', 'active')",
+            [],
+        )
+        .unwrap();
+
+        // Entry A: dispatched + dispatch_id=NULL (orphan — should be reset)
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
+             VALUES ('entry-orphan', 'run-recovery', 'card-orphan', 'agent-recovery', 'dispatched', NULL, datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        // Entry B: dispatched + phantom dispatch_id (not in task_dispatches — should be reset)
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
+             VALUES ('entry-phantom', 'run-recovery', 'card-phantom', 'agent-recovery', 'dispatched', 'phantom-id-999', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        // Entry C: dispatched + cancelled dispatch (should be reset)
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title) \
+             VALUES ('dispatch-cancelled', 'card-cancelled', 'agent-recovery', 'implementation', 'cancelled', 'test')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
+             VALUES ('entry-cancelled', 'run-recovery', 'card-cancelled', 'agent-recovery', 'dispatched', 'dispatch-cancelled', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        // Entry D: dispatched + valid active dispatch (must NOT be reset)
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title) \
+             VALUES ('dispatch-valid', 'card-valid', 'agent-recovery', 'implementation', 'dispatched', 'test')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
+             VALUES ('entry-valid', 'run-recovery', 'card-valid', 'agent-recovery', 'dispatched', 'dispatch-valid', datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Fire onTick1min — triggers recovery path 2
+    engine
+        .fire_hook(
+            crate::engine::hooks::Hook::OnTick1min,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    // Verify
+    let conn = db.lock().unwrap();
+
+    // A: orphan (NULL dispatch_id) → reset to pending
+    let (status_a, did_a): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-orphan'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status_a, "pending", "orphan entry must be reset to pending");
+    assert!(did_a.is_none(), "orphan entry dispatch_id must stay NULL");
+
+    // B: phantom dispatch_id → reset to pending
+    let (status_b, did_b): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-phantom'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        status_b, "pending",
+        "phantom dispatch entry must be reset to pending"
+    );
+    assert!(
+        did_b.is_none(),
+        "phantom entry dispatch_id must be cleared to NULL"
+    );
+
+    // C: cancelled dispatch → reset to pending
+    let (status_c, did_c): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-cancelled'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        status_c, "pending",
+        "cancelled dispatch entry must be reset to pending"
+    );
+    assert!(
+        did_c.is_none(),
+        "cancelled entry dispatch_id must be cleared to NULL"
+    );
+
+    // D: valid active dispatch → must remain dispatched
+    let (status_d, did_d): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-valid'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        status_d, "dispatched",
+        "valid dispatch entry must NOT be reset"
+    );
+    assert_eq!(
+        did_d.as_deref(),
+        Some("dispatch-valid"),
+        "valid entry dispatch_id must be preserved"
+    );
+}
