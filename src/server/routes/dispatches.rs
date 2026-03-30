@@ -1536,6 +1536,7 @@ pub(super) async fn send_review_result_to_primary(
         let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
         let message = format!(
             "⚠️ [리뷰 verdict 미제출] {title}\n\
+             ⛔ 코드 리뷰 금지 — 이것은 리뷰 결과 확인 요청입니다\n\
              카운터모델이 verdict를 제출하지 않고 세션이 종료됐습니다.\n\
              GitHub 이슈 코멘트를 확인하고 리뷰 내용이 있으면 반영해주세요.{url_line}"
         );
@@ -1615,12 +1616,13 @@ pub(super) async fn send_review_result_to_primary(
 
     let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
     let message = format!(
-        "DISPATCH:{dispatch_id} - [리뷰 검토] {title}\n\
+        "DISPATCH:{dispatch_id} [⚖️ 리뷰 검토] - {title}\n\
+         ⛔ 코드 리뷰 금지 — 이미 완료된 리뷰 결과를 검토하는 단계입니다\n\
          📝 카운터모델 리뷰 결과: **{verdict}**\n\
-         GitHub 이슈 코멘트를 확인하고 다음 중 하나를 선택하세요:\n\
-         • 수용 → 리뷰 반영 수정 후 review-decision API에 accept 호출\n\
-         • 반론 → GitHub 코멘트로 이의 제기 후 review-decision API에 dispute 호출\n\
-         • 불수용 → review-decision API에 dismiss 호출{url_line}"
+         GitHub 이슈 코멘트에서 피드백을 확인하고 다음 중 하나를 선택하세요:\n\
+         • **수용** → 피드백 반영 수정 후 review-decision API에 `accept` 호출\n\
+         • **반론** → GitHub 코멘트로 이의 제기 후 review-decision API에 `dispute` 호출\n\
+         • **무시** → review-decision API에 `dismiss` 호출{url_line}"
     );
     let message = prefix_dispatch_message("review-decision", &message);
 
