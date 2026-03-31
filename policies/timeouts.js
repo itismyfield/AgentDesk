@@ -1055,7 +1055,7 @@ var timeouts = {
           kmChannel,
           "⚠️ [orphan-review] #" + (oc.github_issue_number || "?") + " " +
           (oc.title || oc.id) + "\nreview 상태인데 dispatch 없음 → pending_decision 전환 (PMD 결정 필요)",
-          "notify",
+          "announce",
           "system"
         );
       }
