@@ -869,7 +869,8 @@ pub(super) async fn tmux_output_watcher(
 
             let ctx_cfg = super::adk_session::fetch_context_thresholds(shared.api_port).await;
             let pct = (tokens * 100) / ctx_cfg.context_window.max(1);
-            if pct >= ctx_cfg.compact_pct && !is_prompt_too_long {
+            // DISABLED — token counting unreliable. Re-enable after fix.
+            if false && pct >= ctx_cfg.compact_pct && !is_prompt_too_long {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 eprintln!(
                     "  [{ts}] ⚡ [watcher] Auto-compact: {} at {pct}% ({tokens} tokens)",

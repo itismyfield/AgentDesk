@@ -1207,10 +1207,11 @@ timeouts.onTick5min = function(ev) {
   agentdesk.log.debug("[tick5min][H] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_M(); } catch(e) { agentdesk.log.warn("[tick5min] M error: " + e); }
   agentdesk.log.debug("[tick5min][M] " + (Date.now() - t) + "ms");
-  if (timeouts.onContextCheck) {
-    t = Date.now(); try { timeouts.onContextCheck(); } catch(e) { agentdesk.log.warn("[tick5min] ctx error: " + e); }
-    agentdesk.log.debug("[tick5min][ctx] " + (Date.now() - t) + "ms");
-  }
+  // DISABLED — token counting unreliable (double-count, stale after /clear). Re-enable after fix.
+  // if (timeouts.onContextCheck) {
+  //   t = Date.now(); try { timeouts.onContextCheck(); } catch(e) { agentdesk.log.warn("[tick5min] ctx error: " + e); }
+  //   agentdesk.log.debug("[tick5min][ctx] " + (Date.now() - t) + "ms");
+  // }
   agentdesk.log.debug("[tick5min] total " + (Date.now() - start) + "ms");
 };
 

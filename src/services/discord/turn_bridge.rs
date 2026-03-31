@@ -1361,10 +1361,11 @@ pub(super) fn spawn_turn_bridge(
         )
         .await;
 
-        // ─── Auto-compact: send /compact if context window usage exceeds threshold ───
-        // Only for non-dispatch (main channel) sessions with a live tmux session.
+        // ─── Auto-compact: DISABLED — token counting is unreliable (input+output
+        // double-count, stale DB values after /clear). Re-enable after accurate
+        // context window measurement is implemented.
         #[cfg(unix)]
-        if dispatch_id.is_none() && !is_prompt_too_long {
+        if false && dispatch_id.is_none() && !is_prompt_too_long {
             let total_tokens =
                 total_context_tokens(accumulated_input_tokens, accumulated_output_tokens);
             let ctx_cfg = super::adk_session::fetch_context_thresholds(shared_owned.api_port).await;
