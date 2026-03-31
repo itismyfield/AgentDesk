@@ -1003,10 +1003,10 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         orphans.len()
     );
 
+    let mut delivered = 0usize;
     for (dispatch_id, agent_id, card_id, title, dtype) in &orphans {
-        // Remove the dispatch_notified guard so send_dispatch_to_discord can proceed.
-        // This is safe because the Once guard ensures only one caller reaches here,
-        // and the 5-condition query already validated this dispatch is truly orphan.
+        // Clear any existing dispatch_notified marker — the 5-condition query already
+        // validated this dispatch is truly orphan, so the marker (if any) is stale.
         {
             let conn = match db.lock() {
                 Ok(c) => c,
@@ -1027,19 +1027,33 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
             card = &card_id[..8.min(card_id.len())],
         );
 
-        crate::server::routes::dispatches::send_dispatch_to_discord(
+        // send_dispatch_to_discord handles its own two-phase delivery guard
+        // (reserving → send → notified), so no manual marker management needed here.
+        match crate::server::routes::dispatches::send_dispatch_to_discord(
             db,
             agent_id,
             title,
             card_id,
             dispatch_id,
         )
-        .await;
+        .await
+        {
+            Ok(()) => {
+                delivered += 1;
+            }
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}]   ⚠ Recovery delivery failed for {id}: {e}",
+                    id = &dispatch_id[..8],
+                );
+            }
+        }
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!(
-        "  [{ts}] ✓ #164: Re-delivered {} orphan dispatch(es)",
+        "  [{ts}] ✓ #164: Re-delivered {delivered}/{} orphan dispatch(es)",
         orphans.len()
     );
 }

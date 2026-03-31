@@ -28,6 +28,36 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         dashboard_dir.join("index.html").exists()
     };
 
+    // #209: Collect dispatch_outbox stats for observability
+    let outbox_stats = state.db.lock().ok().map(|conn| {
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let retrying: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let failed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'failed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        serde_json::json!({
+            "pending": pending,
+            "retrying": retrying,
+            "permanent_failures": failed
+        })
+    });
+
     if let Some(ref registry) = state.health_registry {
         let healthy = health::is_healthy(registry).await;
         let discord_json = health::build_health_json(registry).await;
@@ -36,6 +66,9 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
             serde_json::from_str(&discord_json).unwrap_or(serde_json::json!({}));
         json["db"] = serde_json::json!(db_ok);
         json["dashboard"] = serde_json::json!(dashboard_ok);
+        if let Some(stats) = outbox_stats {
+            json["dispatch_outbox"] = stats;
+        }
 
         let status = if healthy && db_ok {
             StatusCode::OK
@@ -50,12 +83,15 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         } else {
             StatusCode::SERVICE_UNAVAILABLE
         };
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "ok": db_ok,
             "version": env!("CARGO_PKG_VERSION"),
             "db": db_ok,
             "dashboard": dashboard_ok
         });
+        if let Some(stats) = outbox_stats {
+            json["dispatch_outbox"] = stats;
+        }
         (status, Json(json)).into_response()
     }
 }
