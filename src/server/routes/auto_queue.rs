@@ -906,7 +906,7 @@ pub async fn activate(
     let mut run_filter = if active_only {
         "status = 'active'".to_string()
     } else {
-        "status IN ('active', 'generated')".to_string()
+        "status IN ('active', 'generated', 'pending')".to_string()
     };
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref repo) = body.repo {
@@ -943,9 +943,9 @@ pub async fn activate(
     };
 
     if !active_only {
-        // Promote generated → active on explicit activation.
+        // Promote pending/generated → active on explicit activation.
         conn.execute(
-            "UPDATE auto_queue_runs SET status = 'active' WHERE id = ?1 AND status = 'generated'",
+            "UPDATE auto_queue_runs SET status = 'active' WHERE id = ?1 AND status IN ('generated', 'pending')",
             [&run_id],
         )
         .ok();
@@ -1911,10 +1911,10 @@ pub async fn enqueue(
         )
         .unwrap_or_default();
 
-    // Find existing active run (do NOT create yet — preserves idempotent retry)
+    // Find existing active/pending run (do NOT create yet — preserves idempotent retry)
     let existing_run_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM auto_queue_runs WHERE status = 'active' AND (repo = ?1 OR repo IS NULL) AND (agent_id = ?2 OR agent_id IS NULL) ORDER BY created_at DESC LIMIT 1",
+            "SELECT id FROM auto_queue_runs WHERE status IN ('active', 'pending') AND (repo = ?1 OR repo IS NULL) AND (agent_id = ?2 OR agent_id IS NULL) ORDER BY created_at DESC LIMIT 1",
             rusqlite::params![body.repo, agent_id],
             |row| row.get(0),
         )
@@ -1984,11 +1984,11 @@ pub async fn enqueue(
         );
     }
 
-    // Use existing run or create new one.
+    // Use existing run or create new one (pending — requires activate to dispatch).
     let run_id = existing_run_id.unwrap_or_else(|| {
         let id = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id) VALUES (?1, ?2, ?3)",
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES (?1, ?2, ?3, 'pending')",
             rusqlite::params![id, body.repo, agent_id],
         )
         .ok();
