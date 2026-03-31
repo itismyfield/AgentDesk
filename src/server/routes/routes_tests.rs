@@ -2794,9 +2794,10 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
         .unwrap();
 
         // Entry A: dispatched + dispatch_id=NULL (orphan — should be reset)
+        // #214: dispatched_at must be >2min ago to pass grace period
         conn.execute(
             "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-             VALUES ('entry-orphan', 'run-recovery', 'card-orphan', 'agent-recovery', 'dispatched', NULL, datetime('now'))",
+             VALUES ('entry-orphan', 'run-recovery', 'card-orphan', 'agent-recovery', 'dispatched', NULL, datetime('now', '-3 minutes'))",
             [],
         )
         .unwrap();
@@ -2804,7 +2805,7 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
         // Entry B: dispatched + phantom dispatch_id (not in task_dispatches — should be reset)
         conn.execute(
             "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-             VALUES ('entry-phantom', 'run-recovery', 'card-phantom', 'agent-recovery', 'dispatched', 'phantom-id-999', datetime('now'))",
+             VALUES ('entry-phantom', 'run-recovery', 'card-phantom', 'agent-recovery', 'dispatched', 'phantom-id-999', datetime('now', '-3 minutes'))",
             [],
         )
         .unwrap();
@@ -2818,7 +2819,7 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
         .unwrap();
         conn.execute(
             "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-             VALUES ('entry-cancelled', 'run-recovery', 'card-cancelled', 'agent-recovery', 'dispatched', 'dispatch-cancelled', datetime('now'))",
+             VALUES ('entry-cancelled', 'run-recovery', 'card-cancelled', 'agent-recovery', 'dispatched', 'dispatch-cancelled', datetime('now', '-3 minutes'))",
             [],
         )
         .unwrap();

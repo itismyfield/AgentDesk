@@ -303,14 +303,17 @@ var autoQueue = {
       }
     }
 
-    // Recovery path 2 (#179/#191): dispatched entries whose dispatch is stuck
+    // Recovery path 2 (#179/#191/#214): dispatched entries whose dispatch is stuck
     // Covers: cancelled/failed dispatch, phantom dispatch_id (row missing),
     // AND orphan entries (dispatched status but dispatch_id is NULL)
+    // #214: Grace period — only check entries dispatched >2 min ago to avoid
+    // false orphan detection when dispatch intent hasn't drained yet
     var stuckDispatched = agentdesk.db.query(
       "SELECT e.id, e.agent_id, e.dispatch_id, e.kanban_card_id " +
       "FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
       "WHERE e.status = 'dispatched' AND r.status = 'active' " +
+      "AND e.dispatched_at IS NOT NULL AND e.dispatched_at < datetime('now', '-2 minutes') " +
       "AND (" +
       "  e.dispatch_id IS NULL" +
       "  OR EXISTS (" +
