@@ -362,8 +362,11 @@ fn should_resume_watcher_after_turn(
     !defer_watcher_resume && !(has_local_queued_turns && can_chain_locally)
 }
 
-fn total_context_tokens(input_tokens: u64, output_tokens: u64) -> u64 {
-    input_tokens.saturating_add(output_tokens)
+fn total_context_tokens(input_tokens: u64, _output_tokens: u64) -> u64 {
+    // input_tokens already represents cumulative context window occupancy
+    // (system prompt + conversation history + new message + cache tokens).
+    // Adding output_tokens would double-count and inflate the percentage.
+    input_tokens
 }
 
 fn persisted_context_tokens(input_tokens: u64, output_tokens: u64) -> Option<u64> {
