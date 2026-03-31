@@ -2,7 +2,6 @@ use std::fs;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
-use rand::Rng;
 use serenity::{ChannelId, CreateMessage};
 
 use crate::services::provider::ProviderKind;
@@ -903,6 +902,7 @@ async fn execute_agent_turn(
             provider: None,
             model: None,
             reasoning_effort: None,
+            peer_agents_enabled: true,
         })
         .unwrap_or_default()
     } else {
@@ -1112,6 +1112,7 @@ async fn conclude_meeting(
             provider: None,
             model: None,
             reasoning_effort: None,
+            peer_agents_enabled: true,
         })
         .unwrap_or_default()
     } else {

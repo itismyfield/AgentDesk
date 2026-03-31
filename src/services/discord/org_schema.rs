@@ -38,6 +38,7 @@ pub(super) struct AgentDef {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub workspace: Option<String>,
+    pub peer_agents: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +53,7 @@ pub(super) struct ChannelBinding {
     pub workspace: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub peer_agents: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +173,10 @@ pub(super) fn resolve_role_binding(
         .and_then(ProviderKind::from_str);
 
     let model = ch_binding.model.clone().or_else(|| agent_def.model.clone());
+    let peer_agents_enabled = ch_binding
+        .peer_agents
+        .or(agent_def.peer_agents)
+        .unwrap_or(true);
 
     // Explicit prompt_file > auto-derived from prompts_root > empty
     let prompt_file = agent_def
@@ -191,6 +197,7 @@ pub(super) fn resolve_role_binding(
         provider,
         model,
         reasoning_effort: None,
+        peer_agents_enabled,
     })
 }
 
@@ -448,6 +455,31 @@ channels:
 
             let ws = resolve_workspace(ChannelId::new(100), None).unwrap();
             assert!(ws.ends_with("/override-ws"));
+        });
+    }
+
+    #[test]
+    fn test_channel_binding_can_disable_peer_agents() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_org_yaml(
+                temp_home.path(),
+                r#"
+version: 1
+agents:
+  spark:
+    display_name: "Spark"
+    prompt_file: "~/prompts/spark.md"
+    peer_agents: true
+channels:
+  by_id:
+    "1488022491992424448":
+      agent: spark
+      peer_agents: false
+"#,
+            );
+
+            let binding = resolve_role_binding(ChannelId::new(1488022491992424448), None).unwrap();
+            assert!(!binding.peer_agents_enabled);
         });
     }
 

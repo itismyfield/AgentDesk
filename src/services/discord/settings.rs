@@ -46,6 +46,8 @@ pub(super) struct RoleBinding {
     pub model: Option<String>,
     /// Optional reasoning effort for Codex (e.g. "low", "normal", "high", "xhigh")
     pub reasoning_effort: Option<String>,
+    /// Whether this role may see peer-agent handoff guidance in the system prompt.
+    pub peer_agents_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,7 +85,26 @@ pub(super) fn channel_supports_provider(
         }
     }
 
+    // When org.yaml is present, require an explicit channel binding or suffix match.
+    // This avoids the legacy "Claude catches all generic channels" behavior leaking
+    // into deployments that already opted into explicit org routing.
+    if org_schema::org_schema_exists() {
+        return false;
+    }
+
     provider.is_channel_supported(channel_name, is_dm)
+}
+
+pub(super) fn bot_settings_allow_channel(
+    settings: &DiscordBotSettings,
+    channel_id: ChannelId,
+    is_dm: bool,
+) -> bool {
+    if is_dm {
+        return true;
+    }
+    settings.allowed_channel_ids.is_empty()
+        || settings.allowed_channel_ids.contains(&channel_id.get())
 }
 
 /// Look up the provider for a channel name using the global suffix_map
@@ -420,6 +441,11 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
                 .collect()
         })
         .unwrap_or_default();
+    let allowed_channel_ids = entry
+        .get("allowed_channel_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(json_u64).collect())
+        .unwrap_or_default();
     let allowed_user_ids = entry
         .get("allowed_user_ids")
         .and_then(|v| v.as_array())
@@ -430,6 +456,19 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(json_u64).collect())
         .unwrap_or_default();
+    let channel_model_overrides = entry
+        .get("channel_model_overrides")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(channel_id, model)| {
+                    model
+                        .as_str()
+                        .map(|model| (channel_id.clone(), model.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let allowed_tools = match entry.get("allowed_tools") {
         None => DEFAULT_ALLOWED_TOOLS
             .iter()
@@ -439,6 +478,7 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
             let Some(tools_arr) = value.as_array() else {
                 return DiscordBotSettings {
                     provider,
+                    allowed_channel_ids,
                     owner_user_id,
                     last_sessions,
                     last_remotes,
@@ -453,8 +493,10 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
     DiscordBotSettings {
         provider,
         allowed_tools,
+        allowed_channel_ids,
         last_sessions,
         last_remotes,
+        channel_model_overrides,
         owner_user_id,
         allowed_user_ids,
         allowed_bot_ids,
@@ -480,8 +522,10 @@ pub(super) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
         "token": token,
         "provider": settings.provider.as_str(),
         "allowed_tools": normalized_tools,
+        "allowed_channel_ids": settings.allowed_channel_ids,
         "last_sessions": settings.last_sessions,
         "last_remotes": settings.last_remotes,
+        "channel_model_overrides": settings.channel_model_overrides,
         "allowed_user_ids": settings.allowed_user_ids,
         "allowed_bot_ids": settings.allowed_bot_ids,
     });
@@ -554,9 +598,9 @@ mod tests {
     use crate::services::provider::ProviderKind;
 
     use super::{
-        channel_supports_provider, discord_token_hash, load_bot_settings,
-        load_discord_bot_launch_configs, load_peer_agents, render_peer_agent_guidance,
-        resolve_role_binding,
+        bot_settings_allow_channel, channel_supports_provider, discord_token_hash,
+        load_bot_settings, load_discord_bot_launch_configs, load_peer_agents,
+        render_peer_agent_guidance, resolve_role_binding, save_bot_settings,
     };
 
     fn with_temp_home<F>(f: F)
@@ -681,6 +725,116 @@ mod tests {
             assert_eq!(settings.owner_user_id, Some(343742347365974000));
             assert_eq!(settings.allowed_user_ids, vec![429955158974136300]);
             assert_eq!(settings.allowed_bot_ids, vec![1479017284805722200]);
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_reads_channel_model_overrides() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "channel_model_overrides": {
+                        "123": "gpt-5.4",
+                        "456": "sonnet"
+                    }
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert_eq!(
+                settings
+                    .channel_model_overrides
+                    .get("123")
+                    .map(String::as_str),
+                Some("gpt-5.4")
+            );
+            assert_eq!(
+                settings
+                    .channel_model_overrides
+                    .get("456")
+                    .map(String::as_str),
+                Some("sonnet")
+            );
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_reads_allowed_channel_ids() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "allowed_channel_ids": ["123", 456]
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert_eq!(settings.allowed_channel_ids, vec![123, 456]);
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_persists_channel_model_overrides() {
+        with_temp_home(|_temp_home: &TempDir| {
+            let token = "test-token";
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings
+                .channel_model_overrides
+                .insert("123".to_string(), "gpt-5.4".to_string());
+            settings
+                .channel_model_overrides
+                .insert("456".to_string(), "sonnet".to_string());
+
+            save_bot_settings(token, &settings);
+
+            let loaded = load_bot_settings(token);
+            assert_eq!(
+                loaded
+                    .channel_model_overrides
+                    .get("123")
+                    .map(String::as_str),
+                Some("gpt-5.4")
+            );
+            assert_eq!(
+                loaded
+                    .channel_model_overrides
+                    .get("456")
+                    .map(String::as_str),
+                Some("sonnet")
+            );
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_persists_allowed_channel_ids() {
+        with_temp_home(|_temp_home: &TempDir| {
+            let token = "test-token";
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings.allowed_channel_ids = vec![123, 456];
+
+            save_bot_settings(token, &settings);
+
+            let loaded = load_bot_settings(token);
+            assert_eq!(loaded.allowed_channel_ids, vec![123, 456]);
         });
     }
 
@@ -836,6 +990,28 @@ mod tests {
     }
 
     #[test]
+    fn test_bot_settings_allow_channel_honors_allowlist() {
+        let mut settings = super::super::DiscordBotSettings::default();
+        settings.allowed_channel_ids = vec![1488022491992424448];
+
+        assert!(bot_settings_allow_channel(
+            &settings,
+            ChannelId::new(1488022491992424448),
+            false
+        ));
+        assert!(!bot_settings_allow_channel(
+            &settings,
+            ChannelId::new(1486017489027469493),
+            false
+        ));
+        assert!(bot_settings_allow_channel(
+            &settings,
+            ChannelId::new(999),
+            true
+        ));
+    }
+
+    #[test]
     fn test_channel_supports_provider_cc_claude_only() {
         use super::RoleBinding;
 
@@ -845,6 +1021,7 @@ mod tests {
             provider: Some(ProviderKind::Claude),
             model: None,
             reasoning_effort: None,
+            peer_agents_enabled: true,
         };
 
         // With a role binding specifying Claude, only Claude should match
@@ -860,5 +1037,80 @@ mod tests {
             false,
             Some(&binding),
         ));
+    }
+
+    #[test]
+    fn test_channel_supports_provider_org_schema_disables_generic_claude_fallback() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: "Test Org"
+agents:
+  claude:
+    display_name: "claude"
+    provider: claude
+channels:
+  by_name:
+    enabled: true
+    mappings:
+      "agentdesk-claude":
+        agent: claude
+        provider: claude
+"#,
+            )
+            .unwrap();
+
+            assert!(!channel_supports_provider(
+                &ProviderKind::Claude,
+                Some("random-general"),
+                false,
+                None,
+            ));
+            assert!(!channel_supports_provider(
+                &ProviderKind::Codex,
+                Some("random-general"),
+                false,
+                None,
+            ));
+        });
+    }
+
+    #[test]
+    fn test_channel_supports_provider_org_schema_suffix_match_still_works() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: "Test Org"
+agents:
+  codex:
+    display_name: "codex"
+    provider: codex
+suffix_map:
+  "-cdx": "codex"
+"#,
+            )
+            .unwrap();
+
+            assert!(channel_supports_provider(
+                &ProviderKind::Codex,
+                Some("agentdesk-cdx"),
+                false,
+                None,
+            ));
+            assert!(!channel_supports_provider(
+                &ProviderKind::Claude,
+                Some("agentdesk-cdx"),
+                false,
+                None,
+            ));
+        });
     }
 }

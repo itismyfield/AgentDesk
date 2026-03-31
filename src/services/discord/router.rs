@@ -10,6 +10,45 @@ pub(super) fn should_process_turn_message(kind: serenity::model::channel::Messag
     )
 }
 
+fn is_model_picker_component_custom_id(
+    custom_id: &str,
+    fallback_channel_id: serenity::ChannelId,
+) -> bool {
+    super::commands::parse_model_picker_custom_id(custom_id, fallback_channel_id).is_some()
+}
+
+async fn reset_provider_session_if_pending(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) {
+    if shared
+        .model_session_reset_pending
+        .remove(&channel_id)
+        .is_none()
+    {
+        return;
+    }
+
+    let channel_name = {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.session_id = None;
+            session.channel_name.clone()
+        } else {
+            None
+        }
+    };
+
+    if let Some(name) = channel_name.as_deref() {
+        crate::services::claude::terminate_local_session(&provider.build_tmux_session_name(name));
+    }
+
+    if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
+        super::adk_session::clear_claude_session_id(&session_key, shared.api_port).await;
+    }
+}
+
 pub(super) async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -19,9 +58,27 @@ pub(super) async fn handle_event(
     match event {
         serenity::FullEvent::InteractionCreate { interaction } => {
             if let Some(component) = interaction.as_message_component() {
-                if component.data.custom_id == super::commands::MODEL_PICKER_CUSTOM_ID
-                    || component.data.custom_id == super::commands::MODEL_RESET_CUSTOM_ID
-                {
+                if is_model_picker_component_custom_id(
+                    &component.data.custom_id,
+                    component.channel_id,
+                ) {
+                    let settings_snapshot = { data.shared.settings.read().await.clone() };
+                    if !super::provider_handles_channel(
+                        ctx,
+                        &data.provider,
+                        &settings_snapshot,
+                        component.channel_id,
+                    )
+                    .await
+                    {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!(
+                            "  [{ts}] ⏭ COMPONENT-GUARD: skipping model picker in channel {} for provider {}",
+                            component.channel_id,
+                            data.provider.as_str()
+                        );
+                        return Ok(());
+                    }
                     return handle_model_picker_interaction(ctx, component, data).await;
                 }
             }
@@ -119,24 +176,13 @@ pub(super) async fn handle_event(
                 }
             }
 
-            // If the message looks like a known slash command, skip it (poise handles it).
-            // Unknown `/`-prefixed messages fall through to the AI provider as regular text.
+            // Ignore messages that look like slash commands (but allow from trusted bots)
             if new_message.content.starts_with('/') && !new_message.author.bot {
-                let cmd_name = new_message.content[1..]
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("");
-                let is_known = data
-                    .shared
-                    .known_slash_commands
-                    .get()
-                    .map_or(false, |set| set.contains(cmd_name));
-                if is_known {
-                    return Ok(());
-                }
+                return Ok(());
             }
 
-            // this bot. Bot mentions are excluded because Discord auto-adds the
+            // Ignore messages that mention other (human) users — not directed at
+            // this bot.  Bot mentions are excluded because Discord auto-adds the
             // replied-to author to the mentions array for InlineReply messages;
             // filtering on those would silently drop legitimate replies to
             // announce/notify/codex bot messages.
@@ -169,6 +215,10 @@ pub(super) async fn handle_event(
             };
             let role_binding =
                 resolve_role_binding(effective_channel_id, effective_channel_name.as_deref());
+            let settings_snapshot = { data.shared.settings.read().await.clone() };
+            if !bot_settings_allow_channel(&settings_snapshot, effective_channel_id, is_dm) {
+                return Ok(());
+            }
             if !channel_supports_provider(
                 &data.provider,
                 effective_channel_name.as_deref(),
@@ -672,109 +722,7 @@ pub(super) async fn handle_event(
     Ok(())
 }
 
-async fn handle_model_picker_interaction(
-    ctx: &serenity::Context,
-    component: &serenity::ComponentInteraction,
-    data: &Data,
-) -> Result<(), Error> {
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    let channel_id = component.channel_id;
-    let user_id = component.user.id;
-    let user_name = &component.user.name;
-    println!("  [{ts}] ◀ [{}] model picker {}", user_name, channel_id);
-
-    if !check_auth(user_id, user_name, &data.shared, &data.token).await {
-        component
-            .create_response(
-                ctx,
-                serenity::CreateInteractionResponse::Message(
-                    serenity::CreateInteractionResponseMessage::new()
-                        .content("Not authorized for this bot.")
-                        .ephemeral(true),
-                ),
-            )
-            .await?;
-        return Ok(());
-    }
-
-    if !super::commands::provider_supports_model_override(&data.provider) {
-        component
-            .create_response(
-                ctx,
-                serenity::CreateInteractionResponse::Message(
-                    serenity::CreateInteractionResponseMessage::new()
-                        .content("Model override is only supported for Claude, Codex, and Gemini channels.")
-                        .ephemeral(true),
-                ),
-            )
-            .await?;
-        return Ok(());
-    }
-
-    if component.data.custom_id == super::commands::MODEL_RESET_CUSTOM_ID {
-        data.shared.model_overrides.remove(&channel_id);
-    } else {
-        let selected = match &component.data.kind {
-            serenity::ComponentInteractionDataKind::StringSelect { values } => {
-                values.first().cloned()
-            }
-            _ => None,
-        };
-
-        let Some(selected) = selected else {
-            component
-                .create_response(
-                    ctx,
-                    serenity::CreateInteractionResponse::Message(
-                        serenity::CreateInteractionResponseMessage::new()
-                            .content("Unsupported model picker interaction.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await?;
-            return Ok(());
-        };
-
-        if selected == "__default__" || super::commands::is_clear_model_keyword(&selected) {
-            data.shared.model_overrides.remove(&channel_id);
-        } else {
-            let validated = match super::commands::validate_model_input(&data.provider, &selected) {
-                Ok(model) => model,
-                Err(message) => {
-                    component
-                        .create_response(
-                            ctx,
-                            serenity::CreateInteractionResponse::Message(
-                                serenity::CreateInteractionResponseMessage::new()
-                                    .content(message)
-                                    .ephemeral(true),
-                            ),
-                        )
-                        .await?;
-                    return Ok(());
-                }
-            };
-            data.shared.model_overrides.insert(channel_id, validated);
-        }
-    }
-
-    let embed =
-        super::commands::build_model_picker_embed(&data.shared, channel_id, &data.provider).await;
-    let components =
-        super::commands::build_model_picker_components(&data.shared, channel_id, &data.provider)
-            .await;
-    component
-        .create_response(
-            ctx,
-            serenity::CreateInteractionResponse::UpdateMessage(
-                serenity::CreateInteractionResponseMessage::new()
-                    .embed(embed)
-                    .components(components),
-            ),
-        )
-        .await?;
-    Ok(())
-}
+use super::model_picker_interaction::handle_model_picker_interaction;
 
 pub(super) async fn handle_text_message(
     ctx: &serenity::Context,
@@ -901,7 +849,6 @@ pub(super) async fn handle_text_message(
                     let (ch_name_resolved, cat_name) =
                         resolve_channel_category(ctx, channel_id).await;
                     {
-                        // Session ID comes from DB (sessions.claude_session_id), not from file.
                         let mut data = shared.core.lock().await;
                         let session =
                             data.sessions
@@ -1265,7 +1212,7 @@ pub(super) async fn handle_text_message(
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
-    let mut system_prompt_owned = build_system_prompt(
+    let system_prompt_owned = build_system_prompt(
         &discord_context,
         &current_path,
         channel_id,
@@ -1277,29 +1224,6 @@ pub(super) async fn handle_text_message(
         dispatch_profile,
         dispatch_type_str.as_deref(),
     );
-
-    // Inject session retry context (Discord history from stale session auto-retry).
-    // Consumed once — deleted after reading so subsequent turns don't see it.
-    if let Some(ref db) = shared.db {
-        let kv_key = format!("session_retry_context:{}", channel_id);
-        if let Ok(conn) = db.lock() {
-            let ctx: Option<String> = conn
-                .query_row(
-                    "SELECT value FROM kv_meta WHERE key = ?1",
-                    [&kv_key],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok();
-            if let Some(history) = ctx {
-                system_prompt_owned.push_str(&format!(
-                    "\n\n[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n{}",
-                    history
-                ));
-                conn.execute("DELETE FROM kv_meta WHERE key = ?1", [&kv_key])
-                    .ok();
-            }
-        }
-    }
 
     // Create cancel token — with second check to close the TOCTOU race window.
     // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
@@ -1520,6 +1444,8 @@ pub(super) async fn handle_text_message(
             })
     };
 
+    reset_provider_session_if_pending(shared, channel_id, &provider).await;
+
     // Resolve channel/tmux session name from current session state
     let (channel_name, tmux_session_name) = {
         let data = shared.core.lock().await;
@@ -1612,7 +1538,7 @@ pub(super) async fn handle_text_message(
         }
     };
 
-    let mut inflight_state = InflightTurnState::new(
+    let inflight_state = InflightTurnState::new(
         provider.clone(),
         channel_id.get(),
         channel_name.clone(),
@@ -1626,8 +1552,6 @@ pub(super) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
-    inflight_state.session_key = adk_session_key.clone();
-    inflight_state.dispatch_id = dispatch_id.clone();
     if let Err(e) = save_inflight_state(&inflight_state) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}]   ⚠ inflight state save failed: {e}");
@@ -1684,41 +1608,8 @@ pub(super) async fn handle_text_message(
         }
     }
 
-    // Resolve model + reasoning_effort: DashMap override > dispatch role override > role-map > default
-    let (model_for_turn, reasoning_effort_for_turn): (Option<String>, Option<String>) = {
-        let dashmap_model = shared.model_overrides.get(&channel_id).map(|v| v.clone());
-        if dashmap_model.is_some() {
-            (dashmap_model, None)
-        } else if let Some(override_ch) = shared.dispatch_role_overrides.get(&channel_id) {
-            let alt_ch = *override_ch;
-            let rb = resolve_role_binding(alt_ch, None);
-            (
-                rb.as_ref().and_then(|r| r.model.clone()),
-                rb.as_ref().and_then(|r| r.reasoning_effort.clone()),
-            )
-        } else {
-            let ch_name = {
-                let data = shared.core.lock().await;
-                data.sessions
-                    .get(&channel_id)
-                    .and_then(|s| s.channel_name.clone())
-            };
-            let rb = resolve_role_binding(channel_id, ch_name.as_deref());
-            (
-                rb.as_ref().and_then(|r| r.model.clone()),
-                rb.as_ref().and_then(|r| r.reasoning_effort.clone()),
-            )
-        }
-    };
-
-    // Pass reasoning_effort to codex via environment variable
-    if let Some(ref effort) = reasoning_effort_for_turn {
-        // SAFETY: This runs on the tokio blocking thread pool before spawning the provider.
-        // No concurrent reads of this env var occur at this point.
-        unsafe {
-            std::env::set_var("AGENTDESK_CODEX_REASONING_EFFORT", effort);
-        }
-    }
+    let model_for_turn =
+        super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
 
     // Run the provider in a blocking thread
     let provider_for_blocking = provider.clone();
@@ -2289,9 +2180,11 @@ async fn handle_text_command(
             // Send /clear to the actual Claude Code session via tmux
             #[cfg(unix)]
             if let Some(ref name) = tmux_name {
-                let name = name.clone();
+                let exact_target = tmux_exact_target(name);
                 let _ = tokio::task::spawn_blocking(move || {
-                    crate::services::platform::tmux::send_keys(&name, &["/clear", "Enter"])
+                    std::process::Command::new("tmux")
+                        .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
+                        .output()
                 })
                 .await;
             }
@@ -2436,7 +2329,7 @@ Any other message is sent to {p}.
 `!cc <skill>` — Run a provider skill
 
 **Settings**
-`!model [get|set|clear] [name]` — Model management
+`/model` — Open the interactive model picker
 `!debug` — Toggle debug logging
 `!metrics [date]` — Show turn metrics
 `!queue [all]` — Show pending queue
@@ -2483,144 +2376,12 @@ Any other message is sent to {p}.
         "!model" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ◀ [{}] !model {} {}", msg.author.name, arg1, arg2);
-
-            if !super::commands::provider_supports_model_override(&data.provider) {
-                let _ = msg
-                    .reply(
-                        &ctx.http,
-                        "Model override is only supported for Claude, Codex, and Gemini channels.",
-                    )
-                    .await;
-                return Ok(true);
-            }
-
-            match *arg1 {
-                "list" => {
-                    let embed = super::commands::build_model_picker_embed(
-                        &data.shared,
-                        channel_id,
-                        &data.provider,
-                    )
-                    .await;
-                    let components = super::commands::build_model_picker_components(
-                        &data.shared,
-                        channel_id,
-                        &data.provider,
-                    )
-                    .await;
-                    let _ = channel_id
-                        .send_message(
-                            &ctx.http,
-                            CreateMessage::new().embed(embed).components(components),
-                        )
-                        .await;
-                }
-                "info" => {
-                    let status = super::commands::build_model_info_message(
-                        &data.shared,
-                        channel_id,
-                        &data.provider,
-                    )
-                    .await;
-                    let _ = msg.reply(&ctx.http, status).await;
-                }
-                "set" => {
-                    if arg2.is_empty() {
-                        let _ = msg
-                            .reply(&ctx.http, "Usage: `!model set <model_name>`")
-                            .await;
-                    } else {
-                        let validated =
-                            match super::commands::validate_model_input(&data.provider, arg2) {
-                                Ok(model) => model,
-                                Err(message) => {
-                                    let _ = msg.reply(&ctx.http, message).await;
-                                    return Ok(true);
-                                }
-                            };
-                        data.shared
-                            .model_overrides
-                            .insert(channel_id, validated.clone());
-                        let status = super::commands::build_model_status_message(
-                            &data.shared,
-                            channel_id,
-                            &data.provider,
-                        )
-                        .await;
-                        let _ = msg
-                            .reply(
-                                &ctx.http,
-                                format!(
-                                    "Model set to **{}** for this channel.\n{}",
-                                    validated, status
-                                ),
-                            )
-                            .await;
-                    }
-                }
-                "clear" | "default" | "none" => {
-                    data.shared.model_overrides.remove(&channel_id);
-                    let status = super::commands::build_model_status_message(
-                        &data.shared,
-                        channel_id,
-                        &data.provider,
-                    )
-                    .await;
-                    let _ = msg
-                        .reply(&ctx.http, format!("Model override cleared.\n{}", status))
-                        .await;
-                }
-                "get" | "" => {
-                    let embed = super::commands::build_model_picker_embed(
-                        &data.shared,
-                        channel_id,
-                        &data.provider,
-                    )
-                    .await;
-                    let components = super::commands::build_model_picker_components(
-                        &data.shared,
-                        channel_id,
-                        &data.provider,
-                    )
-                    .await;
-                    let _ = msg
-                        .channel_id
-                        .send_message(
-                            &ctx.http,
-                            CreateMessage::new().embed(embed).components(components),
-                        )
-                        .await;
-                }
-                _ => {
-                    // Treat bare arg as shorthand for "set"
-                    let validated =
-                        match super::commands::validate_model_input(&data.provider, arg1) {
-                            Ok(model) => model,
-                            Err(message) => {
-                                let _ = msg.reply(&ctx.http, message).await;
-                                return Ok(true);
-                            }
-                        };
-                    data.shared
-                        .model_overrides
-                        .insert(channel_id, validated.clone());
-                    let status = super::commands::build_model_status_message(
-                        &data.shared,
-                        channel_id,
-                        &data.provider,
-                    )
-                    .await;
-                    let _ = msg
-                        .reply(
-                            &ctx.http,
-                            format!(
-                                "Model set to **{}** for this channel.\n{}",
-                                validated, status
-                            ),
-                        )
-                        .await;
-                }
-            }
+            let _ = msg
+                .reply(
+                    &ctx.http,
+                    "Model picker text commands are deprecated. Use `/model`.",
+                )
+                .await;
             return Ok(true);
         }
 
@@ -3122,6 +2883,7 @@ struct DispatchInfo {
     discord_channel_alt: Option<String>,
 }
 
+#[allow(dead_code)]
 async fn lookup_card_thread(api_port: u16, dispatch_id: &str) -> Option<String> {
     let info = lookup_dispatch_info(api_port, dispatch_id).await?;
     info.active_thread_id
@@ -3209,7 +2971,10 @@ async fn link_dispatch_thread(api_port: u16, dispatch_id: &str, thread_id: u64, 
 
 #[cfg(test)]
 mod tests {
-    use super::should_process_turn_message;
+    use super::super::model_picker_interaction::build_model_picker_close_response;
+    use super::{is_model_picker_component_custom_id, should_process_turn_message};
+    use poise::serenity_prelude::ChannelId;
+    use serde_json::json;
     use serenity::model::channel::MessageType;
 
     #[test]
@@ -3338,5 +3103,37 @@ mod tests {
         // is_thread_context=false → always blocked by the main branch
         let is_dup = now.duration_since(ts3) < msg_dedup_ttl;
         assert!(is_dup, "parent duplicate after thread must be blocked");
+    }
+
+    #[test]
+    fn model_picker_component_dispatch_matches_all_actions() {
+        let channel_id = ChannelId::new(42);
+        let custom_ids = [
+            format!("agentdesk:model-picker:{}", channel_id.get()),
+            format!("agentdesk:model-submit:{}", channel_id.get()),
+            format!("agentdesk:model-reset:{}", channel_id.get()),
+            format!("agentdesk:model-cancel:{}", channel_id.get()),
+        ];
+
+        for custom_id in custom_ids {
+            assert!(
+                is_model_picker_component_custom_id(&custom_id, channel_id),
+                "expected model picker dispatch for {custom_id}"
+            );
+        }
+
+        assert!(!is_model_picker_component_custom_id(
+            "agentdesk:other:42",
+            channel_id
+        ));
+    }
+
+    #[test]
+    fn model_picker_close_response_acknowledges_component_close() {
+        let payload = serde_json::to_value(build_model_picker_close_response())
+            .expect("close response should serialize");
+
+        assert_eq!(payload["type"], json!(6));
+        assert_eq!(payload["data"], json!(null));
     }
 }

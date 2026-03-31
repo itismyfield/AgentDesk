@@ -39,6 +39,13 @@ pub struct ProviderRuntimeProbe {
     pub version: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderDefaultBehavior {
+    pub resume_without_reset: bool,
+    pub runtime_model: Option<&'static str>,
+    pub source_label: &'static str,
+}
+
 impl ProviderKind {
     pub fn as_str(&self) -> &str {
         match self {
@@ -88,6 +95,23 @@ impl ProviderKind {
                 supports_tool_stream: true,
             }),
             Self::Unsupported(_) => None,
+        }
+    }
+
+    /// Provider-specific behavior when AgentDesk clears its explicit model
+    /// override and falls through to the provider-managed default path.
+    pub fn default_model_behavior(&self) -> ProviderDefaultBehavior {
+        match self {
+            Self::Claude => ProviderDefaultBehavior {
+                resume_without_reset: true,
+                runtime_model: Some("default"),
+                source_label: "Claude default alias",
+            },
+            Self::Codex | Self::Gemini | Self::Unsupported(_) => ProviderDefaultBehavior {
+                resume_without_reset: true,
+                runtime_model: None,
+                source_label: "provider default",
+            },
         }
     }
 
