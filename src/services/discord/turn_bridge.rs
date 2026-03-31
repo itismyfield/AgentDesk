@@ -1348,7 +1348,27 @@ pub(super) fn spawn_turn_bridge(
                 total_context_tokens(accumulated_input_tokens, accumulated_output_tokens);
             let ctx_cfg = super::adk_session::fetch_context_thresholds(shared_owned.api_port).await;
             let pct = (total_tokens * 100) / ctx_cfg.context_window.max(1);
-            if pct >= ctx_cfg.compact_pct {
+            // Cooldown: skip if compact was sent recently (5 min)
+            let compact_cooldown_ok = shared_owned.db.as_ref().map_or(true, |db| {
+                db.lock().ok().map_or(true, |conn| {
+                    let cooldown_key = format!("auto_compact_cooldown:{}", channel_id.get());
+                    let last: Option<String> = conn
+                        .query_row(
+                            "SELECT value FROM kv_meta WHERE key = ?1",
+                            [&cooldown_key],
+                            |row| row.get(0),
+                        )
+                        .ok();
+                    last.and_then(|v| v.parse::<i64>().ok()).map_or(true, |ts| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        now - ts > 300 // 5 min cooldown
+                    })
+                })
+            });
+            if pct >= ctx_cfg.compact_pct && compact_cooldown_ok {
                 if let Some(ref tmux_name) = inflight_state.tmux_session_name {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
@@ -1380,6 +1400,22 @@ pub(super) fn spawn_turn_bridge(
                                 .send()
                                 .await;
                         });
+                    }
+                    // Set cooldown timestamp
+                    if let Some(ref db) = shared_owned.db {
+                        if let Ok(conn) = db.lock() {
+                            let cooldown_key =
+                                format!("auto_compact_cooldown:{}", channel_id.get());
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            conn.execute(
+                                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                                rusqlite::params![cooldown_key, now.to_string()],
+                            )
+                            .ok();
+                        }
                     }
                 }
             }
