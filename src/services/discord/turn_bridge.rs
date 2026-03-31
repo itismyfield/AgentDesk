@@ -2227,8 +2227,8 @@ mod tests {
     }
 
     #[test]
-    fn persisted_context_tokens_counts_input_and_output() {
-        assert_eq!(persisted_context_tokens(610_000, 90_000), Some(700_000));
+    fn persisted_context_tokens_uses_input_tokens_only() {
+        assert_eq!(persisted_context_tokens(610_000, 90_000), Some(610_000));
         assert_eq!(persisted_context_tokens(0, 0), None);
     }
 
