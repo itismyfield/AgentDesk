@@ -15,8 +15,8 @@ use super::formatting::{
     format_for_discord, format_tool_input, normalize_empty_lines, send_long_message_raw,
 };
 use super::settings::{
-    bot_settings_allow_agent, bot_settings_allow_channel, channel_supports_provider,
-    resolve_role_binding,
+    BotChannelRoutingGuardFailure, channel_supports_provider, resolve_role_binding,
+    validate_bot_channel_routing,
 };
 use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};
 
@@ -1282,29 +1282,34 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 
         // #148: Do NOT register in owned_sessions yet — QUARANTINE check below may
         // skip this session. Registering early blocks new session creation for the channel.
-        let role_binding = resolve_role_binding(*channel_id, Some(channel_name));
-        if !bot_settings_allow_channel(&settings_snapshot, *channel_id, false) {
+        if let Err(reason) = validate_bot_channel_routing(
+            &settings_snapshot,
+            &provider,
+            *channel_id,
+            Some(channel_name),
+            false,
+        ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ watcher skip for {} — channel {} not allowed for bot settings",
-                session_name, channel_id
-            );
-            continue;
-        }
-        if !bot_settings_allow_agent(&settings_snapshot, role_binding.as_ref(), false) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ watcher skip for {} — agent mismatch for channel {}",
-                session_name, channel_id
-            );
-            continue;
-        }
-        if !channel_supports_provider(&provider, Some(channel_name), false, role_binding.as_ref()) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ watcher skip for {} — provider mismatch for channel {}",
-                session_name, channel_id
-            );
+            match reason {
+                BotChannelRoutingGuardFailure::ChannelNotAllowed => println!(
+                    "  [{ts}] ⏭ watcher skip for {} — channel {} {}",
+                    session_name,
+                    channel_id,
+                    reason.message()
+                ),
+                BotChannelRoutingGuardFailure::AgentMismatch => println!(
+                    "  [{ts}] ⏭ watcher skip for {} — {} for channel {}",
+                    session_name,
+                    reason.message(),
+                    channel_id
+                ),
+                BotChannelRoutingGuardFailure::ProviderMismatch => println!(
+                    "  [{ts}] ⏭ watcher skip for {} — {} for channel {}",
+                    session_name,
+                    reason.message(),
+                    channel_id
+                ),
+            }
             continue;
         }
 

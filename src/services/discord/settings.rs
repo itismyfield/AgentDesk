@@ -667,9 +667,10 @@ mod tests {
     use crate::services::provider::ProviderKind;
 
     use super::{
-        bot_settings_allow_agent, bot_settings_allow_channel, channel_supports_provider,
-        discord_token_hash, load_bot_settings, load_discord_bot_launch_configs, load_peer_agents,
-        render_peer_agent_guidance, resolve_role_binding, save_bot_settings,
+        BotChannelRoutingGuardFailure, bot_settings_allow_agent, bot_settings_allow_channel,
+        channel_supports_provider, discord_token_hash, load_bot_settings,
+        load_discord_bot_launch_configs, load_peer_agents, render_peer_agent_guidance,
+        resolve_role_binding, save_bot_settings, validate_bot_channel_routing,
     };
 
     fn with_temp_home<F>(f: F)
@@ -1180,6 +1181,25 @@ mod tests {
         ));
         assert!(!bot_settings_allow_agent(&settings, None, false));
         assert!(bot_settings_allow_agent(&settings, None, true));
+    }
+
+    #[test]
+    fn test_validate_bot_channel_routing_reports_channel_not_allowed() {
+        let mut settings = super::super::DiscordBotSettings::default();
+        settings.allowed_channel_ids = vec![1488022491992424448];
+
+        let result = validate_bot_channel_routing(
+            &settings,
+            &ProviderKind::Codex,
+            ChannelId::new(1486017489027469493),
+            Some("agentdesk-codex"),
+            false,
+        );
+
+        assert_eq!(
+            result,
+            Err(BotChannelRoutingGuardFailure::ChannelNotAllowed)
+        );
     }
 
     #[test]

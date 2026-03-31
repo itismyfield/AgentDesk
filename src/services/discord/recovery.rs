@@ -1,7 +1,6 @@
 use super::handoff::{HandoffRecord, save_handoff};
 use super::settings::{
-    bot_settings_allow_agent, bot_settings_allow_channel, channel_supports_provider,
-    resolve_role_binding,
+    BotChannelRoutingGuardFailure, resolve_role_binding, validate_bot_channel_routing,
 };
 use super::turn_bridge::stale_inflight_message;
 use super::*;
@@ -474,35 +473,31 @@ pub(super) async fn restore_inflight_turns(
                     })
                 });
                 let channel_id = ChannelId::new(state.channel_id);
-                let role_binding =
-                    resolve_role_binding(channel_id, effective_channel_name.as_deref());
-                if !bot_settings_allow_channel(&settings_snapshot, channel_id, false) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ⏭ inflight recovery skip for channel {} — not allowed for bot settings",
-                        state.channel_id
-                    );
-                    continue;
-                }
-                if !bot_settings_allow_agent(&settings_snapshot, role_binding.as_ref(), false) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ⏭ inflight recovery skip for channel {} — agent mismatch",
-                        state.channel_id
-                    );
-                    continue;
-                }
-                if !channel_supports_provider(
+                if let Err(reason) = validate_bot_channel_routing(
+                    &settings_snapshot,
                     provider,
+                    channel_id,
                     effective_channel_name.as_deref(),
                     false,
-                    role_binding.as_ref(),
                 ) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ⏭ inflight recovery skip for channel {} — provider mismatch",
-                        state.channel_id
-                    );
+                    match reason {
+                        BotChannelRoutingGuardFailure::ChannelNotAllowed => println!(
+                            "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
+                            state.channel_id,
+                            reason.message()
+                        ),
+                        BotChannelRoutingGuardFailure::AgentMismatch => println!(
+                            "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
+                            state.channel_id,
+                            reason.message()
+                        ),
+                        BotChannelRoutingGuardFailure::ProviderMismatch => println!(
+                            "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
+                            state.channel_id,
+                            reason.message()
+                        ),
+                    }
                     continue;
                 }
                 {
@@ -629,34 +624,31 @@ pub(super) async fn restore_inflight_turns(
                     .map(|(_, ch)| ch)
             })
         });
-        let role_binding = resolve_role_binding(channel_id, channel_name.as_deref());
-        if !bot_settings_allow_channel(&settings_snapshot, channel_id, false) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ inflight recovery skip for channel {} — not allowed for bot settings",
-                state.channel_id
-            );
-            continue;
-        }
-        if !bot_settings_allow_agent(&settings_snapshot, role_binding.as_ref(), false) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ inflight recovery skip for channel {} — agent mismatch",
-                state.channel_id
-            );
-            continue;
-        }
-        if !channel_supports_provider(
+        if let Err(reason) = validate_bot_channel_routing(
+            &settings_snapshot,
             provider,
+            channel_id,
             channel_name.as_deref(),
             false,
-            role_binding.as_ref(),
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ inflight recovery skip for channel {} — provider mismatch",
-                state.channel_id
-            );
+            match reason {
+                BotChannelRoutingGuardFailure::ChannelNotAllowed => println!(
+                    "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
+                    state.channel_id,
+                    reason.message()
+                ),
+                BotChannelRoutingGuardFailure::AgentMismatch => println!(
+                    "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
+                    state.channel_id,
+                    reason.message()
+                ),
+                BotChannelRoutingGuardFailure::ProviderMismatch => println!(
+                    "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
+                    state.channel_id,
+                    reason.message()
+                ),
+            }
             continue;
         }
         let (fallback_output, fallback_input) = tmux_session_name
@@ -1100,6 +1092,7 @@ pub(super) async fn restore_inflight_turns(
         let mut state = state;
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
         state.dispatch_id = state.dispatch_id.or_else(|| recovery_dispatch_id.clone());
+        let role_binding = resolve_role_binding(channel_id, channel_name.as_deref());
 
         spawn_turn_bridge(
             http.clone(),

@@ -9,10 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::SharedData;
 use super::formatting::send_long_message_raw;
 use super::runtime_store::{atomic_write, discord_restart_reports_root};
-use super::settings::{
-    bot_settings_allow_agent, bot_settings_allow_channel, channel_supports_provider,
-    resolve_role_binding,
-};
+use super::settings::{BotChannelRoutingGuardFailure, validate_bot_channel_routing};
 use crate::services::provider::ProviderKind;
 
 const RESTART_REPORT_VERSION: u32 = 1;
@@ -232,38 +229,33 @@ pub(super) async fn flush_restart_reports(
 
     for report in reports {
         let channel_id = serenity::ChannelId::new(report.channel_id);
-        let role_binding = resolve_role_binding(channel_id, report.channel_name.as_deref());
         let settings_snapshot = { shared.settings.read().await.clone() };
 
-        if !bot_settings_allow_channel(&settings_snapshot, channel_id, false) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ restart report skip for channel {} — not allowed for bot settings",
-                report.channel_id
-            );
-            continue;
-        }
-
-        if !bot_settings_allow_agent(&settings_snapshot, role_binding.as_ref(), false) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ restart report skip for channel {} — agent mismatch",
-                report.channel_id
-            );
-            continue;
-        }
-
-        if !channel_supports_provider(
+        if let Err(reason) = validate_bot_channel_routing(
+            &settings_snapshot,
             provider,
+            channel_id,
             report.channel_name.as_deref(),
             false,
-            role_binding.as_ref(),
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ restart report skip for channel {} — provider mismatch",
-                report.channel_id
-            );
+            match reason {
+                BotChannelRoutingGuardFailure::ChannelNotAllowed => println!(
+                    "  [{ts}] ⏭ restart report skip for channel {} — {}",
+                    report.channel_id,
+                    reason.message()
+                ),
+                BotChannelRoutingGuardFailure::AgentMismatch => println!(
+                    "  [{ts}] ⏭ restart report skip for channel {} — {}",
+                    report.channel_id,
+                    reason.message()
+                ),
+                BotChannelRoutingGuardFailure::ProviderMismatch => println!(
+                    "  [{ts}] ⏭ restart report skip for channel {} — {}",
+                    report.channel_id,
+                    reason.message()
+                ),
+            }
             continue;
         }
 
