@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::SharedData;
 use super::formatting::send_long_message_raw;
 use super::runtime_store::{atomic_write, discord_restart_reports_root};
-use super::settings::{BotChannelRoutingGuardFailure, validate_bot_channel_routing};
+use super::settings::validate_bot_channel_routing;
 use crate::services::provider::ProviderKind;
 
 const RESTART_REPORT_VERSION: u32 = 1;
@@ -243,23 +243,10 @@ pub(super) async fn flush_restart_reports(
             is_dm,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            match reason {
-                BotChannelRoutingGuardFailure::ChannelNotAllowed => println!(
-                    "  [{ts}] ⏭ restart report skip for channel {} — {}",
-                    report.channel_id,
-                    reason.message()
-                ),
-                BotChannelRoutingGuardFailure::AgentMismatch => println!(
-                    "  [{ts}] ⏭ restart report skip for channel {} — {}",
-                    report.channel_id,
-                    reason.message()
-                ),
-                BotChannelRoutingGuardFailure::ProviderMismatch => println!(
-                    "  [{ts}] ⏭ restart report skip for channel {} — {}",
-                    report.channel_id,
-                    reason.message()
-                ),
-            }
+            println!(
+                "  [{ts}] ⏭ restart report skip for channel {} — {reason}",
+                report.channel_id,
+            );
             continue;
         }
 

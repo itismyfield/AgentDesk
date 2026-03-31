@@ -1,7 +1,5 @@
 use super::handoff::{HandoffRecord, save_handoff};
-use super::settings::{
-    BotChannelRoutingGuardFailure, resolve_role_binding, validate_bot_channel_routing,
-};
+use super::settings::{resolve_role_binding, validate_bot_channel_routing};
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::services::tmux_common::tmux_exact_target;
@@ -495,23 +493,10 @@ pub(super) async fn restore_inflight_turns(
                     is_dm,
                 ) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    match reason {
-                        BotChannelRoutingGuardFailure::ChannelNotAllowed => println!(
-                            "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
-                            state.channel_id,
-                            reason.message()
-                        ),
-                        BotChannelRoutingGuardFailure::AgentMismatch => println!(
-                            "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
-                            state.channel_id,
-                            reason.message()
-                        ),
-                        BotChannelRoutingGuardFailure::ProviderMismatch => println!(
-                            "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
-                            state.channel_id,
-                            reason.message()
-                        ),
-                    }
+                    println!(
+                        "  [{ts}] ⏭ inflight recovery skip for channel {} — {reason}",
+                        state.channel_id,
+                    );
                     continue;
                 }
                 {
@@ -653,23 +638,10 @@ pub(super) async fn restore_inflight_turns(
             is_dm,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            match reason {
-                BotChannelRoutingGuardFailure::ChannelNotAllowed => println!(
-                    "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
-                    state.channel_id,
-                    reason.message()
-                ),
-                BotChannelRoutingGuardFailure::AgentMismatch => println!(
-                    "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
-                    state.channel_id,
-                    reason.message()
-                ),
-                BotChannelRoutingGuardFailure::ProviderMismatch => println!(
-                    "  [{ts}] ⏭ inflight recovery skip for channel {} — {}",
-                    state.channel_id,
-                    reason.message()
-                ),
-            }
+            println!(
+                "  [{ts}] ⏭ inflight recovery skip for channel {} — {reason}",
+                state.channel_id,
+            );
             continue;
         }
         let (fallback_output, fallback_input) = tmux_session_name

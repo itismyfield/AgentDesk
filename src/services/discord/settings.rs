@@ -135,12 +135,12 @@ pub(super) enum BotChannelRoutingGuardFailure {
     ProviderMismatch,
 }
 
-impl BotChannelRoutingGuardFailure {
-    pub(super) fn message(self) -> &'static str {
+impl std::fmt::Display for BotChannelRoutingGuardFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ChannelNotAllowed => "not allowed for bot settings",
-            Self::AgentMismatch => "agent mismatch",
-            Self::ProviderMismatch => "provider mismatch",
+            Self::ChannelNotAllowed => f.write_str("not allowed for bot settings"),
+            Self::AgentMismatch => f.write_str("agent mismatch"),
+            Self::ProviderMismatch => f.write_str("provider mismatch"),
         }
     }
 }
