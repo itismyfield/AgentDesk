@@ -1149,6 +1149,7 @@ pub fn handle_dcserver(token: Option<String>) {
         let mut discord_engine: Option<PolicyEngine> = None;
         match db::init(&ad_config) {
             Ok(ad_db) => {
+                crate::services::termination_audit::init_audit_db(ad_db.clone());
                 // Sync agents from config → DB
                 let agent_count = ad_config.agents.len();
                 if agent_count > 0 {

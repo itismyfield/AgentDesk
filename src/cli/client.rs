@@ -637,6 +637,101 @@ pub fn cmd_deploy() -> Result<(), String> {
     Ok(())
 }
 
+/// `agentdesk terminations [--card-id X] [--dispatch-id X] [--session X] [--limit N]`
+pub fn cmd_terminations(
+    card_id: Option<&str>,
+    dispatch_id: Option<&str>,
+    session: Option<&str>,
+    limit: u32,
+) -> Result<(), String> {
+    let mut params = vec![format!("limit={limit}")];
+    if let Some(v) = card_id {
+        params.push(format!("card_id={v}"));
+    }
+    if let Some(v) = dispatch_id {
+        params.push(format!("dispatch_id={v}"));
+    }
+    if let Some(v) = session {
+        params.push(format!("session_key={v}"));
+    }
+    let query = params.join("&");
+    let value = get_json(&format!("/api/session-termination-events?{query}"))?;
+    let events = value
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "invalid response".to_string())?;
+
+    if events.is_empty() {
+        println!("No termination events found.");
+        return Ok(());
+    }
+
+    // Table header
+    let time_w = 19;
+    let component_w = 16;
+    let code_w = 26;
+    let session_w = 40;
+    let alive_w = 5;
+
+    println!(
+        "{}  {}  {}  {}  {}  {}",
+        pad_cell("CREATED_AT", time_w),
+        pad_cell("COMPONENT", component_w),
+        pad_cell("REASON_CODE", code_w),
+        pad_cell("SESSION", session_w),
+        pad_cell("ALIVE", alive_w),
+        "REASON_TEXT",
+    );
+    println!(
+        "{}  {}  {}  {}  {}  {}",
+        "-".repeat(time_w),
+        "-".repeat(component_w),
+        "-".repeat(code_w),
+        "-".repeat(session_w),
+        "-".repeat(alive_w),
+        "-".repeat(40),
+    );
+
+    for event in events {
+        let created = event
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let component = event
+            .get("killer_component")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let code = event
+            .get("reason_code")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let session_key = event
+            .get("session_key")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let alive = match event.get("tmux_alive").and_then(Value::as_bool) {
+            Some(true) => "Y",
+            Some(false) => "N",
+            None => "-",
+        };
+        let reason = event
+            .get("reason_text")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+
+        println!(
+            "{}  {}  {}  {}  {}  {}",
+            pad_cell(created, time_w),
+            pad_cell(component, component_w),
+            pad_cell(code, code_w),
+            pad_cell(session_key, session_w),
+            pad_cell(alive, alive_w),
+            reason,
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{render_cards_table, runtime_config_payload};

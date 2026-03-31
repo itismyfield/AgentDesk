@@ -28,6 +28,7 @@ mod session_activity;
 pub mod settings;
 pub mod skills_api;
 pub mod stats;
+pub mod termination_events;
 
 use axum::{
     Json, Router,
@@ -333,6 +334,11 @@ pub fn api_router(
         .route(
             "/sessions/force-kill",
             post(dispatched_sessions::force_kill_session),
+        )
+        // Session termination events (#212)
+        .route(
+            "/session-termination-events",
+            get(termination_events::list_termination_events),
         )
         // Messages
         .route(

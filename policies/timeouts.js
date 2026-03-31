@@ -752,7 +752,18 @@ var timeouts = {
           totalMin + "분 무응답 → 강제 중단" +
           (redispatched ? " + 재디스패치 완료" : ""));
 
-        // 5) 이력 기록
+        // 5) Termination audit
+        try {
+          var probeInfo = "agent=" + sess.agent_id + " extensions=" + extensions + "/" + MAX_EXTENSIONS +
+            " last_heartbeat=" + sess.last_heartbeat + " kill_ok=" + (killResult.ok || false);
+          agentdesk.db.execute(
+            "INSERT INTO session_termination_events (session_key, dispatch_id, killer_component, reason_code, reason_text, probe_snapshot, tmux_alive) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [sess.session_key, sess.active_dispatch_id || null, "deadlock_policy", "deadlock_timeout",
+             totalMin + "min timeout — " + (redispatched ? "redispatched" : "cancelled"), probeInfo, 0]
+          );
+        } catch (e) { /* fire-and-forget */ }
+
+        // 6) 이력 기록 (legacy)
         agentdesk.db.execute(
           "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
           ["deadlock_history:" + sess.session_key + ":" + Date.now(),

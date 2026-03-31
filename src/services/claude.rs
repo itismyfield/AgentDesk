@@ -1675,6 +1675,14 @@ fn execute_streaming_local_tmux(
             FollowupResult::Delivered => return Ok(()),
             FollowupResult::RecreateSession { error } => {
                 debug_log(&format!("Follow-up failed, recreating session: {}", error));
+                crate::services::termination_audit::record_termination_for_tmux(
+                    tmux_session_name,
+                    None,
+                    "claude_provider",
+                    "followup_failed_recreate",
+                    Some(&format!("followup failed, recreating: {}", error)),
+                    None,
+                );
                 record_tmux_exit_reason(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
@@ -1685,6 +1693,14 @@ fn execute_streaming_local_tmux(
         }
     } else if session_exists {
         debug_log("Stale tmux session found — recreating");
+        crate::services::termination_audit::record_termination_for_tmux(
+            tmux_session_name,
+            None,
+            "claude_provider",
+            "stale_session_recreate",
+            Some("stale local session cleanup before recreate"),
+            None,
+        );
         record_tmux_exit_reason(
             tmux_session_name,
             "stale local session cleanup before recreate",

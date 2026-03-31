@@ -206,6 +206,21 @@ enum Commands {
         /// Optional JSON body
         body: Option<String>,
     },
+    /// List session termination events
+    Terminations {
+        /// Filter by kanban card ID
+        #[arg(long)]
+        card_id: Option<String>,
+        /// Filter by dispatch ID
+        #[arg(long)]
+        dispatch_id: Option<String>,
+        /// Filter by session key
+        #[arg(long)]
+        session: Option<String>,
+        /// Max number of events to show
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
     /// Environment diagnostics
     Doctor {
         /// Apply safe local repairs before running diagnostics
@@ -431,6 +446,19 @@ fn main() -> Result<()> {
             Some(Commands::Api { method, path, body }) => {
                 return exit_for_cli(cli::client::cmd_api(&method, &path, body.as_deref()));
             }
+            Some(Commands::Terminations {
+                card_id,
+                dispatch_id,
+                session,
+                limit,
+            }) => {
+                return exit_for_cli(cli::client::cmd_terminations(
+                    card_id.as_deref(),
+                    dispatch_id.as_deref(),
+                    session.as_deref(),
+                    limit,
+                ));
+            }
             Some(Commands::Doctor { fix, json }) => {
                 return if json {
                     exit_for_json_cli(cli::doctor::cmd_doctor(fix, json))
@@ -471,6 +499,7 @@ fn main() -> Result<()> {
 
         let config = config::load().context("Failed to load config")?;
         let db = db::init(&config).context("Failed to init DB")?;
+        services::termination_audit::init_audit_db(db.clone());
 
         // Load data-driven pipeline definition (#106)
         let pipeline_path = config.policies.dir.join("default-pipeline.yaml");
