@@ -327,8 +327,27 @@ var autoQueue = {
       ")",
       []
     );
+
+    // #214: Exclude dispatch_ids that are still in pendingIntents (not yet drained to DB).
+    // dispatch.create() pushes a CreateDispatch intent but DB INSERT happens after hook completes.
+    // Without this filter, path 2 would immediately reset entries created by path 1 in the same tick.
+    var pendingDispatchIds = {};
+    if (agentdesk.__pendingIntents) {
+      for (var pi = 0; pi < agentdesk.__pendingIntents.length; pi++) {
+        var intent = agentdesk.__pendingIntents[pi];
+        if (intent.type === "create_dispatch" && intent.dispatch_id) {
+          pendingDispatchIds[intent.dispatch_id] = true;
+        }
+      }
+    }
+
     for (var j = 0; j < stuckDispatched.length; j++) {
       var stuck = stuckDispatched[j];
+      // Skip entries whose dispatch is still pending in intent queue
+      if (stuck.dispatch_id && pendingDispatchIds[stuck.dispatch_id]) {
+        agentdesk.log.info("[auto-queue] onTick1min: skipping stuck check for entry " + stuck.id + " — dispatch " + stuck.dispatch_id + " is pending in intent queue");
+        continue;
+      }
       agentdesk.log.info("[auto-queue] onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + (stuck.dispatch_id || "NULL") + " is orphan/cancelled/failed/phantom)");
       agentdesk.db.execute(
         "UPDATE auto_queue_entries SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL WHERE id = ?",
