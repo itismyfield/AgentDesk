@@ -154,6 +154,16 @@ async fn reset_session_for_auto_retry(
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
         eprintln!("  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})");
+        crate::services::termination_audit::record_termination_for_tmux(
+            &name,
+            None,
+            "turn_bridge",
+            "auto_retry_fresh_session",
+            Some(&format!(
+                "forcing fresh session before auto-retry: {reason}"
+            )),
+            None,
+        );
         record_tmux_exit_reason(
             &name,
             &format!("forcing fresh session before auto-retry: {reason}"),
@@ -282,6 +292,14 @@ pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, 
                             })
                             .unwrap_or(false);
                     if !is_unified {
+                        crate::services::termination_audit::record_termination_for_tmux(
+                            &name,
+                            None,
+                            "turn_bridge",
+                            "explicit_cancel",
+                            Some(&format!("explicit cleanup via {reason}")),
+                            None,
+                        );
                         record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
                         crate::services::platform::tmux::kill_session(&name);
                     }
@@ -2227,8 +2245,9 @@ mod tests {
     }
 
     #[test]
-    fn persisted_context_tokens_counts_input_and_output() {
-        assert_eq!(persisted_context_tokens(610_000, 90_000), Some(700_000));
+    fn persisted_context_tokens_uses_input_only() {
+        // input_tokens represents full context window occupancy; output is excluded
+        assert_eq!(persisted_context_tokens(610_000, 90_000), Some(610_000));
         assert_eq!(persisted_context_tokens(0, 0), None);
     }
 
