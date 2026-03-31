@@ -119,7 +119,7 @@ pub(super) async fn handle_event(
                 }
 
                 // Check if this arrival is from a thread context
-                let is_thread_context = resolve_thread_parent(ctx, new_message.channel_id)
+                let is_thread_context = resolve_thread_parent(&ctx.http, new_message.channel_id)
                     .await
                     .is_some();
 
@@ -203,16 +203,14 @@ pub(super) async fn handle_event(
             let is_dm = new_message.guild_id.is_none();
             let (channel_name, _) = resolve_channel_category(ctx, channel_id).await;
             // For threads, inherit role binding from the parent channel
-            let (effective_channel_id, effective_channel_name) = if let Some((
-                parent_id,
-                parent_name,
-            )) =
-                resolve_thread_parent(ctx, channel_id).await
-            {
-                (parent_id, parent_name.or_else(|| channel_name.clone()))
-            } else {
-                (channel_id, channel_name.clone())
-            };
+            let (effective_channel_id, effective_channel_name) =
+                if let Some((parent_id, parent_name)) =
+                    resolve_thread_parent(&ctx.http, channel_id).await
+                {
+                    (parent_id, parent_name.or_else(|| channel_name.clone()))
+                } else {
+                    (channel_id, channel_name.clone())
+                };
             let settings_snapshot = { data.shared.settings.read().await.clone() };
             if validate_bot_channel_routing(
                 &settings_snapshot,
@@ -779,7 +777,7 @@ pub(super) async fn handle_text_message(
             // Fallback: if this is a thread, try resolving workspace from parent channel
             if workspace.is_none() {
                 if let Some((parent_id, parent_name)) =
-                    super::resolve_thread_parent(ctx, channel_id).await
+                    super::resolve_thread_parent(&ctx.http, channel_id).await
                 {
                     // Use parent name from Discord API first, fall back to session map
                     let parent_ch_name = parent_name.or_else(|| {
@@ -908,7 +906,7 @@ pub(super) async fn handle_text_message(
     // Skip if already inside a thread (threads cannot nest).
     // Thread reuse: if the card already has an active_thread_id, redirect
     // to the existing thread instead of creating a new one.
-    let is_already_thread = super::resolve_thread_parent(ctx, channel_id)
+    let is_already_thread = super::resolve_thread_parent(&ctx.http, channel_id)
         .await
         .is_some();
     let dispatch_id_for_thread = super::adk_session::parse_dispatch_id(user_text);

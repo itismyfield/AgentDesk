@@ -230,13 +230,17 @@ pub(super) async fn flush_restart_reports(
     for report in reports {
         let channel_id = serenity::ChannelId::new(report.channel_id);
         let settings_snapshot = { shared.settings.read().await.clone() };
+        let is_dm = matches!(
+            channel_id.to_channel(http.as_ref()).await,
+            Ok(serenity::model::channel::Channel::Private(_))
+        );
 
         if let Err(reason) = validate_bot_channel_routing(
             &settings_snapshot,
             provider,
             channel_id,
             report.channel_name.as_deref(),
-            false,
+            is_dm,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             match reason {

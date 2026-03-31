@@ -478,11 +478,20 @@ pub(super) async fn restore_inflight_turns(
                             .map(|(_, ch)| ch)
                     })
                 });
+                // Resolve thread parent so validation uses the same semantics
+                // as normal message routing (router.rs).
+                let (eff_id, eff_name) = if let Some((pid, pname)) =
+                    super::resolve_thread_parent(http, channel_id).await
+                {
+                    (pid, pname.or(effective_channel_name.clone()))
+                } else {
+                    (channel_id, effective_channel_name.clone())
+                };
                 if let Err(reason) = validate_bot_channel_routing(
                     &settings_snapshot,
                     provider,
-                    channel_id,
-                    effective_channel_name.as_deref(),
+                    eff_id,
+                    eff_name.as_deref(),
                     is_dm,
                 ) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -628,11 +637,19 @@ pub(super) async fn restore_inflight_turns(
                     .map(|(_, ch)| ch)
             })
         });
+        // Resolve thread parent so validation uses the same semantics
+        // as normal message routing (router.rs).
+        let (eff_id, eff_name) =
+            if let Some((pid, pname)) = super::resolve_thread_parent(http, channel_id).await {
+                (pid, pname.or(channel_name.clone()))
+            } else {
+                (channel_id, channel_name.clone())
+            };
         if let Err(reason) = validate_bot_channel_routing(
             &settings_snapshot,
             provider,
-            channel_id,
-            channel_name.as_deref(),
+            eff_id,
+            eff_name.as_deref(),
             is_dm,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
