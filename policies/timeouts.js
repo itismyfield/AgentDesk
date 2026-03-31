@@ -592,9 +592,11 @@ var timeouts = {
 
     // Fix stale working sessions: if status=working but no inflight file exists,
     // the turn has ended but DB wasn't updated. Fix to idle.
+    // #219: Increased grace period from 3min to 10min — agents running long tool
+    // calls (cargo build, subagents) may not send heartbeats for several minutes.
     var staleWorkingSessions = agentdesk.db.query(
       "SELECT session_key FROM sessions WHERE status = 'working' " +
-      "AND last_heartbeat < datetime('now', '-3 minutes')"
+      "AND last_heartbeat < datetime('now', '-10 minutes')"
     );
     for (var sw = 0; sw < staleWorkingSessions.length; sw++) {
       var swKey = staleWorkingSessions[sw].session_key;
@@ -605,6 +607,21 @@ var timeouts = {
         var checkOut = agentdesk.exec("tmux", JSON.stringify(["list-panes", "-t", tmuxName, "-F", "#{pane_current_command}"]));
         tmuxAlive = checkOut && checkOut.indexOf("agentdesk") !== -1;
       } catch(e) { tmuxAlive = false; }
+      // #219: Also check tmux output file activity — if output was modified recently,
+      // the session is alive even without heartbeat updates
+      if (!tmuxAlive) {
+        try {
+          var outputPath = "/tmp/adk-output-" + tmuxName + ".txt";
+          var stat = agentdesk.exec("stat", JSON.stringify(["-f", "%m", outputPath]));
+          if (stat) {
+            var mtime = parseInt(stat.trim(), 10);
+            var now = Math.floor(Date.now() / 1000);
+            if (now - mtime < 300) { // output modified within 5 minutes
+              tmuxAlive = true;
+            }
+          }
+        } catch(e2) { /* stat failed — file may not exist */ }
+      }
       if (!tmuxAlive) {
         agentdesk.db.execute(
           "UPDATE sessions SET status = 'idle' WHERE session_key = ? AND status = 'working'",
