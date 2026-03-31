@@ -256,6 +256,7 @@ pub(super) async fn tmux_output_watcher(
 
     let mut current_offset = initial_offset;
     let mut prompt_too_long_killed = false;
+    let mut turn_result_relayed = false;
     // Guard against duplicate relay: track the offset from which the last relay was sent.
     // If the outer loop circles back and current_offset hasn't advanced past this point,
     // the relay is suppressed.
@@ -329,7 +330,7 @@ pub(super) async fn tmux_output_watcher(
             } else {
                 println!("  [{ts}] 👁 tmux session {tmux_session_name} ended, watcher stopping");
             }
-            if !prompt_too_long_killed {
+            if !prompt_too_long_killed && !turn_result_relayed {
                 // Suppress warning for normal dispatch completion — not an error
                 let is_normal_completion = read_tmux_exit_reason(&tmux_session_name)
                     .map(|r| r.contains("dispatch turn completed"))
@@ -839,6 +840,83 @@ pub(super) async fn tmux_output_watcher(
                 let user_msg_id = serenity::MessageId::new(state.user_msg_id);
                 super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
                 super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
+
+                // Finalize implementation/rework dispatches only — review
+                // dispatches require the verdict flow (review_verdict.rs).
+                let mut dispatch_ok = true;
+                if let Some(did) = super::adk_session::parse_dispatch_id(&state.user_text) {
+                    let dispatch_type = shared.db.as_ref().and_then(|db| {
+                        db.separate_conn().ok().and_then(|conn| {
+                            conn.query_row(
+                                "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
+                                [did.as_str()],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .ok()
+                        })
+                    });
+
+                    match dispatch_type.as_deref() {
+                        Some("implementation") | Some("rework") => {
+                            dispatch_ok = false;
+                            if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+                                match crate::dispatch::finalize_dispatch(
+                                    db,
+                                    engine,
+                                    &did,
+                                    "watcher_completed",
+                                    None,
+                                ) {
+                                    Ok(_) => {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        println!(
+                                            "  [{ts}] ✓ watcher: completed dispatch {did} via finalize_dispatch"
+                                        );
+                                        crate::server::routes::dispatches::queue_dispatch_followup(
+                                            db, &did,
+                                        );
+                                        dispatch_ok = true;
+                                    }
+                                    Err(e) => {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        eprintln!(
+                                            "  [{ts}] ⚠ watcher: finalize_dispatch failed for {did}: {e}"
+                                        );
+                                        dispatch_ok =
+                                            super::turn_bridge::runtime_db_fallback_complete(
+                                                &did,
+                                                "watcher_db_fallback",
+                                            );
+                                    }
+                                }
+                            } else {
+                                dispatch_ok = super::turn_bridge::runtime_db_fallback_complete(
+                                    &did,
+                                    "watcher_db_fallback",
+                                );
+                            }
+                        }
+                        Some(_) => {
+                            // Non-work dispatches — leave for their own completion flow
+                        }
+                        None => {
+                            // DB unavailable — preserve inflight for retry
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!(
+                                "  [{ts}] ⚠ watcher: cannot determine dispatch type for {did} — preserving state"
+                            );
+                            dispatch_ok = false;
+                        }
+                    }
+                }
+
+                // Response was relayed — prevent duplicate handoff on session death
+                turn_result_relayed = true;
+                // Only clear inflight state if dispatch was completed (or no dispatch).
+                // Preserving state on failure allows the next recovery pass to retry.
+                if dispatch_ok {
+                    super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
+                }
             }
         }
 

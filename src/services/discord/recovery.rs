@@ -726,10 +726,103 @@ pub(super) async fn restore_inflight_turns(
                 shared,
             )
             .await;
-            // Keep the inflight state until the watcher either relays the
-            // final response or triggers watcher-death handoff. Clearing it
-            // here breaks the handoff path if the recovered tmux session dies
-            // before producing a result.
+
+            // Mark user message as completed: ⏳ → ✅
+            let user_msg_id = MessageId::new(state.user_msg_id);
+            super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
+            super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
+
+            // Complete the dispatch if this was an implementation/rework turn.
+            // Review dispatches require the verdict flow (review_verdict.rs)
+            // and must not be generically finalized here.
+            let recovered_dispatch_id = parse_dispatch_id(&state.user_text);
+            let mut dispatch_completed = recovered_dispatch_id.is_none();
+            if let Some(ref did) = recovered_dispatch_id {
+                let dispatch_type = shared.db.as_ref().and_then(|db| {
+                    db.separate_conn().ok().and_then(|conn| {
+                        conn.query_row(
+                            "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
+                            [did.as_str()],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok()
+                    })
+                });
+
+                match dispatch_type.as_deref() {
+                    Some("implementation") | Some("rework") => {
+                        if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+                            for attempt in 1..=3u8 {
+                                match crate::dispatch::finalize_dispatch(
+                                    db,
+                                    engine,
+                                    did,
+                                    "recovery_output_completed",
+                                    None,
+                                ) {
+                                    Ok(_) => {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        println!(
+                                            "  [{ts}] ✓ recovery: completed dispatch {did} via finalize_dispatch"
+                                        );
+                                        crate::server::routes::dispatches::queue_dispatch_followup(
+                                            db, did,
+                                        );
+                                        dispatch_completed = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        eprintln!(
+                                            "  [{ts}] ⚠ recovery: finalize_dispatch failed for {did} (attempt {attempt}/3): {e}"
+                                        );
+                                        if attempt < 3 {
+                                            tokio::time::sleep(std::time::Duration::from_secs(1))
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                            if !dispatch_completed {
+                                dispatch_completed =
+                                    super::turn_bridge::runtime_db_fallback_complete(
+                                        did,
+                                        "recovery_output_db_fallback",
+                                    );
+                            }
+                        } else {
+                            dispatch_completed = super::turn_bridge::runtime_db_fallback_complete(
+                                did,
+                                "recovery_output_db_fallback",
+                            );
+                        }
+                        if !dispatch_completed {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!(
+                                "  [{ts}] ❌ recovery: dispatch {did} completion failed — preserving state for retry"
+                            );
+                        }
+                    }
+                    Some(_) => {
+                        // Non-work dispatches (review, review-decision) need their
+                        // own completion flow — clear inflight but leave dispatch
+                        // status for the appropriate handler (see follow-up #xxx).
+                        dispatch_completed = true;
+                    }
+                    None => {
+                        // DB unavailable — cannot determine dispatch type.
+                        // Preserve inflight state so the next recovery pass can retry.
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!(
+                            "  [{ts}] ⚠ recovery: cannot determine dispatch type for {did} — preserving state"
+                        );
+                    }
+                }
+            }
+
+            if dispatch_completed {
+                clear_inflight_state(provider, state.channel_id);
+            }
             continue;
         }
 
@@ -949,7 +1042,10 @@ pub(super) async fn restore_inflight_turns(
                 }
             }
 
-            clear_inflight_state(provider, state.channel_id);
+            // Keep the inflight state until the watcher either relays the
+            // final response or triggers watcher-death handoff. Clearing it
+            // here breaks the handoff path if the recovered tmux session
+            // dies before producing a result.
             continue;
         }
 
