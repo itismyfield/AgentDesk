@@ -601,30 +601,41 @@ var timeouts = {
     for (var sw = 0; sw < staleWorkingSessions.length; sw++) {
       var swKey = staleWorkingSessions[sw].session_key;
       var tmuxName = (swKey || "").split(":").pop();
-      // Check if tmux session is still alive and has a running process
+      // #219: Check if tmux session exists (not just "agentdesk" process).
+      // Agents running child processes (cargo, node, claude) show those in
+      // pane_current_command, so checking for "agentdesk" misses active sessions.
       var tmuxAlive = false;
       try {
-        var checkOut = agentdesk.exec("tmux", JSON.stringify(["list-panes", "-t", tmuxName, "-F", "#{pane_current_command}"]));
-        tmuxAlive = checkOut && checkOut.indexOf("agentdesk") !== -1;
+        var checkOut = agentdesk.exec("tmux", ["has-session", "-t", tmuxName]);
+        // has-session: success = "" (empty stdout), failure = "ERROR: ..."
+        tmuxAlive = typeof checkOut === "string" && checkOut.indexOf("ERROR") === -1;
       } catch(e) { tmuxAlive = false; }
-      // #219: Also check tmux output file activity — if output was modified recently,
-      // the session is alive even without heartbeat updates
+      // Note: has-session correctly detects all live tmux sessions regardless
+      // of child process. The old pane_current_command check missed sessions
+      // running cargo/node/claude. No output file fallback needed.
       if (!tmuxAlive) {
+        // #219: Fail any pending dispatch before transitioning to idle.
+        // Without this, the dispatch stays "pending" as an orphan and gets
+        // re-delivered or auto-completed, causing the failure loop.
         try {
-          var outputPath = "/tmp/adk-output-" + tmuxName + ".txt";
-          var stat = agentdesk.exec("stat", JSON.stringify(["-f", "%m", outputPath]));
-          if (stat) {
-            var mtime = parseInt(stat.trim(), 10);
-            var now = Math.floor(Date.now() / 1000);
-            if (now - mtime < 300) { // output modified within 5 minutes
-              tmuxAlive = true;
+          var swSessInfo = agentdesk.db.query(
+            "SELECT active_dispatch_id FROM sessions WHERE session_key = ?", [swKey]
+          );
+          if (swSessInfo.length > 0 && swSessInfo[0].active_dispatch_id) {
+            var swDispId = swSessInfo[0].active_dispatch_id;
+            var swDispStatus = agentdesk.db.query(
+              "SELECT status FROM task_dispatches WHERE id = ?", [swDispId]
+            );
+            if (swDispStatus.length > 0 && (swDispStatus[0].status === "pending" || swDispStatus[0].status === "dispatched")) {
+              agentdesk.dispatch.markFailed(swDispId, "Stale working session recovery — no active tmux session after 10min");
+              agentdesk.log.warn("[deadlock] Failed stale dispatch " + swDispId + " for session " + swKey);
             }
           }
-        } catch(e2) { /* stat failed — file may not exist */ }
-      }
-      if (!tmuxAlive) {
+        } catch(dispErr) {
+          agentdesk.log.warn("[deadlock] Failed to mark dispatch for " + swKey + ": " + dispErr);
+        }
         agentdesk.db.execute(
-          "UPDATE sessions SET status = 'idle' WHERE session_key = ? AND status = 'working'",
+          "UPDATE sessions SET status = 'idle', active_dispatch_id = NULL WHERE session_key = ? AND status = 'working'",
           [swKey]
         );
         agentdesk.log.info("[deadlock] Fixed stale working session → idle: " + swKey);
