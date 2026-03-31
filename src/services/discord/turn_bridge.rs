@@ -1359,6 +1359,28 @@ pub(super) fn spawn_turn_bridge(
                         crate::services::platform::tmux::send_keys(&name, &["/compact", "Enter"])
                     })
                     .await;
+                    // Notify agent channel via notify bot
+                    {
+                        let api_port = shared_owned.api_port;
+                        let ch = channel_id.get();
+                        let msg = format!(
+                            "⚡ 컨텍스트 자동 compact 실행 ({}% — {} tokens)",
+                            pct, total_tokens
+                        );
+                        tokio::spawn(async move {
+                            let url = crate::config::local_api_url(api_port, "/api/send");
+                            let _ = reqwest::Client::new()
+                                .post(&url)
+                                .json(&serde_json::json!({
+                                    "target": format!("channel:{ch}"),
+                                    "content": msg,
+                                    "bot": "notify",
+                                    "source": "system",
+                                }))
+                                .send()
+                                .await;
+                        });
+                    }
                 }
             }
         }
