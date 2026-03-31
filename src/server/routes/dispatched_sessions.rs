@@ -341,7 +341,7 @@ pub async fn hook_session(
            provider = excluded.provider,
            session_info = COALESCE(excluded.session_info, sessions.session_info),
            model = COALESCE(excluded.model, sessions.model),
-           tokens = CASE WHEN excluded.tokens > 0 THEN excluded.tokens ELSE sessions.tokens END,
+           tokens = excluded.tokens,
            cwd = COALESCE(excluded.cwd, sessions.cwd),
            active_dispatch_id = CASE
              WHEN excluded.status IN ('idle', 'disconnected') THEN NULL
