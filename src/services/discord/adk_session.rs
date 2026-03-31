@@ -25,6 +25,30 @@ pub(super) fn parse_dispatch_id(text: &str) -> Option<String> {
     Some(id.to_string())
 }
 
+/// #222: Look up a pending implementation/rework dispatch for a thread channel
+/// via the ADK API. Used as fallback when parse_dispatch_id fails (unified threads
+/// where user_text doesn't contain DISPATCH: prefix).
+pub(super) async fn lookup_pending_dispatch_for_thread(
+    api_port: u16,
+    thread_channel_id: u64,
+) -> Option<String> {
+    let url = local_api_url(
+        api_port,
+        &format!(
+            "/api/internal/pending-dispatch-for-thread?thread_id={}",
+            thread_channel_id
+        ),
+    );
+    let resp = reqwest::Client::new().get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    body.get("dispatch_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 pub(super) async fn build_adk_session_key(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,

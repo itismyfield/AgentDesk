@@ -1520,7 +1520,19 @@ pub(super) async fn handle_text_message(
         channel_name.as_deref(),
         Some(&current_path),
     );
-    let dispatch_id = parse_dispatch_id(user_text);
+    // #222: Text-based dispatch_id first, DB-based thread lookup as fallback.
+    // In unified threads, user_text may not contain DISPATCH: prefix because
+    // multiple dispatches share the same thread sequentially.
+    let dispatch_id = match super::adk_session::parse_dispatch_id(user_text) {
+        Some(id) => Some(id),
+        None => {
+            super::adk_session::lookup_pending_dispatch_for_thread(
+                shared.api_port,
+                channel_id.get(),
+            )
+            .await
+        }
+    };
     post_adk_session_status(
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),

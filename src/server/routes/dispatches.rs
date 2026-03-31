@@ -2458,6 +2458,78 @@ pub(crate) async fn dispatch_outbox_loop(db: crate::db::Db) {
     }
 }
 
+/// GET /api/internal/pending-dispatch-for-thread?thread_id=xxx
+///
+/// #222: Look up a pending implementation/rework dispatch whose kanban card
+/// is linked to the given thread channel. Used by turn_bridge as fallback
+/// when parse_dispatch_id(user_text) fails in unified threads.
+pub async fn get_pending_dispatch_for_thread(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let thread_id = match params.get("thread_id") {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "thread_id required"})),
+            );
+        }
+    };
+
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    // Find a pending dispatch whose card is linked to this thread via
+    // channel_thread_map (JSON contains the thread_id) or active_thread_id.
+    let dispatch_id: Option<String> = conn
+        .query_row(
+            "SELECT td.id FROM task_dispatches td \
+             JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
+             WHERE td.status IN ('pending', 'dispatched') \
+             AND td.dispatch_type IN ('implementation', 'rework') \
+             AND (kc.active_thread_id = ?1 \
+                  OR INSTR(COALESCE(kc.channel_thread_map, ''), ?1) > 0) \
+             ORDER BY td.created_at DESC LIMIT 1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    // Fallback: check unified_thread_id / unified_thread_channel_id in auto_queue_runs
+    let dispatch_id = dispatch_id.or_else(|| {
+        conn.query_row(
+            "SELECT td.id FROM task_dispatches td \
+             JOIN auto_queue_entries e ON e.kanban_card_id = td.kanban_card_id \
+             JOIN auto_queue_runs r ON r.id = e.run_id \
+             WHERE td.status IN ('pending', 'dispatched') \
+             AND td.dispatch_type IN ('implementation', 'rework') \
+             AND r.unified_thread = 1 AND r.status = 'active' \
+             AND (r.unified_thread_channel_id = ?1 \
+                  OR INSTR(COALESCE(r.unified_thread_id, ''), ?1) > 0) \
+             ORDER BY td.created_at DESC LIMIT 1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .ok()
+    });
+
+    match dispatch_id {
+        Some(id) => (StatusCode::OK, Json(json!({"dispatch_id": id}))),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no pending dispatch for thread"})),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -201,6 +201,10 @@ pub fn api_router(
             post(dispatches::link_dispatch_thread),
         )
         .route("/internal/card-thread", get(dispatches::get_card_thread))
+        .route(
+            "/internal/pending-dispatch-for-thread",
+            get(dispatches::get_pending_dispatch_for_thread),
+        )
         // Pipeline stages (legacy path)
         .route(
             "/pipeline-stages",
