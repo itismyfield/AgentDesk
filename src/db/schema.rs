@@ -556,24 +556,10 @@ pub fn seed_builtin_pipeline_stages(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    ensure_pipeline_stage(
-        conn,
-        AGENTDESK_REPO_ID,
-        "dev-deploy",
-        100,
-        Some("review_pass"),
-        Some("self"),
-        Some("no_rs_changes"),
-    )?;
-    ensure_pipeline_stage(
-        conn,
-        AGENTDESK_REPO_ID,
-        "e2e-test",
-        200,
-        None,
-        Some("counter"),
-        Some("no_rs_changes"),
-    )?;
+    // #197: dev-deploy and e2e-test stages disabled until #197 is implemented.
+    // Re-enable when deploy-pipeline.js can handle these stages.
+    // ensure_pipeline_stage(conn, AGENTDESK_REPO_ID, "dev-deploy", 100, Some("review_pass"), Some("self"), Some("no_rs_changes"))?;
+    // ensure_pipeline_stage(conn, AGENTDESK_REPO_ID, "e2e-test", 200, None, Some("counter"), Some("no_rs_changes"))?;
 
     Ok(())
 }
