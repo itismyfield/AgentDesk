@@ -1097,9 +1097,23 @@ pub(super) async fn handle_text_message(
     if !pending_uploads.is_empty() {
         context_chunks.push(pending_uploads.join("\n"));
     }
-    // SAK (Shared Agent Knowledge) is now injected into the system prompt
-    // (see below, after build_system_prompt) for prompt caching benefits.
-    // ReviewLite dispatches still skip it to save tokens.
+    // Load SAK early — Claude gets it in the system prompt (for caching),
+    // non-Claude providers get it as a first-turn user message (no cache benefit).
+    let is_review_lite = matches!(
+        dispatch_type_str.as_deref(),
+        Some("review") | Some("review-decision")
+    );
+    let shared_knowledge_content = if !is_review_lite {
+        load_shared_knowledge()
+    } else {
+        None
+    };
+    // Non-Claude first turn: inject SAK as user context (old behaviour)
+    if !matches!(provider, ProviderKind::Claude) && session_id.is_none() {
+        if let Some(ref knowledge) = shared_knowledge_content {
+            context_chunks.push(knowledge.clone());
+        }
+    }
     if let Some(ref reply_ctx) = reply_context {
         context_chunks.push(reply_ctx.clone());
     }
@@ -1203,7 +1217,14 @@ pub(super) async fn handle_text_message(
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
-    let mut system_prompt_owned = build_system_prompt(
+    // Claude: pass SAK to build_system_prompt for stable cache prefix placement.
+    // Non-Claude: SAK was already pushed to context_chunks above.
+    let sak_for_system = if matches!(provider, ProviderKind::Claude) {
+        shared_knowledge_content.as_deref()
+    } else {
+        None
+    };
+    let system_prompt_owned = build_system_prompt(
         &discord_context,
         &current_path,
         channel_id,
@@ -1214,24 +1235,15 @@ pub(super) async fn handle_text_message(
         reply_to_user_message,
         dispatch_profile,
         dispatch_type_str.as_deref(),
+        sak_for_system,
     );
-
-    // Inject SAK (Shared Agent Knowledge) into system prompt for prompt caching.
-    // SAK changes infrequently (daily memory-merge at most), so placing it in the
-    // system prompt prefix enables Anthropic's automatic prefix caching — cached
-    // tokens are free on Pro/Max subscriptions.
-    // ReviewLite dispatches skip SAK to save tokens (reviewer doesn't need it).
-    if dispatch_profile != DispatchProfile::ReviewLite {
-        if let Some(knowledge) = load_shared_knowledge() {
-            let sak_len = knowledge.len();
-            system_prompt_owned.push_str("\n\n");
-            system_prompt_owned.push_str(&knowledge);
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] 📦 SAK injected into system prompt ({sak_len} chars) for channel {}",
-                channel_id.get()
-            );
-        }
+    if sak_for_system.is_some() {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
+            sak_for_system.unwrap().len(),
+            channel_id.get()
+        );
     }
 
     // Create cancel token — with second check to close the TOCTOU race window.

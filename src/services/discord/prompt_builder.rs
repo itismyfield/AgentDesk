@@ -38,6 +38,7 @@ pub(super) fn build_system_prompt(
     queued_turn: bool,
     profile: DispatchProfile,
     dispatch_type: Option<&str>,
+    shared_knowledge: Option<&str>,
 ) -> String {
     let mut system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
@@ -141,6 +142,13 @@ pub(super) fn build_system_prompt(
             }
         }
 
+        // SAK before LTM: placed here for cache prefix stability — SAK and
+        // everything above it rarely changes, maximising Anthropic prefix cache hits.
+        if let Some(sak) = shared_knowledge {
+            system_prompt_owned.push_str("\n\n");
+            system_prompt_owned.push_str(sak);
+        }
+
         // ReviewLite: skip long-term memory and peer agents to save tokens
         if profile == DispatchProfile::Full {
             if let Some(catalog) = load_longterm_memory_catalog(&binding.role_id) {
@@ -158,6 +166,10 @@ pub(super) fn build_system_prompt(
                 }
             }
         }
+    } else if let Some(sak) = shared_knowledge {
+        // No role binding — still inject SAK (no LTM/peer agents to worry about)
+        system_prompt_owned.push_str("\n\n");
+        system_prompt_owned.push_str(sak);
     }
 
     if queued_turn {
@@ -206,6 +218,7 @@ mod tests {
             false, // queued_turn
             DispatchProfile::Full,
             None, // dispatch_type
+            None, // shared_knowledge
         )
     }
 
@@ -293,6 +306,7 @@ mod tests {
             false,
             DispatchProfile::Full,
             None,
+            None,
         );
         let without_skills = build_system_prompt(
             "ctx",
@@ -305,6 +319,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review"),
+            None,
         );
         assert!(with_skills.contains("Available skills"));
         assert!(!without_skills.contains("Available skills"));
@@ -334,6 +349,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review"),
+            None,
         );
         let decision_prompt = build_system_prompt(
             "ctx",
@@ -346,6 +362,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review-decision"),
+            None,
         );
         // review should NOT contain decision API
         assert!(!review_prompt.contains("/api/review-decision"));
@@ -379,6 +396,7 @@ mod tests {
             Some(&binding),
             false,
             DispatchProfile::Full,
+            None,
             None,
         );
 
