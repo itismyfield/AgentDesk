@@ -517,13 +517,13 @@ pub(crate) trait OutboxNotifier: Send + Sync {
         title: String,
         card_id: String,
         dispatch_id: String,
-    ) -> impl std::future::Future<Output = ()> + Send;
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 
     fn handle_followup(
         &self,
         db: crate::db::Db,
         dispatch_id: String,
-    ) -> impl std::future::Future<Output = ()> + Send;
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
 
 /// Production notifier that calls the real Discord functions.
@@ -537,17 +537,29 @@ impl OutboxNotifier for RealOutboxNotifier {
         title: String,
         card_id: String,
         dispatch_id: String,
-    ) {
-        send_dispatch_to_discord(&db, &agent_id, &title, &card_id, &dispatch_id).await;
+    ) -> Result<(), String> {
+        send_dispatch_to_discord(&db, &agent_id, &title, &card_id, &dispatch_id).await
     }
 
-    async fn handle_followup(&self, db: crate::db::Db, dispatch_id: String) {
-        handle_completed_dispatch_followups(&db, &dispatch_id).await;
+    async fn handle_followup(&self, db: crate::db::Db, dispatch_id: String) -> Result<(), String> {
+        handle_completed_dispatch_followups(&db, &dispatch_id).await
     }
 }
 
+/// Backoff delays for outbox retries: 1m → 5m → 15m → 1h
+const RETRY_BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
+/// Maximum number of retries before marking as permanent failure.
+const MAX_RETRY_COUNT: i32 = 4;
+
 /// Process one batch of pending outbox entries.
 /// Returns the number of entries processed (0 if queue was empty).
+///
+/// Retry/backoff policy (#209):
+/// - On notifier success: mark entry as 'done'
+/// - On notifier failure (retry_count < MAX_RETRY_COUNT): increment retry_count,
+///   set next_attempt_at with exponential backoff, revert to 'pending'
+/// - On max retry exceeded: mark as 'failed' (permanent failure)
+/// - For 'notify' actions: manages dispatch_notified reservation atomically
 pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
     db: &crate::db::Db,
     notifier: &N,
@@ -559,14 +571,18 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
         Option<String>,
         Option<String>,
         Option<String>,
+        i32,
     )> = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return 0,
         };
         let mut stmt = match conn.prepare(
-            "SELECT id, dispatch_id, action, agent_id, card_id, title \
-             FROM dispatch_outbox WHERE status = 'pending' ORDER BY id ASC LIMIT 5",
+            "SELECT id, dispatch_id, action, agent_id, card_id, title, retry_count \
+             FROM dispatch_outbox \
+             WHERE status = 'pending' \
+               AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now')) \
+             ORDER BY id ASC LIMIT 5",
         ) {
             Ok(s) => s,
             Err(_) => return 0,
@@ -579,6 +595,7 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,
+                row.get(6)?,
             ))
         })
         .ok()
@@ -587,7 +604,7 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
     };
 
     let count = pending.len();
-    for (id, dispatch_id, action, agent_id, card_id, title) in pending {
+    for (id, dispatch_id, action, agent_id, card_id, title, retry_count) in pending {
         // Mark as processing
         if let Ok(conn) = db.lock() {
             conn.execute(
@@ -597,31 +614,77 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
             .ok();
         }
 
-        match action.as_str() {
+        let result = match action.as_str() {
             "notify" => {
-                if let (Some(aid), Some(cid), Some(t)) = (agent_id, card_id, title) {
+                if let (Some(aid), Some(cid), Some(t)) =
+                    (agent_id.clone(), card_id.clone(), title.clone())
+                {
+                    // Two-phase delivery guard (reservation + notified marker) is handled
+                    // inside send_dispatch_to_discord, protecting all callers uniformly.
                     notifier
                         .notify_dispatch(db.clone(), aid, t, cid, dispatch_id.clone())
-                        .await;
+                        .await
+                } else {
+                    Err("missing agent_id, card_id, or title for notify action".into())
                 }
             }
             "followup" => {
                 notifier
                     .handle_followup(db.clone(), dispatch_id.clone())
-                    .await;
+                    .await
             }
             other => {
                 tracing::warn!("[dispatch-outbox] Unknown action: {other}");
+                Err(format!("unknown action: {other}"))
             }
-        }
+        };
 
-        // Mark done
-        if let Ok(conn) = db.lock() {
-            conn.execute(
-                "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now') WHERE id = ?1",
-                [id],
-            )
-            .ok();
+        match result {
+            Ok(()) => {
+                // Mark done
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
+                        "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now') WHERE id = ?1",
+                        [id],
+                    )
+                    .ok();
+                }
+            }
+            Err(err) => {
+                let new_count = retry_count + 1;
+                if new_count > MAX_RETRY_COUNT {
+                    // Permanent failure — exhausted all 4 retries (1m → 5m → 15m → 1h)
+                    tracing::error!(
+                        "[dispatch-outbox] Permanent failure for entry {id} (dispatch={dispatch_id}, action={action}): {err}"
+                    );
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE dispatch_outbox SET status = 'failed', error = ?1, \
+                             retry_count = ?2, processed_at = datetime('now') WHERE id = ?3",
+                            rusqlite::params![err, new_count, id],
+                        )
+                        .ok();
+                    }
+                } else {
+                    // Schedule retry with backoff (index = new_count - 1, since retry 1 uses BACKOFF[0])
+                    let backoff_idx = (new_count - 1) as usize;
+                    let backoff_secs = RETRY_BACKOFF_SECS.get(backoff_idx).copied().unwrap_or(3600);
+                    tracing::warn!(
+                        "[dispatch-outbox] Retry {new_count}/{MAX_RETRY_COUNT} for entry {id} (dispatch={dispatch_id}, action={action}) \
+                         in {backoff_secs}s: {err}",
+                    );
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE dispatch_outbox SET status = 'pending', error = ?1, \
+                             retry_count = ?2, \
+                             next_attempt_at = datetime('now', '+' || ?3 || ' seconds') \
+                             WHERE id = ?4",
+                            rusqlite::params![err, new_count, backoff_secs, id],
+                        )
+                        .ok();
+                    }
+                }
+            }
         }
     }
     count
@@ -637,30 +700,79 @@ pub(crate) async fn send_dispatch_to_discord(
     title: &str,
     card_id: &str,
     dispatch_id: &str,
-) {
-    // Guard: atomic reservation — exactly one caller wins the INSERT
+) -> Result<(), String> {
+    // Two-phase delivery guard (prevents duplicates across all callers):
+    // 1. Check dispatch_notified (confirmed prior delivery) → skip if present
+    // 2. Claim dispatch_reserving (atomic lock) → skip if another path holds it
+    // 3. Send to Discord
+    // 4. On success: release reserving, commit notified
+    // 5. On failure: release reserving, return Err
+    // Boot recovery clears stale reserving markers on startup.
     {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return Err("db lock failed for delivery guard".into()),
         };
-        let inserted = conn
+        // Already confirmed delivered?
+        let notified = conn
+            .query_row(
+                "SELECT 1 FROM kv_meta WHERE key = ?1",
+                [&format!("dispatch_notified:{dispatch_id}")],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if notified {
+            return Ok(()); // Confirmed prior delivery — idempotent skip
+        }
+        // Atomic reservation claim
+        let claimed = conn
             .execute(
                 "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![format!("dispatch_notified:{dispatch_id}"), dispatch_id],
+                rusqlite::params![format!("dispatch_reserving:{dispatch_id}"), dispatch_id],
             )
-            .unwrap_or(0);
-        if inserted == 0 {
-            // Already reserved by another caller — skip
-            return;
+            .unwrap_or(0)
+            > 0;
+        if !claimed {
+            return Ok(()); // Another path is actively delivering — skip
         }
     }
 
+    // Wrap the actual send so we can always release the reservation
+    let send_result =
+        send_dispatch_to_discord_inner(db, agent_id, title, card_id, dispatch_id).await;
+
+    // Release reservation and commit notified marker on success
+    if let Ok(conn) = db.lock() {
+        conn.execute(
+            "DELETE FROM kv_meta WHERE key = ?1",
+            [&format!("dispatch_reserving:{dispatch_id}")],
+        )
+        .ok();
+        if send_result.is_ok() {
+            conn.execute(
+                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![format!("dispatch_notified:{dispatch_id}"), dispatch_id],
+            )
+            .ok();
+        }
+    }
+
+    send_result
+}
+
+/// Inner function: performs the actual Discord send without reservation logic.
+async fn send_dispatch_to_discord_inner(
+    db: &crate::db::Db,
+    agent_id: &str,
+    title: &str,
+    card_id: &str,
+    dispatch_id: &str,
+) -> Result<(), String> {
     // Determine dispatch type to choose the right channel
     let dispatch_type: Option<String> = {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return Err("db lock failed for dispatch type query".into()),
         };
         conn.query_row(
             "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
@@ -708,7 +820,7 @@ pub(crate) async fn send_dispatch_to_discord(
     let channel_id: Option<String> = {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return Err("db lock failed for channel lookup".into()),
         };
         let col = if use_alt {
             "discord_channel_alt"
@@ -729,7 +841,7 @@ pub(crate) async fn send_dispatch_to_discord(
             tracing::warn!(
                 "[dispatch] No discord_channel_id for agent {agent_id}, skipping message"
             );
-            return;
+            return Err(format!("no discord channel for agent {agent_id}"));
         }
     };
 
@@ -744,7 +856,9 @@ pub(crate) async fn send_dispatch_to_discord(
                     tracing::warn!(
                         "[dispatch] Cannot resolve channel '{channel_id}' for agent {agent_id}"
                     );
-                    return;
+                    return Err(format!(
+                        "cannot resolve channel '{channel_id}' for agent {agent_id}"
+                    ));
                 }
             }
         }
@@ -754,7 +868,7 @@ pub(crate) async fn send_dispatch_to_discord(
     let (issue_url, issue_number): (Option<String>, Option<i64>) = {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return Err("db lock failed for issue lookup".into()),
         };
         conn.query_row(
             "SELECT github_issue_url, github_issue_number FROM kanban_cards WHERE id = ?1",
@@ -772,7 +886,7 @@ pub(crate) async fn send_dispatch_to_discord(
     ) = if use_alt {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return Err("db lock failed for context query".into()),
         };
         let ctx: Option<String> = conn
             .query_row(
@@ -835,7 +949,7 @@ pub(crate) async fn send_dispatch_to_discord(
             tracing::warn!(
                 "[dispatch] No announce bot token (missing credential/announce_bot_token)"
             );
-            return;
+            return Err("no announce bot token".into());
         }
     };
 
@@ -906,7 +1020,7 @@ pub(crate) async fn send_dispatch_to_discord(
     } else {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return Err("db lock failed for thread lookup".into()),
         };
         get_thread_for_channel(&conn, card_id, channel_id_num)
     };
@@ -927,7 +1041,7 @@ pub(crate) async fn send_dispatch_to_discord(
         .await
         {
             if reused {
-                return;
+                return Ok(());
             }
         }
     }
@@ -1080,7 +1194,7 @@ pub(crate) async fn send_dispatch_to_discord(
                 let thread_id = thread_body.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 if !thread_id.is_empty() {
                     // Send dispatch message into the thread BEFORE persisting thread_id.
-                    // If the POST fails, we rollback (don't save thread_id) so that
+                    // If the POST fails, we don't save thread_id so that
                     // [I-0] recovery sends to the channel and future dispatches won't
                     // reuse an empty thread.
                     let thread_msg_url = format!(
@@ -1096,7 +1210,7 @@ pub(crate) async fn send_dispatch_to_discord(
                         .map(|r| r.status().is_success())
                         .unwrap_or(false);
                     if thread_msg_ok {
-                        // Persist thread_id on success (notified marker already set atomically)
+                        // Persist thread_id on success
                         if let Ok(conn) = db.lock() {
                             conn.execute(
                                 "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
@@ -1194,21 +1308,19 @@ pub(crate) async fn send_dispatch_to_discord(
                         tracing::info!(
                             "[dispatch] Created thread {thread_id} and sent dispatch {dispatch_id} to {agent_id}"
                         );
+                        return Ok(());
                     } else {
-                        // Rollback atomic reservation so retry can succeed
-                        if let Ok(conn) = db.lock() {
-                            conn.execute(
-                                "DELETE FROM kv_meta WHERE key = ?1",
-                                [&format!("dispatch_notified:{dispatch_id}")],
-                            )
-                            .ok();
-                        }
                         tracing::warn!(
-                            "[dispatch] Thread message POST failed for dispatch {dispatch_id}, rolled back notified marker"
+                            "[dispatch] Thread message POST failed for dispatch {dispatch_id}"
                         );
+                        return Err(format!(
+                            "thread message POST failed for dispatch {dispatch_id}"
+                        ));
                     }
                 }
             }
+            // thread_body parse failed or thread_id empty
+            return Err("thread created but response parsing failed".into());
         }
         Ok(tr) => {
             // Thread creation failed — fall back to sending directly to the channel
@@ -1228,47 +1340,26 @@ pub(crate) async fn send_dispatch_to_discord(
                 .await
             {
                 Ok(r) if r.status().is_success() => {
-                    // notified marker already set atomically at function entry
                     tracing::info!(
                         "[dispatch] Sent fallback message to {agent_id} (channel {channel_id})"
                     );
+                    return Ok(());
                 }
                 Ok(r) => {
                     let st = r.status();
                     let body = r.text().await.unwrap_or_default();
-                    // Rollback atomic reservation so retry can succeed
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "DELETE FROM kv_meta WHERE key = ?1",
-                            [&format!("dispatch_notified:{dispatch_id}")],
-                        )
-                        .ok();
-                    }
                     tracing::warn!("[dispatch] Discord API error {st}: {body}");
+                    return Err(format!("discord API error {st}: {body}"));
                 }
                 Err(e) => {
-                    // Rollback atomic reservation so retry can succeed
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "DELETE FROM kv_meta WHERE key = ?1",
-                            [&format!("dispatch_notified:{dispatch_id}")],
-                        )
-                        .ok();
-                    }
                     tracing::warn!("[dispatch] Request failed: {e}");
+                    return Err(format!("discord request failed: {e}"));
                 }
             }
         }
         Err(e) => {
-            // Rollback atomic reservation so retry can succeed
-            if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "DELETE FROM kv_meta WHERE key = ?1",
-                    [&format!("dispatch_notified:{dispatch_id}")],
-                )
-                .ok();
-            }
             tracing::warn!("[dispatch] Thread creation request failed: {e}");
+            return Err(format!("thread creation request failed: {e}"));
         }
     }
 }
@@ -1466,12 +1557,12 @@ pub(super) async fn send_review_result_to_primary(
     db: &crate::db::Db,
     card_id: &str,
     verdict: &str,
-) {
+) -> Result<(), String> {
     // Look up card info
     let (agent_id, title, issue_url, channel_id): (String, String, Option<String>, String) = {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return Err("db lock failed for card lookup".into()),
         };
         let result = conn.query_row(
             "SELECT kc.assigned_agent_id, kc.title, kc.github_issue_url, a.discord_channel_id \
@@ -1483,7 +1574,7 @@ pub(super) async fn send_review_result_to_primary(
         );
         match result {
             Ok(r) => r,
-            Err(_) => return,
+            Err(_) => return Err(format!("card {card_id} not found or missing agent")),
         }
     };
 
@@ -1492,13 +1583,13 @@ pub(super) async fn send_review_result_to_primary(
         Ok(n) => n,
         Err(_) => match resolve_channel_alias(&channel_id) {
             Some(n) => n,
-            None => return,
+            None => return Err(format!("cannot resolve channel alias '{channel_id}'")),
         },
     };
 
     let token = match crate::credential::read_bot_token("announce") {
         Some(t) => t,
-        None => return,
+        None => return Err("no announce bot token".into()),
     };
     let client = reqwest::Client::new();
 
@@ -1506,7 +1597,7 @@ pub(super) async fn send_review_result_to_primary(
     let active_thread_id: Option<String> = {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return Err("db lock failed for thread lookup".into()),
         };
         // Try unified thread first: find active auto-queue run for this card
         let unified: Option<String> = conn
@@ -1611,13 +1702,22 @@ pub(super) async fn send_review_result_to_primary(
             "https://discord.com/api/v10/channels/{}/messages",
             target_channel
         );
-        let _ = client
+        match client
             .post(&url)
             .header("Authorization", format!("Bot {}", token))
             .json(&serde_json::json!({"content": message}))
             .send()
-            .await;
-        return;
+            .await
+        {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) => {
+                return Err(format!(
+                    "discord API error {} for pass notification",
+                    r.status()
+                ));
+            }
+            Err(e) => return Err(format!("discord request failed for pass notification: {e}")),
+        }
     }
 
     // For unknown verdict (e.g. session idle auto-completed without verdict submission),
@@ -1636,13 +1736,26 @@ pub(super) async fn send_review_result_to_primary(
             "https://discord.com/api/v10/channels/{}/messages",
             target_channel
         );
-        let _ = client
+        match client
             .post(&url)
             .header("Authorization", format!("Bot {}", token))
             .json(&serde_json::json!({"content": message}))
             .send()
-            .await;
-        return;
+            .await
+        {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) => {
+                return Err(format!(
+                    "discord API error {} for unknown-verdict notification",
+                    r.status()
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "discord request failed for unknown-verdict notification: {e}"
+                ));
+            }
+        }
     }
 
     // #118: If approach-change already created a rework dispatch (review_status = rework_pending),
@@ -1666,7 +1779,7 @@ pub(super) async fn send_review_result_to_primary(
             tracing::info!(
                 "[review-followup] #118 skipping review-decision for {card_id} — approach-change rework already dispatched"
             );
-            return;
+            return Ok(()); // Not an error — intentional skip
         }
     }
 
@@ -1700,7 +1813,9 @@ pub(super) async fn send_review_result_to_primary(
             tracing::warn!(
                 "[review-followup] skipping review-decision dispatch for card {card_id}: {e}"
             );
-            return;
+            return Err(format!(
+                "create_dispatch_core failed for review-decision: {e}"
+            ));
         }
     };
 
@@ -1747,6 +1862,11 @@ pub(super) async fn send_review_result_to_primary(
             tracing::info!(
                 "[review] Sent review-decision to existing thread {target_channel} for {agent_id}"
             );
+            Ok(())
+        } else {
+            Err(format!(
+                "discord send failed for review-decision to thread {target_channel}"
+            ))
         }
     } else {
         let url = format!(
@@ -1773,13 +1893,16 @@ pub(super) async fn send_review_result_to_primary(
                     .ok();
                 }
                 tracing::info!("[review] Sent review result to {agent_id} (channel {channel_id})");
+                Ok(())
             }
             Ok(resp) => {
                 let status = resp.status();
                 tracing::warn!("[review] Discord API error {status}");
+                Err(format!("discord API error {status} for review-decision"))
             }
             Err(e) => {
                 tracing::warn!("[review] Request failed: {e}");
+                Err(format!("discord request failed for review-decision: {e}"))
             }
         }
     }
@@ -1806,11 +1929,14 @@ fn extract_review_verdict(result_json: Option<&str>) -> String {
 
 /// Send Discord notifications for a completed dispatch (review verdicts, etc.).
 /// Callers of `finalize_dispatch` should spawn this after the sync call returns.
-pub(crate) async fn handle_completed_dispatch_followups(db: &crate::db::Db, dispatch_id: &str) {
+pub(crate) async fn handle_completed_dispatch_followups(
+    db: &crate::db::Db,
+    dispatch_id: &str,
+) -> Result<(), String> {
     let info: Option<(String, String, String, String, String, Option<String>)> = {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(_) => return Err("db lock failed for dispatch lookup".into()),
         };
         conn.query_row(
             "SELECT td.dispatch_type, td.status, kc.id, COALESCE(kc.assigned_agent_id, ''), kc.title, td.result \
@@ -1833,10 +1959,10 @@ pub(crate) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
     };
 
     let Some((dispatch_type, status, card_id, _agent_id, _title, result_json)) = info else {
-        return;
+        return Err(format!("dispatch {dispatch_id} not found"));
     };
     if status != "completed" {
-        return;
+        return Ok(()); // Not an error — dispatch not yet completed
     }
 
     if dispatch_type == "review" {
@@ -1851,7 +1977,7 @@ pub(crate) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
         // Only send_review_result_to_primary for explicit verdicts (pass/improve/reject)
         // submitted via the verdict API — these have a real "verdict" field in the result.
         if verdict != "unknown" {
-            send_review_result_to_primary(db, &card_id, &verdict).await;
+            send_review_result_to_primary(db, &card_id, &verdict).await?;
         } else {
             println!(
                 "  [{ts}] ⏭ REVIEW-FOLLOWUP: skipping send_review_result_to_primary (verdict=unknown)"
@@ -1862,25 +1988,21 @@ pub(crate) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
     // Archive thread on dispatch completion — but only if the card is done.
     // When the card has an active lifecycle (not done), keep the thread open for reuse
     // by subsequent dispatches (rework, review-decision, etc.).
-    let card_status: Option<String> = {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+    let card_status: Option<String> = db.lock().ok().and_then(|conn| {
         conn.query_row(
             "SELECT status FROM kanban_cards WHERE id = ?1",
             [&card_id],
             |row| row.get(0),
         )
         .ok()
-    };
+    });
     let should_archive = card_status.as_deref() == Some("done");
 
     if should_archive {
         let thread_id: Option<String> = {
             let conn = match db.lock() {
                 Ok(c) => c,
-                Err(_) => return,
+                Err(_) => return Ok(()), // Best effort — archiving is not critical
             };
             conn.query_row(
                 "SELECT COALESCE(thread_id, json_extract(context, '$.thread_id')) FROM task_dispatches WHERE id = ?1",
@@ -1914,8 +2036,9 @@ pub(crate) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
     // Generic resend removed — dispatch Discord notification is handled by:
     // 1. kanban.rs fire_transition_hooks → onCardTransition → send_dispatch_to_discord
     // 2. timeouts.js [I-0] recovery for unnotified dispatches
-    // 3. send_dispatch_to_discord has a dispatch_notified guard to prevent duplicates
+    // 3. dispatch_notified guard in process_outbox_batch prevents duplicates
     // Previously this generic resend caused 2-3x duplicate messages for every dispatch.
+    Ok(())
 }
 
 /// Resolve a channel name alias (e.g. "adk-cc") to a numeric channel ID

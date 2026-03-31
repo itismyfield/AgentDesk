@@ -525,6 +525,20 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         }
     }
 
+    // #209: Add next_attempt_at column to dispatch_outbox for retry backoff scheduling
+    {
+        let has_next_attempt: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('dispatch_outbox') WHERE name = 'next_attempt_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_next_attempt {
+            conn.execute_batch("ALTER TABLE dispatch_outbox ADD COLUMN next_attempt_at DATETIME;")?;
+        }
+    }
+
     seed_builtin_pipeline_stages(conn)?;
 
     Ok(())
