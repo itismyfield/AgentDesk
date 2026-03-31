@@ -2200,6 +2200,17 @@ pub(crate) fn queue_dispatch_notify(
 /// Replaces `tokio::spawn(handle_completed_dispatch_followups(...))`.
 pub(crate) fn queue_dispatch_followup(db: &crate::db::Db, dispatch_id: &str) {
     if let Ok(conn) = db.separate_conn() {
+        // Dedup: skip if a followup entry already exists for this dispatch
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'followup'",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if exists {
+            return;
+        }
         conn.execute(
             "INSERT INTO dispatch_outbox (dispatch_id, action) VALUES (?1, 'followup')",
             [dispatch_id],
