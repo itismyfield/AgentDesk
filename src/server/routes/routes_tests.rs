@@ -1804,7 +1804,10 @@ async fn auto_queue_enqueue_accepts_backlog_without_creating_dispatch() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(run_status, "active");
+    assert_eq!(
+        run_status, "pending",
+        "enqueue creates run in pending state — requires activate to dispatch"
+    );
     assert_eq!(entry_status, "pending");
 }
 
