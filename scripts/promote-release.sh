@@ -71,22 +71,16 @@ _finalize_detached_helper() {
 
     local content
     if [ "$status" -eq 0 ]; then
-        content="✅ release promote helper finished
-session: ${PROMOTE_HELPER_SESSION:-unknown}
-log: ${PROMOTE_LOG_PATH:-n/a}"
+        content="✅ release promote complete"
     else
-        content="❌ release promote helper failed (exit ${status})
-session: ${PROMOTE_HELPER_SESSION:-unknown}
+        content="❌ release promote failed (exit ${status})
 log: ${PROMOTE_LOG_PATH:-n/a}"
-    fi
-
-    local summary
-    summary=$(_tail_for_summary "$PROMOTE_LOG_PATH")
-    if [ -n "$summary" ]; then
-        content="${content}
-
-최근 로그:
+        local summary
+        summary=$(_tail_for_summary "$PROMOTE_LOG_PATH")
+        if [ -n "$summary" ]; then
+            content="${content}
 ${summary}"
+        fi
     fi
 
     _notify_channel "$content"

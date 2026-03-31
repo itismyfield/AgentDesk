@@ -59,22 +59,16 @@ _finalize_detached_helper() {
 
     local content
     if [ "$status" -eq 0 ]; then
-        content="✅ dev deploy helper finished
-session: ${DEV_DEPLOY_HELPER_SESSION:-unknown}
-log: ${DEV_DEPLOY_LOG_PATH:-n/a}"
+        content="✅ dev deploy complete"
     else
-        content="❌ dev deploy helper failed (exit ${status})
-session: ${DEV_DEPLOY_HELPER_SESSION:-unknown}
+        content="❌ dev deploy failed (exit ${status})
 log: ${DEV_DEPLOY_LOG_PATH:-n/a}"
-    fi
-
-    local summary
-    summary=$(_tail_for_summary "$DEV_DEPLOY_LOG_PATH")
-    if [ -n "$summary" ]; then
-        content="${content}
-
-최근 로그:
+        local summary
+        summary=$(_tail_for_summary "$DEV_DEPLOY_LOG_PATH")
+        if [ -n "$summary" ]; then
+            content="${content}
 ${summary}"
+        fi
     fi
 
     _notify_channel "$content"
