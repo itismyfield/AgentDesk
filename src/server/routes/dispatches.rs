@@ -904,29 +904,45 @@ pub(crate) async fn send_dispatch_to_discord(
         }
     }
 
-    // #145: If unified thread reuse failed, remove this channel from JSON map (dispatch_id path)
+    // #145/#140: If unified thread reuse failed, remove this channel from JSON map (dispatch_id path)
+    // #140: Handle nested parallel format {"group_num": {"channel_id": "thread_id"}}
     if unified_thread_id.is_some() {
         if let Ok(conn) = db.lock() {
-            let existing: String = conn
+            let row_data: Option<(String, i64, i64)> = conn
                 .query_row(
-                    "SELECT COALESCE(unified_thread_id, '{}') FROM auto_queue_runs \
-                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE dispatch_id = ?1) \
-                     AND status IN ('active', 'paused')",
+                    "SELECT COALESCE(r.unified_thread_id, '{}'), COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
+                     FROM auto_queue_runs r \
+                     JOIN auto_queue_entries e ON e.run_id = r.id \
+                     WHERE e.dispatch_id = ?1 AND r.status IN ('active', 'paused')",
                     [dispatch_id],
-                    |row| row.get(0),
-                )
-                .unwrap_or_else(|_| "{}".to_string());
-            if let Ok(mut map) = serde_json::from_str::<serde_json::Value>(&existing) {
-                if let Some(obj) = map.as_object_mut() {
-                    obj.remove(&channel_id_num.to_string());
-                }
-                conn.execute(
-                    "UPDATE auto_queue_runs SET unified_thread_id = ?1 \
-                     WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE dispatch_id = ?2) \
-                     AND status IN ('active', 'paused')",
-                    rusqlite::params![map.to_string(), dispatch_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
                 )
                 .ok();
+            if let Some((existing, thread_group, group_count)) = row_data {
+                if let Ok(mut map) = serde_json::from_str::<serde_json::Value>(&existing) {
+                    let ch_key = channel_id_num.to_string();
+                    if group_count > 1 {
+                        // Parallel: nested format — remove from group sub-map
+                        let group_key = thread_group.to_string();
+                        if let Some(group_map) =
+                            map.get_mut(&group_key).and_then(|v| v.as_object_mut())
+                        {
+                            group_map.remove(&ch_key);
+                        }
+                    } else {
+                        // Non-parallel: flat format
+                        if let Some(obj) = map.as_object_mut() {
+                            obj.remove(&ch_key);
+                        }
+                    }
+                    conn.execute(
+                        "UPDATE auto_queue_runs SET unified_thread_id = ?1 \
+                         WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE dispatch_id = ?2) \
+                         AND status IN ('active', 'paused')",
+                        rusqlite::params![map.to_string(), dispatch_id],
+                    )
+                    .ok();
+                }
             }
         }
         unified_thread_id = None; // Reset local so new thread creation saves to run below

@@ -896,8 +896,9 @@ pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
 /// Check whether a thread channel belongs to an active unified-thread auto-queue run.
 ///
 /// Looks up `auto_queue_runs` by `unified_thread_channel_id` matching the
-/// given Discord channel ID. Returns `true` when a matching active/paused run
-/// still has pending or dispatched entries.
+/// given Discord channel ID. Also searches within `unified_thread_id` JSON
+/// for parallel runs where each group has its own thread (#140).
+/// Returns `true` when a matching active/paused run still has pending or dispatched entries.
 pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
     let root = match crate::cli::agentdesk_runtime_root() {
         Some(r) => r,
@@ -909,7 +910,8 @@ pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
         Err(_) => return false,
     };
     let channel_str = channel_id.to_string();
-    let result: bool = conn
+    // Check scalar unified_thread_channel_id (covers non-parallel and last-written parallel)
+    let scalar_match: bool = conn
         .query_row(
             "SELECT COUNT(*) > 0 \
              FROM auto_queue_entries e \
@@ -922,7 +924,24 @@ pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
             |row| row.get(0),
         )
         .unwrap_or(false);
-    result
+    if scalar_match {
+        return true;
+    }
+    // #140: Also search within unified_thread_id JSON for parallel runs.
+    // Thread IDs stored as quoted string values, so searching for '"thread_id"' is safe.
+    let quoted = format!("\"{}\"", channel_str);
+    conn.query_row(
+        "SELECT COUNT(*) > 0 \
+         FROM auto_queue_entries e \
+         JOIN auto_queue_runs r ON e.run_id = r.id \
+         WHERE r.status IN ('active', 'paused') \
+         AND e.status IN ('pending', 'dispatched') \
+         AND r.unified_thread_id IS NOT NULL \
+         AND INSTR(r.unified_thread_id, ?1) > 0",
+        [&quoted],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
 }
 
 /// Extract thread channel ID from a channel name's `-t{15+digit}` suffix.

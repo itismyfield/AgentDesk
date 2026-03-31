@@ -62,16 +62,40 @@ var autoQueue = {
     );
     if (remaining.length > 0 && remaining[0].cnt === 0) {
       var runInfo = agentdesk.db.query(
-        "SELECT unified_thread_id, unified_thread_channel_id FROM auto_queue_runs WHERE id = ?",
+        "SELECT unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count FROM auto_queue_runs WHERE id = ?",
         [runId]
       );
       if (runInfo.length > 0 && runInfo[0].unified_thread_id) {
-        var channelId = runInfo[0].unified_thread_channel_id;
-        if (channelId) {
-          agentdesk.log.info("[auto-queue] Run " + runId + " complete — requesting tmux cleanup for channel " + channelId);
+        // #140: For parallel runs, send kill signals for ALL group threads
+        var threadIds = [];
+        try {
+          var map = JSON.parse(runInfo[0].unified_thread_id);
+          if (runInfo[0].group_count > 1) {
+            // Nested format: {"group_num": {"channel_id": "thread_id"}}
+            for (var gk in map) {
+              if (typeof map[gk] === "object") {
+                for (var ck in map[gk]) {
+                  threadIds.push(map[gk][ck]);
+                }
+              }
+            }
+          } else {
+            // Flat format: {"channel_id": "thread_id"}
+            for (var ck in map) {
+              threadIds.push(map[ck]);
+            }
+          }
+        } catch (e) { /* ignore parse errors */ }
+        // Fallback: also include scalar unified_thread_channel_id if not already present
+        var scalarId = runInfo[0].unified_thread_channel_id;
+        if (scalarId && threadIds.indexOf(scalarId) === -1) {
+          threadIds.push(scalarId);
+        }
+        for (var ti = 0; ti < threadIds.length; ti++) {
+          agentdesk.log.info("[auto-queue] Run " + runId + " complete — requesting tmux cleanup for thread " + threadIds[ti]);
           agentdesk.db.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-            ["kill_unified_thread:" + channelId, runId]
+            ["kill_unified_thread:" + threadIds[ti], runId]
           );
         }
       }
@@ -186,11 +210,6 @@ var autoQueue = {
       dispatched++;
     }
 
-    // Also dispatch next in same group if not done and agent is free
-    // (This handles the case where the same group has more entries)
-    if (!agentBusy && !groupDone) {
-      dispatchNextEntryInGroup(agentId, runId, doneGroup);
-    }
   },
 
   // ── Periodic recovery: dispatch next entry for idle agents (#110, #140, #179) ──
@@ -318,6 +337,18 @@ var autoQueue = {
 
 // ── Shared dispatch helper (group-aware) (#140) ─────────────────
 function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
+  // #179/#140: Guard — skip if this group already has a dispatched entry.
+  // Prevents onCardTerminal + onTick1min race from creating duplicate dispatches.
+  var alreadyDispatched = agentdesk.db.query(
+    "SELECT e.id FROM auto_queue_entries e " +
+    "WHERE e.run_id = ? AND COALESCE(e.thread_group, 0) = ? AND e.status = 'dispatched' LIMIT 1",
+    [runId, threadGroup]
+  );
+  if (alreadyDispatched.length > 0) {
+    agentdesk.log.info("[auto-queue] Skipping group " + threadGroup + " dispatch — already has dispatched entry " + alreadyDispatched[0].id);
+    return;
+  }
+
   var nextEntry = agentdesk.db.query(
     "SELECT e.id, e.kanban_card_id, kc.title " +
     "FROM auto_queue_entries e " +

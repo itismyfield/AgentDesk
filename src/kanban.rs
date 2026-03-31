@@ -178,11 +178,6 @@ pub fn transition_status_with_opts(
     github_sync_on_transition(db, &effective, card_id, new_status);
     fire_dynamic_hooks(engine, &effective, card_id, &old_status, new_status);
 
-    // Drain intents pushed by hooks (e.g. OnReviewEnter → dispatch.create).
-    // Without this, dispatch_outbox notifications are never queued and the
-    // dispatch sits pending until the 2-min recovery sweep picks it up.
-    drain_hook_side_effects(db, engine);
-
     if effective.is_terminal(new_status) && record_true_negative_if_pass(db, card_id) {
         crate::server::routes::review_verdict::spawn_aggregate_if_needed(db);
     }
