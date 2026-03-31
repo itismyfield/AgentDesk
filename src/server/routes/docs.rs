@@ -499,6 +499,24 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
             "auto-queue",
             "Cancel all active/paused runs",
         ),
+        ep(
+            "POST",
+            "/api/auto-queue/reset",
+            "auto-queue",
+            "Reset auto-queue (delete all runs and entries)",
+        ),
+        ep(
+            "POST",
+            "/api/auto-queue/enqueue",
+            "auto-queue",
+            "Enqueue single issue by number (repo, issue_number, agent_id)",
+        ),
+        ep(
+            "POST",
+            "/api/auto-queue/runs/{id}/order",
+            "auto-queue",
+            "Submit ordered issue list for a pending run (order: [issue_numbers])",
+        ),
         // Analytics
         ep("GET", "/api/streaks", "analytics", "Agent activity streaks"),
         ep(
@@ -531,6 +549,13 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
             "/api/skills-trend",
             "analytics",
             "Skill usage trend by day",
+        ),
+        // Resume
+        ep(
+            "POST",
+            "/api/kanban-cards/{id}/resume",
+            "kanban",
+            "Resume stuck card from current state (accepts issue number or card ID)",
         ),
         // Docs
         ep("GET", "/api/docs", "docs", "API endpoint listing"),
