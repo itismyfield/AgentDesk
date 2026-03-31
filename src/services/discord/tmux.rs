@@ -563,6 +563,14 @@ pub(super) async fn tmux_output_watcher(
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tokio::task::spawn_blocking(move || {
+                    crate::services::termination_audit::record_termination_for_tmux(
+                        &sess,
+                        None,
+                        "tmux_watcher",
+                        "prompt_too_long",
+                        Some("watcher cleanup: prompt too long"),
+                        None,
+                    );
                     record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
                     crate::services::platform::tmux::kill_session(&sess);
                 }),
@@ -597,6 +605,14 @@ pub(super) async fn tmux_output_watcher(
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tokio::task::spawn_blocking(move || {
+                    crate::services::termination_audit::record_termination_for_tmux(
+                        &sess,
+                        None,
+                        "tmux_watcher",
+                        "auth_error",
+                        Some("watcher cleanup: authentication failed"),
+                        None,
+                    );
                     record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
                     crate::services::platform::tmux::kill_session(&sess);
                 }),
@@ -687,6 +703,14 @@ pub(super) async fn tmux_output_watcher(
                     .send()
                     .await;
             }
+            crate::services::termination_audit::record_termination_for_tmux(
+                &tmux_session_name,
+                None,
+                "tmux_watcher",
+                "stale_resume_retry",
+                Some("stale session resume detected — forcing fresh session before auto-retry"),
+                None,
+            );
             record_tmux_exit_reason(
                 &tmux_session_name,
                 "stale session resume detected — forcing fresh session before auto-retry",
@@ -903,6 +927,14 @@ pub(super) async fn tmux_output_watcher(
                         return;
                     }
                 }
+                crate::services::termination_audit::record_termination_for_tmux(
+                    &sess,
+                    None,
+                    "tmux_watcher",
+                    "dead_after_turn",
+                    Some("watcher cleanup: dead session after turn"),
+                    None,
+                );
                 record_tmux_exit_reason(&sess, "watcher cleanup: dead session after turn");
                 crate::services::platform::tmux::kill_session(&sess);
             }
@@ -1558,6 +1590,14 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             // Kill the dead tmux session
             let sess = dc.session_name.clone();
             let _ = tokio::task::spawn_blocking(move || {
+                crate::services::termination_audit::record_termination_for_tmux(
+                    &sess,
+                    None,
+                    "tmux_startup",
+                    "startup_dead_session",
+                    Some("startup cleanup: dead session"),
+                    None,
+                );
                 record_tmux_exit_reason(&sess, "startup cleanup: dead session");
                 crate::services::platform::tmux::kill_session(&sess);
             })

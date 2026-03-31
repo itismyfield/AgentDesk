@@ -2611,21 +2611,38 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     *last_guard = tokio::time::Instant::now();
     drop(last_guard);
 
-    let expired: Vec<ChannelId> = {
+    let expired: Vec<(ChannelId, Option<String>)> = {
         let data = shared.core.lock().await;
         let now = tokio::time::Instant::now();
         data.sessions
             .iter()
             .filter(|(_, s)| now.duration_since(s.last_active) > SESSION_MAX_IDLE)
-            .map(|(ch, _)| *ch)
+            .map(|(ch, s)| (*ch, s.session_id.clone()))
             .collect()
     };
     if expired.is_empty() {
         return;
     }
+    // Collect session_keys for audit before removing from memory
+    let expired_keys: Vec<(ChannelId, String)> = {
+        let hostname = crate::services::platform::hostname_short();
+        let provider = shared.settings.read().await.provider.clone();
+        let data = shared.core.lock().await;
+        expired
+            .iter()
+            .filter_map(|(ch, _)| {
+                data.sessions.get(ch).and_then(|s| {
+                    s.channel_name.as_ref().map(|name| {
+                        let tmux_name = provider.build_tmux_session_name(name);
+                        (*ch, format!("{}:{}", hostname, tmux_name))
+                    })
+                })
+            })
+            .collect()
+    };
     {
         let mut data = shared.core.lock().await;
-        for ch in &expired {
+        for (ch, _) in &expired {
             // Clean up worktree if session had one
             if let Some(session) = data.sessions.get(ch) {
                 if let Some(ref wt) = session.worktree {
@@ -2642,9 +2659,22 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             data.intervention_queue.remove(ch);
         }
     }
-    for ch in &expired {
+    for (ch, _) in &expired {
         shared.api_timestamps.remove(ch);
         shared.tmux_watchers.remove(ch);
+    }
+    // Record termination audit for cleaned-up sessions
+    for (_, session_key) in &expired_keys {
+        crate::services::termination_audit::record_termination(
+            session_key,
+            None,
+            "cleanup",
+            "idle_session_expiry",
+            Some("in-memory session expired due to idle timeout"),
+            None,
+            None,
+            None,
+        );
     }
     println!("  [cleanup] Removed {} idle session(s)", expired.len());
 }

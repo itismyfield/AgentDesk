@@ -775,10 +775,10 @@ pub(super) async fn restore_inflight_turns(
                 state.full_response.clone()
             };
             let stale_text = stale_inflight_message(&best_response);
-            if let Some(diag) = tmux_session_name
+            let death_diag = tmux_session_name
                 .as_deref()
-                .and_then(|name| build_tmux_death_diagnostic(name, output_path.as_deref()))
-            {
+                .and_then(|name| build_tmux_death_diagnostic(name, output_path.as_deref()));
+            if let Some(ref diag) = death_diag {
                 println!(
                     "  [{ts}] ⚠ cannot recover inflight turn for channel {}: tmux session missing (response len: {}, {diag})",
                     state.channel_id,
@@ -799,6 +799,18 @@ pub(super) async fn restore_inflight_turns(
                 shared,
             )
             .await;
+            if let Some(ref sk) = state.session_key {
+                crate::services::termination_audit::record_termination(
+                    sk,
+                    state.dispatch_id.as_deref(),
+                    "recovery",
+                    "restart_session_missing",
+                    Some("tmux session missing after restart"),
+                    death_diag.as_deref(),
+                    Some(state.last_offset),
+                    Some(false),
+                );
+            }
             save_missing_session_handoff(provider, &state, &best_response);
             clear_inflight_state(provider, state.channel_id);
             continue;

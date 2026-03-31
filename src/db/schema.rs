@@ -539,6 +539,25 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         }
     }
 
+    // #212: Session termination audit trail
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_termination_events (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_key     TEXT NOT NULL,
+            dispatch_id     TEXT,
+            killer_component TEXT NOT NULL,
+            reason_code     TEXT NOT NULL,
+            reason_text     TEXT,
+            probe_snapshot  TEXT,
+            last_offset     INTEGER,
+            tmux_alive      INTEGER,
+            created_at      DATETIME DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ste_session_key ON session_termination_events(session_key);
+        CREATE INDEX IF NOT EXISTS idx_ste_dispatch_id ON session_termination_events(dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_ste_created_at ON session_termination_events(created_at);",
+    )?;
+
     seed_builtin_pipeline_stages(conn)?;
 
     Ok(())

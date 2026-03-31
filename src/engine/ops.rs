@@ -1718,6 +1718,14 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 .split_once(':')
                 .map(|(_, name)| name)
                 .unwrap_or(&session_key);
+            crate::services::termination_audit::record_termination_for_tmux(
+                tmux_name,
+                None,
+                "policy_engine",
+                "session_kill_api",
+                Some("force-kill via agentdesk.session.kill()"),
+                None,
+            );
             match crate::services::platform::tmux::kill_session_output(tmux_name) {
                 Ok(out) if out.status.success() => {
                     format!(r#"{{"ok":true,"session":"{}"}}"#, session_key)
