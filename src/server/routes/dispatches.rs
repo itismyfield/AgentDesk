@@ -675,15 +675,28 @@ pub(crate) async fn send_dispatch_to_discord(
     let mut use_alt = use_counter_model_channel(dispatch_type.as_deref());
 
     // #145: Check if this dispatch is in a unified thread auto-queue run (dispatch_id path)
+    // #218: Check unified run by dispatch_id first, then card_id for review/rework
     let is_unified_run: bool = db
         .lock()
         .ok()
         .and_then(|conn| {
+            let by_dispatch: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM auto_queue_runs r \
+                     JOIN auto_queue_entries e ON e.run_id = r.id \
+                     WHERE e.dispatch_id = ?1 AND r.unified_thread = 1 AND r.status = 'active'",
+                    [dispatch_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if by_dispatch {
+                return Some(true);
+            }
             conn.query_row(
                 "SELECT COUNT(*) > 0 FROM auto_queue_runs r \
                  JOIN auto_queue_entries e ON e.run_id = r.id \
-                 WHERE e.dispatch_id = ?1 AND r.unified_thread = 1 AND r.status = 'active'",
-                [dispatch_id],
+                 WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active'",
+                [card_id],
                 |row| row.get(0),
             )
             .ok()
@@ -838,6 +851,8 @@ pub(crate) async fn send_dispatch_to_discord(
     //   unified_thread_id = {"channel_id": "thread_id"}
     let mut unified_thread_id: Option<String> = db.lock().ok().and_then(|conn| {
         // Get both the map JSON and the entry's thread_group + run's group count
+        // #218: Try dispatch_id first, then fall back to card_id for review/rework
+        // dispatches that aren't directly linked to auto_queue_entries.
         let row: Option<(String, i64, i64)> = conn
             .query_row(
                 "SELECT r.unified_thread_id, COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
@@ -848,7 +863,20 @@ pub(crate) async fn send_dispatch_to_discord(
                 [dispatch_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
-            .ok();
+            .ok()
+            .or_else(|| {
+                // #218: Fallback — match by card_id for review/rework dispatches
+                conn.query_row(
+                    "SELECT r.unified_thread_id, COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
+                     FROM auto_queue_runs r \
+                     JOIN auto_queue_entries e ON e.run_id = r.id \
+                     WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
+                     AND r.unified_thread_id IS NOT NULL",
+                    [card_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                )
+                .ok()
+            });
         row.and_then(|(json_str, thread_group, group_count)| {
             if let Ok(map) = serde_json::from_str::<serde_json::Value>(&json_str) {
                 if !map.is_object() {
@@ -1080,7 +1108,8 @@ pub(crate) async fn send_dispatch_to_discord(
                             // Save when: no existing thread for this channel (unified_thread_id is None)
                             // AND this card belongs to a unified run
                             if unified_thread_id.is_none() && is_unified_run {
-                                // #140: Get thread_group and group_count for this entry
+                                // #140/#218: Get thread_group and group_count for this entry
+                                // Try dispatch_id first, fall back to card_id for review/rework
                                 let (entry_group, group_count): (i64, i64) = conn
                                     .query_row(
                                         "SELECT COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
@@ -1090,9 +1119,19 @@ pub(crate) async fn send_dispatch_to_discord(
                                         [dispatch_id],
                                         |row| Ok((row.get(0)?, row.get(1)?)),
                                     )
+                                    .or_else(|_| {
+                                        conn.query_row(
+                                            "SELECT COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
+                                             FROM auto_queue_entries e \
+                                             JOIN auto_queue_runs r ON e.run_id = r.id \
+                                             WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active'",
+                                            [card_id],
+                                            |row| Ok((row.get(0)?, row.get(1)?)),
+                                        )
+                                    })
                                     .unwrap_or((0, 1));
 
-                                // Read existing map
+                                // Read existing map (try dispatch_id then card_id)
                                 let existing: String = conn
                                     .query_row(
                                         "SELECT COALESCE(unified_thread_id, '{}') FROM auto_queue_runs \
@@ -1101,6 +1140,15 @@ pub(crate) async fn send_dispatch_to_discord(
                                         [dispatch_id],
                                         |row| row.get(0),
                                     )
+                                    .or_else(|_| {
+                                        conn.query_row(
+                                            "SELECT COALESCE(r.unified_thread_id, '{}') FROM auto_queue_runs r \
+                                             JOIN auto_queue_entries e ON e.run_id = r.id \
+                                             WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active'",
+                                            [card_id],
+                                            |row| row.get(0),
+                                        )
+                                    })
                                     .unwrap_or_else(|_| "{}".to_string());
 
                                 let mut map: serde_json::Value =
@@ -1123,13 +1171,24 @@ pub(crate) async fn send_dispatch_to_discord(
                                     map[channel_id_num.to_string()] = serde_json::json!(thread_id);
                                 }
 
-                                conn.execute(
+                                // #218: Try dispatch_id first, then card_id for review/rework
+                                let map_str = map.to_string();
+                                let updated = conn.execute(
                                     "UPDATE auto_queue_runs SET unified_thread_id = ?1, unified_thread_channel_id = ?2 \
                                      WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE dispatch_id = ?3) \
                                      AND status IN ('active', 'paused')",
-                                    rusqlite::params![map.to_string(), thread_id, dispatch_id],
+                                    rusqlite::params![map_str, thread_id, dispatch_id],
                                 )
-                                .ok();
+                                .unwrap_or(0);
+                                if updated == 0 {
+                                    conn.execute(
+                                        "UPDATE auto_queue_runs SET unified_thread_id = ?1, unified_thread_channel_id = ?2 \
+                                         WHERE id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?3) \
+                                         AND unified_thread = 1 AND status IN ('active', 'paused')",
+                                        rusqlite::params![map_str, thread_id, card_id],
+                                    )
+                                    .ok();
+                                }
                             }
                         }
                         tracing::info!(
@@ -1443,14 +1502,32 @@ pub(super) async fn send_review_result_to_primary(
     };
     let client = reqwest::Client::new();
 
-    // Look up thread for primary channel (review results go to primary)
-    // channel_id_num (u64) was already resolved above from the alias
+    // #218: Check unified_thread_id first for auto-queue dispatches
     let active_thread_id: Option<String> = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
         };
-        get_thread_for_channel(&conn, card_id, channel_id_num)
+        // Try unified thread first: find active auto-queue run for this card
+        let unified: Option<String> = conn
+            .query_row(
+                "SELECT r.unified_thread_id FROM auto_queue_runs r \
+                 JOIN auto_queue_entries e ON e.run_id = r.id \
+                 WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
+                 AND r.unified_thread_id IS NOT NULL",
+                [card_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|json_str| {
+                let map: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+                let ch_key = channel_id_num.to_string();
+                map.get(&ch_key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
+        // Fall back to card's channel_thread_map
+        unified.or_else(|| get_thread_for_channel(&conn, card_id, channel_id_num))
     };
     // Use resolved numeric channel ID for Discord API calls
     let channel_id = channel_id_num.to_string();
