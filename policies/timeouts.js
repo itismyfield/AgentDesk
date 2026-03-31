@@ -855,9 +855,13 @@ var timeouts = {
       );
       var orphanTitle = (orphanInfo.length > 0) ? orphanInfo[0].title : od.kanban_card_id;
       var orphanAgent = (orphanInfo.length > 0) ? orphanInfo[0].assigned_agent_id : "?";
-      sendNotifyAlert(getPMDChannel(),
-        "🔄 [고아 디스패치 복구] " + orphanAgent + " — " + orphanTitle +
-        "\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → " + kReview + " 전이");
+      var kmCh = getPMDChannel();
+      if (kmCh) {
+        agentdesk.message.queue(kmCh,
+          "🔄 [고아 디스패치 복구] " + orphanAgent + " — " + orphanTitle +
+          "\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → " + kReview + " 전이",
+          "announce", "system");
+      }
     }
   },
 
