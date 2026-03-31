@@ -6,6 +6,8 @@ pub(crate) mod health;
 mod inflight;
 mod meeting;
 mod metrics;
+mod model_catalog;
+mod model_picker_interaction;
 mod org_schema;
 mod prompt_builder;
 mod recovery;
@@ -59,8 +61,8 @@ use restart_report::flush_restart_reports;
 use router::{handle_event, handle_text_message};
 use runtime_store::worktrees_root;
 use settings::{
-    RoleBinding, channel_supports_provider, channel_upload_dir, cleanup_old_uploads,
-    load_bot_settings, resolve_role_binding, save_bot_settings,
+    RoleBinding, bot_settings_allow_channel, channel_supports_provider, channel_upload_dir,
+    cleanup_old_uploads, load_bot_settings, resolve_role_binding, save_bot_settings,
 };
 use shared_memory::load_shared_knowledge;
 #[cfg(unix)]
@@ -119,9 +121,6 @@ pub(super) fn turn_watchdog_timeout() -> Duration {
 static WATCHDOG_DEADLINE_OVERRIDES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<u64, i64>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-/// Maximum watchdog extension: 3 hours from the original turn start.
-const WATCHDOG_MAX_EXTENSION_MS: i64 = 3 * 3600 * 1000;
 
 /// Extend the watchdog deadline for a channel. Returns the new deadline_ms or None if at cap.
 pub fn extend_watchdog_deadline(channel_id: u64, extend_by_secs: u64) -> Option<i64> {
@@ -253,10 +252,15 @@ pub(super) struct Intervention {
 pub(super) struct DiscordBotSettings {
     pub(super) provider: ProviderKind,
     pub(super) allowed_tools: Vec<String>,
+    /// Explicit Discord channel allowlist for this bot token.
+    /// Empty means "no channel restriction".
+    pub(super) allowed_channel_ids: Vec<u64>,
     /// channel_id (string) → last working directory path
     pub(super) last_sessions: std::collections::HashMap<String, String>,
     /// channel_id (string) → last remote profile name
     pub(super) last_remotes: std::collections::HashMap<String, String>,
+    /// channel_id (string) → persisted model override
+    pub(super) channel_model_overrides: std::collections::HashMap<String, String>,
     /// Discord user ID of the registered owner (imprinting auth)
     pub(super) owner_user_id: Option<u64>,
     /// Additional authorized user IDs (added by owner via /adduser)
@@ -273,8 +277,10 @@ impl Default for DiscordBotSettings {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            allowed_channel_ids: Vec::new(),
             last_sessions: std::collections::HashMap::new(),
             last_remotes: std::collections::HashMap::new(),
+            channel_model_overrides: std::collections::HashMap::new(),
             owner_user_id: None,
             allowed_user_ids: Vec::new(),
             allowed_bot_ids: Vec::new(),
@@ -297,6 +303,14 @@ pub(super) struct TmuxWatcherHandle {
     /// Set by turn_bridge when it delivers the response directly (non-handoff path).
     /// Watcher checks this before relay to avoid duplicate messages.
     pub(super) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Clone)]
+pub(super) struct ModelPickerPendingState {
+    pub(super) owner_user_id: UserId,
+    pub(super) target_channel_id: ChannelId,
+    pub(super) pending_model: Option<String>,
+    pub(super) updated_at: Instant,
 }
 
 /// Core state that requires atomic multi-field access (always locked together)
@@ -369,8 +383,14 @@ pub(super) struct SharedData {
     /// ISO 8601 timestamp of the last completed turn (for health reporting).
     pub(super) last_turn_at: std::sync::Mutex<Option<String>>,
     /// Per-channel model override, independent of session lifecycle.
-    /// Takes priority over role-map model. Cleared via `/model default`.
+    /// Takes priority over role-map model. Cleared via the `/model` picker default option.
     pub(super) model_overrides: dashmap::DashMap<ChannelId, String>,
+    /// Channels that must start a fresh provider session on the next turn
+    /// because the effective model override changed.
+    pub(super) model_session_reset_pending: dashmap::DashSet<ChannelId>,
+    /// Per-message staged model picker selection.
+    /// Key: picker message id. Value tracks owner, target channel, and staged model until submit.
+    pub(super) model_picker_pending: dashmap::DashMap<MessageId, ModelPickerPendingState>,
     /// Per-thread role/model override for cross-channel dispatch reuse.
     /// When a review dispatch reuses an implementation thread, this maps
     /// thread_channel_id → alt_channel_id so role_binding and model_for_turn
@@ -1493,6 +1513,17 @@ pub async fn run_bot(
     let provider_for_shutdown = provider.clone();
     let provider_for_error = provider.clone();
 
+    let restored_model_overrides: Vec<(ChannelId, String)> = bot_settings
+        .channel_model_overrides
+        .iter()
+        .filter_map(|(channel_id, model)| {
+            channel_id
+                .parse::<u64>()
+                .ok()
+                .map(|id| (ChannelId::new(id), model.clone()))
+        })
+        .collect();
+
     let shared = Arc::new(SharedData {
         core: Mutex::new(CoreState {
             sessions: HashMap::new(),
@@ -1519,7 +1550,21 @@ pub async fn run_bot(
         dispatch_thread_parents: dashmap::DashMap::new(),
         bot_connected: std::sync::atomic::AtomicBool::new(false),
         last_turn_at: std::sync::Mutex::new(None),
-        model_overrides: dashmap::DashMap::new(),
+        model_overrides: {
+            let map = dashmap::DashMap::new();
+            for (channel_id, model) in &restored_model_overrides {
+                map.insert(*channel_id, model.clone());
+            }
+            map
+        },
+        model_session_reset_pending: {
+            let set = dashmap::DashSet::new();
+            for (channel_id, _) in &restored_model_overrides {
+                set.insert(*channel_id);
+            }
+            set
+        },
+        model_picker_pending: dashmap::DashMap::new(),
         dispatch_role_overrides: dashmap::DashMap::new(),
         last_message_ids: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
@@ -1537,6 +1582,12 @@ pub async fn run_bot(
             "  [{ts}] 🔑 dcserver generation: {}",
             shared.current_generation
         );
+        if !restored_model_overrides.is_empty() {
+            println!(
+                "  [{ts}] 🧩 restored model overrides: {} channel(s)",
+                restored_model_overrides.len()
+            );
+        }
     }
 
     // Register this provider with the health check registry
@@ -1572,6 +1623,28 @@ pub async fn run_bot(
                 commands::cmd_help(),
                 commands::cmd_meeting(),
             ],
+            command_check: Some(|ctx| {
+                Box::pin(async move {
+                    let settings_snapshot = { ctx.data().shared.settings.read().await.clone() };
+                    let allowed = provider_handles_channel(
+                        ctx.serenity_context(),
+                        &ctx.data().provider,
+                        &settings_snapshot,
+                        ctx.channel_id(),
+                    )
+                    .await;
+                    if !allowed {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!(
+                            "  [{ts}] ⏭ CMD-GUARD: skipping /{} in channel {} for provider {}",
+                            ctx.command().name,
+                            ctx.channel_id(),
+                            ctx.data().provider.as_str()
+                        );
+                    }
+                    Ok(allowed)
+                })
+            }),
             event_handler: |ctx, event, _framework, data| Box::pin(handle_event(ctx, event, data)),
             ..Default::default()
         })
@@ -2992,6 +3065,34 @@ pub(super) async fn resolve_channel_category(
         None
     };
     (ch_name, cat_name)
+}
+
+pub(super) async fn provider_handles_channel(
+    ctx: &serenity::prelude::Context,
+    provider: &ProviderKind,
+    settings: &DiscordBotSettings,
+    channel_id: serenity::model::id::ChannelId,
+) -> bool {
+    let is_dm = matches!(
+        channel_id.to_channel(&ctx.http).await,
+        Ok(serenity::model::channel::Channel::Private(_))
+    );
+    let (channel_name, _) = resolve_channel_category(ctx, channel_id).await;
+    let (effective_channel_id, effective_channel_name) =
+        if let Some((parent_id, parent_name)) = resolve_thread_parent(ctx, channel_id).await {
+            (parent_id, parent_name.or(channel_name))
+        } else {
+            (channel_id, channel_name)
+        };
+    let role_binding =
+        resolve_role_binding(effective_channel_id, effective_channel_name.as_deref());
+
+    channel_supports_provider(
+        provider,
+        effective_channel_name.as_deref(),
+        is_dm,
+        role_binding.as_ref(),
+    ) && bot_settings_allow_channel(settings, effective_channel_id, is_dm)
 }
 
 /// If `channel_id` is a Discord thread, return the parent channel ID and name.

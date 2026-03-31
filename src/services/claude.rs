@@ -16,8 +16,6 @@ use crate::services::tmux_diagnostics::{
     record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
     tmux_session_exists, tmux_session_has_live_pane,
 };
-use crate::utils::format::safe_prefix;
-
 /// Cached path to the claude binary.
 /// Once resolved, reused for all subsequent calls.
 static CLAUDE_PATH: OnceLock<Option<String>> = OnceLock::new();
@@ -138,6 +136,7 @@ pub fn kill_child_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct ClaudeResponse {
     pub success: bool,
@@ -280,6 +279,7 @@ pub struct CancelToken {
     pub cancelled: std::sync::atomic::AtomicBool,
     pub child_pid: std::sync::Mutex<Option<u32>>,
     /// SSH cancel flag — set to true to signal remote execution to close the channel
+    #[allow(dead_code)]
     pub ssh_cancel: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// tmux session name for cleanup on cancel
     pub tmux_session: std::sync::Mutex<Option<String>>,
@@ -355,6 +355,7 @@ pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
 ];
 
 /// Execute a command using Claude CLI
+#[allow(dead_code)]
 pub fn execute_command(
     prompt: &str,
     session_id: Option<&str>,
@@ -491,6 +492,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 }
 
 /// Parse Claude CLI JSON output
+#[cfg_attr(not(test), allow(dead_code))]
 fn parse_claude_output(output: &str) -> ClaudeResponse {
     let mut session_id: Option<String> = None;
     let mut response_text = String::new();
@@ -530,6 +532,7 @@ fn parse_claude_output(output: &str) -> ClaudeResponse {
 }
 
 /// Check if Claude CLI is available
+#[allow(dead_code)]
 pub fn is_claude_available() -> bool {
     #[cfg(not(unix))]
     {
@@ -543,6 +546,7 @@ pub fn is_claude_available() -> bool {
 }
 
 /// Check if platform supports AI features
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_ai_supported() -> bool {
     cfg!(unix)
 }
@@ -2501,6 +2505,22 @@ pub(crate) static PROCESS_HANDLES: std::sync::LazyLock<
         std::collections::HashMap<String, crate::services::session_backend::SessionHandle>,
     >,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub fn terminate_local_session(session_name: &str) {
+    if let Some(handle) = PROCESS_HANDLES.lock().unwrap().remove(session_name) {
+        let crate::services::session_backend::SessionHandle::Process { pid, .. } = handle;
+        kill_pid_tree(pid);
+    }
+
+    #[cfg(unix)]
+    if tmux_session_exists(session_name) {
+        record_tmux_exit_reason(session_name, "model change requested fresh session");
+        let exact_target = tmux_exact_target(session_name);
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &exact_target])
+            .status();
+    }
+}
 
 /// Execute Claude inside a tmux session on a remote host via SSH.
 /// NOTE: Remote SSH execution is not available in AgentDesk — always returns Err.

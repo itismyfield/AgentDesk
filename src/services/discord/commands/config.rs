@@ -1,624 +1,434 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use poise::CreateReply;
 use poise::serenity_prelude as serenity;
 
 use super::super::formatting::{canonical_tool_name, risk_badge, send_long_message_ctx, tool_info};
+use super::super::model_catalog::{
+    SOURCE_DISPATCH_ROLE, SOURCE_PROVIDER_DEFAULT, SOURCE_ROLE_MAP, SOURCE_RUNTIME_OVERRIDE,
+    is_default_picker_value,
+};
 use super::super::settings::{resolve_role_binding, save_bot_settings};
 use super::super::{Context, Error, SharedData, check_auth, check_owner};
+use super::model_ui::{
+    build_model_picker_options, build_model_picker_summary_lines, has_pending_model_change,
+};
 use crate::services::provider::ProviderKind;
 
-const MODEL_CLEAR_KEYWORDS: &[&str] = &["default", "none", "clear"];
-const MODEL_INFO_KEYWORDS: &[&str] = &["info"];
-const MODEL_LIST_KEYWORDS: &[&str] = &["list"];
+const MODEL_PICKER_PENDING_TTL: Duration = Duration::from_secs(30 * 60);
 pub(in crate::services::discord) const MODEL_PICKER_CUSTOM_ID: &str = "agentdesk:model-picker";
+pub(in crate::services::discord) const MODEL_SUBMIT_CUSTOM_ID: &str = "agentdesk:model-submit";
 pub(in crate::services::discord) const MODEL_RESET_CUSTOM_ID: &str = "agentdesk:model-reset";
-
-#[derive(Clone, Copy)]
-struct ModelCatalogEntry {
-    value: &'static str,
-    label: &'static str,
-    description: &'static str,
+pub(in crate::services::discord) const MODEL_CANCEL_CUSTOM_ID: &str = "agentdesk:model-cancel";
+const MODEL_PICKER_SUBMIT_LABEL: &str = "저장";
+const MODEL_PICKER_RESET_LABEL: &str = "기본값";
+const MODEL_PICKER_CANCEL_LABEL: &str = "취소";
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::services::discord) enum ModelPickerAction {
+    Select,
+    Submit,
+    Reset,
+    Cancel,
 }
 
-// Curated from current official provider model docs as of 2026-03-27.
-const CLAUDE_MODEL_CATALOG: &[ModelCatalogEntry] = &[
-    ModelCatalogEntry {
-        value: "claude-opus-4-6",
-        label: "Claude Opus 4.6",
-        description: "latest flagship",
-    },
-    ModelCatalogEntry {
-        value: "claude-sonnet-4-6",
-        label: "Claude Sonnet 4.6",
-        description: "latest balanced model",
-    },
-    ModelCatalogEntry {
-        value: "claude-opus-4-5-20251101",
-        label: "Claude Opus 4.5",
-        description: "previous opus generation",
-    },
-    ModelCatalogEntry {
-        value: "claude-sonnet-4-5-20250929",
-        label: "Claude Sonnet 4.5",
-        description: "strong coding and agents",
-    },
-    ModelCatalogEntry {
-        value: "claude-haiku-4-5-20251001",
-        label: "Claude Haiku 4.5",
-        description: "latest fast model",
-    },
-    ModelCatalogEntry {
-        value: "claude-opus-4-1-20250805",
-        label: "Claude Opus 4.1",
-        description: "stable legacy opus",
-    },
-    ModelCatalogEntry {
-        value: "claude-opus-4-0",
-        label: "Claude Opus 4",
-        description: "older opus generation",
-    },
-    ModelCatalogEntry {
-        value: "claude-sonnet-4-0",
-        label: "Claude Sonnet 4",
-        description: "older balanced model",
-    },
-];
-
-const CODEX_MODEL_CATALOG: &[ModelCatalogEntry] = &[
-    ModelCatalogEntry {
-        value: "gpt-5.4",
-        label: "GPT-5.4",
-        description: "latest frontier model",
-    },
-    ModelCatalogEntry {
-        value: "gpt-5.4-pro",
-        label: "GPT-5.4 Pro",
-        description: "highest precision reasoning",
-    },
-    ModelCatalogEntry {
-        value: "gpt-5.4-mini",
-        label: "GPT-5.4 Mini",
-        description: "fast strong mini",
-    },
-    ModelCatalogEntry {
-        value: "gpt-5-mini",
-        label: "GPT-5 Mini",
-        description: "lower-latency general model",
-    },
-    ModelCatalogEntry {
-        value: "gpt-5",
-        label: "GPT-5",
-        description: "previous frontier baseline",
-    },
-    ModelCatalogEntry {
-        value: "gpt-5.3-codex",
-        label: "GPT-5.3 Codex",
-        description: "latest codex-specific model",
-    },
-    ModelCatalogEntry {
-        value: "gpt-5.2-codex",
-        label: "GPT-5.2 Codex",
-        description: "long-horizon coding",
-    },
-    ModelCatalogEntry {
-        value: "gpt-5.1-codex-max",
-        label: "GPT-5.1 Codex Max",
-        description: "best long-running agent",
-    },
-];
-
-const GEMINI_MODEL_CATALOG: &[ModelCatalogEntry] = &[
-    ModelCatalogEntry {
-        value: "gemini-3-flash-preview",
-        label: "Gemini 3 Flash Preview",
-        description: "latest general preview",
-    },
-    ModelCatalogEntry {
-        value: "gemini-2.5-pro",
-        label: "Gemini 2.5 Pro",
-        description: "best stable reasoning",
-    },
-    ModelCatalogEntry {
-        value: "gemini-2.5-flash",
-        label: "Gemini 2.5 Flash",
-        description: "stable fast model",
-    },
-    ModelCatalogEntry {
-        value: "gemini-2.5-flash-preview-09-2025",
-        label: "Gemini 2.5 Flash Preview",
-        description: "latest flash preview",
-    },
-    ModelCatalogEntry {
-        value: "gemini-2.5-flash-lite",
-        label: "Gemini 2.5 Flash-Lite",
-        description: "fastest cheap stable model",
-    },
-    ModelCatalogEntry {
-        value: "gemini-2.5-flash-lite-preview-09-2025",
-        label: "Gemini 2.5 Flash-Lite Preview",
-        description: "latest lite preview",
-    },
-    ModelCatalogEntry {
-        value: "gemini-2.5-flash-native-audio-preview-12-2025",
-        label: "Gemini 2.5 Flash Live",
-        description: "latest live audio model",
-    },
-    ModelCatalogEntry {
-        value: "gemini-flash-latest",
-        label: "Gemini Flash Latest",
-        description: "latest rolling flash alias",
-    },
-];
-
-const CLAUDE_MODEL_ALIASES: &[(&str, &str)] = &[
-    ("opus", "claude-opus-4-6"),
-    ("sonnet", "claude-sonnet-4-6"),
-    ("haiku", "claude-haiku-4-5-20251001"),
-];
-
-const CODEX_MODEL_ALIASES: &[(&str, &str)] = &[
-    ("gpt-5-codex", "gpt-5-codex"),
-    ("o3", "o3"),
-    ("o4-mini", "o4-mini"),
-];
-
-const GEMINI_MODEL_ALIASES: &[(&str, &str)] = &[
-    ("gemini-2.5-pro", "gemini-2.5-pro"),
-    ("gemini-2.5-flash", "gemini-2.5-flash"),
-    ("gemini-2.0-flash", "gemini-2.0-flash"),
-];
-
-pub(in crate::services::discord) fn provider_supports_model_override(
-    provider: &ProviderKind,
+pub(in crate::services::discord) fn same_model_override(
+    current: Option<&str>,
+    next: Option<&str>,
 ) -> bool {
-    matches!(
-        provider,
-        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Gemini
-    )
-}
-
-pub(in crate::services::discord) fn model_hint(provider: &ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Claude => "default + 최신 Claude top 8",
-        ProviderKind::Codex => "default + 최신 Codex top 8",
-        ProviderKind::Gemini => "default + 최신 Gemini top 8",
-        ProviderKind::Unsupported(_) => "모델 이름 또는 default",
+    match (current, next) {
+        (None, None) => true,
+        (Some(lhs), Some(rhs)) => lhs.eq_ignore_ascii_case(rhs),
+        _ => false,
     }
 }
 
-fn known_models(provider: &ProviderKind) -> &'static [ModelCatalogEntry] {
-    match provider {
-        ProviderKind::Claude => CLAUDE_MODEL_CATALOG,
-        ProviderKind::Codex => CODEX_MODEL_CATALOG,
-        ProviderKind::Gemini => GEMINI_MODEL_CATALOG,
-        ProviderKind::Unsupported(_) => &[],
-    }
-}
-
-fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static str)] {
-    match provider {
-        ProviderKind::Claude => CLAUDE_MODEL_ALIASES,
-        ProviderKind::Codex => CODEX_MODEL_ALIASES,
-        ProviderKind::Gemini => GEMINI_MODEL_ALIASES,
-        ProviderKind::Unsupported(_) => &[],
-    }
-}
-
-fn normalize_keyword<'a>(raw: &'a str, keywords: &[&str]) -> Option<&'a str> {
-    let trimmed = raw.trim();
-    if keywords.iter().any(|kw| kw.eq_ignore_ascii_case(trimmed)) {
-        Some(trimmed)
-    } else {
-        None
-    }
-}
-
-pub(in crate::services::discord) fn is_clear_model_keyword(raw: &str) -> bool {
-    normalize_keyword(raw, MODEL_CLEAR_KEYWORDS).is_some()
-}
-
-fn canonical_known_model(provider: &ProviderKind, raw: &str) -> Option<&'static str> {
-    let trimmed = raw.trim();
-    if let Some(entry) = known_models(provider)
-        .iter()
-        .find(|entry| entry.value.eq_ignore_ascii_case(trimmed))
-    {
-        return Some(entry.value);
-    }
-
-    model_aliases(provider)
-        .iter()
-        .find(|(alias, _)| alias.eq_ignore_ascii_case(trimmed))
-        .map(|(_, canonical)| *canonical)
-}
-
-fn looks_like_model_identifier(raw: &str) -> bool {
-    let trimmed = raw.trim();
-    !trimmed.is_empty()
-        && trimmed.len() <= 64
-        && trimmed
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
-}
-
-pub(in crate::services::discord) fn validate_model_input(
-    provider: &ProviderKind,
-    raw: &str,
-) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("Model name cannot be empty.".to_string());
-    }
-
-    if let Some(canonical) = canonical_known_model(provider, trimmed) {
-        return Ok(canonical.to_string());
-    }
-
-    if looks_like_model_identifier(trimmed) {
-        return Ok(trimmed.to_string());
-    }
-
-    Err(format!(
-        "Unrecognized model `{}` for {}.\n{}\nUse `/model list` to see known examples.",
-        trimmed,
-        provider.display_name(),
-        model_hint(provider)
-    ))
-}
-
-fn doctor_guidance_suffix(provider: &ProviderKind) -> String {
-    match provider.probe_runtime() {
-        Some(probe) if probe.binary_path.is_some() && probe.version.is_some() => String::new(),
-        _ => format!(
-            "\nRuntime check: `{}` CLI probe is unavailable. Try `agentdesk doctor` or `agentdesk doctor --json`.",
-            provider.as_str()
-        ),
-    }
-}
-
-fn runtime_probe_detail(provider: &ProviderKind) -> (String, String, String) {
-    match provider.probe_runtime() {
-        Some(probe) => {
-            let binary_path = probe
-                .binary_path
-                .unwrap_or_else(|| "(not found)".to_string());
-            let version = probe
-                .version
-                .unwrap_or_else(|| "(version unavailable)".to_string());
-            let runtime_status = if binary_path == "(not found)" {
-                "missing"
-            } else if version == "(version unavailable)" {
-                "degraded"
-            } else {
-                "ok"
-            };
-            (runtime_status.to_string(), binary_path, version)
-        }
-        None => (
-            "unsupported".to_string(),
-            "(unsupported)".to_string(),
-            "(unsupported)".to_string(),
-        ),
-    }
-}
-
-async fn effective_model_snapshot(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-) -> (Option<String>, Option<String>, String, String, String) {
-    let override_model = shared.model_overrides.get(&channel_id).map(|v| v.clone());
-    let ch_name = {
-        let d = shared.core.lock().await;
-        d.sessions
-            .get(&channel_id)
-            .and_then(|s| s.channel_name.clone())
-    };
-    let role_model = resolve_role_binding(channel_id, ch_name.as_deref()).and_then(|rb| rb.model);
-    let effective = override_model
-        .as_deref()
-        .or(role_model.as_deref())
-        .unwrap_or("(default)")
-        .to_string();
-    let source = if override_model.is_some() {
-        "runtime override"
-    } else if role_model.is_some() {
-        "role-map"
-    } else {
-        "system default"
-    }
-    .to_string();
-    let default_model = role_model
-        .clone()
-        .unwrap_or_else(|| "system default".to_string());
-
-    (override_model, role_model, effective, source, default_model)
-}
-
-pub(in crate::services::discord) async fn build_model_status_message(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) -> String {
-    let (override_model, role_model, effective, source, _) =
-        effective_model_snapshot(shared, channel_id).await;
-
-    format!(
-        "Provider: **{}**\nModel: **{}**\nSource: **{}**\nRuntime override: `{}`\nRole default: `{}`\nApplies: next turn\n{}",
-        provider.display_name(),
-        effective,
-        source,
-        override_model.as_deref().unwrap_or("(none)"),
-        role_model.as_deref().unwrap_or("(none)"),
-        model_hint(provider)
-    )
-}
-
-pub(in crate::services::discord) async fn build_model_info_message(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) -> String {
-    let (override_model, role_model, effective, source, _) =
-        effective_model_snapshot(shared, channel_id).await;
-    let (runtime_status, binary_path, version) = runtime_probe_detail(provider);
-    let mut msg = format!(
-        "Provider: **{}**\nModel: **{}**\nSource: **{}**\nRuntime override: `{}`\nRole default: `{}`\nRuntime CLI: **{}**\nBinary: `{}`\nVersion: `{}`\nApplies: next turn\n{}",
-        provider.display_name(),
-        effective,
-        source,
-        override_model.as_deref().unwrap_or("(none)"),
-        role_model.as_deref().unwrap_or("(none)"),
-        runtime_status,
-        binary_path,
-        version,
-        model_hint(provider)
-    );
-    msg.push_str(&doctor_guidance_suffix(provider));
-    msg
-}
-
-pub(in crate::services::discord) fn build_model_list_message(provider: &ProviderKind) -> String {
-    let examples = known_models(provider);
-    let list = if examples.is_empty() {
-        "(no known examples)".to_string()
-    } else {
-        examples
-            .iter()
-            .map(|entry| format!("- {} — `{}`", entry.label, entry.value))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    format!(
-        "**{} model examples**\n{}\n{}\nUse `/model <name>` to set one for this channel.{}",
-        provider.display_name(),
-        list,
-        model_hint(provider),
-        doctor_guidance_suffix(provider)
-    )
-}
-
-fn build_model_picker_options(
+fn session_reset_required_for_model_change(
     provider: &ProviderKind,
     current_override: Option<&str>,
-) -> Vec<serenity::CreateSelectMenuOption> {
-    let mut options = vec![
-        serenity::CreateSelectMenuOption::new("default", "__default__")
-            .description("use role-map or system default")
-            .default_selection(current_override.is_none()),
-    ];
-
-    for entry in known_models(provider) {
-        let option = serenity::CreateSelectMenuOption::new(entry.label, entry.value)
-            .description(entry.description)
-            .default_selection(
-                current_override.is_some_and(|active| active.eq_ignore_ascii_case(entry.value)),
-            );
-        options.push(option);
+    next_override: Option<&str>,
+) -> bool {
+    if same_model_override(current_override, next_override) {
+        return false;
     }
 
-    options
+    if next_override.is_none() {
+        return !provider.default_model_behavior().resume_without_reset;
+    }
+
+    true
 }
 
-pub(in crate::services::discord) async fn build_model_picker_embed(
+// Source-label constants live in model_catalog; re-export locally for test readability.
+use SOURCE_DISPATCH_ROLE as DISPATCH_ROLE_OVERRIDE_SOURCE;
+use SOURCE_PROVIDER_DEFAULT as PROVIDER_DEFAULT_SOURCE;
+use SOURCE_ROLE_MAP as ROLE_MAP_SOURCE;
+use SOURCE_RUNTIME_OVERRIDE as RUNTIME_OVERRIDE_SOURCE;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::services::discord) struct EffectiveModelSnapshot {
+    pub(in crate::services::discord) override_model: Option<String>,
+    pub(in crate::services::discord) dispatch_role_model: Option<String>,
+    pub(in crate::services::discord) role_model: Option<String>,
+    pub(in crate::services::discord) effective: String,
+    pub(in crate::services::discord) source: &'static str,
+    pub(in crate::services::discord) default_model: String,
+    pub(in crate::services::discord) default_source: &'static str,
+}
+
+fn resolve_effective_model(
+    override_model: Option<&str>,
+    dispatch_role_model: Option<&str>,
+    role_model: Option<&str>,
+) -> (String, &'static str) {
+    if let Some(model) = override_model {
+        (model.to_string(), RUNTIME_OVERRIDE_SOURCE)
+    } else if let Some(model) = dispatch_role_model {
+        (model.to_string(), DISPATCH_ROLE_OVERRIDE_SOURCE)
+    } else if let Some(model) = role_model {
+        (model.to_string(), ROLE_MAP_SOURCE)
+    } else {
+        ("default".to_string(), PROVIDER_DEFAULT_SOURCE)
+    }
+}
+
+fn resolve_default_model(
+    dispatch_role_model: Option<&str>,
+    role_model: Option<&str>,
+) -> (String, &'static str) {
+    if let Some(model) = dispatch_role_model {
+        (model.to_string(), DISPATCH_ROLE_OVERRIDE_SOURCE)
+    } else if let Some(model) = role_model {
+        (model.to_string(), ROLE_MAP_SOURCE)
+    } else {
+        ("default".to_string(), PROVIDER_DEFAULT_SOURCE)
+    }
+}
+
+fn resolve_dispatch_role_model(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    let override_channel = shared
+        .dispatch_role_overrides
+        .get(&channel_id)
+        .map(|value| *value)?;
+    resolve_role_binding(override_channel, None).and_then(|binding| binding.model)
+}
+
+pub(in crate::services::discord) async fn effective_model_snapshot(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> EffectiveModelSnapshot {
+    let override_model = shared
+        .model_overrides
+        .get(&channel_id)
+        .map(|value| value.clone());
+    let dispatch_role_model = resolve_dispatch_role_model(shared, channel_id);
+    let channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let role_model =
+        resolve_role_binding(channel_id, channel_name.as_deref()).and_then(|binding| binding.model);
+    let (effective, source) = resolve_effective_model(
+        override_model.as_deref(),
+        dispatch_role_model.as_deref(),
+        role_model.as_deref(),
+    );
+    let (default_model, default_source) =
+        resolve_default_model(dispatch_role_model.as_deref(), role_model.as_deref());
+
+    EffectiveModelSnapshot {
+        override_model,
+        dispatch_role_model,
+        role_model,
+        effective,
+        source,
+        default_model,
+        default_source,
+    }
+}
+
+fn runtime_model_for_turn(
+    provider: &ProviderKind,
+    effective_model: &str,
+    source: &'static str,
+) -> Option<String> {
+    if source == PROVIDER_DEFAULT_SOURCE && effective_model.eq_ignore_ascii_case("default") {
+        provider
+            .default_model_behavior()
+            .runtime_model
+            .map(ToString::to_string)
+    } else {
+        Some(effective_model.to_string())
+    }
+}
+
+pub(in crate::services::discord) async fn update_channel_model_override(
+    shared: &Arc<SharedData>,
+    token: &str,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+    next_override: Option<String>,
+) -> bool {
+    let current_override = shared
+        .model_overrides
+        .get(&channel_id)
+        .map(|value| value.clone());
+    if same_model_override(current_override.as_deref(), next_override.as_deref()) {
+        return false;
+    }
+
+    let reset_required = session_reset_required_for_model_change(
+        provider,
+        current_override.as_deref(),
+        next_override.as_deref(),
+    );
+
+    match next_override {
+        Some(model) => {
+            shared.model_overrides.insert(channel_id, model.clone());
+            let mut settings = shared.settings.write().await;
+            settings
+                .channel_model_overrides
+                .insert(channel_id.get().to_string(), model);
+            save_bot_settings(token, &settings);
+        }
+        None => {
+            shared.model_overrides.remove(&channel_id);
+            let mut settings = shared.settings.write().await;
+            settings
+                .channel_model_overrides
+                .remove(&channel_id.get().to_string());
+            save_bot_settings(token, &settings);
+        }
+    }
+
+    if reset_required {
+        shared.model_session_reset_pending.insert(channel_id);
+    } else {
+        shared.model_session_reset_pending.remove(&channel_id);
+    }
+
+    true
+}
+
+pub(in crate::services::discord) async fn resolve_model_for_turn(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
     provider: &ProviderKind,
-) -> serenity::CreateEmbed {
-    let (_, _, effective, source, default_model) =
-        effective_model_snapshot(shared, channel_id).await;
-    let mut description = format!(
-        "Provider: **{}** (fixed)\nCurrent model: **{}**\nDefault: **{}**\nSource: **{}**\nApply: next turn\n\nSelect menu changes the server value immediately.",
-        provider.display_name(),
-        effective,
-        default_model,
-        source,
+) -> Option<String> {
+    let snapshot = effective_model_snapshot(shared, channel_id).await;
+    runtime_model_for_turn(provider, &snapshot.effective, snapshot.source)
+}
+
+fn prune_model_picker_pending(shared: &Arc<SharedData>) {
+    let now = Instant::now();
+    let expired: Vec<_> = shared
+        .model_picker_pending
+        .iter()
+        .filter_map(|entry| {
+            if now.duration_since(entry.updated_at) > MODEL_PICKER_PENDING_TTL {
+                Some(*entry.key())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for message_id in expired {
+        shared.model_picker_pending.remove(&message_id);
+    }
+}
+
+pub(in crate::services::discord) fn remember_model_picker_pending(
+    shared: &Arc<SharedData>,
+    message_id: serenity::MessageId,
+    owner_user_id: serenity::UserId,
+    target_channel_id: serenity::ChannelId,
+    pending_model: Option<String>,
+) {
+    prune_model_picker_pending(shared);
+    shared.model_picker_pending.insert(
+        message_id,
+        super::super::ModelPickerPendingState {
+            owner_user_id,
+            target_channel_id,
+            pending_model,
+            updated_at: Instant::now(),
+        },
     );
-    let doctor_hint = doctor_guidance_suffix(provider);
-    if !doctor_hint.is_empty() {
-        description.push_str(&format!("\n{}", doctor_hint.trim()));
+}
+
+pub(in crate::services::discord) fn clear_model_picker_pending(
+    shared: &Arc<SharedData>,
+    message_id: serenity::MessageId,
+) {
+    shared.model_picker_pending.remove(&message_id);
+}
+
+pub(in crate::services::discord) fn model_picker_pending_to_override(
+    pending_model: Option<&str>,
+) -> Option<Option<String>> {
+    match pending_model {
+        None => None,
+        Some(value) if is_default_picker_value(value) => Some(None),
+        Some(value) => Some(Some(value.to_string())),
+    }
+}
+
+fn provider_card_color(provider: &ProviderKind) -> u32 {
+    match provider {
+        ProviderKind::Claude => 0xD97706,
+        ProviderKind::Codex => 0x10B981,
+        ProviderKind::Gemini => 0x3B82F6,
+        ProviderKind::Unsupported(_) => 0x5865F2,
+    }
+}
+
+pub(in crate::services::discord) fn build_model_picker_custom_id(
+    target_channel_id: serenity::ChannelId,
+) -> String {
+    format!("{}:{}", MODEL_PICKER_CUSTOM_ID, target_channel_id.get())
+}
+
+pub(in crate::services::discord) fn build_model_submit_custom_id(
+    target_channel_id: serenity::ChannelId,
+) -> String {
+    format!("{}:{}", MODEL_SUBMIT_CUSTOM_ID, target_channel_id.get())
+}
+
+pub(in crate::services::discord) fn build_model_reset_custom_id(
+    target_channel_id: serenity::ChannelId,
+) -> String {
+    format!("{}:{}", MODEL_RESET_CUSTOM_ID, target_channel_id.get())
+}
+
+pub(in crate::services::discord) fn build_model_cancel_custom_id(
+    target_channel_id: serenity::ChannelId,
+) -> String {
+    format!("{}:{}", MODEL_CANCEL_CUSTOM_ID, target_channel_id.get())
+}
+
+pub(in crate::services::discord) fn parse_model_picker_custom_id(
+    custom_id: &str,
+    fallback_channel_id: serenity::ChannelId,
+) -> Option<(ModelPickerAction, serenity::ChannelId)> {
+    fn parse_target(
+        custom_id: &str,
+        prefix: &str,
+        fallback_channel_id: serenity::ChannelId,
+    ) -> Option<serenity::ChannelId> {
+        if custom_id == prefix {
+            return Some(fallback_channel_id);
+        }
+
+        let raw_id = custom_id.strip_prefix(prefix)?.strip_prefix(':')?;
+        let parsed = raw_id.parse::<u64>().ok()?;
+        Some(serenity::ChannelId::new(parsed))
     }
 
+    parse_target(custom_id, MODEL_PICKER_CUSTOM_ID, fallback_channel_id)
+        .map(|channel_id| (ModelPickerAction::Select, channel_id))
+        .or_else(|| {
+            parse_target(custom_id, MODEL_SUBMIT_CUSTOM_ID, fallback_channel_id)
+                .map(|channel_id| (ModelPickerAction::Submit, channel_id))
+        })
+        .or_else(|| {
+            parse_target(custom_id, MODEL_RESET_CUSTOM_ID, fallback_channel_id)
+                .map(|channel_id| (ModelPickerAction::Reset, channel_id))
+        })
+        .or_else(|| {
+            parse_target(custom_id, MODEL_CANCEL_CUSTOM_ID, fallback_channel_id)
+                .map(|channel_id| (ModelPickerAction::Cancel, channel_id))
+        })
+}
+
+pub(in crate::services::discord) fn build_model_picker_embed_from_snapshot(
+    snapshot: &EffectiveModelSnapshot,
+    provider: &ProviderKind,
+    pending_model: Option<&str>,
+    notice: Option<&str>,
+) -> serenity::CreateEmbed {
+    let lines = build_model_picker_summary_lines(
+        provider,
+        &snapshot.effective,
+        pending_model,
+        snapshot.override_model.as_deref(),
+        notice,
+    );
     serenity::CreateEmbed::new()
         .title("Model Picker")
-        .description(description)
-        .color(0x5865F2)
+        .description(lines.join("\n"))
+        .color(provider_card_color(provider))
 }
 
-pub(in crate::services::discord) async fn build_model_picker_components(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
+pub(in crate::services::discord) fn build_model_picker_action_rows(
+    target_channel_id: serenity::ChannelId,
     provider: &ProviderKind,
+    pending_model: Option<&str>,
+    override_model: Option<&str>,
+    default_model: &str,
+    default_source: &'static str,
 ) -> Vec<serenity::CreateActionRow> {
-    let (override_model, _, _, _, _) = effective_model_snapshot(shared, channel_id).await;
     let menu = serenity::CreateSelectMenu::new(
-        MODEL_PICKER_CUSTOM_ID,
+        build_model_picker_custom_id(target_channel_id),
         serenity::CreateSelectMenuKind::String {
-            options: build_model_picker_options(provider, override_model.as_deref()),
+            options: build_model_picker_options(
+                provider,
+                pending_model,
+                override_model,
+                default_model,
+                default_source,
+            ),
         },
     )
-    .placeholder("Select a model override")
+    .placeholder("모델 선택")
     .min_values(1)
     .max_values(1);
 
-    let reset_button = serenity::CreateButton::new(MODEL_RESET_CUSTOM_ID)
-        .label("Reset to default")
+    let can_submit = has_pending_model_change(pending_model, override_model);
+
+    let submit_button =
+        serenity::CreateButton::new(build_model_submit_custom_id(target_channel_id))
+            .label(MODEL_PICKER_SUBMIT_LABEL)
+            .style(serenity::ButtonStyle::Primary)
+            .disabled(!can_submit);
+
+    let can_reset = override_model.is_some()
+        || pending_model.is_some_and(|pending| !is_default_picker_value(pending));
+    let reset_button = serenity::CreateButton::new(build_model_reset_custom_id(target_channel_id))
+        .label(MODEL_PICKER_RESET_LABEL)
         .style(serenity::ButtonStyle::Secondary)
-        .disabled(override_model.is_none());
+        .disabled(!can_reset);
+
+    let cancel_button =
+        serenity::CreateButton::new(build_model_cancel_custom_id(target_channel_id))
+            .label(MODEL_PICKER_CANCEL_LABEL)
+            .style(serenity::ButtonStyle::Danger);
 
     vec![
         serenity::CreateActionRow::SelectMenu(menu),
-        serenity::CreateActionRow::Buttons(vec![reset_button]),
+        serenity::CreateActionRow::Buttons(vec![submit_button, reset_button, cancel_button]),
     ]
 }
 
-async fn autocomplete_model<'a>(
-    ctx: Context<'a>,
-    partial: &'a str,
-) -> Vec<serenity::AutocompleteChoice> {
-    let mut choices = Vec::new();
-    let partial_lower = partial.to_ascii_lowercase();
-    let provider = &ctx.data().provider;
-
-    for keyword in ["info", "list", "default"] {
-        if partial.is_empty() || keyword.contains(&partial_lower) {
-            let label = format!(
-                "{} — {}",
-                keyword,
-                match keyword {
-                    "info" => "show provider, model, and source",
-                    "list" => "show known model examples",
-                    "default" => "clear runtime override",
-                    _ => "",
-                }
-            );
-            choices.push(serenity::AutocompleteChoice::new(
-                label,
-                keyword.to_string(),
-            ));
-        }
-    }
-
-    for entry in known_models(provider) {
-        if choices.len() >= 25 {
-            break;
-        }
-        let searchable = format!(
-            "{} {} {}",
-            entry.label.to_ascii_lowercase(),
-            entry.value.to_ascii_lowercase(),
-            entry.description.to_ascii_lowercase()
-        );
-        if partial.is_empty() || searchable.contains(&partial_lower) {
-            let label = format!("{} — {}", entry.label, entry.description);
-            choices.push(serenity::AutocompleteChoice::new(
-                label,
-                entry.value.to_string(),
-            ));
-        }
-    }
-
-    choices
-}
-
-/// /model — Set or view the model override for this channel
-#[poise::command(slash_command, rename = "model")]
-pub(in crate::services::discord) async fn cmd_model(
-    ctx: Context<'_>,
-    #[autocomplete = "autocomplete_model"]
-    #[description = "Model name or 'default' to clear"]
-    model: Option<String>,
-) -> Result<(), Error> {
-    let user_id = ctx.author().id;
-    let user_name = &ctx.author().name;
-    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
-        return Ok(());
-    }
-
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    let channel_id = ctx.channel_id();
-
-    if !provider_supports_model_override(&ctx.data().provider) {
-        println!("  [{ts}] ◀ [{user_name}] /model (unsupported provider)");
-        ctx.say("Model override is only supported for Claude, Codex, and Gemini channels.")
-            .await?;
-        return Ok(());
-    }
-
-    match model {
-        Some(m) => {
-            println!("  [{ts}] ◀ [{user_name}] /model {m}");
-
-            if normalize_keyword(&m, MODEL_LIST_KEYWORDS).is_some() {
-                let embed =
-                    build_model_picker_embed(&ctx.data().shared, channel_id, &ctx.data().provider)
-                        .await;
-                let components = build_model_picker_components(
-                    &ctx.data().shared,
-                    channel_id,
-                    &ctx.data().provider,
-                )
-                .await;
-                ctx.send(CreateReply::default().embed(embed).components(components))
-                    .await?;
-                return Ok(());
-            }
-
-            if normalize_keyword(&m, MODEL_INFO_KEYWORDS).is_some() {
-                let msg =
-                    build_model_info_message(&ctx.data().shared, channel_id, &ctx.data().provider)
-                        .await;
-                ctx.say(msg).await?;
-                return Ok(());
-            }
-
-            if normalize_keyword(&m, MODEL_CLEAR_KEYWORDS).is_some() {
-                ctx.data().shared.model_overrides.remove(&channel_id);
-                let msg = build_model_status_message(
-                    &ctx.data().shared,
-                    channel_id,
-                    &ctx.data().provider,
-                )
-                .await;
-                ctx.say(format!("Model override cleared.\n{}", msg)).await?;
-                return Ok(());
-            }
-
-            let validated = match validate_model_input(&ctx.data().provider, &m) {
-                Ok(model) => model,
-                Err(message) => {
-                    ctx.say(message).await?;
-                    return Ok(());
-                }
-            };
-
-            ctx.data()
-                .shared
-                .model_overrides
-                .insert(channel_id, validated.clone());
-            let msg =
-                build_model_status_message(&ctx.data().shared, channel_id, &ctx.data().provider)
-                    .await;
-            ctx.say(format!(
-                "Model set to **{}** for this channel.\n{}",
-                validated, msg
-            ))
-            .await?;
-        }
-        None => {
-            println!("  [{ts}] ◀ [{user_name}] /model");
-            let embed =
-                build_model_picker_embed(&ctx.data().shared, channel_id, &ctx.data().provider)
-                    .await;
-            let components =
-                build_model_picker_components(&ctx.data().shared, channel_id, &ctx.data().provider)
-                    .await;
-            ctx.send(CreateReply::default().embed(embed).components(components))
-                .await?;
-        }
-    }
-    Ok(())
+pub(in crate::services::discord) fn build_model_picker_components_from_snapshot(
+    snapshot: &EffectiveModelSnapshot,
+    target_channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+    pending_model: Option<&str>,
+) -> Vec<serenity::CreateActionRow> {
+    build_model_picker_action_rows(
+        target_channel_id,
+        provider,
+        pending_model,
+        snapshot.override_model.as_deref(),
+        &snapshot.default_model,
+        snapshot.default_source,
+    )
 }
 
 /// /allowedtools — Show currently allowed tools
@@ -819,4 +629,428 @@ pub(in crate::services::discord) async fn cmd_removeuser(
         .await?;
     println!("  [{ts}] ▶ Removed user: {target_name} (id:{target_id})");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::services::discord::model_catalog::{
+        DEFAULT_PICKER_VALUE, known_models, validate_model_input,
+    };
+
+    use super::super::model_ui::{
+        build_model_picker_option_specs, build_model_picker_summary_lines,
+    };
+    use super::*;
+
+    #[test]
+    fn model_picker_custom_id_round_trip() {
+        let channel_id = serenity::ChannelId::new(123_456_789);
+        let custom_id = build_model_picker_custom_id(channel_id);
+        let parsed = parse_model_picker_custom_id(&custom_id, serenity::ChannelId::new(1));
+        assert_eq!(parsed, Some((ModelPickerAction::Select, channel_id)));
+    }
+
+    #[test]
+    fn model_reset_custom_id_round_trip() {
+        let channel_id = serenity::ChannelId::new(987_654_321);
+        let custom_id = build_model_reset_custom_id(channel_id);
+        let parsed = parse_model_picker_custom_id(&custom_id, serenity::ChannelId::new(1));
+        assert_eq!(parsed, Some((ModelPickerAction::Reset, channel_id)));
+    }
+
+    #[test]
+    fn model_submit_custom_id_round_trip() {
+        let channel_id = serenity::ChannelId::new(111_222_333);
+        let custom_id = build_model_submit_custom_id(channel_id);
+        let parsed = parse_model_picker_custom_id(&custom_id, serenity::ChannelId::new(1));
+        assert_eq!(parsed, Some((ModelPickerAction::Submit, channel_id)));
+    }
+
+    #[test]
+    fn model_cancel_custom_id_round_trip() {
+        let channel_id = serenity::ChannelId::new(777_888_999);
+        let custom_id = build_model_cancel_custom_id(channel_id);
+        let parsed = parse_model_picker_custom_id(&custom_id, serenity::ChannelId::new(1));
+        assert_eq!(parsed, Some((ModelPickerAction::Cancel, channel_id)));
+    }
+
+    #[test]
+    fn legacy_custom_id_uses_fallback_channel() {
+        let fallback = serenity::ChannelId::new(42);
+        let parsed = parse_model_picker_custom_id(MODEL_PICKER_CUSTOM_ID, fallback);
+        assert_eq!(parsed, Some((ModelPickerAction::Select, fallback)));
+    }
+
+    #[test]
+    fn model_picker_option_specs_include_default_first_for_all_supported_providers() {
+        for provider in [
+            ProviderKind::Claude,
+            ProviderKind::Codex,
+            ProviderKind::Gemini,
+        ] {
+            let options = build_model_picker_option_specs(
+                &provider,
+                None,
+                None,
+                "default",
+                PROVIDER_DEFAULT_SOURCE,
+            );
+            assert_eq!(options[0].value, DEFAULT_PICKER_VALUE);
+            assert_eq!(options[0].label, "기본값");
+            let expected = match provider {
+                ProviderKind::Claude => "오버라이드 해제 -> default (Claude default alias)",
+                ProviderKind::Codex | ProviderKind::Gemini => "오버라이드 해제 -> provider default",
+                ProviderKind::Unsupported(_) => unreachable!(),
+            };
+            assert_eq!(options[0].description, expected);
+            assert!(options[0].selected);
+        }
+    }
+
+    #[test]
+    fn model_picker_option_specs_show_role_map_default_metadata() {
+        let options = build_model_picker_option_specs(
+            &ProviderKind::Claude,
+            None,
+            Some("claude-sonnet-4-6"),
+            "claude-opus-4-6",
+            ROLE_MAP_SOURCE,
+        );
+        assert_eq!(options[0].label, "기본값");
+        assert_eq!(
+            options[0].description,
+            "오버라이드 해제 -> claude-opus-4-6 (role-map)"
+        );
+        assert!(!options[0].selected);
+        assert_eq!(options[1].value, "sonnet");
+    }
+
+    #[test]
+    fn model_picker_pending_to_override_interprets_default_sentinel() {
+        assert_eq!(
+            model_picker_pending_to_override(Some(DEFAULT_PICKER_VALUE)),
+            Some(None)
+        );
+        assert_eq!(
+            model_picker_pending_to_override(Some("gpt-5.4")),
+            Some(Some("gpt-5.4".to_string()))
+        );
+    }
+
+    #[test]
+    fn pending_model_change_treats_default_as_clear_override() {
+        assert!(!has_pending_model_change(None, None));
+        assert!(!has_pending_model_change(Some(DEFAULT_PICKER_VALUE), None));
+        assert!(has_pending_model_change(
+            Some(DEFAULT_PICKER_VALUE),
+            Some("gpt-5.4")
+        ));
+        assert!(!has_pending_model_change(Some("gpt-5.4"), Some("gpt-5.4")));
+        assert!(has_pending_model_change(
+            Some("gpt-5.4"),
+            Some("gpt-5.4-mini")
+        ));
+    }
+
+    #[test]
+    fn clearing_override_skips_session_reset_for_codex_and_gemini() {
+        assert!(!session_reset_required_for_model_change(
+            &ProviderKind::Codex,
+            Some("gpt-5.4"),
+            None,
+        ));
+        assert!(!session_reset_required_for_model_change(
+            &ProviderKind::Gemini,
+            Some("gemini-2.5-pro"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn clearing_override_skips_session_reset_for_claude_default_alias() {
+        assert!(!session_reset_required_for_model_change(
+            &ProviderKind::Claude,
+            Some("opus"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn runtime_turn_model_uses_claude_default_alias_after_clear() {
+        assert_eq!(
+            runtime_model_for_turn(&ProviderKind::Claude, "default", PROVIDER_DEFAULT_SOURCE),
+            Some("default".to_string())
+        );
+    }
+
+    #[test]
+    fn runtime_turn_model_omits_provider_default_for_codex_and_gemini() {
+        assert_eq!(
+            runtime_model_for_turn(&ProviderKind::Codex, "default", PROVIDER_DEFAULT_SOURCE),
+            None
+        );
+        assert_eq!(
+            runtime_model_for_turn(&ProviderKind::Gemini, "default", PROVIDER_DEFAULT_SOURCE),
+            None
+        );
+    }
+
+    #[test]
+    fn effective_resolution_prefers_dispatch_role_over_role_map() {
+        let (model, source) = resolve_effective_model(None, Some("gpt-5.4"), Some("gpt-5.4-mini"));
+        assert_eq!(model, "gpt-5.4");
+        assert_eq!(source, DISPATCH_ROLE_OVERRIDE_SOURCE);
+    }
+
+    #[test]
+    fn default_resolution_reports_provider_default_when_no_fallbacks_exist() {
+        let (model, source) = resolve_default_model(None, None);
+        assert_eq!(model, "default");
+        assert_eq!(source, PROVIDER_DEFAULT_SOURCE);
+    }
+
+    #[test]
+    fn validate_model_input_accepts_claude_1m_aliases_and_full_names() {
+        assert_eq!(
+            validate_model_input(&ProviderKind::Claude, "sonnet[1m]").unwrap(),
+            "sonnet[1m]"
+        );
+        assert_eq!(
+            validate_model_input(
+                &ProviderKind::Claude,
+                "anthropic.claude-sonnet-4-20250514-v1:0[1m]"
+            )
+            .unwrap(),
+            "anthropic.claude-sonnet-4-20250514-v1:0[1m]"
+        );
+    }
+
+    #[test]
+    fn validate_model_input_accepts_gemini_31_preview_and_auto_aliases() {
+        assert_eq!(
+            validate_model_input(&ProviderKind::Gemini, "gemini-3.1-pro-preview").unwrap(),
+            "gemini-3.1-pro-preview"
+        );
+        assert_eq!(
+            validate_model_input(&ProviderKind::Gemini, "auto").unwrap(),
+            "auto-gemini-3"
+        );
+        assert_eq!(
+            validate_model_input(&ProviderKind::Gemini, "pro").unwrap(),
+            "gemini-3.1-pro-preview"
+        );
+        assert_eq!(
+            validate_model_input(&ProviderKind::Gemini, "flash-lite").unwrap(),
+            "gemini-2.5-flash-lite"
+        );
+    }
+
+    #[test]
+    fn codex_catalog_includes_spark_preview_entry() {
+        let spark = known_models(&ProviderKind::Codex)
+            .iter()
+            .find(|entry| entry.value == "gpt-5.3-codex-spark")
+            .expect("spark entry missing");
+        assert_eq!(spark.label, "GPT-5.3-Codex-Spark");
+        let description = spark.picker_description();
+        assert!(description.to_ascii_lowercase().contains("text-only"));
+        assert!(description.contains("API"));
+    }
+
+    #[test]
+    fn all_catalog_entries_use_compact_pipe_summaries() {
+        for catalog in [
+            known_models(&ProviderKind::Claude),
+            known_models(&ProviderKind::Codex),
+            known_models(&ProviderKind::Gemini),
+        ] {
+            for entry in catalog {
+                let description = entry.picker_description();
+                assert!(
+                    description.matches('|').count() == 1,
+                    "description format drift for {}",
+                    entry.value
+                );
+                assert!(
+                    description.len() <= 100,
+                    "description too long for {}",
+                    entry.value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn picker_options_keep_descriptions_in_dropdown_for_curated_models() {
+        let options = build_model_picker_option_specs(
+            &ProviderKind::Codex,
+            None,
+            None,
+            "gpt-5.4",
+            ROLE_MAP_SOURCE,
+        );
+        assert_eq!(options[0].label, "기본값");
+        assert_eq!(
+            options[0].description,
+            "오버라이드 해제 -> gpt-5.4 (role-map)"
+        );
+        let gpt_54 = options
+            .iter()
+            .find(|entry| entry.value == "gpt-5.4")
+            .expect("gpt-5.4 entry missing");
+        assert_eq!(gpt_54.label, "gpt-5.4");
+        assert_eq!(
+            gpt_54.description,
+            "Frontier coding baseline | API $2.5/$15"
+        );
+        assert!(
+            options
+                .iter()
+                .any(|entry| entry.label == "GPT-5.3-Codex-Spark"
+                    && entry.description == "Text-only preview | No API")
+        );
+    }
+
+    #[test]
+    fn picker_options_use_system_default_description_without_role_map() {
+        let options = build_model_picker_option_specs(
+            &ProviderKind::Gemini,
+            None,
+            None,
+            "default",
+            PROVIDER_DEFAULT_SOURCE,
+        );
+        assert_eq!(options[0].label, "기본값");
+        assert_eq!(
+            options[0].description,
+            "오버라이드 해제 -> provider default"
+        );
+        assert!(options.iter().any(|entry| entry.label == "Auto (Gemini 3)"
+            && entry.description == "Preview auto routing | Pro/Flash preview"));
+        assert!(
+            options
+                .iter()
+                .any(|entry| entry.label == "Auto (Gemini 2.5)"
+                    && entry.description == "Stable auto routing | Pro/Flash stable")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|entry| entry.label == "gemini-3.1-pro-preview"
+                    && entry.description == "Gemini 3.1 Pro preview | Local CLI catalog")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|entry| entry.label == "gemini-3-pro-preview"
+                    && entry.description == "Frontier reasoning and coding | $2/$12")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|entry| entry.label == "gemini-3-flash-preview"
+                    && entry.description == "Low-latency frontier work | $0.5/$3")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|entry| entry.label == "gemini-2.5-flash-lite"
+                    && entry.description == "Low-cost flash-lite | Local CLI catalog")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|entry| entry.label == "gemini-3.1-flash-lite-preview"
+                    && entry.description == "Preview flash-lite variant | Local CLI catalog")
+        );
+    }
+
+    #[test]
+    fn claude_picker_mentions_default_alias_without_role_map() {
+        let options = build_model_picker_option_specs(
+            &ProviderKind::Claude,
+            None,
+            None,
+            "default",
+            PROVIDER_DEFAULT_SOURCE,
+        );
+        assert_eq!(options[0].label, "기본값");
+        assert_eq!(
+            options[0].description,
+            "오버라이드 해제 -> default (Claude default alias)"
+        );
+    }
+
+    #[test]
+    fn claude_picker_uses_cli_safe_aliases() {
+        let options = build_model_picker_option_specs(
+            &ProviderKind::Claude,
+            None,
+            None,
+            "default",
+            PROVIDER_DEFAULT_SOURCE,
+        );
+        assert!(
+            options
+                .iter()
+                .any(|entry| entry.value == "sonnet" && entry.label == "Sonnet 4.6")
+        );
+        assert!(options.iter().any(|entry| entry.value == "sonnet[1m]"
+            && entry.label == "Sonnet 4.6 1M"
+            && entry.description == "1M context window | Sonnet 4.6 alias"));
+        assert!(options.iter().any(|entry| entry.value == "opus[1m]"
+            && entry.label == "Opus 4.6 1M"
+            && entry.description == "1M context window | Opus 4.6 alias"));
+        assert!(options.iter().any(|entry| entry.value == "opusplan"
+            && entry.label == "Opus Plan 4.6"
+            && entry.description == "Opus 4.6 planning | Sonnet 4.6 executes"));
+    }
+
+    #[test]
+    fn model_picker_summary_lines_stay_compact() {
+        let lines = build_model_picker_summary_lines(
+            &ProviderKind::Gemini,
+            "gemini-3-flash-preview",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            lines,
+            [
+                "Provider : `gemini`".to_string(),
+                "Current Model : `gemini-3-flash-preview`".to_string(),
+                "현재 작업 상태 : 기본 설정 사용 중".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn model_picker_summary_lines_show_pending_save_state() {
+        let lines = build_model_picker_summary_lines(
+            &ProviderKind::Codex,
+            "gpt-5.4",
+            Some("gpt-5.4-mini"),
+            Some("gpt-5.4"),
+            None,
+        );
+        assert_eq!(lines[2], "현재 작업 상태 : `gpt-5.4-mini` 저장 대기");
+    }
+
+    #[test]
+    fn model_picker_action_rows_include_submit_reset_cancel_buttons() {
+        let rows = build_model_picker_action_rows(
+            serenity::ChannelId::new(42),
+            &ProviderKind::Codex,
+            None,
+            None,
+            "gpt-5.4",
+            ROLE_MAP_SOURCE,
+        );
+        assert_eq!(rows.len(), 2);
+        let controls = format!("{:?}", rows[1]);
+        assert!(controls.contains(MODEL_PICKER_SUBMIT_LABEL));
+        assert!(controls.contains(MODEL_PICKER_RESET_LABEL));
+        assert!(controls.contains(MODEL_PICKER_CANCEL_LABEL));
+    }
 }
