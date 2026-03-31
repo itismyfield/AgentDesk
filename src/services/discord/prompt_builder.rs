@@ -151,9 +151,11 @@ pub(super) fn build_system_prompt(
                 system_prompt_owned.push_str(&catalog);
             }
 
-            if let Some(peer_guidance) = render_peer_agent_guidance(&binding.role_id) {
-                system_prompt_owned.push_str("\n\n");
-                system_prompt_owned.push_str(&peer_guidance);
+            if binding.peer_agents_enabled {
+                if let Some(peer_guidance) = render_peer_agent_guidance(&binding.role_id) {
+                    system_prompt_owned.push_str("\n\n");
+                    system_prompt_owned.push_str(&peer_guidance);
+                }
             }
         }
     }
@@ -319,6 +321,7 @@ mod tests {
             provider: None,
             model: None,
             reasoning_effort: None,
+            peer_agents_enabled: true,
         };
         let review_prompt = build_system_prompt(
             "ctx",
@@ -351,5 +354,34 @@ mod tests {
         assert!(decision_prompt.contains("/api/review-decision"));
         assert!(decision_prompt.contains("accept/dispute/dismiss"));
         assert!(decision_prompt.contains("[Review Decision Rules]"));
+    }
+
+    #[test]
+    fn test_full_prompt_omits_peer_agent_directory_when_disabled() {
+        use super::super::settings::RoleBinding;
+
+        let binding = RoleBinding {
+            role_id: "spark".to_string(),
+            prompt_file: "/nonexistent".to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+        };
+
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1488022491992424448),
+            "tok",
+            "",
+            "",
+            Some(&binding),
+            false,
+            DispatchProfile::Full,
+            None,
+        );
+
+        assert!(!prompt.contains("[Peer Agent Directory]"));
     }
 }

@@ -42,12 +42,17 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
         .get("reasoningEffort")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let peer_agents_enabled = obj
+        .get("peerAgents")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     Some(RoleBinding {
         role_id,
         prompt_file,
         provider,
         model,
         reasoning_effort,
+        peer_agents_enabled,
     })
 }
 
