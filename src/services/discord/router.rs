@@ -1108,12 +1108,9 @@ pub(super) async fn handle_text_message(
     } else {
         None
     };
-    // Non-Claude first turn: inject SAK as user context (old behaviour)
-    if !matches!(provider, ProviderKind::Claude) && session_id.is_none() {
-        if let Some(ref knowledge) = shared_knowledge_content {
-            context_chunks.push(knowledge.clone());
-        }
-    }
+    // Non-Claude SAK injection is deferred until after session recovery
+    // (see below, after fetch_provider_session_id) to avoid duplicate injection
+    // when dcserver restarts and restores an existing session from DB.
     if let Some(ref reply_ctx) = reply_context {
         context_chunks.push(reply_ctx.clone());
     }
@@ -1129,7 +1126,7 @@ pub(super) async fn handle_text_message(
         );
     }
     context_chunks.push(sanitized_input);
-    let context_prompt = context_chunks.join("\n\n");
+    let mut context_prompt = context_chunks.join("\n\n");
 
     // Build disabled tools notice
     let default_tools: std::collections::HashSet<&str> =
@@ -1507,6 +1504,15 @@ pub(super) async fn handle_text_message(
     } else {
         session_id
     };
+
+    // Non-Claude first turn: inject SAK as user context (no Anthropic cache benefit).
+    // Deferred to here (after session recovery from DB) so that a dcserver restart
+    // doesn't duplicate SAK into a resumed session.
+    if !matches!(provider, ProviderKind::Claude) && session_id.is_none() {
+        if let Some(ref knowledge) = shared_knowledge_content {
+            context_prompt = format!("{}\n\n{}", knowledge, context_prompt);
+        }
+    }
 
     let adk_session_name = channel_name.clone();
     let adk_session_info = derive_adk_session_info(
