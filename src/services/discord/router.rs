@@ -10,6 +10,22 @@ pub(super) fn should_process_turn_message(kind: serenity::model::channel::Messag
     )
 }
 
+fn should_skip_human_slash_message(
+    content: &str,
+    known_slash_commands: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    if !content.starts_with('/') {
+        return false;
+    }
+
+    let command_name = content[1..].split_whitespace().next().unwrap_or("");
+    if command_name.is_empty() {
+        return false;
+    }
+
+    known_slash_commands.is_some_and(|set| set.contains(command_name))
+}
+
 fn is_model_picker_component_custom_id(
     custom_id: &str,
     fallback_channel_id: serenity::ChannelId,
@@ -176,8 +192,14 @@ pub(super) async fn handle_event(
                 }
             }
 
-            // Ignore messages that look like slash commands (but allow from trusted bots)
-            if new_message.content.starts_with('/') && !new_message.author.bot {
+            // Registered slash commands are handled by poise interactions.
+            // Unknown `/...` text should fall through to the AI provider.
+            if !new_message.author.bot
+                && should_skip_human_slash_message(
+                    &new_message.content,
+                    data.shared.known_slash_commands.get(),
+                )
+            {
                 return Ok(());
             }
 
@@ -3002,7 +3024,10 @@ async fn link_dispatch_thread(api_port: u16, dispatch_id: &str, thread_id: u64, 
 #[cfg(test)]
 mod tests {
     use super::super::model_picker_interaction::build_model_picker_close_response;
-    use super::{is_model_picker_component_custom_id, should_process_turn_message};
+    use super::{
+        is_model_picker_component_custom_id, should_process_turn_message,
+        should_skip_human_slash_message,
+    };
     use poise::serenity_prelude::ChannelId;
     use serde_json::json;
     use serenity::model::channel::MessageType;
@@ -3020,6 +3045,30 @@ mod tests {
             MessageType::ThreadStarterMessage
         ));
         assert!(!should_process_turn_message(MessageType::ChatInputCommand));
+    }
+
+    #[test]
+    fn known_human_slash_messages_are_skipped() {
+        let known = std::collections::HashSet::from([
+            "help".to_string(),
+            "clear".to_string(),
+            "model".to_string(),
+        ]);
+        assert!(should_skip_human_slash_message("/help", Some(&known)));
+        assert!(should_skip_human_slash_message("/clear now", Some(&known)));
+    }
+
+    #[test]
+    fn unregistered_human_slash_messages_fall_through() {
+        let known = std::collections::HashSet::from(["help".to_string()]);
+        assert!(!should_skip_human_slash_message("/unknown", Some(&known)));
+        assert!(!should_skip_human_slash_message("/", Some(&known)));
+        assert!(!should_skip_human_slash_message("/   ", Some(&known)));
+        assert!(!should_skip_human_slash_message(
+            "/unknown arg",
+            Some(&known)
+        ));
+        assert!(!should_skip_human_slash_message("/unknown", None));
     }
 
     /// mid:* cleanup should use the longer MSG_DEDUP_TTL (60s),
