@@ -1278,7 +1278,7 @@ fn seed_agent(db: &Db, agent_id: &str) {
 }
 
 #[tokio::test]
-async fn create_repo_seeds_builtin_agentdesk_pipeline_stages() {
+async fn create_repo_does_not_seed_disabled_agentdesk_pipeline_stages() {
     let db = test_db();
     let engine = test_engine(&db);
     let app = test_api_router(db.clone(), engine, None);
@@ -1318,16 +1318,7 @@ async fn create_repo_seeds_builtin_agentdesk_pipeline_stages() {
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
 
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].0, "dev-deploy");
-    assert_eq!(rows[0].1, 100);
-    assert_eq!(rows[0].2.as_deref(), Some("review_pass"));
-    assert_eq!(rows[0].3.as_deref(), Some("self"));
-    assert_eq!(rows[0].4.as_deref(), Some("no_rs_changes"));
-    assert_eq!(rows[1].0, "e2e-test");
-    assert_eq!(rows[1].1, 200);
-    assert_eq!(rows[1].3.as_deref(), Some("counter"));
-    assert_eq!(rows[1].4.as_deref(), Some("no_rs_changes"));
+    assert!(rows.is_empty());
 }
 
 #[tokio::test]

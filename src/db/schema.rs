@@ -598,7 +598,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrate_backfills_agentdesk_pipeline_stages_for_existing_repo() {
+    fn migrate_does_not_backfill_disabled_agentdesk_pipeline_stages_for_existing_repo() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE kv_meta (
@@ -643,20 +643,11 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
 
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].0, "dev-deploy");
-        assert_eq!(rows[0].1, 100);
-        assert_eq!(rows[0].2.as_deref(), Some("review_pass"));
-        assert_eq!(rows[0].3.as_deref(), Some("self"));
-        assert_eq!(rows[0].4.as_deref(), Some("no_rs_changes"));
-        assert_eq!(rows[1].0, "e2e-test");
-        assert_eq!(rows[1].1, 200);
-        assert_eq!(rows[1].3.as_deref(), Some("counter"));
-        assert_eq!(rows[1].4.as_deref(), Some("no_rs_changes"));
+        assert!(rows.is_empty());
     }
 
     #[test]
-    fn seed_builtin_pipeline_stages_is_idempotent() {
+    fn seed_builtin_pipeline_stages_is_noop_while_disabled() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         conn.execute(
@@ -675,6 +666,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 0);
     }
 }
