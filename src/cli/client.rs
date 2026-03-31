@@ -383,6 +383,24 @@ pub fn cmd_dispatch_redispatch(card_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `agentdesk resume <card_id_or_issue_number>`
+///
+/// The API handler resolves GitHub issue numbers automatically,
+/// so this can pass the input directly.
+pub fn cmd_resume(card_id: &str, force: bool, reason: Option<&str>) -> Result<(), String> {
+    let mut body = serde_json::json!({});
+    if force {
+        body["force"] = serde_json::json!(true);
+    }
+    if let Some(r) = reason {
+        body["reason"] = serde_json::json!(r);
+    }
+
+    let value = post_json(&format!("/api/kanban-cards/{card_id}/resume"), Some(body))?;
+    print_json(&value);
+    Ok(())
+}
+
 /// `agentdesk agents`
 pub fn cmd_agents() -> Result<(), String> {
     let value = get_json("/api/agents")?;

@@ -170,6 +170,17 @@ enum Commands {
         #[command(subcommand)]
         action: DispatchAction,
     },
+    /// Resume a stuck kanban card from its current state
+    Resume {
+        /// Card ID or GitHub issue number
+        card_id: String,
+        /// Force resume (bypass gates for pending_decision/blocked)
+        #[arg(long)]
+        force: bool,
+        /// Reason for audit log
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// List agents and their status
     Agents,
     /// Runtime config get/set
@@ -382,6 +393,13 @@ fn main() -> Result<()> {
                         cli::client::cmd_dispatch_redispatch(&card_id)
                     }
                 });
+            }
+            Some(Commands::Resume {
+                card_id,
+                force,
+                reason,
+            }) => {
+                return exit_for_cli(cli::client::cmd_resume(&card_id, force, reason.as_deref()));
             }
             Some(Commands::Agents) => {
                 return exit_for_cli(cli::client::cmd_agents());
