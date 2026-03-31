@@ -181,6 +181,15 @@ enum Commands {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Complete pending dispatch and advance to review
+    Advance {
+        /// GitHub issue number
+        issue_number: String,
+    },
+    /// Show auto-queue status with thread links
+    Queue,
+    /// Build + deploy dev + promote to release
+    Deploy,
     /// List agents and their status
     Agents,
     /// Runtime config get/set
@@ -403,6 +412,15 @@ fn main() -> Result<()> {
             }
             Some(Commands::Agents) => {
                 return exit_for_cli(cli::client::cmd_agents());
+            }
+            Some(Commands::Advance { issue_number }) => {
+                return exit_for_cli(cli::client::cmd_advance(&issue_number));
+            }
+            Some(Commands::Queue) => {
+                return exit_for_cli(cli::client::cmd_queue());
+            }
+            Some(Commands::Deploy) => {
+                return exit_for_cli(cli::client::cmd_deploy());
             }
             Some(Commands::Config { action }) => {
                 return exit_for_cli(match action {

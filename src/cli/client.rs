@@ -433,6 +433,210 @@ pub fn cmd_api(method: &str, path: &str, body: Option<&str>) -> Result<(), Strin
     Ok(())
 }
 
+/// `agentdesk advance <issue_number>`
+///
+/// Complete the pending dispatch for an issue and create a review dispatch.
+/// Replaces the manual 4-step process: PATCH complete → force-transition → update review_status → POST review dispatch.
+pub fn cmd_advance(issue_number: &str) -> Result<(), String> {
+    // 1. Find card
+    let cards = get_json("/api/kanban-cards")?;
+    let card = cards["cards"]
+        .as_array()
+        .and_then(|arr| {
+            let num: i64 = issue_number.parse().unwrap_or(0);
+            arr.iter().find(|c| c["github_issue_number"] == num)
+        })
+        .ok_or_else(|| format!("Card not found for issue #{issue_number}"))?;
+    let card_id = card["id"].as_str().unwrap_or("");
+    let card_title = card["title"].as_str().unwrap_or("");
+    let status = card["status"].as_str().unwrap_or("");
+
+    // 2. Find and complete pending dispatch
+    let dispatches = get_json(&format!("/api/dispatches?card_id={card_id}"))?;
+    let ds = dispatches
+        .as_array()
+        .or_else(|| dispatches["dispatches"].as_array())
+        .ok_or("No dispatches found")?;
+    let pending = ds.iter().find(|d| {
+        d["status"] == "pending"
+            && (d["dispatch_type"] == "implementation" || d["dispatch_type"] == "rework")
+    });
+    if let Some(d) = pending {
+        let did = d["id"].as_str().unwrap_or("");
+        println!("Completing dispatch {did}...");
+        request_json(
+            "PATCH",
+            &format!("/api/dispatches/{did}"),
+            Some(&serde_json::json!({"status": "completed", "result": {"status": "done", "completion_source": "cli_advance"}}).to_string()),
+        )?;
+    } else {
+        println!("No pending implementation/rework dispatch found.");
+    }
+
+    // 3. Force transition to review if not already
+    if status != "review" {
+        println!("Transitioning to review...");
+        // Need PMD channel for force-transition — read from DB via API
+        let kanban_mgr = get_json("/api/settings/runtime-config")
+            .ok()
+            .and_then(|v| {
+                v["current"]["kanbanManagerChannelId"]
+                    .as_str()
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+        let mut req = agent().post(&format!(
+            "{}/api/kanban-cards/{card_id}/force-transition",
+            api_base()
+        ));
+        if let Some(token) = auth_token() {
+            req = req.set("Authorization", &format!("Bearer {token}"));
+        }
+        if !kanban_mgr.is_empty() {
+            req = req.set("X-Channel-Id", &kanban_mgr);
+        }
+        let _ = req
+            .set("Content-Type", "application/json")
+            .send_string(&serde_json::json!({"status": "review"}).to_string())
+            .ok();
+    }
+
+    // 4. Create review dispatch
+    println!("Creating review dispatch...");
+    let review_title = format!("[Review] {card_title}");
+    let result = post_json(
+        "/api/dispatches",
+        Some(serde_json::json!({
+            "kanban_card_id": card_id,
+            "to_agent_id": card["assigned_agent_id"],
+            "dispatch_type": "review",
+            "title": review_title,
+            "context": {"cli_advance": true}
+        })),
+    )?;
+    let dispatch_id = result["dispatch"]["id"].as_str().unwrap_or("?");
+    println!("✅ #{issue_number} advanced to review (dispatch: {dispatch_id})");
+    Ok(())
+}
+
+/// `agentdesk queue`
+///
+/// Show auto-queue status with work/review thread links.
+pub fn cmd_queue() -> Result<(), String> {
+    let data = get_json("/api/auto-queue/status")?;
+    let entries = data["entries"].as_array().ok_or("No entries")?;
+    let run = &data["run"];
+
+    let unified = run["unified_thread"].as_bool().unwrap_or(false);
+    let max_threads = run["max_concurrent_threads"].as_i64().unwrap_or(1);
+    println!(
+        "Run: {} | unified={} max_threads={}",
+        run["status"].as_str().unwrap_or("?"),
+        unified,
+        max_threads
+    );
+    println!(
+        "{:<6} {:<12} {:<50} {}",
+        "Issue", "Status", "Title", "Threads"
+    );
+    println!("{}", "-".repeat(100));
+
+    // Get unified_thread_id map for thread links
+    let thread_map: serde_json::Map<String, Value> = run["unified_thread_id"]
+        .as_str()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .or_else(|| run["unified_thread_id"].as_object().cloned())
+        .unwrap_or_default();
+
+    // Discord server ID — derive from channel IDs in thread_map
+    let discord_server = "1470762182344966308"; // TODO: make configurable
+
+    for e in entries {
+        let num = e["github_issue_number"].as_i64().unwrap_or(0);
+        let status = e["status"].as_str().unwrap_or("?");
+        let title = e["card_title"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(48)
+            .collect::<String>();
+
+        // Build thread links
+        let mut links = Vec::new();
+        for (ch_id, thread_val) in &thread_map {
+            if let Some(tid) = thread_val.as_str() {
+                let label = if ch_id.ends_with("35") {
+                    "work"
+                } else {
+                    "review"
+                };
+                links.push(format!(
+                    "{label}:https://discord.com/channels/{discord_server}/{tid}"
+                ));
+            }
+        }
+        let links_str = if links.is_empty() {
+            "-".to_string()
+        } else {
+            links.join(" | ")
+        };
+
+        println!("#{:<5} {:<12} {:<50} {}", num, status, title, links_str);
+    }
+    Ok(())
+}
+
+/// `agentdesk deploy`
+///
+/// Build + deploy dev + promote to release in one command.
+pub fn cmd_deploy() -> Result<(), String> {
+    let workspace = crate::cli::agentdesk_runtime_root()
+        .and_then(|r| {
+            let ws = r.parent()?.join("workspaces/agentdesk");
+            if ws.exists() { Some(ws) } else { None }
+        })
+        .ok_or("Cannot find workspace directory")?;
+
+    println!("=== Step 1: Deploy to dev ===");
+    let dev_status = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("AGENTDESK_DEV_PORT=8799 AGENTDESK_REL_PORT=8791 ./scripts/deploy-dev.sh")
+        .current_dir(&workspace)
+        .status()
+        .map_err(|e| format!("deploy-dev failed: {e}"))?;
+    if !dev_status.success() {
+        return Err("deploy-dev.sh failed".to_string());
+    }
+
+    println!("\n=== Step 2: Waiting for dev health ===");
+    for _ in 0..60 {
+        if let Ok(resp) = ureq::Agent::new()
+            .get("http://127.0.0.1:8799/api/health")
+            .call()
+        {
+            if resp.status() == 200 {
+                println!("✅ Dev healthy");
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+
+    println!("\n=== Step 3: Promote to release ===");
+    let promote_status = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("AGENTDESK_DEV_PORT=8799 AGENTDESK_REL_PORT=8791 ./scripts/promote-release.sh --skip-review")
+        .current_dir(&workspace)
+        .status()
+        .map_err(|e| format!("promote-release failed: {e}"))?;
+    if !promote_status.success() {
+        return Err("promote-release.sh failed".to_string());
+    }
+
+    println!("✅ Deploy complete — release will restart after current turn");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{render_cards_table, runtime_config_payload};
