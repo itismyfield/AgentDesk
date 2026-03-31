@@ -71,6 +71,34 @@ pub async fn run(
         });
     }
 
+    // #209: Boot recovery — reset stale 'processing' dispatch_outbox entries to 'pending'.
+    // These entries were mid-processing when the server crashed/stopped.
+    // Also clear stale dispatch_reserving:* markers (two-phase: reserving = in-flight claim,
+    // notified = confirmed delivery). Reserving markers from a crashed process are stale;
+    // notified markers are kept as they represent confirmed deliveries.
+    {
+        if let Ok(conn) = db.lock() {
+            let recovered = conn
+                .execute(
+                    "UPDATE dispatch_outbox SET status = 'pending' WHERE status = 'processing'",
+                    [],
+                )
+                .unwrap_or(0);
+            let reservations_cleared = conn
+                .execute(
+                    "DELETE FROM kv_meta WHERE key LIKE 'dispatch_reserving:%'",
+                    [],
+                )
+                .unwrap_or(0);
+            if recovered > 0 || reservations_cleared > 0 {
+                tracing::info!(
+                    "[dispatch-outbox] Boot recovery: reset {recovered} stale 'processing' entries, \
+                     cleared {reservations_cleared} stale reservations"
+                );
+            }
+        }
+    }
+
     // #144: Spawn dispatch notification outbox worker — centralizes Discord side-effects
     {
         let dispatch_outbox_db = db.clone();

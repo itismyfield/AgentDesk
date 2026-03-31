@@ -1383,18 +1383,24 @@ mod tests {
             _title: String,
             _card_id: String,
             dispatch_id: String,
-        ) {
+        ) -> Result<(), String> {
             self.calls.lock().unwrap().push(MockCall::Notify {
                 agent_id,
                 dispatch_id,
             });
+            Ok(())
         }
 
-        async fn handle_followup(&self, _db: crate::db::Db, dispatch_id: String) {
+        async fn handle_followup(
+            &self,
+            _db: crate::db::Db,
+            dispatch_id: String,
+        ) -> Result<(), String> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(MockCall::Followup { dispatch_id });
+            Ok(())
         }
     }
 
@@ -1594,9 +1600,12 @@ mod tests {
         assert_eq!(outbox_status(&db, "d-160o-c"), vec!["done"]);
     }
 
-    /// Scenario 160-4: Duplicate outbox entries for the same dispatch → mock
-    /// receives calls for both (dedup is in send_dispatch_to_discord, not the loop).
-    /// But the outbox correctly processes all pending entries and transitions them.
+    /// Scenario 160-4: Duplicate outbox entries for the same dispatch.
+    /// The two-phase delivery guard (dispatch_reserving/dispatch_notified) lives in
+    /// send_dispatch_to_discord, not in process_outbox_batch, so with MockNotifier
+    /// both entries call the notifier. In production, RealOutboxNotifier delegates
+    /// to send_dispatch_to_discord which deduplicates via the two-phase marker.
+    /// Both entries transition to 'done'.
     #[tokio::test]
     async fn scenario_160_4_outbox_processes_all_entries_including_duplicates() {
         let db = test_db();
@@ -1611,12 +1620,14 @@ mod tests {
         let mock = MockNotifier::new();
         let processed = process_outbox_batch(&db, &mock).await;
 
-        // Worker processes all pending entries — dedup is the notifier's job
+        // Worker processes all pending entries
         assert_eq!(processed, 2, "Worker should process both pending entries");
+        // MockNotifier doesn't have the two-phase guard — both entries call through.
+        // In production, send_dispatch_to_discord deduplicates via dispatch_reserving/notified.
         assert_eq!(
             mock.notify_count(),
             2,
-            "Mock receives both calls (real send_dispatch_to_discord would dedup via marker)"
+            "MockNotifier receives both calls (production dedup is in send_dispatch_to_discord)"
         );
 
         // Both entries should transition to done

@@ -494,43 +494,27 @@ var timeouts = {
     // ─── [I-0] 미전송 디스패치 알림 복구 ──────────────────────
     // pending dispatch가 2분 이상 됐는데 알림이 안 갔을 수 있음 → 재전송
     var unnotifiedDispatches = agentdesk.db.query(
-      "SELECT td.id, td.dispatch_type, td.to_agent_id, kc.title, kc.github_issue_url, kc.github_issue_number " +
+      "SELECT td.id, td.dispatch_type, td.to_agent_id, kc.title, kc.github_issue_url, kc.github_issue_number, td.kanban_card_id " +
       "FROM task_dispatches td " +
       "JOIN kanban_cards kc ON td.kanban_card_id = kc.id " +
       "WHERE td.status = 'pending' " +
       "AND td.created_at < datetime('now', '-2 minutes') " +
-      "AND NOT EXISTS (SELECT 1 FROM kv_meta WHERE key = 'dispatch_notified:' || td.id)"
+      "AND NOT EXISTS (SELECT 1 FROM kv_meta WHERE key = 'dispatch_notified:' || td.id) " +
+      "AND NOT EXISTS (SELECT 1 FROM kv_meta WHERE key = 'dispatch_reserving:' || td.id) " +
+      "AND NOT EXISTS (SELECT 1 FROM dispatch_outbox WHERE dispatch_id = td.id AND status IN ('pending', 'processing', 'failed'))"
     );
     for (var un = 0; un < unnotifiedDispatches.length; un++) {
       var ud = unnotifiedDispatches[un];
 
-      // Determine channel
-      var agentChannel = agentdesk.db.query(
-        "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?",
-        [ud.to_agent_id]
-      );
-      if (agentChannel.length === 0) continue;
-
-      // Only "review" goes to the counter-model alt channel.
-      // "review-decision" is sent to the primary channel to reuse the implementation thread.
-      var useAlt = (ud.dispatch_type === "review");
-      var channelId = useAlt ? agentChannel[0].discord_channel_alt : agentChannel[0].discord_channel_id;
-      if (!channelId) continue;
-
-      var issueLink = ud.github_issue_url
-        ? "\n[" + ud.title + " #" + ud.github_issue_number + "](<" + ud.github_issue_url + ">)"
-        : "";
-      var prefix = useAlt
-        ? "DISPATCH:" + ud.id + " - " + ud.title + "\n⚠️ 검토 전용 — 작업 착수 금지\n코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
-        : "DISPATCH:" + ud.id + " - " + ud.title;
-
-      var notifyContent = prefix + issueLink;
-      agentdesk.message.queue("channel:" + channelId, notifyContent, "announce", "system");
+      // Re-enqueue into dispatch_outbox so the Rust outbox worker handles delivery
+      // with proper two-phase guard and retry/backoff (#209).
+      // Do NOT send directly via message.queue — that bypasses the delivery guarantee.
       agentdesk.db.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('dispatch_notified:' || ?1, datetime('now'))",
-        [ud.id]
+        "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) " +
+        "VALUES (?1, 'notify', ?2, ?3, ?4, 'pending')",
+        [ud.id, ud.to_agent_id, ud.kanban_card_id || "", ud.title]
       );
-      agentdesk.log.info("[notify-recovery] Dispatch " + ud.id + " queued for delivery");
+      agentdesk.log.info("[notify-recovery] Dispatch " + ud.id + " re-enqueued to dispatch_outbox");
     }
   },
 
@@ -571,30 +555,9 @@ var timeouts = {
           " — attempt " + newRetryCount + "/" + MAX_DISPATCH_RETRIES +
           " (old: " + fd.id + " → new: " + newDispatchId + ")");
 
-        // Discord 알림 직접 전송 ([I-0] 2분 대기 없이 즉시 알림)
-        var retryAgent = agentdesk.db.query(
-          "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?",
-          [fd.to_agent_id]
-        );
-        if (retryAgent.length > 0) {
-          var useAlt = (fd.dispatch_type === "review");
-          var retryChannelId = useAlt ? retryAgent[0].discord_channel_alt : retryAgent[0].discord_channel_id;
-          if (retryChannelId) {
-            var issueLink = fd.github_issue_url
-              ? "\n[" + fd.title + " #" + fd.github_issue_number + "](<" + fd.github_issue_url + ">)"
-              : "";
-            var retryPrefix = useAlt
-              ? "DISPATCH:" + newDispatchId + " - " + fd.title + "\n⚠️ 검토 전용 — 작업 착수 금지\n코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
-              : "DISPATCH:" + newDispatchId + " - " + fd.title;
-            var retryContent = retryPrefix + issueLink;
-            agentdesk.message.queue("channel:" + retryChannelId, retryContent, "announce", "system");
-            agentdesk.db.execute(
-              "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('dispatch_notified:' || ?1, datetime('now'))",
-              [newDispatchId]
-            );
-            agentdesk.log.info("[retry] Dispatch " + newDispatchId + " notification queued");
-          }
-        }
+        // Discord notification is handled by the dispatch outbox system (#209).
+        // agentdesk.dispatch.create() enqueues an outbox entry via queue_dispatch_notify,
+        // and the outbox worker delivers with two-phase guard (no duplicate risk).
       } catch (e) {
         agentdesk.log.error("[retry] Failed to create retry dispatch for card " +
           fd.kanban_card_id + ": " + e);
