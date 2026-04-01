@@ -376,6 +376,54 @@ pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
     }
 }
 
+/// Result from reading a provider session output stream until completion or session death.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadOutputResult {
+    /// Normal completion (terminal result observed)
+    Completed { offset: u64 },
+    /// Session died without producing a terminal result
+    SessionDied { offset: u64 },
+    /// User cancelled the operation
+    Cancelled { offset: u64 },
+}
+
+/// Result from sending a follow-up message to an existing provider session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowupResult {
+    /// Message delivered and output successfully read to completion.
+    Delivered,
+    /// Session needs to be killed and recreated.
+    RecreateSession { error: String },
+}
+
+pub fn fold_read_output_result<T>(
+    read_result: ReadOutputResult,
+    on_ready: impl FnOnce(u64) -> T,
+    on_session_died: impl FnOnce(u64) -> T,
+) -> T {
+    match read_result {
+        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+            on_ready(offset)
+        }
+        ReadOutputResult::SessionDied { offset } => on_session_died(offset),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn followup_result_from_read_output_result(
+    read_result: ReadOutputResult,
+    session_died_error: impl Into<String>,
+) -> FollowupResult {
+    let session_died_error = session_died_error.into();
+    fold_read_output_result(
+        read_result,
+        |_| FollowupResult::Delivered,
+        |_| FollowupResult::RecreateSession {
+            error: session_died_error,
+        },
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamAttemptFailure {
     pub message: String,
@@ -443,8 +491,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
-        cancel_requested, compose_structured_turn_prompt,
+        CancelToken, FollowupResult, ProviderKind, ReadOutputResult, StreamAttemptFailure,
+        StreamAttemptResult, StreamFinalState, cancel_requested, compose_structured_turn_prompt,
+        fold_read_output_result, followup_result_from_read_output_result,
         parse_provider_and_channel_from_tmux_name, register_child_pid,
         run_retrying_stream_attempts,
     };
@@ -959,5 +1008,48 @@ mod tests {
     fn test_compose_structured_turn_prompt_returns_plain_prompt_without_overrides() {
         let prompt = compose_structured_turn_prompt("just answer", None, None);
         assert_eq!(prompt, "just answer");
+    }
+
+    #[test]
+    fn test_fold_read_output_result_maps_completed_to_ready_offset() {
+        let outcome = fold_read_output_result(
+            ReadOutputResult::Completed { offset: 42 },
+            |offset| format!("ready:{offset}"),
+            |offset| format!("dead:{offset}"),
+        );
+        assert_eq!(outcome, "ready:42");
+    }
+
+    #[test]
+    fn test_fold_read_output_result_maps_session_died_to_dead_branch() {
+        let outcome = fold_read_output_result(
+            ReadOutputResult::SessionDied { offset: 7 },
+            |offset| format!("ready:{offset}"),
+            |offset| format!("dead:{offset}"),
+        );
+        assert_eq!(outcome, "dead:7");
+    }
+
+    #[test]
+    fn test_followup_result_from_read_output_result_maps_completed_to_delivered() {
+        let outcome = followup_result_from_read_output_result(
+            ReadOutputResult::Completed { offset: 99 },
+            "session died during follow-up output reading",
+        );
+        assert_eq!(outcome, FollowupResult::Delivered);
+    }
+
+    #[test]
+    fn test_followup_result_from_read_output_result_maps_session_died_to_recreate() {
+        let outcome = followup_result_from_read_output_result(
+            ReadOutputResult::SessionDied { offset: 99 },
+            "session died during follow-up output reading",
+        );
+        assert_eq!(
+            outcome,
+            FollowupResult::RecreateSession {
+                error: "session died during follow-up output reading".to_string(),
+            }
+        );
     }
 }

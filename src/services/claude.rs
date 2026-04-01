@@ -9,7 +9,10 @@ use std::sync::mpsc::Sender;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
+use crate::services::provider::{
+    CancelToken, FollowupResult, ProviderKind, ReadOutputResult, cancel_requested,
+    fold_read_output_result, register_child_pid,
+};
 use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -206,40 +209,6 @@ pub enum StreamMessage {
     },
     /// Latest read offset in a growing tmux output file
     OutputOffset { offset: u64 },
-}
-
-/// Result from reading a tmux output file until completion or session death.
-pub enum ReadOutputResult {
-    /// Normal completion (result event received)
-    Completed { offset: u64 },
-    /// Session died without producing a result
-    #[allow(dead_code)]
-    SessionDied { offset: u64 },
-    /// User cancelled the operation
-    Cancelled { offset: u64 },
-}
-
-/// Result from sending a follow-up message to an existing tmux session.
-///
-/// When `RecreateSession` is returned, the caller should kill the current
-/// tmux session and fall through to the full session-creation path, replaying
-/// the same prompt in a fresh session.
-///
-/// **Partial-output note:** If the session dies *after* some streaming output
-/// has already been forwarded to Discord, the recreated session will produce
-/// the full response again, which may appear as duplicate text to the user.
-/// This is an acceptable trade-off: the alternative (leaving the task
-/// unfinished) is worse, and Claude/Codex prompts are generally idempotent
-/// for read/analysis tasks.  For prompts that trigger side-effects (file
-/// writes, git operations), the agent CLI itself is responsible for
-/// idempotency — the same prompt re-sent to a fresh session will not blindly
-/// re-apply already-committed changes.
-#[derive(Debug)]
-pub enum FollowupResult {
-    /// Message delivered and output successfully read to completion.
-    Delivered,
-    /// Session needs to be killed and recreated (FIFO broken or session died).
-    RecreateSession { error: String },
 }
 
 #[cfg(unix)]
@@ -1958,24 +1927,24 @@ fn send_followup_to_tmux(
         SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
-            // Notify caller that tmux session is ready for background monitoring
+    Ok(fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path: output_path.to_string(),
                 input_fifo_path: input_fifo_path.to_string(),
                 tmux_session_name: tmux_session_name.to_string(),
                 last_offset: offset,
             });
-            Ok(FollowupResult::Delivered)
-        }
-        ReadOutputResult::SessionDied { .. } => {
+            FollowupResult::Delivered
+        },
+        |_| {
             debug_log("tmux session died during follow-up — requesting recreation");
-            Ok(FollowupResult::RecreateSession {
+            FollowupResult::RecreateSession {
                 error: "session died during follow-up output reading".to_string(),
-            })
-        }
-    }
+            }
+        },
+    ))
 }
 
 /// Callbacks for session status checks during output file polling.
@@ -2349,24 +2318,24 @@ pub(crate) fn execute_streaming_local_process(
         SessionProbe::process(session_name.to_string()),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::ProcessReady {
                 output_path,
                 session_name: session_name.to_string(),
                 last_offset: offset,
             });
-        }
-        ReadOutputResult::SessionDied { .. } => {
+        },
+        |_| {
             let _ = sender.send(StreamMessage::Done {
                 result: "⚠ 프로세스가 종료되었습니다. 새 메시지를 보내면 새 세션이 시작됩니다."
                     .to_string(),
                 session_id: None,
             });
-            // Clean up dead handle
             PROCESS_HANDLES.lock().unwrap().remove(session_name);
-        }
-    }
+        },
+    );
 
     debug_log("=== execute_streaming_local_process END ===");
     Ok(())
@@ -2436,23 +2405,24 @@ fn send_followup_to_process(
         SessionProbe::process(session_name.to_string()),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    Ok(fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::ProcessReady {
                 output_path: output_path.to_string(),
                 session_name: session_name.to_string(),
                 last_offset: offset,
             });
-            Ok(FollowupResult::Delivered)
-        }
-        ReadOutputResult::SessionDied { .. } => {
+            FollowupResult::Delivered
+        },
+        |_| {
             debug_log("process session died during follow-up — requesting recreation");
             PROCESS_HANDLES.lock().unwrap().remove(session_name);
-            Ok(FollowupResult::RecreateSession {
+            FollowupResult::RecreateSession {
                 error: "process died during follow-up output reading".to_string(),
-            })
-        }
-    }
+            }
+        },
+    ))
 }
 
 /// Global storage for ProcessBackend session handles.
@@ -2887,28 +2857,18 @@ mod tests {
     #[test]
     fn test_followup_result_maps_completed_to_delivered() {
         let read_result = ReadOutputResult::Completed { offset: 100 };
-        let followup = match read_result {
-            ReadOutputResult::Completed { .. } | ReadOutputResult::Cancelled { .. } => {
-                FollowupResult::Delivered
-            }
-            ReadOutputResult::SessionDied { .. } => FollowupResult::RecreateSession {
-                error: "died".to_string(),
-            },
-        };
+        let followup =
+            crate::services::provider::followup_result_from_read_output_result(read_result, "died");
         assert!(matches!(followup, FollowupResult::Delivered));
     }
 
     #[test]
     fn test_followup_result_maps_session_died_to_recreate() {
         let read_result = ReadOutputResult::SessionDied { offset: 42 };
-        let followup = match read_result {
-            ReadOutputResult::Completed { .. } | ReadOutputResult::Cancelled { .. } => {
-                FollowupResult::Delivered
-            }
-            ReadOutputResult::SessionDied { .. } => FollowupResult::RecreateSession {
-                error: "session died during follow-up output reading".to_string(),
-            },
-        };
+        let followup = crate::services::provider::followup_result_from_read_output_result(
+            read_result,
+            "session died during follow-up output reading",
+        );
         match followup {
             FollowupResult::RecreateSession { error } => {
                 assert!(error.contains("session died"));

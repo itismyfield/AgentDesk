@@ -7,13 +7,16 @@ use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
 use crate::services::claude::{
-    self, FollowupResult, ReadOutputResult, SessionProbe, StreamLineState, StreamMessage,
-    process_stream_line, read_output_file_until_result, shell_escape,
+    self, SessionProbe, StreamLineState, StreamMessage, process_stream_line,
+    read_output_file_until_result, shell_escape,
 };
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
+use crate::services::provider::{
+    CancelToken, FollowupResult, ProviderKind, cancel_requested, fold_read_output_result,
+    register_child_pid,
+};
 use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -520,23 +523,24 @@ fn execute_streaming_local_tmux(
         SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path,
                 input_fifo_path,
                 tmux_session_name: tmux_session_name.to_string(),
                 last_offset: offset,
             });
-        }
-        ReadOutputResult::SessionDied { .. } => {
+        },
+        |_| {
             let _ = sender.send(StreamMessage::Done {
                 result: "⚠ 세션이 종료되었습니다. 새 메시지를 보내면 새 세션이 시작됩니다."
                     .to_string(),
                 session_id: None,
             });
-        }
-    }
+        },
+    );
 
     Ok(())
 }
@@ -589,20 +593,21 @@ fn send_followup_to_tmux(
         SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    Ok(fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path: output_path.to_string(),
                 input_fifo_path: input_fifo_path.to_string(),
                 tmux_session_name: tmux_session_name.to_string(),
                 last_offset: offset,
             });
-            Ok(FollowupResult::Delivered)
-        }
-        ReadOutputResult::SessionDied { .. } => Ok(FollowupResult::RecreateSession {
+            FollowupResult::Delivered
+        },
+        |_| FollowupResult::RecreateSession {
             error: "session died during follow-up output reading".to_string(),
-        }),
-    }
+        },
+    ))
 }
 
 /// Execute Codex via ProcessBackend (direct child process, no tmux).
@@ -662,23 +667,23 @@ fn execute_streaming_local_process_codex(
                     claude::SessionProbe::process(session_name.to_string()),
                 )?;
 
-                match read_result {
-                    ReadOutputResult::Completed { offset }
-                    | ReadOutputResult::Cancelled { offset } => {
+                fold_read_output_result(
+                    read_result,
+                    |offset| {
                         let _ = sender.send(StreamMessage::ProcessReady {
                             output_path: output_path.to_string(),
                             session_name: session_name.to_string(),
                             last_offset: offset,
                         });
-                    }
-                    ReadOutputResult::SessionDied { .. } => {
+                    },
+                    |_| {
                         let _ = sender.send(StreamMessage::Done {
                             result: "⚠ 세션이 종료되었습니다.".to_string(),
                             session_id: None,
                         });
                         claude::PROCESS_HANDLES.lock().unwrap().remove(session_name);
-                    }
-                }
+                    },
+                );
                 return Ok(());
             }
         }
@@ -739,22 +744,23 @@ fn execute_streaming_local_process_codex(
         claude::SessionProbe::process(session_name.to_string()),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::ProcessReady {
                 output_path,
                 session_name: session_name.to_string(),
                 last_offset: offset,
             });
-        }
-        ReadOutputResult::SessionDied { .. } => {
+        },
+        |_| {
             let _ = sender.send(StreamMessage::Done {
                 result: "⚠ 프로세스가 종료되었습니다.".to_string(),
                 session_id: None,
             });
             claude::PROCESS_HANDLES.lock().unwrap().remove(session_name);
-        }
-    }
+        },
+    );
 
     Ok(())
 }
@@ -1067,7 +1073,7 @@ mod tests {
     #[test]
     fn test_codex_followup_fifo_not_found_returns_recreate() {
         use super::send_followup_to_tmux;
-        use crate::services::claude::FollowupResult;
+        use crate::services::provider::FollowupResult;
 
         let (sender, _receiver) = mpsc::channel();
         let dir = std::env::temp_dir();
