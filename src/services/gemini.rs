@@ -28,6 +28,13 @@ enum GeminiStreamEvent {
     Eof,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum GeminiStreamLoopResult {
+    Eof,
+    RetrySession { message: String },
+    Cancelled,
+}
+
 #[derive(Debug)]
 enum GeminiAttemptResult {
     Completed,
@@ -270,53 +277,30 @@ fn execute_gemini_streaming_attempt(
     }
 
     let mut state = GeminiAttemptState::new(resume_selector);
-    let mut idle_ticks = 0;
-
-    loop {
-        if is_cancelled(cancel_token.as_deref()) {
+    match collect_gemini_stream_events(
+        &stdout_events,
+        cancel_token.as_deref(),
+        &mut state,
+        GEMINI_STREAM_IDLE_TIMEOUT,
+    ) {
+        GeminiStreamLoopResult::Cancelled => {
             claude::kill_child_tree(&mut child);
             let _ = child.wait();
             let _ = stderr_handle.join();
             return Ok(GeminiAttemptResult::Cancelled);
         }
-
-        match stdout_events.recv_timeout(GEMINI_STREAM_IDLE_TIMEOUT) {
-            Ok(GeminiStreamEvent::Line(line)) => {
-                idle_ticks = 0;
-                process_gemini_stream_line(&line, &mut state);
-            }
-            Ok(GeminiStreamEvent::ReadError(message)) => {
-                claude::kill_child_tree(&mut child);
-                let stderr = stderr_handle.join().unwrap_or_default();
-                return Ok(GeminiAttemptResult::RetrySession {
-                    message,
-                    stdout: state.raw_stdout,
-                    stderr,
-                    exit_code: None,
-                });
-            }
-            Ok(GeminiStreamEvent::Eof) | Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => {
-                if state.terminal_result_seen {
-                    break;
-                }
-                idle_ticks += 1;
-                if idle_ticks >= GEMINI_STREAM_IDLE_TICKS_BEFORE_RETRY {
-                    claude::kill_child_tree(&mut child);
-                    let stderr = stderr_handle.join().unwrap_or_default();
-                    return Ok(GeminiAttemptResult::RetrySession {
-                        message: format!(
-                            "Gemini stream produced no output for {} seconds",
-                            GEMINI_STREAM_IDLE_TIMEOUT.as_secs()
-                                * GEMINI_STREAM_IDLE_TICKS_BEFORE_RETRY as u64
-                        ),
-                        stdout: state.raw_stdout,
-                        stderr,
-                        exit_code: None,
-                    });
-                }
-            }
+        GeminiStreamLoopResult::RetrySession { message } => {
+            claude::kill_child_tree(&mut child);
+            let _ = child.wait();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            return Ok(GeminiAttemptResult::RetrySession {
+                message,
+                stdout: state.raw_stdout,
+                stderr,
+                exit_code: None,
+            });
         }
+        GeminiStreamLoopResult::Eof => {}
     }
 
     let status = child
@@ -360,6 +344,51 @@ fn execute_gemini_streaming_attempt(
             stderr,
             exit_code,
         }),
+    }
+}
+
+fn collect_gemini_stream_events(
+    stdout_events: &mpsc::Receiver<GeminiStreamEvent>,
+    cancel_token: Option<&CancelToken>,
+    state: &mut GeminiAttemptState,
+    idle_timeout: Duration,
+) -> GeminiStreamLoopResult {
+    let mut idle_ticks = 0;
+
+    loop {
+        if is_cancelled(cancel_token) {
+            return GeminiStreamLoopResult::Cancelled;
+        }
+
+        match stdout_events.recv_timeout(idle_timeout) {
+            Ok(GeminiStreamEvent::Line(line)) => {
+                idle_ticks = 0;
+                process_gemini_stream_line(&line, state);
+            }
+            Ok(GeminiStreamEvent::ReadError(message)) => {
+                return GeminiStreamLoopResult::RetrySession { message };
+            }
+            Ok(GeminiStreamEvent::Eof) | Err(RecvTimeoutError::Disconnected) => {
+                return GeminiStreamLoopResult::Eof;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if is_cancelled(cancel_token) {
+                    return GeminiStreamLoopResult::Cancelled;
+                }
+                if state.terminal_result_seen {
+                    return GeminiStreamLoopResult::Eof;
+                }
+                idle_ticks += 1;
+                if idle_ticks >= GEMINI_STREAM_IDLE_TICKS_BEFORE_RETRY {
+                    return GeminiStreamLoopResult::RetrySession {
+                        message: format!(
+                            "Gemini stream produced no output for {} seconds",
+                            idle_timeout.as_secs() * GEMINI_STREAM_IDLE_TICKS_BEFORE_RETRY as u64
+                        ),
+                    };
+                }
+            }
+        }
     }
 }
 
@@ -802,8 +831,9 @@ fn render_gemini_value(value: &Value) -> String {
 mod tests {
     use super::{
         GEMINI_INVALID_RESUME_SELECTOR_MESSAGE, GEMINI_SESSION_DEAD_MESSAGE, GeminiAttemptResult,
-        GeminiAttemptState, GeminiFinalState, build_exec_args, build_gemini_tool_result_message,
-        build_gemini_tool_use_message, execute_command_streaming, extract_gemini_error_message,
+        GeminiAttemptState, GeminiFinalState, GeminiStreamEvent, GeminiStreamLoopResult,
+        build_exec_args, build_gemini_tool_result_message, build_gemini_tool_use_message,
+        collect_gemini_stream_events, execute_command_streaming, extract_gemini_error_message,
         extract_text_from_stream_output, finalize_gemini_attempt, flush_buffered_stream_messages,
         looks_like_uuid, normalize_resume_selector, observed_session_to_resume_selector,
         process_gemini_stream_line, remote_profile_not_supported_message,
@@ -815,6 +845,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
+    use std::time::Duration;
 
     #[test]
     fn build_exec_args_includes_resume_when_session_present() {
@@ -1210,6 +1241,32 @@ mod tests {
         assert!(result.is_ok());
         assert!(rx.try_recv().is_err());
         assert!(token.child_pid.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn cancelled_during_stream_returns_cancelled() {
+        let token = Arc::new(CancelToken::new());
+        let (tx, rx) = mpsc::channel();
+        let mut state = GeminiAttemptState::new(None);
+        tx.send(GeminiStreamEvent::Line(
+            r#"{"type":"message","role":"assistant","content":"partial"}"#.to_string(),
+        ))
+        .unwrap();
+        let token_for_thread = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1));
+            token_for_thread.cancelled.store(true, Ordering::Relaxed);
+        });
+
+        let result = collect_gemini_stream_events(
+            &rx,
+            Some(token.as_ref()),
+            &mut state,
+            Duration::from_millis(5),
+        );
+
+        assert_eq!(result, GeminiStreamLoopResult::Cancelled);
+        assert_eq!(state.final_text, "partial");
     }
 
     #[test]
