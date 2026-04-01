@@ -2008,187 +2008,57 @@ pub(crate) fn read_output_file_until_result(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     probe: SessionProbe,
 ) -> Result<ReadOutputResult, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    use std::time::Duration;
-
     debug_log(&format!(
         "=== read_output_file_until_result: offset={} ===",
         start_offset
     ));
 
-    // Wait for output file to exist (wrapper might not have created it yet)
-    // Uses exponential backoff: 10ms → 500ms
-    let wait_start = std::time::Instant::now();
-    let mut wait_interval = Duration::from_millis(10);
-    let max_wait_interval = Duration::from_millis(500);
-    loop {
-        if std::fs::metadata(output_path).is_ok() {
-            break;
-        }
-        if wait_start.elapsed() > Duration::from_secs(30) {
-            return Err("Timeout waiting for output file".to_string());
-        }
-        if cancel_requested(cancel_token.as_deref()) {
-            return Ok(ReadOutputResult::Cancelled {
-                offset: start_offset,
-            });
-        }
-        std::thread::sleep(wait_interval);
-        wait_interval = std::cmp::min(
-            Duration::from_millis((wait_interval.as_millis() as f64 * 1.5) as u64),
-            max_wait_interval,
-        );
-    }
-
-    let mut file = std::fs::File::open(output_path)
-        .map_err(|e| format!("Failed to open output file: {}", e))?;
-    file.seek(SeekFrom::Start(start_offset))
-        .map_err(|e| format!("Failed to seek output file: {}", e))?;
-
-    let mut current_offset = start_offset;
-    let mut partial_line = String::new();
     let mut state = StreamLineState::new();
-    let mut buf = [0u8; 8192];
-    let mut no_data_count: u32 = 0;
-    let mut consecutive_ready_count: u32 = 0;
-    let mut first_ready_at: Option<std::time::Instant> = None;
+    let SessionProbe {
+        is_alive,
+        is_ready_for_input,
+    } = probe;
+    let offset_sender = sender.clone();
+    let line_sender = sender.clone();
+    let synthetic_sender = sender.clone();
+    let error_sender = sender.clone();
 
-    loop {
-        // Check cancellation
-        if cancel_requested(cancel_token.as_deref()) {
-            debug_log("Cancel detected during output file read");
-            return Ok(ReadOutputResult::Cancelled {
-                offset: current_offset,
-            });
-        }
-
-        match file.read(&mut buf) {
-            Ok(0) => {
-                // No new data — check if session is still alive
-                no_data_count += 1;
-                if no_data_count % 25 == 0 {
-                    // Approximately every 3-5 seconds (varies with backoff)
-                    if !(probe.is_alive)() {
-                        debug_log("Session ended while reading output");
-                        // Check for unread data before breaking
-                        let file_len = std::fs::metadata(output_path)
-                            .map(|meta| meta.len())
-                            .unwrap_or(current_offset);
-                        if file_len > current_offset {
-                            continue; // Still data to read
-                        }
-                        break;
-                    }
-
-                    let file_len = std::fs::metadata(output_path)
-                        .map(|meta| meta.len())
-                        .unwrap_or(current_offset);
-                    let has_new_bytes = file_len > current_offset;
-                    // Only consider ready-for-input if output has grown at least
-                    // once since the turn started.  When a follow-up message is
-                    // written to the FIFO but Claude hasn't begun processing yet,
-                    // the previous turn's "Ready for input" prompt still lingers
-                    // in the tmux pane — causing a false-positive completion.
-                    let output_ever_grew = current_offset > start_offset;
-                    if !has_new_bytes && output_ever_grew && (probe.is_ready_for_input)() {
-                        if first_ready_at.is_none() {
-                            first_ready_at = Some(std::time::Instant::now());
-                        }
-                        consecutive_ready_count += 1;
-                        // Time-based guard: require at least 15 seconds of continuous
-                        // ready state to avoid false positives during Claude Code
-                        // auto-continue transitions. With adaptive backoff the loop
-                        // cadence varies, so wall-clock time is the reliable measure.
-                        let ready_elapsed = first_ready_at.unwrap().elapsed();
-                        if ready_elapsed >= Duration::from_secs(15) && consecutive_ready_count >= 3
-                        {
-                            debug_log(
-                                "Session returned to ready prompt without result event; synthesizing completion",
-                            );
-                            let synthetic = StreamMessage::Done {
-                                result: String::new(),
-                                session_id: state.last_session_id.clone(),
-                            };
-                            if sender.send(synthetic).is_err() {
-                                return Ok(ReadOutputResult::Cancelled {
-                                    offset: current_offset,
-                                });
-                            }
-                            state.final_result = Some(String::new());
-                            return Ok(ReadOutputResult::Completed {
-                                offset: current_offset,
-                            });
-                        }
-                    } else {
-                        consecutive_ready_count = 0;
-                        first_ready_at = None;
-                    }
-                }
-                // Adaptive backoff: start fast (10ms), slow down to 200ms when idle
-                let read_interval = if no_data_count < 5 {
-                    Duration::from_millis(10)
-                } else if no_data_count < 20 {
-                    Duration::from_millis(50)
-                } else {
-                    Duration::from_millis(200)
-                };
-                std::thread::sleep(read_interval);
-            }
-            Ok(n) => {
-                no_data_count = 0;
-                consecutive_ready_count = 0;
-                first_ready_at = None;
-                current_offset += n as u64;
-                let _ = sender.send(StreamMessage::OutputOffset {
-                    offset: current_offset,
+    let result = crate::services::provider::poll_output_file_until_result(
+        output_path,
+        start_offset,
+        cancel_token,
+        &mut state,
+        move || is_alive(),
+        move || is_ready_for_input(),
+        move |offset| {
+            let _ = offset_sender.send(StreamMessage::OutputOffset { offset });
+        },
+        move |line, state| process_stream_line(line, &line_sender, state),
+        |state| state.final_result.is_some(),
+        move |state| {
+            let synthetic = StreamMessage::Done {
+                result: String::new(),
+                session_id: state.last_session_id.clone(),
+            };
+            synthetic_sender.send(synthetic).is_ok()
+        },
+        move |state| {
+            if let Some((message, stdout_raw)) = &state.stdout_error {
+                let _ = error_sender.send(StreamMessage::Error {
+                    message: message.clone(),
+                    stdout: stdout_raw.clone(),
+                    stderr: String::new(),
+                    exit_code: None,
                 });
-                partial_line.push_str(&String::from_utf8_lossy(&buf[..n]));
-
-                // Process complete lines
-                while let Some(pos) = partial_line.find('\n') {
-                    let line: String = partial_line.drain(..=pos).collect();
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-
-                    if !process_stream_line(trimmed, &sender, &mut state) {
-                        debug_log("Channel disconnected during output file read");
-                        return Ok(ReadOutputResult::Cancelled {
-                            offset: current_offset,
-                        });
-                    }
-
-                    // Check if we got a result (turn complete)
-                    if state.final_result.is_some() {
-                        debug_log("Result received — returning from output file read");
-                        return Ok(ReadOutputResult::Completed {
-                            offset: current_offset,
-                        });
-                    }
-                }
             }
-            Err(e) => {
-                debug_log(&format!("Error reading output file: {}", e));
-                break;
-            }
-        }
+        },
+    );
+
+    if let Ok(ReadOutputResult::SessionDied { .. }) = &result {
+        debug_log("=== read_output_file_until_result END (session died) ===");
     }
 
-    // Handle deferred error or missing Done message
-    if let Some((message, stdout_raw)) = state.stdout_error {
-        let _ = sender.send(StreamMessage::Error {
-            message,
-            stdout: stdout_raw,
-            stderr: String::new(),
-            exit_code: None,
-        });
-    }
-
-    debug_log("=== read_output_file_until_result END (session died) ===");
-    Ok(ReadOutputResult::SessionDied {
-        offset: current_offset,
-    })
+    result
 }
 
 // ─── ProcessBackend execution path ────────────────────────────────────────────
