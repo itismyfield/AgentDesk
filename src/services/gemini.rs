@@ -47,7 +47,7 @@ struct GeminiAttemptState {
     last_error_message: Option<String>,
     terminal_result_seen: bool,
     terminal_result_text: Option<String>,
-    buffered_messages: Vec<StreamMessage>,
+    meaningful_progress_seen: bool,
 }
 
 impl GeminiAttemptState {
@@ -227,6 +227,7 @@ fn execute_gemini_streaming_attempt(
     let mut state = GeminiAttemptState::new(resume_selector);
     match collect_gemini_stream_events(
         &stdout_events,
+        &sender,
         cancel_token.as_deref(),
         &mut state,
         GEMINI_STREAM_POLL_TIMEOUT,
@@ -263,12 +264,10 @@ fn execute_gemini_streaming_attempt(
 
     match finalize_gemini_attempt(&mut state, stderr, status.code()) {
         StreamFinalState::Done { result, session_id } => {
-            flush_buffered_stream_messages(&sender, &mut state);
             let _ = sender.send(StreamMessage::Done { result, session_id });
             Ok(StreamAttemptResult::Completed)
         }
         StreamFinalState::Error(failure) => {
-            flush_buffered_stream_messages(&sender, &mut state);
             send_gemini_stream_failure(&sender, failure);
             Ok(StreamAttemptResult::Completed)
         }
@@ -293,6 +292,7 @@ fn send_gemini_stream_failure(sender: &Sender<StreamMessage>, failure: StreamAtt
 
 fn collect_gemini_stream_events(
     stdout_events: &mpsc::Receiver<GeminiStreamEvent>,
+    sender: &Sender<StreamMessage>,
     cancel_token: Option<&CancelToken>,
     state: &mut GeminiAttemptState,
     poll_timeout: Duration,
@@ -308,7 +308,7 @@ fn collect_gemini_stream_events(
         match stdout_events.recv_timeout(poll_timeout) {
             Ok(GeminiStreamEvent::Line(line)) => {
                 silent_for = Duration::ZERO;
-                process_gemini_stream_line(&line, state);
+                process_gemini_stream_line(&line, state, sender);
             }
             Ok(GeminiStreamEvent::ReadError(message)) => {
                 return GeminiStreamLoopResult::RetrySession { message };
@@ -323,7 +323,7 @@ fn collect_gemini_stream_events(
                 if state.terminal_result_seen {
                     return GeminiStreamLoopResult::Eof;
                 }
-                if state.raw_stdout.is_empty() {
+                if !state.meaningful_progress_seen {
                     continue;
                 }
                 silent_for += poll_timeout;
@@ -367,7 +367,11 @@ where
     rx
 }
 
-fn process_gemini_stream_line(line: &str, state: &mut GeminiAttemptState) {
+fn process_gemini_stream_line(
+    line: &str,
+    state: &mut GeminiAttemptState,
+    sender: &Sender<StreamMessage>,
+) {
     if line.trim().is_empty() {
         return;
     }
@@ -378,15 +382,19 @@ fn process_gemini_stream_line(line: &str, state: &mut GeminiAttemptState) {
         return;
     };
 
-    process_gemini_json_event(&json, state);
+    process_gemini_json_event(&json, state, sender);
 }
 
-fn process_gemini_json_event(json: &Value, state: &mut GeminiAttemptState) {
+fn process_gemini_json_event(
+    json: &Value,
+    state: &mut GeminiAttemptState,
+    sender: &Sender<StreamMessage>,
+) {
     match json.get("type").and_then(|v| v.as_str()) {
         Some("init") => {
             if let Some(session_id) = json.get("session_id").and_then(|v| v.as_str()) {
                 state.last_resume_selector = observed_session_to_resume_selector(session_id);
-                state.buffered_messages.push(StreamMessage::Init {
+                let _ = sender.send(StreamMessage::Init {
                     session_id: state
                         .last_resume_selector
                         .clone()
@@ -402,20 +410,23 @@ fn process_gemini_json_event(json: &Value, state: &mut GeminiAttemptState) {
             let role = json.get("role").and_then(|v| v.as_str());
             let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if role == Some("assistant") && !content.is_empty() {
+                state.meaningful_progress_seen = true;
                 state.final_text.push_str(content);
-                state.buffered_messages.push(StreamMessage::Text {
+                let _ = sender.send(StreamMessage::Text {
                     content: content.to_string(),
                 });
             }
         }
         Some("tool_use") => {
             if let Some(tool_use) = build_gemini_tool_use_message(json) {
-                state.buffered_messages.push(tool_use);
+                state.meaningful_progress_seen = true;
+                let _ = sender.send(tool_use);
             }
         }
         Some("tool_result") => {
             if let Some(tool_result) = build_gemini_tool_result_message(json) {
-                state.buffered_messages.push(tool_result);
+                state.meaningful_progress_seen = true;
+                let _ = sender.send(tool_result);
             }
         }
         Some("error") => {
@@ -449,7 +460,7 @@ fn process_gemini_json_event(json: &Value, state: &mut GeminiAttemptState) {
             let duration_ms = stats
                 .and_then(|value| value.get("duration_ms"))
                 .and_then(|value| value.as_u64());
-            state.buffered_messages.push(StreamMessage::StatusUpdate {
+            let _ = sender.send(StreamMessage::StatusUpdate {
                 model: model_name,
                 cost_usd: None,
                 total_cost_usd: None,
@@ -529,12 +540,6 @@ fn finalize_gemini_attempt(
         stderr,
         exit_code,
     })
-}
-
-fn flush_buffered_stream_messages(sender: &Sender<StreamMessage>, state: &mut GeminiAttemptState) {
-    for message in state.buffered_messages.drain(..) {
-        let _ = sender.send(message);
-    }
 }
 
 fn is_cancelled(token: Option<&CancelToken>) -> bool {
@@ -760,10 +765,9 @@ mod tests {
         GeminiStreamEvent, GeminiStreamLoopResult, build_exec_args,
         build_gemini_tool_result_message, build_gemini_tool_use_message,
         collect_gemini_stream_events, execute_command_streaming, extract_gemini_error_message,
-        extract_text_from_stream_output, finalize_gemini_attempt, flush_buffered_stream_messages,
-        looks_like_uuid, normalize_resume_selector, observed_session_to_resume_selector,
-        process_gemini_stream_line, remote_profile_not_supported_message,
-        run_gemini_streaming_attempts,
+        extract_text_from_stream_output, finalize_gemini_attempt, looks_like_uuid,
+        normalize_resume_selector, observed_session_to_resume_selector, process_gemini_stream_line,
+        remote_profile_not_supported_message, run_gemini_streaming_attempts,
     };
     use crate::services::claude::StreamMessage;
     use crate::services::provider::{
@@ -904,13 +908,13 @@ mod tests {
         process_gemini_stream_line(
             r#"{"type":"tool_use","tool_name":"run_shell_command","parameters":{"command":"pwd"}}"#,
             &mut state,
+            &tx,
         );
         process_gemini_stream_line(
             r#"{"type":"tool_result","status":"success","output":"/tmp/example"}"#,
             &mut state,
+            &tx,
         );
-
-        flush_buffered_stream_messages(&tx, &mut state);
 
         match rx.recv().unwrap() {
             StreamMessage::ToolUse { name, input } => {
@@ -950,6 +954,7 @@ mod tests {
         process_gemini_stream_line(
             r#"{"type":"message","role":42,"content":["bad-shape"]}"#,
             &mut state,
+            &_tx,
         );
 
         assert!(state.final_text.is_empty());
@@ -961,27 +966,26 @@ mod tests {
         let (_tx, rx): (mpsc::Sender<StreamMessage>, mpsc::Receiver<StreamMessage>) =
             mpsc::channel();
         let mut state = GeminiAttemptState::new(None);
-        process_gemini_stream_line("{}", &mut state);
+        process_gemini_stream_line("{}", &mut state, &_tx);
 
         assert!(!state.terminal_result_seen);
         assert!(rx.try_recv().is_err());
     }
 
     #[test]
-    fn attempt_messages_are_buffered_until_flush() {
+    fn attempt_messages_are_emitted_immediately() {
         let (tx, rx) = mpsc::channel();
         let mut state = GeminiAttemptState::new(None);
         process_gemini_stream_line(
             r#"{"type":"init","session_id":"aa678e6b-c6d3-4dd2-9197-58580c00cc6c","model":"gemini-2.5-flash"}"#,
             &mut state,
+            &tx,
         );
         process_gemini_stream_line(
             r#"{"type":"message","role":"assistant","content":"hello"}"#,
             &mut state,
+            &tx,
         );
-
-        assert!(rx.try_recv().is_err());
-        flush_buffered_stream_messages(&tx, &mut state);
 
         match rx.recv().unwrap() {
             StreamMessage::Init { session_id } => assert_eq!(session_id, "latest"),
@@ -995,32 +999,36 @@ mod tests {
     }
 
     #[test]
-    fn execute_complete_flushes_buffered_messages_before_done() {
+    fn execute_complete_emits_stream_events_before_done() {
         let (tx, rx) = mpsc::channel();
         let mut state = GeminiAttemptState::new(None);
         process_gemini_stream_line(
             r#"{"type":"init","session_id":"session-alpha","model":"gemini-2.5-flash"}"#,
             &mut state,
+            &tx,
         );
         process_gemini_stream_line(
             r#"{"type":"message","role":"assistant","content":"hello"}"#,
             &mut state,
+            &tx,
         );
         process_gemini_stream_line(
             r#"{"type":"tool_use","tool_name":"run_shell_command","parameters":{"command":"pwd"}}"#,
             &mut state,
+            &tx,
         );
         process_gemini_stream_line(
             r#"{"type":"tool_result","status":"success","output":"/tmp/example"}"#,
             &mut state,
+            &tx,
         );
         process_gemini_stream_line(
             r#"{"type":"result","result":"hello","stats":{"input_tokens":10,"output_tokens":4,"duration_ms":20}}"#,
             &mut state,
+            &tx,
         );
 
         let final_state = finalize_gemini_attempt(&mut state, String::new(), Some(0));
-        flush_buffered_stream_messages(&tx, &mut state);
         match final_state {
             StreamFinalState::Done { result, session_id } => {
                 let _ = tx.send(StreamMessage::Done { result, session_id });
@@ -1179,6 +1187,7 @@ mod tests {
     fn cancelled_during_stream_returns_cancelled() {
         let token = Arc::new(CancelToken::new());
         let (tx, rx) = mpsc::channel();
+        let (stream_tx, _stream_rx) = mpsc::channel();
         let mut state = GeminiAttemptState::new(None);
         tx.send(GeminiStreamEvent::Line(
             r#"{"type":"message","role":"assistant","content":"partial"}"#.to_string(),
@@ -1192,6 +1201,7 @@ mod tests {
 
         let result = collect_gemini_stream_events(
             &rx,
+            &stream_tx,
             Some(token.as_ref()),
             &mut state,
             Duration::from_millis(5),
@@ -1205,8 +1215,13 @@ mod tests {
     #[test]
     fn idle_watchdog_does_not_retry_before_first_stream_progress() {
         let token = Arc::new(CancelToken::new());
-        let (_tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let (stream_tx, stream_rx) = mpsc::channel();
         let mut state = GeminiAttemptState::new(None);
+        tx.send(GeminiStreamEvent::Line(
+            r#"{"type":"init","session_id":"latest","model":"gemini-2.5-flash"}"#.to_string(),
+        ))
+        .unwrap();
         let token_for_thread = token.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(4));
@@ -1215,6 +1230,7 @@ mod tests {
 
         let result = collect_gemini_stream_events(
             &rx,
+            &stream_tx,
             Some(token.as_ref()),
             &mut state,
             Duration::from_millis(1),
@@ -1222,12 +1238,19 @@ mod tests {
         );
 
         assert_eq!(result, GeminiStreamLoopResult::Cancelled);
-        assert!(state.raw_stdout.is_empty());
+        assert!(!state.raw_stdout.is_empty());
+        assert!(!state.meaningful_progress_seen);
+        match stream_rx.recv().unwrap() {
+            StreamMessage::Init { session_id } => assert_eq!(session_id, "latest"),
+            other => panic!("expected Init, got {:?}", other),
+        }
+        assert!(stream_rx.try_recv().is_err());
     }
 
     #[test]
     fn idle_watchdog_retries_after_extended_silence_following_progress() {
         let (tx, rx) = mpsc::channel();
+        let (stream_tx, stream_rx) = mpsc::channel();
         let mut state = GeminiAttemptState::new(None);
         tx.send(GeminiStreamEvent::Line(
             r#"{"type":"message","role":"assistant","content":"partial"}"#.to_string(),
@@ -1236,6 +1259,7 @@ mod tests {
 
         let result = collect_gemini_stream_events(
             &rx,
+            &stream_tx,
             None,
             &mut state,
             Duration::from_millis(1),
@@ -1249,6 +1273,12 @@ mod tests {
             other => panic!("expected RetrySession, got {:?}", other),
         }
         assert_eq!(state.final_text, "partial");
+        assert!(state.meaningful_progress_seen);
+        match stream_rx.recv().unwrap() {
+            StreamMessage::Text { content } => assert_eq!(content, "partial"),
+            other => panic!("expected Text, got {:?}", other),
+        }
+        assert!(stream_rx.try_recv().is_err());
     }
 
     #[test]

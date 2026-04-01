@@ -1422,7 +1422,7 @@ mod tests {
             &mut state,
             || {
                 alive_checks += 1;
-                alive_checks < 25
+                alive_checks < 1
             },
             || false,
             |_| {},
