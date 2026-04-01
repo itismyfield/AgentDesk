@@ -1222,6 +1222,46 @@ mod tests {
     }
 
     #[test]
+    fn test_fold_read_output_result_maps_cancelled_to_ready_offset() {
+        let outcome = fold_read_output_result(
+            ReadOutputResult::Cancelled { offset: 15 },
+            |offset| format!("ready:{offset}"),
+            |offset| format!("dead:{offset}"),
+        );
+        assert_eq!(outcome, "ready:15");
+    }
+
+    #[test]
+    fn test_followup_result_from_read_output_result_maps_cancelled_to_delivered() {
+        let outcome = followup_result_from_read_output_result(
+            ReadOutputResult::Cancelled { offset: 99 },
+            "session died during follow-up output reading",
+        );
+        assert_eq!(outcome, FollowupResult::Delivered);
+    }
+
+    #[test]
+    fn test_run_retrying_stream_attempts_returns_early_on_cancelled() {
+        let mut exhausted: Option<StreamAttemptFailure> = None;
+        let mut calls = 0usize;
+
+        let result = run_retrying_stream_attempts(
+            "Gemini",
+            Some("latest".to_string()),
+            1,
+            |_| {
+                calls += 1;
+                Ok(StreamAttemptResult::Cancelled)
+            },
+            |failure| exhausted = Some(failure),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(calls, 1);
+        assert!(exhausted.is_none());
+    }
+
+    #[test]
     fn test_poll_output_file_until_result_completes_after_terminal_line() {
         #[derive(Default)]
         struct TestState {
@@ -1295,5 +1335,68 @@ mod tests {
         .unwrap();
 
         assert_eq!(result, ReadOutputResult::Cancelled { offset: 17 });
+    }
+
+    #[test]
+    fn test_poll_output_file_until_result_reports_session_died_without_terminal_result() {
+        #[derive(Default)]
+        struct TestState {
+            lines: Vec<String>,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("stream.jsonl");
+        std::fs::write(&output_path, "partial\n").unwrap();
+
+        let mut state = TestState::default();
+        let mut alive_checks = 0usize;
+        let result = poll_output_file_until_result(
+            output_path.to_str().unwrap(),
+            0,
+            None,
+            &mut state,
+            || {
+                alive_checks += 1;
+                alive_checks < 25
+            },
+            || false,
+            |_| {},
+            |line: &str, state| {
+                state.lines.push(line.to_string());
+                true
+            },
+            |_| false,
+            |_| true,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ReadOutputResult::SessionDied {
+                offset: std::fs::metadata(&output_path).unwrap().len(),
+            }
+        );
+        assert_eq!(state.lines, vec!["partial".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_tmux_capture_indicates_ready_for_input_detects_recent_ready_banner() {
+        let capture = "\
+build logs\n\
+Ready for input (type message + Enter)\n\
+> ";
+        assert!(super::tmux_capture_indicates_ready_for_input(capture));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_tmux_capture_indicates_ready_for_input_rejects_non_ready_capture() {
+        let capture = "\
+build logs\n\
+waiting for tool output\n\
+still running";
+        assert!(!super::tmux_capture_indicates_ready_for_input(capture));
     }
 }
