@@ -376,11 +376,77 @@ pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamAttemptFailure {
+    pub message: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+impl StreamAttemptFailure {
+    pub fn with_message(mut self, message: String) -> Self {
+        self.message = message;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamAttemptResult {
+    Completed,
+    RetrySession(StreamAttemptFailure),
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamFinalState {
+    Done {
+        result: String,
+        session_id: Option<String>,
+    },
+    Error(StreamAttemptFailure),
+    RetrySession(StreamAttemptFailure),
+}
+
+pub fn run_retrying_stream_attempts<F, G>(
+    provider_name: &str,
+    mut resume_selector: Option<String>,
+    max_session_retries: usize,
+    mut execute_attempt: F,
+    mut on_retry_exhausted: G,
+) -> Result<(), String>
+where
+    F: FnMut(Option<String>) -> Result<StreamAttemptResult, String>,
+    G: FnMut(StreamAttemptFailure),
+{
+    for attempt in 0..=max_session_retries {
+        match execute_attempt(resume_selector.clone())? {
+            StreamAttemptResult::Completed | StreamAttemptResult::Cancelled => return Ok(()),
+            StreamAttemptResult::RetrySession(failure) => {
+                if attempt < max_session_retries {
+                    resume_selector = None;
+                    continue;
+                }
+                let exhausted_message = format!(
+                    "{} session could not be recovered after retry: {}",
+                    provider_name, failure.message
+                );
+                on_retry_exhausted(failure.with_message(exhausted_message));
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CancelToken, ProviderKind, cancel_requested, compose_structured_turn_prompt,
+        CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
+        cancel_requested, compose_structured_turn_prompt,
         parse_provider_and_channel_from_tmux_name, register_child_pid,
+        run_retrying_stream_attempts,
     };
     use crate::dispatch::extract_thread_channel_id;
 
@@ -796,6 +862,82 @@ mod tests {
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(cancel_requested(Some(&token)));
+    }
+
+    #[test]
+    fn test_run_retrying_stream_attempts_resets_resume_selector_after_retry() {
+        let mut selectors = Vec::new();
+
+        let result = run_retrying_stream_attempts(
+            "Gemini",
+            Some("latest".to_string()),
+            1,
+            |selector| {
+                selectors.push(selector.clone());
+                if selectors.len() == 1 {
+                    Ok(StreamAttemptResult::RetrySession(StreamAttemptFailure {
+                        message: "dead session".to_string(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: None,
+                    }))
+                } else {
+                    Ok(StreamAttemptResult::Completed)
+                }
+            },
+            |_| panic!("retry should have recovered"),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(selectors, vec![Some("latest".to_string()), None]);
+    }
+
+    #[test]
+    fn test_run_retrying_stream_attempts_reports_exhausted_failure() {
+        let mut exhausted: Option<StreamAttemptFailure> = None;
+
+        let result = run_retrying_stream_attempts(
+            "Gemini",
+            Some("latest".to_string()),
+            1,
+            |_| {
+                Ok(StreamAttemptResult::RetrySession(StreamAttemptFailure {
+                    message: "dead session".to_string(),
+                    stdout: "partial".to_string(),
+                    stderr: String::new(),
+                    exit_code: None,
+                }))
+            },
+            |failure| exhausted = Some(failure),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            exhausted,
+            Some(StreamAttemptFailure {
+                message: "Gemini session could not be recovered after retry: dead session"
+                    .to_string(),
+                stdout: "partial".to_string(),
+                stderr: String::new(),
+                exit_code: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_stream_final_state_done_preserves_result_and_session_id() {
+        let final_state = StreamFinalState::Done {
+            result: "hello".to_string(),
+            session_id: Some("latest".to_string()),
+        };
+
+        assert_eq!(
+            final_state,
+            StreamFinalState::Done {
+                result: "hello".to_string(),
+                session_id: Some("latest".to_string()),
+            }
+        );
     }
 
     #[test]

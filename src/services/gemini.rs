@@ -8,7 +8,10 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use crate::services::claude::{self, StreamMessage};
-use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
+use crate::services::provider::{
+    CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
+    cancel_requested, register_child_pid, run_retrying_stream_attempts,
+};
 use crate::services::remote::RemoteProfile;
 
 static GEMINI_PATH: OnceLock<Option<String>> = OnceLock::new();
@@ -33,38 +36,6 @@ enum GeminiStreamLoopResult {
     Eof,
     RetrySession { message: String },
     Cancelled,
-}
-
-#[derive(Debug)]
-enum GeminiAttemptResult {
-    Completed,
-    RetrySession {
-        message: String,
-        stdout: String,
-        stderr: String,
-        exit_code: Option<i32>,
-    },
-    Cancelled,
-}
-
-#[derive(Debug)]
-enum GeminiFinalState {
-    Done {
-        result: String,
-        session_id: Option<String>,
-    },
-    Error {
-        message: String,
-        stdout: String,
-        stderr: String,
-        exit_code: Option<i32>,
-    },
-    RetrySession {
-        message: String,
-        stdout: String,
-        stderr: String,
-        exit_code: Option<i32>,
-    },
 }
 
 #[derive(Debug, Default)]
@@ -193,40 +164,19 @@ pub fn execute_command_streaming(
 
 fn run_gemini_streaming_attempts<F>(
     sender: &Sender<StreamMessage>,
-    mut resume_selector: Option<String>,
-    mut execute_attempt: F,
+    resume_selector: Option<String>,
+    execute_attempt: F,
 ) -> Result<(), String>
 where
-    F: FnMut(Option<String>) -> Result<GeminiAttemptResult, String>,
+    F: FnMut(Option<String>) -> Result<StreamAttemptResult, String>,
 {
-    for attempt in 0..=GEMINI_MAX_SESSION_RETRIES {
-        match execute_attempt(resume_selector.clone())? {
-            GeminiAttemptResult::Completed | GeminiAttemptResult::Cancelled => return Ok(()),
-            GeminiAttemptResult::RetrySession {
-                message,
-                stdout,
-                stderr,
-                exit_code,
-            } => {
-                if attempt < GEMINI_MAX_SESSION_RETRIES {
-                    resume_selector = None;
-                    continue;
-                }
-                let _ = sender.send(StreamMessage::Error {
-                    message: format!(
-                        "Gemini session could not be recovered after retry: {}",
-                        message
-                    ),
-                    stdout,
-                    stderr,
-                    exit_code,
-                });
-                return Ok(());
-            }
-        }
-    }
-
-    Ok(())
+    run_retrying_stream_attempts(
+        "Gemini",
+        resume_selector,
+        GEMINI_MAX_SESSION_RETRIES,
+        execute_attempt,
+        |failure| send_gemini_stream_failure(sender, failure),
+    )
 }
 
 fn execute_gemini_streaming_attempt(
@@ -237,7 +187,7 @@ fn execute_gemini_streaming_attempt(
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-) -> Result<GeminiAttemptResult, String> {
+) -> Result<StreamAttemptResult, String> {
     let mut command = Command::new(gemini_bin);
     crate::services::platform::apply_runtime_path(&mut command);
     let mut child = command
@@ -271,7 +221,7 @@ fn execute_gemini_streaming_attempt(
         claude::kill_child_tree(&mut child);
         let _ = child.wait();
         let _ = stderr_handle.join();
-        return Ok(GeminiAttemptResult::Cancelled);
+        return Ok(StreamAttemptResult::Cancelled);
     }
 
     let mut state = GeminiAttemptState::new(resume_selector);
@@ -285,18 +235,18 @@ fn execute_gemini_streaming_attempt(
             claude::kill_child_tree(&mut child);
             let _ = child.wait();
             let _ = stderr_handle.join();
-            return Ok(GeminiAttemptResult::Cancelled);
+            return Ok(StreamAttemptResult::Cancelled);
         }
         GeminiStreamLoopResult::RetrySession { message } => {
             claude::kill_child_tree(&mut child);
             let _ = child.wait();
             let stderr = stderr_handle.join().unwrap_or_default();
-            return Ok(GeminiAttemptResult::RetrySession {
+            return Ok(StreamAttemptResult::RetrySession(StreamAttemptFailure {
                 message,
                 stdout: state.raw_stdout,
                 stderr,
                 exit_code: None,
-            });
+            }));
         }
         GeminiStreamLoopResult::Eof => {}
     }
@@ -307,42 +257,37 @@ fn execute_gemini_streaming_attempt(
     let stderr = stderr_handle.join().unwrap_or_default();
 
     if is_cancelled(cancel_token.as_deref()) {
-        return Ok(GeminiAttemptResult::Cancelled);
+        return Ok(StreamAttemptResult::Cancelled);
     }
 
     match finalize_gemini_attempt(&mut state, stderr, status.code()) {
-        GeminiFinalState::Done { result, session_id } => {
+        StreamFinalState::Done { result, session_id } => {
             flush_buffered_stream_messages(&sender, &mut state);
             let _ = sender.send(StreamMessage::Done { result, session_id });
-            Ok(GeminiAttemptResult::Completed)
+            Ok(StreamAttemptResult::Completed)
         }
-        GeminiFinalState::Error {
-            message,
-            stdout,
-            stderr,
-            exit_code,
-        } => {
+        StreamFinalState::Error(failure) => {
             flush_buffered_stream_messages(&sender, &mut state);
-            let _ = sender.send(StreamMessage::Error {
-                message,
-                stdout,
-                stderr,
-                exit_code,
-            });
-            Ok(GeminiAttemptResult::Completed)
+            send_gemini_stream_failure(&sender, failure);
+            Ok(StreamAttemptResult::Completed)
         }
-        GeminiFinalState::RetrySession {
-            message,
-            stdout,
-            stderr,
-            exit_code,
-        } => Ok(GeminiAttemptResult::RetrySession {
-            message,
-            stdout,
-            stderr,
-            exit_code,
-        }),
+        StreamFinalState::RetrySession(failure) => Ok(StreamAttemptResult::RetrySession(failure)),
     }
+}
+
+fn send_gemini_stream_failure(sender: &Sender<StreamMessage>, failure: StreamAttemptFailure) {
+    let StreamAttemptFailure {
+        message,
+        stdout,
+        stderr,
+        exit_code,
+    } = failure;
+    let _ = sender.send(StreamMessage::Error {
+        message,
+        stdout,
+        stderr,
+        exit_code,
+    });
 }
 
 fn collect_gemini_stream_events(
@@ -517,7 +462,7 @@ fn finalize_gemini_attempt(
     state: &mut GeminiAttemptState,
     stderr: String,
     exit_code: Option<i32>,
-) -> GeminiFinalState {
+) -> StreamFinalState {
     let final_text = std::mem::take(&mut state.final_text);
     let raw_stdout = std::mem::take(&mut state.raw_stdout);
     let last_resume_selector = state.last_resume_selector.take();
@@ -533,52 +478,52 @@ fn finalize_gemini_attempt(
             result
         };
         if result.is_empty() {
-            return GeminiFinalState::Error {
+            return StreamFinalState::Error(StreamAttemptFailure {
                 message: "Gemini emitted a terminal result without any response text".to_string(),
                 stdout: raw_stdout,
                 stderr,
                 exit_code,
-            };
+            });
         }
-        return GeminiFinalState::Done {
+        return StreamFinalState::Done {
             result,
             session_id: last_resume_selector,
         };
     }
 
     if let Some(message) = last_error_message {
-        return GeminiFinalState::Error {
+        return StreamFinalState::Error(StreamAttemptFailure {
             message,
             stdout: raw_stdout,
             stderr,
             exit_code,
-        };
+        });
     }
 
     if exit_code.unwrap_or(0) != 0 {
-        return GeminiFinalState::Error {
+        return StreamFinalState::Error(StreamAttemptFailure {
             message: derive_error_message(&raw_stdout, &stderr, exit_code, "Gemini"),
             stdout: raw_stdout,
             stderr,
             exit_code,
-        };
+        });
     }
 
     if !stderr.trim().is_empty() {
-        return GeminiFinalState::Error {
+        return StreamFinalState::Error(StreamAttemptFailure {
             message: derive_error_message(&raw_stdout, &stderr, exit_code, "Gemini"),
             stdout: raw_stdout,
             stderr,
             exit_code,
-        };
+        });
     }
 
-    GeminiFinalState::RetrySession {
+    StreamFinalState::RetrySession(StreamAttemptFailure {
         message: GEMINI_SESSION_DEAD_MESSAGE.to_string(),
         stdout: raw_stdout,
         stderr,
         exit_code,
-    }
+    })
 }
 
 fn flush_buffered_stream_messages(sender: &Sender<StreamMessage>, state: &mut GeminiAttemptState) {
@@ -802,9 +747,9 @@ fn render_gemini_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        GEMINI_INVALID_RESUME_SELECTOR_MESSAGE, GEMINI_SESSION_DEAD_MESSAGE, GeminiAttemptResult,
-        GeminiAttemptState, GeminiFinalState, GeminiStreamEvent, GeminiStreamLoopResult,
-        build_exec_args, build_gemini_tool_result_message, build_gemini_tool_use_message,
+        GEMINI_INVALID_RESUME_SELECTOR_MESSAGE, GEMINI_SESSION_DEAD_MESSAGE, GeminiAttemptState,
+        GeminiStreamEvent, GeminiStreamLoopResult, build_exec_args,
+        build_gemini_tool_result_message, build_gemini_tool_use_message,
         collect_gemini_stream_events, execute_command_streaming, extract_gemini_error_message,
         extract_text_from_stream_output, finalize_gemini_attempt, flush_buffered_stream_messages,
         looks_like_uuid, normalize_resume_selector, observed_session_to_resume_selector,
@@ -812,7 +757,9 @@ mod tests {
         run_gemini_streaming_attempts,
     };
     use crate::services::claude::StreamMessage;
-    use crate::services::provider::CancelToken;
+    use crate::services::provider::{
+        CancelToken, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
+    };
     use crate::services::remote::{RemoteAuth, RemoteProfile};
     use serde_json::json;
     use std::sync::Arc;
@@ -1058,7 +1005,7 @@ mod tests {
         let final_state = finalize_gemini_attempt(&mut state, String::new(), Some(0));
         flush_buffered_stream_messages(&tx, &mut state);
         match final_state {
-            GeminiFinalState::Done { result, session_id } => {
+            StreamFinalState::Done { result, session_id } => {
                 let _ = tx.send(StreamMessage::Done { result, session_id });
             }
             other => panic!("expected Done, got {:?}", other),
@@ -1116,7 +1063,7 @@ mod tests {
         state.terminal_result_seen = true;
 
         match finalize_gemini_attempt(&mut state, String::new(), Some(0)) {
-            GeminiFinalState::Done { result, session_id } => {
+            StreamFinalState::Done { result, session_id } => {
                 assert_eq!(result, "done");
                 assert_eq!(session_id.as_deref(), Some("latest"));
             }
@@ -1133,8 +1080,8 @@ mod tests {
                 .to_string();
 
         match finalize_gemini_attempt(&mut state, String::new(), Some(0)) {
-            GeminiFinalState::RetrySession { message, .. } => {
-                assert_eq!(message, GEMINI_SESSION_DEAD_MESSAGE);
+            StreamFinalState::RetrySession(failure) => {
+                assert_eq!(failure.message, GEMINI_SESSION_DEAD_MESSAGE);
             }
             other => panic!("expected RetrySession, got {:?}", other),
         }
@@ -1146,16 +1093,11 @@ mod tests {
         state.raw_stdout = "plain stdout".to_string();
 
         match finalize_gemini_attempt(&mut state, "plain stderr".to_string(), Some(2)) {
-            GeminiFinalState::Error {
-                message,
-                stdout,
-                stderr,
-                exit_code,
-            } => {
-                assert!(message.contains("plain stderr"));
-                assert_eq!(stdout, "plain stdout");
-                assert_eq!(stderr, "plain stderr");
-                assert_eq!(exit_code, Some(2));
+            StreamFinalState::Error(failure) => {
+                assert!(failure.message.contains("plain stderr"));
+                assert_eq!(failure.stdout, "plain stdout");
+                assert_eq!(failure.stderr, "plain stderr");
+                assert_eq!(failure.exit_code, Some(2));
             }
             other => panic!("expected Error, got {:?}", other),
         }
@@ -1249,12 +1191,12 @@ mod tests {
 
         let result = run_gemini_streaming_attempts(&tx, Some("latest".to_string()), |selector| {
             attempt_calls.push(selector);
-            Ok(GeminiAttemptResult::RetrySession {
+            Ok(StreamAttemptResult::RetrySession(StreamAttemptFailure {
                 message: GEMINI_SESSION_DEAD_MESSAGE.to_string(),
                 stdout: "partial".to_string(),
                 stderr: String::new(),
                 exit_code: None,
-            })
+            }))
         });
 
         assert!(result.is_ok());
