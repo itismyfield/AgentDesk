@@ -309,6 +309,25 @@ pub(super) struct TmuxWatcherHandle {
     pub(super) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Atomically claim a channel for watcher creation using DashMap::entry().
+/// Returns true if the claim succeeded (caller should spawn the watcher).
+/// Returns false if a watcher already exists (caller should skip).
+pub(super) fn try_claim_watcher(
+    watchers: &dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+) -> bool {
+    use dashmap::mapref::entry::Entry;
+
+    match watchers.entry(channel_id) {
+        Entry::Occupied(_) => false,
+        Entry::Vacant(entry) => {
+            entry.insert(handle);
+            true
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ModelPickerPendingState {
     pub(super) owner_user_id: UserId,

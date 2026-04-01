@@ -554,8 +554,7 @@ pub(super) async fn restore_inflight_turns(
                             pause_epoch: pause_epoch.clone(),
                             turn_delivered: turn_delivered.clone(),
                         };
-                        if super::tmux::try_claim_watcher(&shared.tmux_watchers, channel_id, handle)
-                        {
+                        if super::try_claim_watcher(&shared.tmux_watchers, channel_id, handle) {
                             let ts2 = chrono::Local::now().format("%H:%M:%S");
                             if truncated {
                                 println!(
@@ -1019,7 +1018,7 @@ pub(super) async fn restore_inflight_turns(
                     pause_epoch: pause_epoch.clone(),
                     turn_delivered: turn_delivered.clone(),
                 };
-                if super::tmux::try_claim_watcher(&shared.tmux_watchers, channel_id, handle) {
+                if super::try_claim_watcher(&shared.tmux_watchers, channel_id, handle) {
                     let ts2 = chrono::Local::now().format("%H:%M:%S");
                     if truncated {
                         println!(
