@@ -7,7 +7,8 @@ use std::sync::OnceLock;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 
-use crate::services::claude::{self, StreamMessage};
+use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
+use crate::services::process::kill_child_tree;
 use crate::services::provider::{
     CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
     cancel_requested, register_child_pid, run_retrying_stream_attempts,
@@ -218,7 +219,7 @@ fn execute_gemini_streaming_attempt(
     });
 
     if is_cancelled(cancel_token.as_deref()) {
-        claude::kill_child_tree(&mut child);
+        kill_child_tree(&mut child);
         let _ = child.wait();
         let _ = stderr_handle.join();
         return Ok(StreamAttemptResult::Cancelled);
@@ -240,13 +241,13 @@ fn execute_gemini_streaming_attempt(
         },
     ) {
         GeminiStreamLoopResult::Cancelled => {
-            claude::kill_child_tree(&mut child);
+            kill_child_tree(&mut child);
             let _ = child.wait();
             let _ = stderr_handle.join();
             return Ok(StreamAttemptResult::Cancelled);
         }
         GeminiStreamLoopResult::RetrySession { message } => {
-            claude::kill_child_tree(&mut child);
+            kill_child_tree(&mut child);
             let _ = child.wait();
             let stderr = stderr_handle.join().unwrap_or_default();
             return Ok(StreamAttemptResult::RetrySession(StreamAttemptFailure {
@@ -645,9 +646,7 @@ fn observed_session_to_resume_selector(session_id: &str) -> Option<String> {
 
 fn is_common_session_metadata(session_id: &str) -> bool {
     let session_id = session_id.trim();
-    !session_id.is_empty()
-        && claude::session_id_regex().is_match(session_id)
-        && claude::is_valid_session_id(session_id)
+    !session_id.is_empty() && is_valid_session_id(session_id)
 }
 
 fn looks_like_uuid(value: &str) -> bool {
@@ -782,7 +781,7 @@ mod tests {
         normalize_resume_selector, observed_session_to_resume_selector, process_gemini_stream_line,
         remote_profile_not_supported_message, run_gemini_streaming_attempts,
     };
-    use crate::services::claude::StreamMessage;
+    use crate::services::agent_protocol::StreamMessage;
     use crate::services::provider::{
         CancelToken, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
     };

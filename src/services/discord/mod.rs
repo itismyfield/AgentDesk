@@ -35,7 +35,8 @@ use tokio::sync::Mutex;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateAttachment, CreateMessage, EditMessage, MessageId, UserId};
 
-use crate::services::claude::{self, DEFAULT_ALLOWED_TOOLS, StreamMessage};
+use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
+use crate::services::claude;
 use crate::services::codex;
 use crate::services::gemini;
 use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};

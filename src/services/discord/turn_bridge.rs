@@ -317,7 +317,7 @@ pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, 
 
     let child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
     if let Some(pid) = child_pid {
-        claude::kill_pid_tree(pid);
+        crate::services::process::kill_pid_tree(pid);
     }
 
     if cleanup_tmux {
@@ -1685,7 +1685,7 @@ pub(super) fn spawn_turn_bridge(
         } else if cancelled {
             if let Ok(guard) = cancel_token.child_pid.lock() {
                 if let Some(pid) = *guard {
-                    claude::kill_pid_tree(pid);
+                    crate::services::process::kill_pid_tree(pid);
                 }
             }
 

@@ -24,6 +24,42 @@ pub struct ProcessInfo {
     pub command: String,
 }
 
+/// Kill a process tree by PID.
+/// On Unix, sends SIGTERM to the process group, then SIGKILL as fallback.
+#[allow(unsafe_code)]
+pub fn kill_pid_tree(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        let ret = libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
+        if ret != 0 {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+    }
+}
+
+/// Kill a child process and its entire process tree.
+/// On Unix, sends SIGTERM to the process group first, then SIGKILL as fallback.
+pub fn kill_child_tree(child: &mut std::process::Child) {
+    kill_pid_tree(child.id());
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+/// Shell-escape a string using single quotes (POSIX safe).
+/// Internal single quotes are replaced with `'\''`.
+pub(crate) fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Protected PIDs that should never be killed
 const PROTECTED_PIDS: &[i32] = &[1, 2];
 

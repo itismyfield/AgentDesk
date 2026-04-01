@@ -6,10 +6,12 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
-use crate::services::claude::{self, StreamMessage, read_output_file_until_result, shell_escape};
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::claude::{self, read_output_file_until_result};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
+use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
     fold_read_output_result, register_child_pid,
@@ -232,7 +234,7 @@ fn execute_streaming_direct(
     register_child_pid(cancel_token.as_deref(), child.id());
     // Race condition fix: if /stop arrived before PID was stored, kill now
     if cancel_requested(cancel_token.as_deref()) {
-        claude::kill_child_tree(&mut child);
+        kill_child_tree(&mut child);
         let _ = child.wait();
         return Ok(());
     }
@@ -250,7 +252,7 @@ fn execute_streaming_direct(
 
     for line in reader.lines() {
         if cancel_requested(cancel_token.as_deref()) {
-            claude::kill_child_tree(&mut child);
+            kill_child_tree(&mut child);
             return Ok(());
         }
 
@@ -656,7 +658,7 @@ fn execute_streaming_local_process_codex(
                     backend.send_input(handle, &encoded)?;
                 }
                 drop(handles2);
-                let read_result = claude::read_output_file_until_result(
+                let read_result = read_output_file_until_result(
                     &output_path,
                     start_offset,
                     sender.clone(),
@@ -746,7 +748,7 @@ fn execute_streaming_local_process_codex(
         .unwrap()
         .insert(session_name.to_string(), handle);
 
-    let read_result = claude::read_output_file_until_result(
+    let read_result = read_output_file_until_result(
         &output_path,
         0,
         sender.clone(),
@@ -948,7 +950,7 @@ mod tests {
     use super::{
         TMUX_PROMPT_B64_PREFIX, base_exec_args, compose_codex_prompt, handle_codex_json_line,
     };
-    use crate::services::claude::StreamMessage;
+    use crate::services::agent_protocol::StreamMessage;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
     #[test]

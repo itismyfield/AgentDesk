@@ -1,4 +1,3 @@
-use regex::Regex;
 use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -6,9 +5,11 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
+use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage, is_valid_session_id};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
+use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
     fold_read_output_result, register_child_pid,
@@ -105,40 +106,6 @@ pub fn debug_log_to(filename: &str, msg: &str) {
     }
 }
 
-/// Kill a process tree by PID.
-/// On Unix, sends SIGTERM to the process group, then SIGKILL as fallback.
-#[allow(unsafe_code)]
-pub fn kill_pid_tree(pid: u32) {
-    #[cfg(unix)]
-    unsafe {
-        // Send SIGTERM to the process group (negative PID)
-        let ret = libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
-        if ret != 0 {
-            // Fallback: kill just the process
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // On Windows, use taskkill /T to kill the tree
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output();
-    }
-}
-
-/// Kill a child process and its entire process tree.
-/// On Unix, sends SIGTERM to the process group first, then SIGKILL as fallback.
-pub fn kill_child_tree(child: &mut std::process::Child) {
-    kill_pid_tree(child.id());
-    // Give processes a moment to clean up, then force kill if needed
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill(); // SIGKILL
-    }
-    let _ = child.wait();
-}
-
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct ClaudeResponse {
@@ -148,101 +115,6 @@ pub struct ClaudeResponse {
     pub session_id: Option<String>,
     pub error: Option<String>,
 }
-
-/// Streaming message types for real-time Claude responses
-#[derive(Debug, Clone)]
-pub enum StreamMessage {
-    /// Initialization - contains session_id
-    Init { session_id: String },
-    /// Text response chunk
-    Text { content: String },
-    /// Tool use started
-    ToolUse { name: String, input: String },
-    /// Tool execution result
-    ToolResult { content: String, is_error: bool },
-    /// Chain-of-thought thinking block with optional topic summary
-    Thinking { summary: Option<String> },
-    /// Background task notification
-    TaskNotification {
-        task_id: String,
-        status: String,
-        summary: String,
-    },
-    /// Completion
-    Done {
-        result: String,
-        session_id: Option<String>,
-    },
-    /// Error
-    Error {
-        message: String,
-        #[allow(dead_code)]
-        stdout: String,
-        stderr: String,
-        #[allow(dead_code)]
-        exit_code: Option<i32>,
-    },
-    /// Statusline info extracted from result/assistant events
-    StatusUpdate {
-        model: Option<String>,
-        cost_usd: Option<f64>,
-        total_cost_usd: Option<f64>,
-        #[allow(dead_code)]
-        duration_ms: Option<u64>,
-        #[allow(dead_code)]
-        num_turns: Option<u32>,
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-    },
-    /// tmux session is ready for background monitoring (first turn completed)
-    TmuxReady {
-        output_path: String,
-        input_fifo_path: String,
-        tmux_session_name: String,
-        last_offset: u64,
-    },
-    /// ProcessBackend session completed first turn (no tmux watcher needed)
-    ProcessReady {
-        output_path: String,
-        session_name: String,
-        last_offset: u64,
-    },
-    /// Latest read offset in a growing tmux output file
-    OutputOffset { offset: u64 },
-}
-
-/// Cached regex pattern for session ID validation
-pub(crate) fn session_id_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"^[a-zA-Z0-9_-]+$").expect("Invalid session ID regex pattern"))
-}
-
-/// Validate session ID format (alphanumeric, dashes, underscores only)
-/// Max length reduced to 64 characters for security
-pub(crate) fn is_valid_session_id(session_id: &str) -> bool {
-    !session_id.is_empty() && session_id.len() <= 64 && session_id_regex().is_match(session_id)
-}
-
-/// Default allowed tools for Claude CLI
-pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
-    "Bash",
-    "Read",
-    "Edit",
-    "Write",
-    "Glob",
-    "Grep",
-    "Task",
-    "TaskOutput",
-    "TaskStop",
-    "WebFetch",
-    "WebSearch",
-    "NotebookEdit",
-    "Skill",
-    "TaskCreate",
-    "TaskGet",
-    "TaskUpdate",
-    "TaskList",
-];
 
 /// Execute a command using Claude CLI
 #[allow(dead_code)]
@@ -1250,12 +1122,6 @@ pub(crate) fn process_stream_line(
     }
 
     true
-}
-
-/// Shell-escape a string using single quotes (POSIX safe).
-/// Internal single quotes are replaced with `'\''`.
-pub(crate) fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Execute claude command on a remote host via SSH, streaming stdout lines
@@ -2281,54 +2147,6 @@ fn execute_streaming_remote_tmux(
 mod tests {
     use super::*;
 
-    // ========== is_valid_session_id tests ==========
-
-    #[test]
-    fn test_session_id_valid() {
-        assert!(is_valid_session_id("abc123"));
-        assert!(is_valid_session_id("session-1"));
-        assert!(is_valid_session_id("session_2"));
-        assert!(is_valid_session_id("ABC-XYZ_123"));
-        assert!(is_valid_session_id("a")); // Single char
-    }
-
-    #[test]
-    fn test_session_id_empty_rejected() {
-        assert!(!is_valid_session_id(""));
-    }
-
-    #[test]
-    fn test_session_id_too_long_rejected() {
-        // 64 characters should be valid
-        let max_len = "a".repeat(64);
-        assert!(is_valid_session_id(&max_len));
-
-        // 65 characters should be rejected
-        let too_long = "a".repeat(65);
-        assert!(!is_valid_session_id(&too_long));
-    }
-
-    #[test]
-    fn test_session_id_special_chars_rejected() {
-        assert!(!is_valid_session_id("session;rm -rf"));
-        assert!(!is_valid_session_id("session'OR'1=1"));
-        assert!(!is_valid_session_id("session`cmd`"));
-        assert!(!is_valid_session_id("session$(cmd)"));
-        assert!(!is_valid_session_id("session\nline2"));
-        assert!(!is_valid_session_id("session\0null"));
-        assert!(!is_valid_session_id("path/traversal"));
-        assert!(!is_valid_session_id("session with space"));
-        assert!(!is_valid_session_id("session.dot"));
-        assert!(!is_valid_session_id("session@email"));
-    }
-
-    #[test]
-    fn test_session_id_unicode_rejected() {
-        assert!(!is_valid_session_id("세션아이디"));
-        assert!(!is_valid_session_id("session_日本語"));
-        assert!(!is_valid_session_id("émoji🎉"));
-    }
-
     // ========== ClaudeResponse tests ==========
 
     #[test]
@@ -2423,18 +2241,6 @@ mod tests {
 
         #[cfg(not(unix))]
         assert!(!is_ai_supported());
-    }
-
-    // ========== session_id_regex tests ==========
-
-    #[test]
-    fn test_session_id_regex_caching() {
-        // Multiple calls should return the same cached regex
-        let regex1 = session_id_regex();
-        let regex2 = session_id_regex();
-
-        // Both should point to the same static instance
-        assert!(std::ptr::eq(regex1, regex2));
     }
 
     // ========== parse_stream_message tests ==========
