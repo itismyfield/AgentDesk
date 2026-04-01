@@ -56,12 +56,16 @@ async fn reset_provider_session_if_pending(
         }
     };
 
-    if let Some(name) = channel_name.as_deref() {
-        crate::services::claude::terminate_local_session(&provider.build_tmux_session_name(name));
+    if provider.uses_managed_tmux_backend() {
+        if let Some(name) = channel_name.as_deref() {
+            crate::services::claude::terminate_local_session(
+                &provider.build_tmux_session_name(name),
+            );
+        }
     }
 
     if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
-        super::adk_session::clear_claude_session_id(&session_key, shared.api_port).await;
+        super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
     }
 }
 
@@ -1192,6 +1196,10 @@ pub(super) async fn handle_text_message(
                     "\n\nAvailable local Gemini skills (use them by name when relevant):\n{}",
                     list.join("\n")
                 ),
+                ProviderKind::Qwen => format!(
+                    "\n\nAvailable local Qwen skills (use them by name when relevant):\n{}",
+                    list.join("\n")
+                ),
                 ProviderKind::Unsupported(_) => String::new(),
             }
         }
@@ -1330,6 +1338,7 @@ pub(super) async fn handle_text_message(
             .store(max_deadline_ms, std::sync::atomic::Ordering::Relaxed);
 
         let watchdog_channel_id_num = channel_id.get();
+        let watchdog_provider = provider.clone();
         tokio::spawn(async move {
             const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -1375,7 +1384,7 @@ pub(super) async fn handle_text_message(
                     // Only auto-extend when close to deadline (within 2 minutes)
                     if now_ms_check > current_dl - 120_000 {
                         if let Some(inflight) = super::inflight::load_inflight_state(
-                            &crate::services::provider::ProviderKind::Claude,
+                            &watchdog_provider,
                             watchdog_channel_id_num,
                         ) {
                             if let Ok(updated) = chrono::NaiveDateTime::parse_from_str(
@@ -1556,7 +1565,10 @@ pub(super) async fn handle_text_message(
     let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, inflight_offset) = {
         #[cfg(unix)]
         {
-            if remote_profile.is_none() && claude::is_tmux_available() {
+            if remote_profile.is_none()
+                && provider.uses_managed_tmux_backend()
+                && claude::is_tmux_available()
+            {
                 if let Some(ref tmux_name) = tmux_session_name {
                     let (output_path, input_fifo_path) = tmux_runtime_paths(tmux_name);
                     let session_exists =
@@ -1691,6 +1703,20 @@ pub(super) async fn handle_text_message(
                         model_for_turn.as_deref(),
                     ),
                     ProviderKind::Gemini => gemini::execute_command_streaming(
+                        &context_prompt,
+                        session_id_clone.as_deref(),
+                        &current_path_clone,
+                        tx.clone(),
+                        Some(&system_prompt_owned),
+                        Some(&allowed_tools),
+                        Some(cancel_token_clone),
+                        remote_profile.as_ref(),
+                        tmux_session_name.as_deref(),
+                        Some(channel_id.get()),
+                        Some(provider_for_blocking.clone()),
+                        model_for_turn.as_deref(),
+                    ),
+                    ProviderKind::Qwen => qwen::execute_command_streaming(
                         &context_prompt,
                         session_id_clone.as_deref(),
                         &current_path_clone,
@@ -2215,23 +2241,25 @@ async fn handle_text_command(
             }
             d.intervention_queue.remove(&channel_id);
             drop(d);
-            // Clear stored claude_session_id from DB
+            // Clear stored provider session_id from DB
             if let Some(key) =
                 super::adk_session::build_adk_session_key(&data.shared, channel_id, &data.provider)
                     .await
             {
-                super::adk_session::clear_claude_session_id(&key, data.shared.api_port).await;
+                super::adk_session::clear_provider_session_id(&key, data.shared.api_port).await;
             }
             // Send /clear to the actual Claude Code session via tmux
             #[cfg(unix)]
-            if let Some(ref name) = tmux_name {
-                let exact_target = tmux_exact_target(name);
-                let _ = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("tmux")
-                        .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
-                        .output()
-                })
-                .await;
+            if data.provider == crate::services::provider::ProviderKind::Claude {
+                if let Some(ref name) = tmux_name {
+                    let exact_target = tmux_exact_target(name);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        std::process::Command::new("tmux")
+                            .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
+                            .output()
+                    })
+                    .await;
+                }
             }
             let _ = msg.reply(&ctx.http, "Session cleared.").await;
             return Ok(true);
@@ -2875,6 +2903,19 @@ Any other message is sent to {p}.
                     } else {
                         format!(
                             "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
+                             Follow its SKILL.md instructions exactly and adapt them to the request."
+                        )
+                    }
+                }
+                ProviderKind::Qwen => {
+                    if args_str.is_empty() {
+                        format!(
+                            "Use the local Qwen skill `/{skill}` now. \
+                             Follow its SKILL.md instructions exactly and complete the task."
+                        )
+                    } else {
+                        format!(
+                            "Use the local Qwen skill `/{skill}` now with this user request: {args_str}\n\
                              Follow its SKILL.md instructions exactly and adapt them to the request."
                         )
                     }

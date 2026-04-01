@@ -729,6 +729,7 @@ fn execute_streaming_local_process_codex(
         agentdesk_exe: exe.display().to_string(),
         output_path: output_path.clone(),
         prompt_path: prompt_path.clone(),
+        wrapper_subcommand: "codex-tmux-wrapper".to_string(),
         wrapper_args: {
             let mut args = vec!["--codex-bin".to_string(), codex_bin.to_string()];
             if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
@@ -743,7 +744,6 @@ fn execute_streaming_local_process_codex(
             }
             args
         },
-        is_codex: true,
         env_vars: vec![],
     };
 

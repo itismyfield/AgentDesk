@@ -151,6 +151,26 @@ pub(in crate::services::discord) async fn effective_model_snapshot(
     }
 }
 
+pub(in crate::services::discord) async fn current_working_dir(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    if let Some(path) = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.current_path.clone())
+    } {
+        return Some(path);
+    }
+
+    let settings = shared.settings.read().await;
+    settings
+        .last_sessions
+        .get(&channel_id.get().to_string())
+        .cloned()
+}
+
 fn runtime_model_for_turn(
     provider: &ProviderKind,
     effective_model: &str,
@@ -284,6 +304,7 @@ fn provider_card_color(provider: &ProviderKind) -> u32 {
         ProviderKind::Claude => 0xD97706,
         ProviderKind::Codex => 0x10B981,
         ProviderKind::Gemini => 0x3B82F6,
+        ProviderKind::Qwen => 0x0EA5A4,
         ProviderKind::Unsupported(_) => 0x5865F2,
     }
 }
@@ -372,6 +393,7 @@ pub(in crate::services::discord) fn build_model_picker_action_rows(
     override_model: Option<&str>,
     default_model: &str,
     default_source: &'static str,
+    working_dir: Option<&str>,
 ) -> Vec<serenity::CreateActionRow> {
     let menu = serenity::CreateSelectMenu::new(
         build_model_picker_custom_id(target_channel_id),
@@ -382,6 +404,7 @@ pub(in crate::services::discord) fn build_model_picker_action_rows(
                 override_model,
                 default_model,
                 default_source,
+                working_dir,
             ),
         },
     )
@@ -420,6 +443,7 @@ pub(in crate::services::discord) fn build_model_picker_components_from_snapshot(
     target_channel_id: serenity::ChannelId,
     provider: &ProviderKind,
     pending_model: Option<&str>,
+    working_dir: Option<&str>,
 ) -> Vec<serenity::CreateActionRow> {
     build_model_picker_action_rows(
         target_channel_id,
@@ -428,6 +452,7 @@ pub(in crate::services::discord) fn build_model_picker_components_from_snapshot(
         snapshot.override_model.as_deref(),
         &snapshot.default_model,
         snapshot.default_source,
+        working_dir,
     )
 }
 
@@ -694,12 +719,15 @@ mod tests {
                 None,
                 "default",
                 PROVIDER_DEFAULT_SOURCE,
+                None,
             );
             assert_eq!(options[0].value, DEFAULT_PICKER_VALUE);
             assert_eq!(options[0].label, "기본값");
             let expected = match provider {
                 ProviderKind::Claude => "오버라이드 해제 -> default (Claude default alias)",
-                ProviderKind::Codex | ProviderKind::Gemini => "오버라이드 해제 -> provider default",
+                ProviderKind::Codex | ProviderKind::Gemini | ProviderKind::Qwen => {
+                    "오버라이드 해제 -> provider default"
+                }
                 ProviderKind::Unsupported(_) => unreachable!(),
             };
             assert_eq!(options[0].description, expected);
@@ -715,6 +743,7 @@ mod tests {
             Some("claude-sonnet-4-6"),
             "claude-opus-4-6",
             ROLE_MAP_SOURCE,
+            None,
         );
         assert_eq!(options[0].label, "기본값");
         assert_eq!(
@@ -812,13 +841,14 @@ mod tests {
     #[test]
     fn validate_model_input_accepts_claude_1m_aliases_and_full_names() {
         assert_eq!(
-            validate_model_input(&ProviderKind::Claude, "sonnet[1m]").unwrap(),
+            validate_model_input(&ProviderKind::Claude, "sonnet[1m]", None).unwrap(),
             "sonnet[1m]"
         );
         assert_eq!(
             validate_model_input(
                 &ProviderKind::Claude,
-                "anthropic.claude-sonnet-4-20250514-v1:0[1m]"
+                "anthropic.claude-sonnet-4-20250514-v1:0[1m]",
+                None,
             )
             .unwrap(),
             "anthropic.claude-sonnet-4-20250514-v1:0[1m]"
@@ -828,19 +858,19 @@ mod tests {
     #[test]
     fn validate_model_input_accepts_gemini_31_preview_and_auto_aliases() {
         assert_eq!(
-            validate_model_input(&ProviderKind::Gemini, "gemini-3.1-pro-preview").unwrap(),
+            validate_model_input(&ProviderKind::Gemini, "gemini-3.1-pro-preview", None).unwrap(),
             "gemini-3.1-pro-preview"
         );
         assert_eq!(
-            validate_model_input(&ProviderKind::Gemini, "auto").unwrap(),
+            validate_model_input(&ProviderKind::Gemini, "auto", None).unwrap(),
             "auto-gemini-3"
         );
         assert_eq!(
-            validate_model_input(&ProviderKind::Gemini, "pro").unwrap(),
+            validate_model_input(&ProviderKind::Gemini, "pro", None).unwrap(),
             "gemini-3.1-pro-preview"
         );
         assert_eq!(
-            validate_model_input(&ProviderKind::Gemini, "flash-lite").unwrap(),
+            validate_model_input(&ProviderKind::Gemini, "flash-lite", None).unwrap(),
             "gemini-2.5-flash-lite"
         );
     }
@@ -888,6 +918,7 @@ mod tests {
             None,
             "gpt-5.4",
             ROLE_MAP_SOURCE,
+            None,
         );
         assert_eq!(options[0].label, "기본값");
         assert_eq!(
@@ -919,6 +950,7 @@ mod tests {
             None,
             "default",
             PROVIDER_DEFAULT_SOURCE,
+            None,
         );
         assert_eq!(options[0].label, "기본값");
         assert_eq!(
@@ -973,6 +1005,7 @@ mod tests {
             None,
             "default",
             PROVIDER_DEFAULT_SOURCE,
+            None,
         );
         assert_eq!(options[0].label, "기본값");
         assert_eq!(
@@ -989,6 +1022,7 @@ mod tests {
             None,
             "default",
             PROVIDER_DEFAULT_SOURCE,
+            None,
         );
         assert!(
             options
@@ -1046,6 +1080,7 @@ mod tests {
             None,
             "gpt-5.4",
             ROLE_MAP_SOURCE,
+            None,
         );
         assert_eq!(rows.len(), 2);
         let controls = format!("{:?}", rows[1]);

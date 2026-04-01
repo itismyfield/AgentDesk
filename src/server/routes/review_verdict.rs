@@ -297,7 +297,7 @@ pub async fn submit_verdict(
                             StatusCode::BAD_REQUEST,
                             Json(json!({
                                 "error": format!(
-                                    "unknown provider '{}' — expected a supported provider like 'claude', 'codex', or 'gemini'",
+                                    "unknown provider '{}' — expected a supported provider like 'claude', 'codex', 'gemini', or 'qwen'",
                                     raw_submitter
                                 )
                             })),

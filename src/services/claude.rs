@@ -2363,8 +2363,8 @@ pub(crate) fn execute_streaming_local_process(
         agentdesk_exe: exe.display().to_string(),
         output_path: output_path.clone(),
         prompt_path: prompt_path.clone(),
+        wrapper_subcommand: "tmux-wrapper".to_string(),
         wrapper_args,
-        is_codex: false,
         env_vars: vec![],
     };
 

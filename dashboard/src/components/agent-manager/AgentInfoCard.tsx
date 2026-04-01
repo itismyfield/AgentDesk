@@ -539,6 +539,7 @@ export default function AgentInfoCard({
               <option value="claude">Claude</option>
               <option value="codex">Codex</option>
               <option value="gemini">Gemini</option>
+              <option value="qwen">Qwen</option>
             </select>
             <span className="text-[10px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
               {savingProvider ? tr("저장 중...", "Saving...") : null}
@@ -827,16 +828,20 @@ export default function AgentInfoCard({
                             ? "rgba(56,189,248,0.18)"
                             : s.provider === "gemini"
                               ? "rgba(250,204,21,0.18)"
+                              : s.provider === "qwen"
+                                ? "rgba(34,197,94,0.18)"
                               : "rgba(167,139,250,0.18)",
                         color:
                           s.provider === "codex"
                             ? "#38bdf8"
                             : s.provider === "gemini"
                               ? "#facc15"
+                              : s.provider === "qwen"
+                                ? "#86efac"
                               : "#c4b5fd",
                       }}
                     >
-                      {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : "Claude"}
+                      {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : s.provider === "qwen" ? "Qwen" : "Claude"}
                     </span>
                     <span
                       className="text-[10px] px-1.5 py-0.5 rounded"

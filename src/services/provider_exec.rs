@@ -1,5 +1,5 @@
 use crate::services::provider::ProviderKind;
-use crate::services::{claude, codex, gemini};
+use crate::services::{claude, codex, gemini, qwen};
 
 pub async fn execute_simple(provider: ProviderKind, prompt: String) -> Result<String, String> {
     match provider {
@@ -15,6 +15,11 @@ pub async fn execute_simple(provider: ProviderKind, prompt: String) -> Result<St
         }
         ProviderKind::Gemini => {
             tokio::task::spawn_blocking(move || gemini::execute_command_simple(&prompt))
+                .await
+                .map_err(|e| format!("Task join error: {}", e))?
+        }
+        ProviderKind::Qwen => {
+            tokio::task::spawn_blocking(move || qwen::execute_command_simple(&prompt))
                 .await
                 .map_err(|e| format!("Task join error: {}", e))?
         }

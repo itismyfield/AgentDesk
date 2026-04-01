@@ -1,7 +1,7 @@
-//! Session backend for managing AI provider (Claude/Codex) processes.
+//! Session backend for managing AI provider wrapper processes.
 //!
 //! `ProcessBackend`: Runs wrapper as a direct child process with stdin pipe (cross-platform).
-//! Simpler but sessions die with dcserver. Recovery via `claude --resume`.
+//! Simpler but sessions die with dcserver. Recovery depends on the provider wrapper.
 
 use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -19,10 +19,10 @@ pub struct SessionConfig {
     pub output_path: String,
     /// Prompt file path
     pub prompt_path: String,
+    /// Wrapper subcommand (e.g., tmux-wrapper, codex-tmux-wrapper, qwen-tmux-wrapper)
+    pub wrapper_subcommand: String,
     /// Provider-specific wrapper args (e.g., --codex-bin, -- claude ...)
     pub wrapper_args: Vec<String>,
-    /// Whether this is a codex session (uses codex-tmux-wrapper subcommand)
-    pub is_codex: bool,
     /// Environment variables to set
     pub env_vars: Vec<(String, String)>,
 }
@@ -68,14 +68,8 @@ impl SessionBackend for ProcessBackend {
             .map_err(|e| format!("Failed to create output file: {}", e))?;
 
         // 2. Build wrapper command args
-        let wrapper_flag = if config.is_codex {
-            "codex-tmux-wrapper"
-        } else {
-            "tmux-wrapper"
-        };
-
         let mut args = vec![
-            wrapper_flag.to_string(),
+            config.wrapper_subcommand.clone(),
             "--output-file".to_string(),
             config.output_path.clone(),
             "--input-fifo".to_string(),

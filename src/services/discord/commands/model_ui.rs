@@ -1,7 +1,8 @@
 use poise::serenity_prelude as serenity;
 
 use crate::services::discord::model_catalog::{
-    DEFAULT_PICKER_VALUE, SOURCE_PROVIDER_DEFAULT, is_default_picker_value, known_models,
+    DEFAULT_PICKER_VALUE, SOURCE_PROVIDER_DEFAULT, is_default_picker_value, resolved_default_model,
+    resolved_models,
 };
 use crate::services::provider::ProviderKind;
 
@@ -83,19 +84,28 @@ fn default_picker_option_description(
     provider: &ProviderKind,
     default_model: &str,
     default_source: &str,
+    working_dir: Option<&str>,
 ) -> String {
     match default_source {
-        SOURCE_PROVIDER_DEFAULT => match provider.default_model_behavior().runtime_model {
-            Some(model) => format!(
-                "오버라이드 해제 -> {} ({})",
-                display_model_value(model),
-                provider.default_model_behavior().source_label
-            ),
-            None => format!(
-                "오버라이드 해제 -> {}",
-                provider.default_model_behavior().source_label
-            ),
-        },
+        SOURCE_PROVIDER_DEFAULT => {
+            if let Some(resolved_default) = resolved_default_model(provider, working_dir) {
+                return format!(
+                    "오버라이드 해제 -> {} (Qwen settings default)",
+                    display_model_value(&resolved_default)
+                );
+            }
+            match provider.default_model_behavior().runtime_model {
+                Some(model) => format!(
+                    "오버라이드 해제 -> {} ({})",
+                    display_model_value(model),
+                    provider.default_model_behavior().source_label
+                ),
+                None => format!(
+                    "오버라이드 해제 -> {}",
+                    provider.default_model_behavior().source_label
+                ),
+            }
+        }
         other => format!("오버라이드 해제 -> {} ({})", default_model, other),
     }
 }
@@ -106,6 +116,7 @@ pub(super) fn build_model_picker_option_specs(
     override_model: Option<&str>,
     default_model: &str,
     default_source: &str,
+    working_dir: Option<&str>,
 ) -> Vec<ModelPickerOptionSpec> {
     let default_selected = match pending_model {
         Some(value) => is_default_picker_value(value),
@@ -116,24 +127,26 @@ pub(super) fn build_model_picker_option_specs(
         _ => override_model,
     };
 
-    let mut options = Vec::with_capacity(known_models(provider).len() + 1);
+    let resolved_models = resolved_models(provider, working_dir);
+    let mut options = Vec::with_capacity(resolved_models.len() + 1);
     options.push(ModelPickerOptionSpec {
         value: DEFAULT_PICKER_VALUE.to_string(),
         label: default_picker_option_label(),
-        description: default_picker_option_description(provider, default_model, default_source),
+        description: default_picker_option_description(
+            provider,
+            default_model,
+            default_source,
+            working_dir,
+        ),
         selected: default_selected,
     });
-    options.extend(
-        known_models(provider)
-            .iter()
-            .map(|entry| ModelPickerOptionSpec {
-                value: entry.value.to_string(),
-                label: entry.label.to_string(),
-                description: entry.picker_description(),
-                selected: selected_explicit_model
-                    .is_some_and(|active| active.eq_ignore_ascii_case(entry.value)),
-            }),
-    );
+    options.extend(resolved_models.iter().map(|entry| ModelPickerOptionSpec {
+        value: entry.value.to_string(),
+        label: entry.label.to_string(),
+        description: entry.picker_description(),
+        selected:
+            selected_explicit_model.is_some_and(|active| active.eq_ignore_ascii_case(entry.value)),
+    }));
     options
 }
 
@@ -143,6 +156,7 @@ pub(super) fn build_model_picker_options(
     override_model: Option<&str>,
     default_model: &str,
     default_source: &str,
+    working_dir: Option<&str>,
 ) -> Vec<serenity::CreateSelectMenuOption> {
     build_model_picker_option_specs(
         provider,
@@ -150,6 +164,7 @@ pub(super) fn build_model_picker_options(
         override_model,
         default_model,
         default_source,
+        working_dir,
     )
     .iter()
     .map(|entry| {

@@ -99,14 +99,14 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         data.intervention_queue.remove(&channel_id);
     }
 
-    // Clear the stored claude_session_id from DB so the next turn
-    // doesn't try to --resume a dead session.
+    // Clear the stored provider session_id from DB so the next turn
+    // doesn't try to resume a dead session.
     let shared = &ctx.data().shared;
     let provider = &ctx.data().provider;
     if let Some(key) =
         super::super::adk_session::build_adk_session_key(shared, channel_id, provider).await
     {
-        super::super::adk_session::clear_claude_session_id(&key, shared.api_port).await;
+        super::super::adk_session::clear_provider_session_id(&key, shared.api_port).await;
     }
 
     // Only send /clear via send-keys for Claude sessions.

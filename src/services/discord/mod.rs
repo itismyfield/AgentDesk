@@ -41,6 +41,7 @@ use crate::services::claude::{
 use crate::services::codex;
 use crate::services::gemini;
 use crate::services::provider::ProviderKind;
+use crate::services::qwen;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
 
 use adk_session::{
@@ -1352,6 +1353,71 @@ pub(super) fn scan_skills(
                 }
             }
         }
+        ProviderKind::Qwen => {
+            let mut roots = Vec::new();
+            if let Some(home) = dirs::home_dir() {
+                roots.push(home.join(".qwen").join("skills"));
+            }
+            if let Some(proj) = project_path {
+                roots.push(Path::new(proj).join(".qwen").join("skills"));
+            }
+
+            for root in roots {
+                if !root.is_dir() {
+                    continue;
+                }
+                let Ok(entries) = fs::read_dir(&root) else {
+                    continue;
+                };
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if let Some(skill_path) = resolve_codex_skill_file(&path) {
+                        if let Some(name) = skill_path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|s| s.to_str())
+                        {
+                            let name = name.to_string();
+                            if seen.insert(name.clone()) {
+                                let desc = fs::read_to_string(&skill_path)
+                                    .ok()
+                                    .map(|content| extract_skill_description(&content))
+                                    .unwrap_or_else(|| format!("Skill: {}", name));
+                                skills.push((name, desc));
+                            }
+                        }
+                        continue;
+                    }
+
+                    if path.is_dir() {
+                        let Ok(nested) = fs::read_dir(&path) else {
+                            continue;
+                        };
+                        for child in nested.filter_map(|e| e.ok()) {
+                            let child_path = child.path();
+                            let Some(skill_path) = resolve_codex_skill_file(&child_path) else {
+                                continue;
+                            };
+                            let Some(name) = skill_path
+                                .parent()
+                                .and_then(|p| p.file_name())
+                                .and_then(|s| s.to_str())
+                            else {
+                                continue;
+                            };
+                            let name = name.to_string();
+                            if seen.insert(name.clone()) {
+                                let desc = fs::read_to_string(&skill_path)
+                                    .ok()
+                                    .map(|content| extract_skill_description(&content))
+                                    .unwrap_or_else(|| format!("Skill: {}", name));
+                                skills.push((name, desc));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         ProviderKind::Unsupported(_) => {}
     }
 
@@ -1384,6 +1450,13 @@ fn skill_dir_fingerprint(provider: &ProviderKind) -> (usize, u64) {
             let mut v = Vec::new();
             if let Some(home) = dirs::home_dir() {
                 v.push(home.join(".gemini").join("skills"));
+            }
+            v
+        }
+        ProviderKind::Qwen => {
+            let mut v = Vec::new();
+            if let Some(home) = dirs::home_dir() {
+                v.push(home.join(".qwen").join("skills"));
             }
             v
         }
@@ -1459,6 +1532,7 @@ fn skill_dir_fingerprint_with_projects(
             ProviderKind::Claude => Path::new(path).join(".claude").join("commands"),
             ProviderKind::Codex => Path::new(path).join(".codex").join("skills"),
             ProviderKind::Gemini => Path::new(path).join(".gemini").join("skills"),
+            ProviderKind::Qwen => Path::new(path).join(".qwen").join("skills"),
             _ => continue,
         };
         if proj_dir.is_dir() {
@@ -2879,13 +2953,6 @@ pub(super) async fn auto_restore_session(
     channel_id: ChannelId,
     serenity_ctx: &serenity::prelude::Context,
 ) {
-    {
-        let data = shared.core.lock().await;
-        if data.sessions.contains_key(&channel_id) {
-            return;
-        }
-    }
-
     // Resolve channel/category before taking the lock for mutation
     let (ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
 
@@ -2899,13 +2966,8 @@ pub(super) async fn auto_restore_session(
         let saved_remote = settings.last_remotes.get(&channel_key).cloned();
         let provider = settings.provider.clone();
 
-        // Try DB cwd first — preserves worktree paths from previous session
-        let ch_name = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&channel_id)
-                .and_then(|s| s.channel_name.clone())
-        };
+        // Use the live Discord channel name here so restart recovery cannot
+        // keep querying a stale same-provider session key from another agent.
         let db_cwd: Option<String> = ch_name.as_ref().and_then(|ch| {
             let tmux_name = provider.build_tmux_session_name(ch);
             let hostname = crate::services::platform::hostname_short();
@@ -2928,8 +2990,17 @@ pub(super) async fn auto_restore_session(
     };
 
     let mut data = shared.core.lock().await;
-    if data.sessions.contains_key(&channel_id) {
-        return; // Double-check after re-acquiring lock
+    if let Some(session) = data.sessions.get_mut(&channel_id) {
+        session.channel_id = Some(channel_id.get());
+        session.last_active = tokio::time::Instant::now();
+        session.channel_name = ch_name.clone();
+        session.category_name = cat_name.clone();
+        if session.remote_profile_name.is_none() {
+            session.remote_profile_name = saved_remote.clone();
+        }
+        if session.current_path.is_some() || last_path.is_none() {
+            return;
+        }
     }
 
     if let Some(last_path) = last_path {
@@ -2946,8 +3017,8 @@ pub(super) async fn auto_restore_session(
                     pending_uploads: Vec::new(),
                     cleared: false,
                     channel_id: Some(channel_id.get()),
-                    channel_name: ch_name,
-                    category_name: cat_name,
+                    channel_name: ch_name.clone(),
+                    category_name: cat_name.clone(),
                     remote_profile_name: saved_remote.clone(),
 
                     last_active: tokio::time::Instant::now(),
@@ -2957,6 +3028,11 @@ pub(super) async fn auto_restore_session(
                 });
             session.channel_id = Some(channel_id.get());
             session.last_active = tokio::time::Instant::now();
+            session.channel_name = ch_name.clone();
+            session.category_name = cat_name.clone();
+            if session.remote_profile_name.is_none() {
+                session.remote_profile_name = saved_remote.clone();
+            }
             session.current_path = Some(last_path.clone());
             drop(data);
 

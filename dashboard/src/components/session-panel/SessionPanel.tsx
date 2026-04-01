@@ -197,10 +197,12 @@ function SessionCard({
                   ? "bg-sky-900/50 text-sky-300"
                   : s.provider === "gemini"
                     ? "bg-blue-900/50 text-blue-300"
+                    : s.provider === "qwen"
+                      ? "bg-emerald-900/50 text-emerald-300"
                     : "bg-violet-900/50 text-violet-300"
               }`}
             >
-              {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : "Claude"}
+              {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : s.provider === "qwen" ? "Qwen" : "Claude"}
             </span>
             {s.stats_xp > 0 && (
               <span className="bg-amber-900/50 text-amber-300 px-1.5 py-0.5 rounded shrink-0">

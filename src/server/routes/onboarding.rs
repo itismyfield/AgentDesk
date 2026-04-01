@@ -711,7 +711,7 @@ pub struct CheckProviderBody {
 }
 
 /// POST /api/onboarding/check-provider
-/// Checks if a CLI provider (claude/codex/gemini) is installed and authenticated.
+/// Checks if a CLI provider (claude/codex/gemini/qwen) is installed and authenticated.
 pub async fn check_provider(
     Json(body): Json<CheckProviderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -719,10 +719,11 @@ pub async fn check_provider(
         "claude" => "claude",
         "codex" => "codex",
         "gemini" => "gemini",
+        "qwen" => "qwen",
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "provider must be 'claude', 'codex', or 'gemini'"})),
+                Json(json!({"error": "provider must be 'claude', 'codex', 'gemini', or 'qwen'"})),
             );
         }
     };
@@ -736,6 +737,7 @@ pub async fn check_provider(
             "claude" => crate::services::claude::resolve_claude_path(),
             "codex" => crate::services::codex::resolve_codex_path(),
             "gemini" => crate::services::gemini::resolve_gemini_path(),
+            "qwen" => crate::services::qwen::resolve_qwen_path(),
             _ => None,
         })
         .await
@@ -775,6 +777,8 @@ pub async fn check_provider(
                 home.join(".claude")
             } else if cmd == "codex" {
                 home.join(".codex")
+            } else if cmd == "qwen" {
+                home.join(".qwen")
             } else {
                 home.join(".gemini")
             };

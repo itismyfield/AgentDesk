@@ -18,11 +18,12 @@ import MeetingProviderFlow, { formatProviderFlow, providerFlowCaption } from "./
 import MarkdownContent from "./common/MarkdownContent";
 
 const STORAGE_KEY = "pcd_meeting_channel_id";
-const MEETING_PROVIDERS = ["claude", "codex", "gemini"] as const;
+const MEETING_PROVIDERS = ["claude", "codex", "gemini", "qwen"] as const;
 const PROVIDER_LABELS: Record<string, string> = {
   claude: "Claude",
   codex: "Codex",
   gemini: "Gemini",
+  qwen: "Qwen",
   opencode: "OpenCode",
   copilot: "Copilot",
   antigravity: "Antigravity",

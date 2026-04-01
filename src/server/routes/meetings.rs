@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::services::provider::ProviderKind;
 
 // ── Body types ─────────────────────────────────────────────────
 
@@ -20,6 +21,32 @@ pub struct StartMeetingBody {
     pub agenda: Option<String>,
     pub channel_id: Option<String>,
     pub primary_provider: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MeetingEntryBody {
+    pub seq: Option<i64>,
+    pub round: Option<i64>,
+    pub speaker_role_id: Option<String>,
+    pub speaker_name: Option<String>,
+    pub content: Option<String>,
+    pub is_summary: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertMeetingBody {
+    pub id: String,
+    pub agenda: Option<String>,
+    pub summary: Option<String>,
+    pub status: Option<String>,
+    pub primary_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
+    pub participant_names: Option<Vec<String>>,
+    pub total_rounds: Option<i64>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub thread_id: Option<String>,
+    pub entries: Option<Vec<MeetingEntryBody>>,
 }
 
 // ── Handlers ───────────────────────────────────────────────────
@@ -37,7 +64,8 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary
+        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, created_at
          FROM meetings
          ORDER BY started_at DESC",
     ) {
@@ -91,7 +119,8 @@ pub async fn get_meeting(
     };
 
     match conn.query_row(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary
+        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, created_at
          FROM meetings WHERE id = ?1",
         [&id],
         |row| meeting_row_to_json(row),
@@ -198,7 +227,8 @@ pub async fn update_issue_repo(
 
     // Read back meeting
     match conn.query_row(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary
+        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, created_at
          FROM meetings WHERE id = ?1",
         [&id],
         |row| meeting_row_to_json(row),
@@ -452,7 +482,9 @@ pub async fn discard_issue(
     // Return meeting + summary for UI refresh
     let meeting = conn
         .query_row(
-            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary FROM meetings WHERE id = ?1",
+            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+                    primary_provider, reviewer_provider, participant_names, created_at
+             FROM meetings WHERE id = ?1",
             [&id],
             |row| meeting_row_to_json(row),
         )
@@ -500,7 +532,9 @@ pub async fn discard_all_issues(
 
     let meeting = conn
         .query_row(
-            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary FROM meetings WHERE id = ?1",
+            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+                    primary_provider, reviewer_provider, participant_names, created_at
+             FROM meetings WHERE id = ?1",
             [&id],
             |row| meeting_row_to_json(row),
         )
@@ -520,7 +554,7 @@ pub async fn discard_all_issues(
 /// POST /api/round-table-meetings/start
 /// Send meeting start request to Discord channel via announce bot.
 pub async fn start_meeting(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(body): Json<StartMeetingBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let channel_id = match &body.channel_id {
@@ -534,11 +568,17 @@ pub async fn start_meeting(
     };
 
     let agenda = body.agenda.as_deref().unwrap_or("General discussion");
+    let primary_provider = match parse_meeting_provider(body.primary_provider.as_deref()) {
+        Ok(provider) => provider,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
 
     // Send meeting start command to the channel via /api/send (same axum server)
     let server_port = crate::config::load_graceful().server.port;
 
-    let message = format!("/meeting start {agenda}");
+    let message = build_meeting_start_command(agenda, primary_provider);
     let client = reqwest::Client::new();
     match client
         .post(crate::config::local_api_url(server_port, "/api/send"))
@@ -571,32 +611,246 @@ pub async fn start_meeting(
     }
 }
 
+/// POST /api/round-table-meetings
+/// Persist completed/cancelled meeting payloads posted back from the Discord runtime.
+pub async fn upsert_meeting(
+    State(state): State<AppState>,
+    Json(body): Json<UpsertMeetingBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if body.id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "meeting id is required"})),
+        );
+    }
+
+    let primary_provider = match parse_meeting_provider(body.primary_provider.as_deref()) {
+        Ok(provider) => provider,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
+    let reviewer_provider = match parse_meeting_provider(body.reviewer_provider.as_deref()) {
+        Ok(provider) => provider.or_else(|| primary_provider.clone().map(|p| p.counterpart())),
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
+
+    let agenda = body
+        .agenda
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("General discussion");
+    let status = body.status.as_deref().unwrap_or("completed");
+    let total_rounds = body.total_rounds.unwrap_or(0);
+    let started_at = body
+        .started_at
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let participant_names = body.participant_names.unwrap_or_default();
+    let participant_names_json =
+        serde_json::to_string(&participant_names).unwrap_or_else(|_| "[]".to_string());
+    let summary = body
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    if let Err(e) = conn.execute(
+        "INSERT INTO meetings (
+            id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+            primary_provider, reviewer_provider, participant_names, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ON CONFLICT(id) DO UPDATE SET
+            channel_id = COALESCE(excluded.channel_id, meetings.channel_id),
+            title = excluded.title,
+            status = excluded.status,
+            effective_rounds = excluded.effective_rounds,
+            started_at = COALESCE(meetings.started_at, excluded.started_at),
+            completed_at = excluded.completed_at,
+            summary = excluded.summary,
+            primary_provider = excluded.primary_provider,
+            reviewer_provider = excluded.reviewer_provider,
+            participant_names = excluded.participant_names,
+            created_at = COALESCE(meetings.created_at, excluded.created_at)",
+        rusqlite::params![
+            body.id,
+            body.thread_id,
+            agenda,
+            status,
+            total_rounds,
+            started_at,
+            body.completed_at,
+            summary,
+            primary_provider.as_ref().map(ProviderKind::as_str),
+            reviewer_provider.as_ref().map(ProviderKind::as_str),
+            participant_names_json,
+            started_at,
+        ],
+    ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        );
+    }
+
+    let _ = conn.execute(
+        "DELETE FROM meeting_transcripts WHERE meeting_id = ?1",
+        [&body.id],
+    );
+
+    let mut next_seq = 1i64;
+    for (idx, entry) in body.entries.unwrap_or_default().into_iter().enumerate() {
+        let seq = entry.seq.unwrap_or((idx as i64) + 1);
+        next_seq = next_seq.max(seq + 1);
+        if let Err(e) = conn.execute(
+            "INSERT INTO meeting_transcripts (
+                meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                body.id,
+                seq,
+                entry.round,
+                entry.speaker_role_id,
+                entry.speaker_name,
+                entry.content,
+                entry.is_summary.unwrap_or(false),
+            ],
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    }
+
+    if let Some(summary_text) = summary {
+        let _ = conn.execute(
+            "INSERT INTO meeting_transcripts (
+                meeting_id, seq, round, speaker_agent_id, speaker_name, content, is_summary
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+            rusqlite::params![
+                body.id,
+                next_seq,
+                total_rounds,
+                Option::<String>::None,
+                Some("Summary".to_string()),
+                summary_text,
+            ],
+        );
+    }
+
+    match conn.query_row(
+        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+                primary_provider, reviewer_provider, participant_names, created_at
+         FROM meetings WHERE id = ?1",
+        [&body.id],
+        |row| meeting_row_to_json(row),
+    ) {
+        Ok(mut meeting) => {
+            let transcripts = load_transcripts(&conn, &body.id);
+            let obj = meeting.as_object_mut().unwrap();
+            obj.insert("transcripts".to_string(), json!(&transcripts));
+            obj.insert("entries".to_string(), json!(transcripts));
+            enrich_meeting_with_issue_data(&conn, &body.id, obj);
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "meeting": meeting})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────────
+
+fn parse_meeting_provider(raw: Option<&str>) -> Result<Option<ProviderKind>, String> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    ProviderKind::from_str(value)
+        .map(Some)
+        .ok_or_else(|| format!("invalid provider '{}'", value))
+}
+
+fn build_meeting_start_command(agenda: &str, primary_provider: Option<ProviderKind>) -> String {
+    match primary_provider {
+        Some(provider) => format!("/meeting start --primary {} {}", provider.as_str(), agenda),
+        None => format!("/meeting start {agenda}"),
+    }
+}
+
+fn row_optional_timestamp(row: &rusqlite::Row, idx: usize) -> Option<i64> {
+    use rusqlite::types::ValueRef;
+
+    match row.get_ref(idx).ok()? {
+        ValueRef::Null => None,
+        ValueRef::Integer(v) => Some(v),
+        ValueRef::Real(v) => Some(v as i64),
+        ValueRef::Text(bytes) => {
+            let text = std::str::from_utf8(bytes).ok()?.trim();
+            if text.is_empty() {
+                None
+            } else if let Ok(ts) = text.parse::<i64>() {
+                Some(ts)
+            } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
+                Some(dt.timestamp_millis())
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
+            {
+                Some(dt.and_utc().timestamp_millis())
+            } else {
+                None
+            }
+        }
+        ValueRef::Blob(_) => None,
+    }
+}
 
 fn meeting_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
     let title = row.get::<_, Option<String>>(2)?;
-    let effective_rounds = row.get::<_, Option<i64>>(4)?;
+    let effective_rounds = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
+    let participant_names = row
+        .get::<_, Option<String>>(10)?
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default();
+    let started_at = row_optional_timestamp(row, 5).unwrap_or(0);
+    let completed_at = row_optional_timestamp(row, 6);
+    let created_at = row_optional_timestamp(row, 11).unwrap_or(started_at);
     Ok(json!({
         "id": row.get::<_, String>(0)?,
         "channel_id": row.get::<_, Option<String>>(1)?,
         "title": title,
         "status": row.get::<_, Option<String>>(3)?,
         "effective_rounds": effective_rounds,
-        "started_at": row.get::<_, Option<String>>(5)?,
-        "completed_at": row.get::<_, Option<String>>(6)?,
+        "started_at": started_at,
+        "completed_at": completed_at,
         "summary": row.get::<_, Option<String>>(7)?,
         // alias fields for frontend compatibility
         "agenda": title,
-        "total_rounds": effective_rounds.unwrap_or(0),
-        // additional fields expected by frontend (defaults)
-        "primary_provider": null,
-        "reviewer_provider": null,
-        "participant_names": null,
-        "issues_created": null,
+        "total_rounds": effective_rounds,
+        "primary_provider": row.get::<_, Option<String>>(8)?,
+        "reviewer_provider": row.get::<_, Option<String>>(9)?,
+        "participant_names": participant_names,
+        "issues_created": 0,
         "proposed_issues": null,
         "issue_creation_results": null,
         "issue_repo": null,
-        "created_at": null,
+        "created_at": created_at,
     }))
 }
 
@@ -658,7 +912,12 @@ fn enrich_meeting_with_issue_data(
     }
 
     if !results.is_empty() {
+        let created_count = results
+            .iter()
+            .filter(|entry| entry.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
+            .count();
         obj.insert("issue_creation_results".to_string(), json!(results));
+        obj.insert("issues_created".to_string(), json!(created_count));
     }
 }
 
@@ -691,5 +950,27 @@ fn load_transcripts(conn: &rusqlite::Connection, meeting_id: &str) -> Vec<serde_
     match rows {
         Some(iter) => iter.filter_map(|r| r.ok()).collect(),
         None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_meeting_start_command;
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn build_meeting_start_command_uses_primary_flag_for_qwen() {
+        assert_eq!(
+            build_meeting_start_command("신규 안건", Some(ProviderKind::Qwen)),
+            "/meeting start --primary qwen 신규 안건"
+        );
+    }
+
+    #[test]
+    fn build_meeting_start_command_omits_flag_when_provider_missing() {
+        assert_eq!(
+            build_meeting_start_command("일반 안건", None),
+            "/meeting start 일반 안건"
+        );
     }
 }

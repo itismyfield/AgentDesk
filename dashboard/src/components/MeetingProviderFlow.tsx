@@ -19,6 +19,12 @@ const PROVIDER_META: Record<string, { label: string; bg: string; color: string; 
     color: "#60a5fa",
     border: "rgba(59,130,246,0.25)",
   },
+  qwen: {
+    label: "Qwen",
+    bg: "rgba(34,197,94,0.12)",
+    color: "#86efac",
+    border: "rgba(34,197,94,0.25)",
+  },
   opencode: {
     label: "OpenCode",
     bg: "rgba(168,85,247,0.12)",

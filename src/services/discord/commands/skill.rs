@@ -271,6 +271,19 @@ pub(in crate::services::discord) async fn cmd_cc(
                 )
             }
         }
+        ProviderKind::Qwen => {
+            if args_str.is_empty() {
+                format!(
+                    "Use the local Qwen skill `/{skill}` now. \
+                     Follow its SKILL.md instructions exactly and complete the task."
+                )
+            } else {
+                format!(
+                    "Use the local Qwen skill `/{skill}` now with this user request: {args_str}\n\
+                     Follow its SKILL.md instructions exactly and adapt them to the request."
+                )
+            }
+        }
         ProviderKind::Unsupported(name) => {
             ctx.say(format!(
                 "Provider '{}' is not installed. This skill cannot run.",

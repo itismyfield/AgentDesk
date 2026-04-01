@@ -10,12 +10,12 @@ interface BotInfo {
 }
 
 interface CommandBotEntry {
-  provider: "claude" | "codex" | "gemini";
+  provider: "claude" | "codex" | "gemini" | "qwen";
   token: string;
   botInfo: BotInfo | null;
 }
 
-const COMMAND_PROVIDERS = ["claude", "codex", "gemini"] as const;
+const COMMAND_PROVIDERS = ["claude", "codex", "gemini", "qwen"] as const;
 
 function providerSuffix(provider: CommandBotEntry["provider"]) {
   switch (provider) {
@@ -25,6 +25,8 @@ function providerSuffix(provider: CommandBotEntry["provider"]) {
       return "cdx";
     case "gemini":
       return "gm";
+    case "qwen":
+      return "qw";
   }
 }
 
@@ -36,6 +38,8 @@ function providerLabel(provider: CommandBotEntry["provider"]) {
       return "Codex";
     case "gemini":
       return "Gemini";
+    case "qwen":
+      return "Qwen";
   }
 }
 
@@ -47,6 +51,8 @@ function providerCliName(provider: CommandBotEntry["provider"]) {
       return "Codex CLI";
     case "gemini":
       return "Gemini CLI";
+    case "qwen":
+      return "Qwen Code";
   }
 }
 
@@ -58,6 +64,8 @@ function providerInstallHint(provider: CommandBotEntry["provider"], isKo: boolea
       return isKo ? "설치: npm install -g @openai/codex" : "Install: npm install -g @openai/codex";
     case "gemini":
       return isKo ? "설치: npm install -g @google/gemini-cli" : "Install: npm install -g @google/gemini-cli";
+    case "qwen":
+      return isKo ? "설치: npm install -g @qwen-code/qwen-code@latest" : "Install: npm install -g @qwen-code/qwen-code@latest";
   }
 }
 
@@ -69,6 +77,19 @@ function providerLoginHint(provider: CommandBotEntry["provider"], isKo: boolean)
       return isKo ? "로그인: codex login" : "Login: codex login";
     case "gemini":
       return isKo ? "로그인: gemini" : "Login: gemini";
+    case "qwen":
+      return isKo ? "로그인: qwen 실행 후 /auth" : "Login: run qwen, then /auth";
+  }
+}
+
+function providerLoginCommand(provider: CommandBotEntry["provider"]) {
+  switch (provider) {
+    case "gemini":
+      return "gemini";
+    case "qwen":
+      return "qwen -> /auth";
+    default:
+      return `${provider} login`;
   }
 }
 
@@ -763,8 +784,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 {tr("실행 봇", "Command Bot")}
               </span>
               <Tip text={tr(
-                "에이전트의 AI 세션을 실행하는 봇입니다.\nDiscord에서 메시지를 받으면 이 봇이\nClaude Code, Codex CLI, 또는 Gemini CLI를 실행하여\n에이전트가 작업합니다.",
-                "Runs AI sessions for agents.\nWhen a message arrives, this bot\nlaunches Claude Code, Codex CLI, or Gemini CLI.",
+                "에이전트의 AI 세션을 실행하는 봇입니다.\nDiscord에서 메시지를 받으면 이 봇이\nClaude Code, Codex CLI, Gemini CLI, 또는 Qwen Code를 실행하여\n에이전트가 작업합니다.",
+                "Runs AI sessions for agents.\nWhen a message arrives, this bot\nlaunches Claude Code, Codex CLI, Gemini CLI, or Qwen Code.",
               )} />
             </div>
 
@@ -1034,7 +1055,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                     <div className="rounded-lg p-3 text-xs" style={{ backgroundColor: "rgba(251,191,36,0.08)" }}>
                       <div style={{ color: "#fde68a" }}>
                         {tr("터미널에서 로그인하세요:", "Login in terminal:")}
-                        <code className="ml-2 px-1.5 py-0.5 rounded bg-white/10">{provider === "gemini" ? "gemini" : `${provider} login`}</code>
+                        <code className="ml-2 px-1.5 py-0.5 rounded bg-white/10">{providerLoginCommand(provider)}</code>
                       </div>
                     </div>
                   )}

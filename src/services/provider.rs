@@ -20,6 +20,7 @@ pub enum ProviderKind {
     Claude,
     Codex,
     Gemini,
+    Qwen,
     Unsupported(String),
 }
 
@@ -52,6 +53,7 @@ impl ProviderKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Gemini => "gemini",
+            Self::Qwen => "qwen",
             Self::Unsupported(s) => s.as_str(),
         }
     }
@@ -61,6 +63,7 @@ impl ProviderKind {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Gemini => "Gemini",
+            Self::Qwen => "Qwen Code",
             Self::Unsupported(s) => s.as_str(),
         }
     }
@@ -70,6 +73,7 @@ impl ProviderKind {
             Self::Claude => Self::Codex,
             Self::Codex => Self::Claude,
             Self::Gemini => Self::Codex,
+            Self::Qwen => Self::Codex,
             Self::Unsupported(_) => self.clone(),
         }
     }
@@ -94,6 +98,12 @@ impl ProviderKind {
                 supports_resume: true,
                 supports_tool_stream: true,
             }),
+            Self::Qwen => Some(ProviderCapabilities {
+                binary_name: "qwen",
+                supports_structured_output: true,
+                supports_resume: true,
+                supports_tool_stream: true,
+            }),
             Self::Unsupported(_) => None,
         }
     }
@@ -107,11 +117,13 @@ impl ProviderKind {
                 runtime_model: Some("default"),
                 source_label: "Claude default alias",
             },
-            Self::Codex | Self::Gemini | Self::Unsupported(_) => ProviderDefaultBehavior {
-                resume_without_reset: true,
-                runtime_model: None,
-                source_label: "provider default",
-            },
+            Self::Codex | Self::Gemini | Self::Qwen | Self::Unsupported(_) => {
+                ProviderDefaultBehavior {
+                    resume_without_reset: true,
+                    runtime_model: None,
+                    source_label: "provider default",
+                }
+            }
         }
     }
 
@@ -120,6 +132,7 @@ impl ProviderKind {
             Self::Claude => crate::services::claude::resolve_claude_path(),
             Self::Codex => crate::services::codex::resolve_codex_path(),
             Self::Gemini => crate::services::gemini::resolve_gemini_path(),
+            Self::Qwen => crate::services::qwen::resolve_qwen_path(),
             Self::Unsupported(_) => None,
         }
     }
@@ -158,6 +171,7 @@ impl ProviderKind {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "gemini" => Some(Self::Gemini),
+            "qwen" => Some(Self::Qwen),
             _ => None,
         }
     }
@@ -193,7 +207,17 @@ impl ProviderKind {
             return matches!(self, Self::Gemini);
         }
 
+        if channel_name.ends_with("-qw") {
+            return matches!(self, Self::Qwen);
+        }
+
         matches!(self, Self::Claude)
+    }
+
+    /// Returns true when this provider can own a reusable local tmux/process
+    /// session that AgentDesk may need to clear or pre-seed in inflight state.
+    pub fn uses_managed_tmux_backend(&self) -> bool {
+        matches!(self, Self::Claude | Self::Codex | Self::Qwen)
     }
 
     pub fn build_tmux_session_name(&self, channel_name: &str) -> String {
@@ -253,6 +277,9 @@ pub fn parse_provider_and_channel_from_tmux_name(
     if let Some(rest) = without_suffix.strip_prefix("gemini-") {
         return Some((ProviderKind::Gemini, rest.to_string()));
     }
+    if let Some(rest) = without_suffix.strip_prefix("qwen-") {
+        return Some((ProviderKind::Qwen, rest.to_string()));
+    }
     Some((ProviderKind::Claude, without_suffix.to_string()))
 }
 
@@ -272,6 +299,9 @@ mod tests {
         assert!(ProviderKind::Gemini.is_channel_supported(Some("research-gm"), false));
         assert!(!ProviderKind::Gemini.is_channel_supported(Some("research-cc"), false));
         assert!(ProviderKind::Gemini.is_channel_supported(None, true));
+        assert!(ProviderKind::Qwen.is_channel_supported(Some("sandbox-qw"), false));
+        assert!(!ProviderKind::Qwen.is_channel_supported(Some("sandbox-cc"), false));
+        assert!(ProviderKind::Qwen.is_channel_supported(None, true));
     }
 
     #[test]
@@ -299,6 +329,10 @@ mod tests {
             ProviderKind::from_str_or_unsupported("Gemini"),
             ProviderKind::Gemini
         );
+        assert_eq!(
+            ProviderKind::from_str_or_unsupported("Qwen"),
+            ProviderKind::Qwen
+        );
     }
 
     #[test]
@@ -314,6 +348,10 @@ mod tests {
         assert_eq!(
             parse_provider_and_channel_from_tmux_name("AgentDesk-gemini-research-gm"),
             Some((ProviderKind::Gemini, "research-gm".to_string()))
+        );
+        assert_eq!(
+            parse_provider_and_channel_from_tmux_name("AgentDesk-qwen-sandbox-qw"),
+            Some((ProviderKind::Qwen, "sandbox-qw".to_string()))
         );
         assert_eq!(
             parse_provider_and_channel_from_tmux_name("AgentDesk-mac-mini"),
@@ -337,12 +375,18 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_from_str_qwen() {
+        assert_eq!(ProviderKind::from_str("qwen"), Some(ProviderKind::Qwen));
+    }
+
+    #[test]
     fn test_provider_from_str_case_insensitive() {
         assert_eq!(ProviderKind::from_str("Claude"), Some(ProviderKind::Claude));
         assert_eq!(ProviderKind::from_str("CLAUDE"), Some(ProviderKind::Claude));
         assert_eq!(ProviderKind::from_str("CODEX"), Some(ProviderKind::Codex));
         assert_eq!(ProviderKind::from_str("Codex"), Some(ProviderKind::Codex));
         assert_eq!(ProviderKind::from_str("Gemini"), Some(ProviderKind::Gemini));
+        assert_eq!(ProviderKind::from_str("Qwen"), Some(ProviderKind::Qwen));
     }
 
     #[test]
@@ -364,6 +408,10 @@ mod tests {
         let name3 = ProviderKind::Gemini.build_tmux_session_name("research-gm");
         assert!(name3.starts_with("AgentDesk-gemini-"));
         assert!(name3.contains("research-gm"));
+
+        let name4 = ProviderKind::Qwen.build_tmux_session_name("sandbox-qw");
+        assert!(name4.starts_with("AgentDesk-qwen-"));
+        assert!(name4.contains("sandbox-qw"));
     }
 
     #[test]
@@ -386,6 +434,12 @@ mod tests {
             parse_provider_and_channel_from_tmux_name(&session3).unwrap();
         assert_eq!(provider3, ProviderKind::Gemini);
         assert_eq!(parsed_channel3, "research-gm");
+
+        let session4 = ProviderKind::Qwen.build_tmux_session_name("sandbox-qw");
+        let (provider4, parsed_channel4) =
+            parse_provider_and_channel_from_tmux_name(&session4).unwrap();
+        assert_eq!(provider4, ProviderKind::Qwen);
+        assert_eq!(parsed_channel4, "sandbox-qw");
     }
 
     #[test]
@@ -599,6 +653,7 @@ mod tests {
         assert_eq!(ProviderKind::Claude.counterpart(), ProviderKind::Codex);
         assert_eq!(ProviderKind::Codex.counterpart(), ProviderKind::Claude);
         assert_eq!(ProviderKind::Gemini.counterpart(), ProviderKind::Codex);
+        assert_eq!(ProviderKind::Qwen.counterpart(), ProviderKind::Codex);
 
         let unsupported = ProviderKind::Unsupported("gpt".to_string());
         assert_eq!(
@@ -613,6 +668,7 @@ mod tests {
             ProviderKind::Claude,
             ProviderKind::Codex,
             ProviderKind::Gemini,
+            ProviderKind::Qwen,
         ] {
             let capabilities = provider.capabilities().expect("supported provider");
             assert!(capabilities.supports_structured_output);
@@ -620,5 +676,14 @@ mod tests {
             assert!(capabilities.supports_tool_stream);
             assert!(!capabilities.binary_name.is_empty());
         }
+    }
+
+    #[test]
+    fn test_uses_managed_tmux_backend_for_claude_codex_and_qwen() {
+        assert!(ProviderKind::Claude.uses_managed_tmux_backend());
+        assert!(ProviderKind::Codex.uses_managed_tmux_backend());
+        assert!(ProviderKind::Qwen.uses_managed_tmux_backend());
+        assert!(!ProviderKind::Gemini.uses_managed_tmux_backend());
+        assert!(!ProviderKind::Unsupported("gpt".to_string()).uses_managed_tmux_backend());
     }
 }

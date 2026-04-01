@@ -143,6 +143,37 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = InputModeArg::Fifo)]
         input_mode: InputModeArg,
     },
+    /// tmux + Qwen CLI integration wrapper (Unix only)
+    #[cfg(unix)]
+    QwenTmuxWrapper {
+        /// Path to the output capture file
+        #[arg(long)]
+        output_file: String,
+        /// Path to the input FIFO
+        #[arg(long)]
+        input_fifo: String,
+        /// Path to the prompt file
+        #[arg(long)]
+        prompt_file: String,
+        /// Path to qwen binary
+        #[arg(long)]
+        qwen_bin: String,
+        /// Optional qwen model override
+        #[arg(long)]
+        qwen_model: Option<String>,
+        /// Qwen built-in core tool allowlist entry
+        #[arg(long = "qwen-core-tool")]
+        qwen_core_tools: Vec<String>,
+        /// Optional resume session id for the first turn
+        #[arg(long)]
+        resume_session_id: Option<String>,
+        /// Working directory (defaults to ".")
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        /// Input mode: fifo (default) or pipe
+        #[arg(long, value_enum, default_value_t = InputModeArg::Fifo)]
+        input_mode: InputModeArg,
+    },
     /// Kill all AgentDesk-* tmux sessions and clean temp files
     ResetTmux,
     /// Check if MCP tool(s) are registered in .claude/settings.json
@@ -371,6 +402,35 @@ fn main() -> Result<()> {
                     &codex_bin,
                     codex_model.as_deref(),
                     reasoning_effort.as_deref(),
+                    mode,
+                );
+                return Ok(());
+            }
+            #[cfg(unix)]
+            Some(Commands::QwenTmuxWrapper {
+                output_file,
+                input_fifo,
+                prompt_file,
+                qwen_bin,
+                qwen_model,
+                qwen_core_tools,
+                resume_session_id,
+                cwd,
+                input_mode,
+            }) => {
+                let mode = match input_mode {
+                    InputModeArg::Pipe => services::tmux_wrapper::InputMode::Pipe,
+                    InputModeArg::Fifo => services::tmux_wrapper::InputMode::Fifo,
+                };
+                services::qwen_tmux_wrapper::run(
+                    &output_file,
+                    &input_fifo,
+                    &prompt_file,
+                    &cwd,
+                    &qwen_bin,
+                    qwen_model.as_deref(),
+                    &qwen_core_tools,
+                    resume_session_id.as_deref(),
                     mode,
                 );
                 return Ok(());

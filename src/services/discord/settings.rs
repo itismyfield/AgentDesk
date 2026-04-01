@@ -37,6 +37,17 @@ pub(crate) fn discord_token_hash(token: &str) -> String {
     format!("discord_{}", hex::encode(&result[..8]))
 }
 
+fn default_allowed_tools_for_provider(provider: &ProviderKind) -> Vec<String> {
+    if matches!(provider, ProviderKind::Qwen) {
+        Vec::new()
+    } else {
+        DEFAULT_ALLOWED_TOOLS
+            .iter()
+            .map(|tool| (*tool).to_string())
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct RoleBinding {
     pub role_id: String,
@@ -536,15 +547,14 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         })
         .unwrap_or_default();
     let allowed_tools = match entry.get("allowed_tools") {
-        None => DEFAULT_ALLOWED_TOOLS
-            .iter()
-            .map(|tool| (*tool).to_string())
-            .collect(),
+        None => default_allowed_tools_for_provider(&provider),
         Some(value) => {
             let Some(tools_arr) = value.as_array() else {
+                let allowed_tools = default_allowed_tools_for_provider(&provider);
                 return DiscordBotSettings {
                     agent,
                     provider,
+                    allowed_tools,
                     allowed_channel_ids,
                     owner_user_id,
                     last_sessions,

@@ -342,7 +342,10 @@ pub fn api_router(
         // Discord bindings
         .route("/discord-bindings", get(discord::list_bindings))
         // Round-table meetings
-        .route("/round-table-meetings", get(meetings::list_meetings))
+        .route(
+            "/round-table-meetings",
+            get(meetings::list_meetings).post(meetings::upsert_meeting),
+        )
         .route("/round-table-meetings/start", post(meetings::start_meeting))
         .route(
             "/round-table-meetings/{id}",

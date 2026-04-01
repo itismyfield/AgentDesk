@@ -56,9 +56,7 @@ pub(super) async fn handle_model_picker_interaction(
                 ctx,
                 serenity::CreateInteractionResponse::Message(
                     serenity::CreateInteractionResponseMessage::new()
-                        .content(
-                            "Model override is only supported for Claude, Codex, and Gemini channels.",
-                        )
+                        .content("Model override is only supported for Claude, Codex, Gemini, and Qwen channels.")
                         .ephemeral(true),
                 ),
             )
@@ -172,23 +170,28 @@ pub(super) async fn handle_model_picker_interaction(
             let pending_model = if is_default_picker_value(&selected) {
                 Some(selected)
             } else {
-                let validated =
-                    match super::commands::validate_model_input(&data.provider, &selected) {
-                        Ok(model) => model,
-                        Err(message) => {
-                            component
-                                .create_response(
-                                    ctx,
-                                    serenity::CreateInteractionResponse::Message(
-                                        serenity::CreateInteractionResponseMessage::new()
-                                            .content(message)
-                                            .ephemeral(true),
-                                    ),
-                                )
-                                .await?;
-                            return Ok(());
-                        }
-                    };
+                let working_dir =
+                    super::commands::current_working_dir(&data.shared, target_channel_id).await;
+                let validated = match super::commands::validate_model_input(
+                    &data.provider,
+                    &selected,
+                    working_dir.as_deref(),
+                ) {
+                    Ok(model) => model,
+                    Err(message) => {
+                        component
+                            .create_response(
+                                ctx,
+                                serenity::CreateInteractionResponse::Message(
+                                    serenity::CreateInteractionResponseMessage::new()
+                                        .content(message)
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                };
                 Some(validated)
             };
 
@@ -262,6 +265,7 @@ pub(super) async fn handle_model_picker_interaction(
         .and_then(|state| state.pending_model.clone());
 
     let snapshot = super::commands::effective_model_snapshot(&data.shared, target_channel_id).await;
+    let working_dir = super::commands::current_working_dir(&data.shared, target_channel_id).await;
     let embed = super::commands::build_model_picker_embed_from_snapshot(
         &snapshot,
         &data.provider,
@@ -273,6 +277,7 @@ pub(super) async fn handle_model_picker_interaction(
         target_channel_id,
         &data.provider,
         pending_model.as_deref(),
+        working_dir.as_deref(),
     );
     component
         .create_response(

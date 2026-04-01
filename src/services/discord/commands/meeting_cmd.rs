@@ -10,7 +10,7 @@ pub(in crate::services::discord) async fn cmd_meeting(
     ctx: Context<'_>,
     #[description = "Action: start / stop / status"] action: String,
     #[description = "Agenda (required for start)"] agenda: Option<String>,
-    #[description = "Primary provider (optional: claude / codex / gemini)"]
+    #[description = "Primary provider (optional: claude / codex / gemini / qwen)"]
     primary_provider: Option<String>,
 ) -> Result<(), Error> {
     let user_id = ctx.author().id;
@@ -34,7 +34,7 @@ pub(in crate::services::discord) async fn cmd_meeting(
             let agenda_text = agenda_str.trim();
             if agenda_text.is_empty() {
                 ctx.say(
-                    "사용법: `/meeting start <안건>` + optional `primary_provider=claude|codex|gemini`",
+                    "사용법: `/meeting start <안건>` + optional `primary_provider=claude|codex|gemini|qwen`",
                 )
                 .await?;
                 return Ok(());
@@ -42,8 +42,10 @@ pub(in crate::services::discord) async fn cmd_meeting(
             let selected_provider = match primary_provider.as_deref().map(ProviderKind::from_str) {
                 Some(Some(provider)) => provider,
                 Some(None) => {
-                    ctx.say("primary_provider는 `claude`, `codex`, `gemini` 중 하나여야 해.")
-                        .await?;
+                    ctx.say(
+                        "primary_provider는 `claude`, `codex`, `gemini`, `qwen` 중 하나여야 해.",
+                    )
+                    .await?;
                     return Ok(());
                 }
                 None => ctx.data().provider.clone(),

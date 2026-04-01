@@ -221,7 +221,7 @@ fn parse_primary_provider_arg(
         Some(value) => match ProviderKind::from_str(value) {
             Some(provider) if provider.is_supported() => Ok(provider),
             _ => Err(format!(
-                "지원하지 않는 provider야: `{}` (`claude`, `codex`, `gemini` 중 하나여야 함)",
+                "지원하지 않는 provider야: `{}` (`claude`, `codex`, `gemini`, `qwen` 중 하나여야 함)",
                 value
             )),
         },
@@ -238,7 +238,9 @@ pub(super) fn parse_meeting_start_text(
     };
     let rest = rest.trim();
     if rest.is_empty() {
-        return Err("사용법: `/meeting start [--primary claude|codex|gemini] <안건>`".to_string());
+        return Err(
+            "사용법: `/meeting start [--primary claude|codex|gemini|qwen] <안건>`".to_string(),
+        );
     }
 
     let mut primary_provider = default_provider.clone();
@@ -266,7 +268,9 @@ pub(super) fn parse_meeting_start_text(
     }
 
     if agenda.trim().is_empty() {
-        return Err("사용법: `/meeting start [--primary claude|codex|gemini] <안건>`".to_string());
+        return Err(
+            "사용법: `/meeting start [--primary claude|codex|gemini|qwen] <안건>`".to_string(),
+        );
     }
 
     Ok(Some(MeetingStartRequest {
@@ -1483,7 +1487,7 @@ pub(super) async fn handle_meeting_command(
 ) -> Result<bool, Error> {
     let text = text.trim().to_string();
 
-    // /meeting start [--primary claude|codex|gemini] <agenda>
+    // /meeting start [--primary claude|codex|gemini|qwen] <agenda>
     if text.starts_with("/meeting start ") {
         let request = match parse_meeting_start_text(&text, default_provider) {
             Ok(Some(request)) => request,
@@ -1502,8 +1506,9 @@ pub(super) async fn handle_meeting_command(
             let _ = channel_id
                 .send_message(
                     &*http,
-                    CreateMessage::new()
-                        .content("사용법: `/meeting start [--primary claude|codex|gemini] <안건>`"),
+                    CreateMessage::new().content(
+                        "사용법: `/meeting start [--primary claude|codex|gemini|qwen] <안건>`",
+                    ),
                 )
                 .await;
             return Ok(true);
@@ -1601,6 +1606,18 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(parsed.primary_provider, ProviderKind::Gemini);
+        assert_eq!(parsed.agenda, "신규 안건");
+    }
+
+    #[test]
+    fn test_parse_meeting_start_text_accepts_qwen_primary_flag() {
+        let parsed = parse_meeting_start_text(
+            "/meeting start --primary qwen 신규 안건",
+            ProviderKind::Claude,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(parsed.primary_provider, ProviderKind::Qwen);
         assert_eq!(parsed.agenda, "신규 안건");
     }
 

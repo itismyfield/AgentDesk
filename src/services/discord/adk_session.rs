@@ -161,9 +161,9 @@ pub(super) async fn delete_adk_session(session_key: &str, api_port: u16) {
     }
 }
 
-/// Clear the stored claude_session_id from DB for a given session_key.
+/// Clear the stored provider session_id from DB for a given session_key.
 /// Called when the user runs /clear so the next turn doesn't resume a dead session.
-pub(super) async fn clear_claude_session_id(session_key: &str, api_port: u16) {
+pub(super) async fn clear_provider_session_id(session_key: &str, api_port: u16) {
     let body = serde_json::json!({ "session_key": session_key });
     match reqwest::Client::new()
         .post(local_api_url(
@@ -177,16 +177,20 @@ pub(super) async fn clear_claude_session_id(session_key: &str, api_port: u16) {
         Ok(resp) if !resp.status().is_success() => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
-                "  [{ts}] ⚠ clear_claude_session_id failed: HTTP {}",
+                "  [{ts}] ⚠ clear_provider_session_id failed: HTTP {}",
                 resp.status()
             );
         }
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ clear_claude_session_id error: {e}");
+            eprintln!("  [{ts}] ⚠ clear_provider_session_id error: {e}");
         }
         _ => {}
     }
+}
+
+pub(super) async fn clear_claude_session_id(session_key: &str, api_port: u16) {
+    clear_provider_session_id(session_key, api_port).await;
 }
 
 /// Save a provider session_id to DB so it survives dcserver restarts.
