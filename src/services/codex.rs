@@ -6,16 +6,13 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
-use crate::services::claude::{
-    self, SessionProbe, StreamLineState, StreamMessage, process_stream_line,
-    read_output_file_until_result, shell_escape,
-};
+use crate::services::claude::{self, StreamMessage, read_output_file_until_result, shell_escape};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
 use crate::services::provider::{
-    CancelToken, FollowupResult, ProviderKind, cancel_requested, fold_read_output_result,
-    register_child_pid,
+    CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
+    fold_read_output_result, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
@@ -664,7 +661,20 @@ fn execute_streaming_local_process_codex(
                     start_offset,
                     sender.clone(),
                     cancel_token,
-                    claude::SessionProbe::process(session_name.to_string()),
+                    SessionProbe::process({
+                        let session_name = session_name.to_string();
+                        move || {
+                            let handles = claude::PROCESS_HANDLES.lock().unwrap();
+                            if let Some(handle) = handles.get(&session_name) {
+                                use crate::services::session_backend::{
+                                    ProcessBackend, SessionBackend,
+                                };
+                                ProcessBackend::new().is_alive(handle)
+                            } else {
+                                false
+                            }
+                        }
+                    }),
                 )?;
 
                 fold_read_output_result(
@@ -741,7 +751,18 @@ fn execute_streaming_local_process_codex(
         0,
         sender.clone(),
         cancel_token,
-        claude::SessionProbe::process(session_name.to_string()),
+        SessionProbe::process({
+            let session_name = session_name.to_string();
+            move || {
+                let handles = claude::PROCESS_HANDLES.lock().unwrap();
+                if let Some(handle) = handles.get(&session_name) {
+                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
+                    ProcessBackend::new().is_alive(handle)
+                } else {
+                    false
+                }
+            }
+        }),
     )?;
 
     fold_read_output_result(

@@ -369,6 +369,72 @@ pub enum FollowupResult {
     RecreateSession { error: String },
 }
 
+/// Callbacks for session status checks during output file polling.
+pub(crate) struct SessionProbe {
+    /// Returns true if the session process is still running.
+    pub is_alive: Box<dyn Fn() -> bool + Send>,
+    /// Returns true if the session is idle and ready for new input.
+    pub is_ready_for_input: Box<dyn Fn() -> bool + Send>,
+}
+
+impl SessionProbe {
+    pub fn new(
+        is_alive: impl Fn() -> bool + Send + 'static,
+        is_ready_for_input: impl Fn() -> bool + Send + 'static,
+    ) -> Self {
+        Self {
+            is_alive: Box::new(is_alive),
+            is_ready_for_input: Box::new(is_ready_for_input),
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn tmux(session_name: String) -> Self {
+        let name_alive = session_name.clone();
+        let name_ready = session_name;
+        Self::new(
+            move || tmux_session_alive(&name_alive),
+            move || tmux_session_ready_for_input(&name_ready),
+        )
+    }
+
+    #[cfg(not(unix))]
+    pub fn tmux(_session_name: String) -> Self {
+        Self::new(|| false, || false)
+    }
+
+    pub fn process(is_alive: impl Fn() -> bool + Send + 'static) -> Self {
+        Self::new(is_alive, || false)
+    }
+}
+
+#[cfg(unix)]
+fn tmux_session_alive(tmux_session_name: &str) -> bool {
+    crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+}
+
+#[cfg(unix)]
+pub(crate) fn tmux_capture_indicates_ready_for_input(capture: &str) -> bool {
+    capture
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .any(|l| l.contains("Ready for input (type message + Enter)"))
+}
+
+#[cfg(unix)]
+pub(crate) fn tmux_session_ready_for_input(tmux_session_name: &str) -> bool {
+    crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
+        .map(|stdout| tmux_capture_indicates_ready_for_input(&stdout))
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn tmux_session_ready_for_input(_tmux_session_name: &str) -> bool {
+    false
+}
+
 pub fn fold_read_output_result<T>(
     read_result: ReadOutputResult,
     on_ready: impl FnOnce(u64) -> T,
