@@ -1097,6 +1097,37 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 );
             }
 
+            // #228: Enforce review_verdict_pass gate on transitions to terminal states.
+            // Only this specific gate is checked — other gates (has_active_dispatch,
+            // review_rework) and force_only transitions are used legitimately by
+            // policies and must not be blocked here. PMD bypasses via force-transition API.
+            if pipeline.is_terminal(&new_status) {
+                if let Some(t) = pipeline.find_transition(&old_status, &new_status) {
+                    let needs_review_pass = t.gates.iter().any(|g| {
+                        pipeline.gates.get(g.as_str())
+                            .map_or(false, |gc| gc.check.as_deref() == Some("review_verdict_pass"))
+                    });
+                    if needs_review_pass {
+                        let has_pass: bool = conn
+                            .query_row(
+                                "SELECT COUNT(*) > 0 FROM task_dispatches \
+                                 WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+                                 AND status = 'completed' \
+                                 AND json_extract(result, '$.verdict') IN ('pass', 'approved')",
+                                [&card_id],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or(false);
+                        if !has_pass {
+                            return format!(
+                                r#"{{"error":"gate blocked: review_verdict_pass — no review pass verdict","from":"{}","to":"{}"}}"#,
+                                old_status, new_status
+                            );
+                        }
+                    }
+                }
+            }
+
             // Clock fields from pipeline config
             let clock_extra = match pipeline.clock_for_state(&new_status) {
                 Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
