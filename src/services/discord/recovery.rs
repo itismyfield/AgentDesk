@@ -717,14 +717,16 @@ pub(super) async fn restore_inflight_turns(
             } else {
                 super::formatting::format_for_discord(&extracted)
             };
-            let _ = super::formatting::replace_long_message_raw(
+            // #225 P1-1: Track relay success — only clear inflight if Discord delivery succeeds
+            let relay_ok = super::formatting::replace_long_message_raw(
                 http,
                 channel_id,
                 current_msg_id,
                 &final_text,
                 shared,
             )
-            .await;
+            .await
+            .is_ok();
 
             // Mark user message as completed: ⏳ → ✅
             let user_msg_id = MessageId::new(state.user_msg_id);
@@ -734,7 +736,9 @@ pub(super) async fn restore_inflight_turns(
             // Complete the dispatch if this was an implementation/rework turn.
             // Review dispatches require the verdict flow (review_verdict.rs)
             // and must not be generically finalized here.
-            let recovered_dispatch_id = parse_dispatch_id(&state.user_text);
+            // #225 P1-3: Use DB lookup for dispatch ID (text parsing fails in unified threads)
+            let recovered_dispatch_id = parse_dispatch_id(&state.user_text)
+                .or(lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id).await);
             let mut dispatch_completed = recovered_dispatch_id.is_none();
             if let Some(ref did) = recovered_dispatch_id {
                 let dispatch_type = shared.db.as_ref().and_then(|db| {
@@ -819,8 +823,15 @@ pub(super) async fn restore_inflight_turns(
                 }
             }
 
-            if dispatch_completed {
+            // #225 P1-1: Only clear inflight if both dispatch completed AND relay succeeded.
+            // If relay failed, preserve inflight for retry on next startup.
+            if dispatch_completed && relay_ok {
                 clear_inflight_state(provider, state.channel_id);
+            } else if dispatch_completed && !relay_ok {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ recovery: dispatch completed but Discord relay failed — preserving inflight for retry"
+                );
             }
             continue;
         }

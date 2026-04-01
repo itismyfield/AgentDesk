@@ -799,6 +799,8 @@ pub(super) async fn tmux_output_watcher(
         }
 
         // Send the terminal response to Discord
+        // #225 P1-2: Track relay success across branches
+        let mut relay_ok = false;
         if !full_response.trim().is_empty() {
             let formatted = format_for_discord(&full_response);
             let prefixed = formatted.to_string();
@@ -808,6 +810,8 @@ pub(super) async fn tmux_output_watcher(
                 prefixed.len(),
                 data_start_offset
             );
+            // #225 P1-2: Track relay success to gate turn_result_relayed
+            relay_ok = true;
             match placeholder_msg_id {
                 Some(msg_id) => {
                     // Update the placeholder with final response (may need splitting)
@@ -828,6 +832,7 @@ pub(super) async fn tmux_output_watcher(
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             println!("  [{ts}] 👁 Failed to relay: {e}");
+                            relay_ok = false;
                         }
                     }
                 }
@@ -837,14 +842,18 @@ pub(super) async fn tmux_output_watcher(
                     {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         println!("  [{ts}] 👁 Failed to relay: {e}");
+                        relay_ok = false;
                     }
                 }
             }
             // Record the offset range we just relayed to prevent duplicate relay.
             last_relayed_offset = Some(data_start_offset);
-        } else if let Some(msg_id) = placeholder_msg_id {
-            // No response text but placeholder exists — clean up
-            let _ = channel_id.delete_message(&http, msg_id).await;
+        } else {
+            relay_ok = false; // No response to relay
+            if let Some(msg_id) = placeholder_msg_id {
+                // No response text but placeholder exists — clean up
+                let _ = channel_id.delete_message(&http, msg_id).await;
+            }
         }
 
         // Mark user message as completed: ⏳ → ✅
@@ -861,8 +870,16 @@ pub(super) async fn tmux_output_watcher(
 
                 // Finalize implementation/rework dispatches only — review
                 // dispatches require the verdict flow (review_verdict.rs).
+                // #225 P1-4: Use DB lookup for dispatch ID (text parsing fails in unified threads)
                 let mut dispatch_ok = true;
-                if let Some(did) = super::adk_session::parse_dispatch_id(&state.user_text) {
+                let resolved_did = super::adk_session::parse_dispatch_id(&state.user_text).or(
+                    super::adk_session::lookup_pending_dispatch_for_thread(
+                        shared.api_port,
+                        channel_id.get(),
+                    )
+                    .await,
+                );
+                if let Some(did) = resolved_did {
                     let dispatch_type = shared.db.as_ref().and_then(|db| {
                         db.separate_conn().ok().and_then(|conn| {
                             conn.query_row(
@@ -928,12 +945,16 @@ pub(super) async fn tmux_output_watcher(
                     }
                 }
 
-                // Response was relayed — prevent duplicate handoff on session death
-                turn_result_relayed = true;
-                // Only clear inflight state if dispatch was completed (or no dispatch).
-                // Preserving state on failure allows the next recovery pass to retry.
-                if dispatch_ok {
-                    super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
+                // #225 P1-2: Only mark relayed + clear inflight if Discord relay succeeded.
+                // If relay failed, preserve retry/handoff path for next startup.
+                if relay_ok {
+                    turn_result_relayed = true;
+                    if dispatch_ok {
+                        super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
+                    }
+                } else {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
                 }
             }
         }
