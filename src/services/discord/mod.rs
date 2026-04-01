@@ -358,7 +358,6 @@ fn choose_restore_channel_name(
         .or(existing_channel_name)
         .map(ToOwned::to_owned)
 }
-
 #[derive(Clone)]
 pub(super) struct ModelPickerPendingState {
     pub(super) owner_user_id: UserId,

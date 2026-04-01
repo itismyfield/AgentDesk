@@ -14,7 +14,6 @@ use crate::services::remote::RemoteProfile;
 static GEMINI_PATH: OnceLock<Option<String>> = OnceLock::new();
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
 const GEMINI_RESUME_LATEST: &str = "latest";
-const GEMINI_CANCELLED_MESSAGE: &str = "Gemini request cancelled";
 const GEMINI_SESSION_DEAD_MESSAGE: &str = "Gemini stream ended without a terminal result";
 const GEMINI_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const GEMINI_STREAM_IDLE_TICKS_BEFORE_RETRY: u32 = 2;
@@ -247,8 +246,8 @@ fn execute_gemini_streaming_attempt(
 
     if is_cancelled(cancel_token.as_deref()) {
         claude::kill_child_tree(&mut child);
-        let stderr = stderr_handle.join().unwrap_or_default();
-        emit_cancellation_error(&sender, String::new(), stderr, None);
+        let _ = child.wait();
+        let _ = stderr_handle.join();
         return Ok(GeminiAttemptResult::Cancelled);
     }
 
@@ -258,8 +257,8 @@ fn execute_gemini_streaming_attempt(
     loop {
         if is_cancelled(cancel_token.as_deref()) {
             claude::kill_child_tree(&mut child);
-            let stderr = stderr_handle.join().unwrap_or_default();
-            emit_cancellation_error(&sender, state.raw_stdout, stderr, None);
+            let _ = child.wait();
+            let _ = stderr_handle.join();
             return Ok(GeminiAttemptResult::Cancelled);
         }
 
@@ -308,7 +307,6 @@ fn execute_gemini_streaming_attempt(
     let stderr = stderr_handle.join().unwrap_or_default();
 
     if is_cancelled(cancel_token.as_deref()) {
-        emit_cancellation_error(&sender, state.raw_stdout, stderr, status.code());
         return Ok(GeminiAttemptResult::Cancelled);
     }
 
@@ -513,7 +511,7 @@ fn finalize_gemini_attempt(
     }
 
     if exit_code.unwrap_or(0) != 0 {
-        return GeminiFinalState::RetrySession {
+        return GeminiFinalState::Error {
             message: derive_error_message(&raw_stdout, &stderr, exit_code, "Gemini"),
             stdout: raw_stdout,
             stderr,
@@ -542,20 +540,6 @@ fn flush_buffered_stream_messages(sender: &Sender<StreamMessage>, state: &mut Ge
     for message in state.buffered_messages.drain(..) {
         let _ = sender.send(message);
     }
-}
-
-fn emit_cancellation_error(
-    sender: &Sender<StreamMessage>,
-    stdout: String,
-    stderr: String,
-    exit_code: Option<i32>,
-) {
-    let _ = sender.send(StreamMessage::Error {
-        message: GEMINI_CANCELLED_MESSAGE.to_string(),
-        stdout,
-        stderr,
-        exit_code,
-    });
 }
 
 fn is_cancelled(token: Option<&CancelToken>) -> bool {
@@ -778,9 +762,8 @@ fn render_gemini_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        GEMINI_CANCELLED_MESSAGE, GEMINI_SESSION_DEAD_MESSAGE, GeminiAttemptState,
-        GeminiFinalState, build_exec_args, build_gemini_tool_result_message,
-        build_gemini_tool_use_message, emit_cancellation_error, execute_command_streaming,
+        GEMINI_SESSION_DEAD_MESSAGE, GeminiAttemptState, GeminiFinalState, build_exec_args,
+        build_gemini_tool_result_message, build_gemini_tool_use_message, execute_command_streaming,
         extract_gemini_error_message, extract_text_from_stream_output, finalize_gemini_attempt,
         flush_buffered_stream_messages, looks_like_uuid, normalize_resume_selector,
         observed_session_to_resume_selector, process_gemini_stream_line,
@@ -994,25 +977,24 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_emits_single_error_message() {
-        let (tx, rx) = mpsc::channel();
-        emit_cancellation_error(&tx, "out".to_string(), "err".to_string(), Some(130));
+    fn non_zero_exit_without_structured_error_is_terminal_error() {
+        let mut state = GeminiAttemptState::new(Some("latest".to_string()));
+        state.raw_stdout = "plain stdout".to_string();
 
-        match rx.recv().unwrap() {
-            StreamMessage::Error {
+        match finalize_gemini_attempt(&mut state, "plain stderr".to_string(), Some(2)) {
+            GeminiFinalState::Error {
                 message,
                 stdout,
                 stderr,
                 exit_code,
             } => {
-                assert_eq!(message, GEMINI_CANCELLED_MESSAGE);
-                assert_eq!(stdout, "out");
-                assert_eq!(stderr, "err");
-                assert_eq!(exit_code, Some(130));
+                assert!(message.contains("plain stderr"));
+                assert_eq!(stdout, "plain stdout");
+                assert_eq!(stderr, "plain stderr");
+                assert_eq!(exit_code, Some(2));
             }
             other => panic!("expected Error, got {:?}", other),
         }
-        assert!(rx.try_recv().is_err());
     }
 
     #[test]
