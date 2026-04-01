@@ -9,7 +9,7 @@ use std::sync::mpsc::Sender;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
 use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -271,54 +271,6 @@ pub(crate) fn tmux_session_ready_for_input(tmux_session_name: &str) -> bool {
 #[cfg(not(unix))]
 pub(crate) fn tmux_session_ready_for_input(_tmux_session_name: &str) -> bool {
     false
-}
-
-/// Token for cooperative cancellation of streaming requests.
-/// Holds a flag and the child process PID so the caller can kill it externally.
-pub struct CancelToken {
-    pub cancelled: std::sync::atomic::AtomicBool,
-    pub child_pid: std::sync::Mutex<Option<u32>>,
-    /// SSH cancel flag — set to true to signal remote execution to close the channel
-    #[allow(dead_code)]
-    pub ssh_cancel: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
-    /// tmux session name for cleanup on cancel
-    pub tmux_session: std::sync::Mutex<Option<String>>,
-    /// Watchdog deadline as Unix timestamp in milliseconds.
-    /// The watchdog fires when `now_ms >= deadline_ms`. Extend by setting a future value.
-    /// Maximum absolute cap: initial deadline + MAX_EXTENSION (3 hours).
-    pub watchdog_deadline_ms: std::sync::atomic::AtomicI64,
-    /// The hard ceiling for watchdog_deadline_ms (initial + 3h). Extensions cannot exceed this.
-    pub watchdog_max_deadline_ms: std::sync::atomic::AtomicI64,
-}
-
-impl CancelToken {
-    pub fn new() -> Self {
-        Self {
-            cancelled: std::sync::atomic::AtomicBool::new(false),
-            child_pid: std::sync::Mutex::new(None),
-            ssh_cancel: std::sync::Mutex::new(None),
-            tmux_session: std::sync::Mutex::new(None),
-            watchdog_deadline_ms: std::sync::atomic::AtomicI64::new(0),
-            watchdog_max_deadline_ms: std::sync::atomic::AtomicI64::new(0),
-        }
-    }
-
-    /// Cancel and clean up any associated tmux session
-    pub fn cancel_with_tmux_cleanup(&self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(name) = self.tmux_session.lock().unwrap().take() {
-            #[cfg(unix)]
-            {
-                record_tmux_exit_reason(&name, "explicit cleanup via cancel_with_tmux_cleanup");
-                crate::services::platform::tmux::kill_session(&name);
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = &name; // suppress unused warning
-            }
-        }
-    }
 }
 
 /// Cached regex pattern for session ID validation
@@ -820,9 +772,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     ));
 
     // Store child PID in cancel token so the caller can kill it externally
-    if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(child.id());
-    }
+    register_child_pid(cancel_token.as_deref(), child.id());
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -863,12 +813,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log("Entering lines loop - will block until first line arrives...");
     for line in reader.lines() {
         // Check cancel token before processing each line
-        if let Some(ref token) = cancel_token {
-            if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                debug_log("Cancel detected — killing child process tree");
-                kill_child_tree(&mut child);
-                return Ok(());
-            }
+        if cancel_requested(cancel_token.as_deref()) {
+            debug_log("Cancel detected — killing child process tree");
+            kill_child_tree(&mut child);
+            return Ok(());
         }
 
         debug_log(&format!("Line {} - read started", line_count + 1));
@@ -1129,12 +1077,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log(&format!("last_session_id: {:?}", last_session_id));
 
     // Check cancel token after exiting the loop
-    if let Some(ref token) = cancel_token {
-        if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            debug_log("Cancel detected after loop — killing child process tree");
-            kill_child_tree(&mut child);
-            return Ok(());
-        }
+    if cancel_requested(cancel_token.as_deref()) {
+        debug_log("Cancel detected after loop — killing child process tree");
+        kill_child_tree(&mut child);
+        return Ok(());
     }
 
     // Wait for process to finish
@@ -2094,7 +2040,6 @@ pub(crate) fn read_output_file_until_result(
     probe: SessionProbe,
 ) -> Result<ReadOutputResult, String> {
     use std::io::{Read, Seek, SeekFrom};
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     debug_log(&format!(
@@ -2114,12 +2059,10 @@ pub(crate) fn read_output_file_until_result(
         if wait_start.elapsed() > Duration::from_secs(30) {
             return Err("Timeout waiting for output file".to_string());
         }
-        if let Some(ref token) = cancel_token {
-            if token.cancelled.load(Ordering::Relaxed) {
-                return Ok(ReadOutputResult::Cancelled {
-                    offset: start_offset,
-                });
-            }
+        if cancel_requested(cancel_token.as_deref()) {
+            return Ok(ReadOutputResult::Cancelled {
+                offset: start_offset,
+            });
         }
         std::thread::sleep(wait_interval);
         wait_interval = std::cmp::min(
@@ -2143,13 +2086,11 @@ pub(crate) fn read_output_file_until_result(
 
     loop {
         // Check cancellation
-        if let Some(ref token) = cancel_token {
-            if token.cancelled.load(Ordering::Relaxed) {
-                debug_log("Cancel detected during output file read");
-                return Ok(ReadOutputResult::Cancelled {
-                    offset: current_offset,
-                });
-            }
+        if cancel_requested(cancel_token.as_deref()) {
+            debug_log("Cancel detected during output file read");
+            return Ok(ReadOutputResult::Cancelled {
+                offset: current_offset,
+            });
         }
 
         match file.read(&mut buf) {

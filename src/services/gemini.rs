@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 
-use crate::services::claude::{self, CancelToken, StreamMessage};
-use crate::services::provider::ProviderKind;
+use crate::services::claude::{self, StreamMessage};
+use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
 use crate::services::remote::RemoteProfile;
 
 static GEMINI_PATH: OnceLock<Option<String>> = OnceLock::new();
@@ -249,9 +249,7 @@ fn execute_gemini_streaming_attempt(
         .spawn()
         .map_err(|e| format!("Failed to start Gemini: {}", e))?;
 
-    if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(child.id());
-    }
+    register_child_pid(cancel_token.as_deref(), child.id());
 
     let stdout = child
         .stdout
@@ -590,9 +588,7 @@ fn flush_buffered_stream_messages(sender: &Sender<StreamMessage>, state: &mut Ge
 }
 
 fn is_cancelled(token: Option<&CancelToken>) -> bool {
-    token
-        .map(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(false)
+    cancel_requested(token)
 }
 
 fn remote_profile_not_supported_message() -> String {
@@ -815,7 +811,8 @@ mod tests {
         process_gemini_stream_line, remote_profile_not_supported_message,
         run_gemini_streaming_attempts,
     };
-    use crate::services::claude::{CancelToken, StreamMessage};
+    use crate::services::claude::StreamMessage;
+    use crate::services::provider::CancelToken;
     use crate::services::remote::{RemoteAuth, RemoteProfile};
     use serde_json::json;
     use std::sync::Arc;

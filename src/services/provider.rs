@@ -1,5 +1,7 @@
 use crate::utils::format::safe_prefix;
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -315,10 +317,70 @@ pub fn compose_structured_turn_prompt(
     sections.join("\n\n")
 }
 
+/// Cooperative cancellation token shared by provider runtimes and Discord orchestration.
+pub struct CancelToken {
+    pub cancelled: AtomicBool,
+    pub child_pid: Mutex<Option<u32>>,
+    /// SSH cancel flag — set to true to signal remote execution to close the channel
+    #[allow(dead_code)]
+    pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
+    /// tmux session name for cleanup on cancel
+    pub tmux_session: Mutex<Option<String>>,
+    /// Watchdog deadline as Unix timestamp in milliseconds.
+    /// The watchdog fires when `now_ms >= deadline_ms`. Extend by setting a future value.
+    /// Maximum absolute cap: initial deadline + MAX_EXTENSION (3 hours).
+    pub watchdog_deadline_ms: AtomicI64,
+    /// The hard ceiling for watchdog_deadline_ms (initial + 3h). Extensions cannot exceed this.
+    pub watchdog_max_deadline_ms: AtomicI64,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            child_pid: Mutex::new(None),
+            ssh_cancel: Mutex::new(None),
+            tmux_session: Mutex::new(None),
+            watchdog_deadline_ms: AtomicI64::new(0),
+            watchdog_max_deadline_ms: AtomicI64::new(0),
+        }
+    }
+
+    /// Cancel and clean up any associated tmux session.
+    pub fn cancel_with_tmux_cleanup(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Some(name) = self.tmux_session.lock().unwrap().take() {
+            #[cfg(unix)]
+            {
+                crate::services::tmux_diagnostics::record_tmux_exit_reason(
+                    &name,
+                    "explicit cleanup via cancel_with_tmux_cleanup",
+                );
+                crate::services::platform::tmux::kill_session(&name);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = &name;
+            }
+        }
+    }
+}
+
+pub fn cancel_requested(token: Option<&CancelToken>) -> bool {
+    token.is_some_and(|token| token.cancelled.load(Ordering::Relaxed))
+}
+
+pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
+    if let Some(token) = token {
+        *token.child_pid.lock().unwrap() = Some(child_pid);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderKind, compose_structured_turn_prompt, parse_provider_and_channel_from_tmux_name,
+        CancelToken, ProviderKind, cancel_requested, compose_structured_turn_prompt,
+        parse_provider_and_channel_from_tmux_name, register_child_pid,
     };
     use crate::dispatch::extract_thread_channel_id;
 
@@ -719,6 +781,21 @@ mod tests {
         assert!(ProviderKind::Qwen.uses_managed_tmux_backend());
         assert!(!ProviderKind::Gemini.uses_managed_tmux_backend());
         assert!(!ProviderKind::Unsupported("gpt".to_string()).uses_managed_tmux_backend());
+    }
+
+    #[test]
+    fn test_cancel_token_helpers_register_and_report_state() {
+        let token = CancelToken::new();
+        assert!(!cancel_requested(Some(&token)));
+        assert!(!cancel_requested(None));
+
+        register_child_pid(Some(&token), 4242);
+        assert_eq!(*token.child_pid.lock().unwrap(), Some(4242));
+
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(cancel_requested(Some(&token)));
     }
 
     #[test]

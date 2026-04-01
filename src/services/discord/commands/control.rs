@@ -1,9 +1,8 @@
-use std::path::Path;
-use std::sync::atomic::Ordering;
-
 use poise::serenity_prelude as serenity;
 use serenity::CreateAttachment;
+use std::path::Path;
 
+use crate::services::provider::cancel_requested;
 #[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
 
@@ -32,7 +31,7 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
 
     match token {
         Some(token) => {
-            if token.cancelled.load(Ordering::Relaxed) {
+            if cancel_requested(Some(token.as_ref())) {
                 ctx.say("Already stopping...").await?;
                 return Ok(());
             }

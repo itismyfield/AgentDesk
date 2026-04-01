@@ -2,6 +2,7 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::config::local_api_url;
+use crate::services::provider::cancel_requested;
 #[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
 #[cfg(unix)]
@@ -955,14 +956,14 @@ pub(super) fn spawn_turn_bridge(
         while !done {
             let mut state_dirty = false;
 
-            if cancel_token.cancelled.load(Ordering::Relaxed) {
+            if cancel_requested(Some(cancel_token.as_ref())) {
                 cancelled = true;
                 break;
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-            if cancel_token.cancelled.load(Ordering::Relaxed) {
+            if cancel_requested(Some(cancel_token.as_ref())) {
                 cancelled = true;
                 break;
             }

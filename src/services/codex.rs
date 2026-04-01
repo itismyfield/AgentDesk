@@ -7,13 +7,13 @@ use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
 use crate::services::claude::{
-    self, CancelToken, FollowupResult, ReadOutputResult, SessionProbe, StreamLineState,
-    StreamMessage, process_stream_line, read_output_file_until_result, shell_escape,
+    self, FollowupResult, ReadOutputResult, SessionProbe, StreamLineState, StreamMessage,
+    process_stream_line, read_output_file_until_result, shell_escape,
 };
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind, cancel_requested, register_child_pid};
 use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -229,14 +229,12 @@ fn execute_streaming_direct(
         .spawn()
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
-    if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(child.id());
-        // Race condition fix: if /stop arrived before PID was stored, kill now
-        if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            claude::kill_child_tree(&mut child);
-            let _ = child.wait();
-            return Ok(());
-        }
+    register_child_pid(cancel_token.as_deref(), child.id());
+    // Race condition fix: if /stop arrived before PID was stored, kill now
+    if cancel_requested(cancel_token.as_deref()) {
+        claude::kill_child_tree(&mut child);
+        let _ = child.wait();
+        return Ok(());
     }
 
     let stdout = child
@@ -251,11 +249,9 @@ fn execute_streaming_direct(
     let started_at = std::time::Instant::now();
 
     for line in reader.lines() {
-        if let Some(ref token) = cancel_token {
-            if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                claude::kill_child_tree(&mut child);
-                return Ok(());
-            }
+        if cancel_requested(cancel_token.as_deref()) {
+            claude::kill_child_tree(&mut child);
+            return Ok(());
         }
 
         let line = match line {
