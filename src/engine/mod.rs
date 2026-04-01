@@ -141,50 +141,7 @@ impl PolicyEngine {
         };
         // Execute the requested hook
         Self::fire_hook_with_guard(&inner, hook, payload)?;
-        // Drain deferred hooks from DB while holding inner guard
-        // (fire_hook_with_guard doesn't need separate lock)
-        let mut had_deferred = false;
-        loop {
-            let rows: Vec<(i64, String, String)> = {
-                let conn = match self.db.separate_conn() {
-                    Ok(c) => c,
-                    Err(_) => break,
-                };
-                let mut stmt = match conn.prepare(
-                    "SELECT id, hook_name, payload FROM deferred_hooks \
-                     WHERE status = 'pending' ORDER BY id ASC LIMIT 50",
-                ) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                    .ok()
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    .unwrap_or_default()
-            };
-            if rows.is_empty() {
-                break;
-            }
-            had_deferred = true;
-            for (id, hook_name, payload_str) in &rows {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] 🔄 fire_hook(deferred {hook_name}, id={id})");
-                let p: serde_json::Value =
-                    serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
-                let fire_result = if let Some(h) = Hook::from_str(hook_name) {
-                    Self::fire_hook_with_guard(&inner, h, p)
-                } else {
-                    Self::fire_dynamic_hook_with_guard(&inner, hook_name, p)
-                };
-                if let Err(e) = &fire_result {
-                    tracing::warn!("deferred hook {hook_name} (id={id}) failed: {e}");
-                }
-                // Delete after attempt (success or fail) — deferred hooks are best-effort
-                if let Ok(conn) = self.db.separate_conn() {
-                    let _ = conn.execute("DELETE FROM deferred_hooks WHERE id = ?1", [id]);
-                }
-            }
-        }
+        let had_deferred = Self::drain_deferred_with_guard(&self.db, &inner);
         // Must drop inner (engine lock) BEFORE draining intents — intent
         // execution needs a fresh lock acquisition via drain_pending_intents.
         drop(inner);
@@ -325,6 +282,33 @@ impl PolicyEngine {
             }
         };
         Self::fire_dynamic_hook_with_guard(&inner, hook_name, payload)
+    }
+
+    /// Blocking variant of `try_fire_hook_by_name` — waits for the engine lock
+    /// instead of deferring on contention. Used only in safety-net paths where
+    /// the hook MUST execute (e.g. finalize_dispatch review-dispatch guarantee).
+    pub fn fire_hook_by_name_blocking(
+        &self,
+        hook_name: &str,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        if let Some(h) = Hook::from_str(hook_name) {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
+            Self::fire_hook_with_guard(&inner, h, payload)?;
+            // Drain deferred hooks while holding the guard (same as try_fire_hook)
+            Self::drain_deferred_with_guard(&self.db, &inner);
+            return Ok(());
+        }
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
+        Self::fire_dynamic_hook_with_guard(&inner, hook_name, payload)?;
+        Self::drain_deferred_with_guard(&self.db, &inner);
+        Ok(())
     }
 
     /// Fire a dynamic (non-enum) hook by looking up `dynamic_hooks` on each
@@ -473,6 +457,56 @@ impl PolicyEngine {
 
             Ok(())
         })
+    }
+
+    /// Drain deferred hooks from the DB while holding the engine guard.
+    /// Returns true if any deferred hooks were found and processed.
+    fn drain_deferred_with_guard(
+        db: &crate::db::Db,
+        inner: &std::sync::MutexGuard<'_, PolicyEngineInner>,
+    ) -> bool {
+        let mut had_deferred = false;
+        loop {
+            let rows: Vec<(i64, String, String)> = {
+                let conn = match db.separate_conn() {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                let mut stmt = match conn.prepare(
+                    "SELECT id, hook_name, payload FROM deferred_hooks \
+                     WHERE status = 'pending' ORDER BY id ASC LIMIT 50",
+                ) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            };
+            if rows.is_empty() {
+                break;
+            }
+            had_deferred = true;
+            for (id, hook_name, payload_str) in &rows {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] 🔄 fire_hook(deferred {hook_name}, id={id})");
+                let p: serde_json::Value =
+                    serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
+                let fire_result = if let Some(h) = Hook::from_str(hook_name) {
+                    Self::fire_hook_with_guard(inner, h, p)
+                } else {
+                    Self::fire_dynamic_hook_with_guard(inner, hook_name, p)
+                };
+                if let Err(e) = &fire_result {
+                    tracing::warn!("deferred hook {hook_name} (id={id}) failed: {e}");
+                }
+                if let Ok(conn) = db.separate_conn() {
+                    let _ = conn.execute("DELETE FROM deferred_hooks WHERE id = ?1", [id]);
+                }
+            }
+        }
+        had_deferred
     }
 
     /// Drain pending card transitions accumulated by `agentdesk.kanban.setStatus()`
