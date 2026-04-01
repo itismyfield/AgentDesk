@@ -537,9 +537,7 @@ pub(super) async fn restore_inflight_turns(
                 if let Some(ref tmux_session_name) = tmux_name {
                     let output_path =
                         crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
-                    if std::fs::metadata(&output_path).is_ok()
-                        && !shared.tmux_watchers.contains_key(&channel_id)
-                    {
+                    if std::fs::metadata(&output_path).is_ok() {
                         let (initial_offset, current_len, truncated) =
                             recovery_watcher_start_offset(&output_path, state.last_offset);
                         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -548,42 +546,43 @@ pub(super) async fn restore_inflight_turns(
                         let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                         let turn_delivered =
                             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                        shared.tmux_watchers.insert(
-                            channel_id,
-                            TmuxWatcherHandle {
-                                paused: paused.clone(),
-                                resume_offset: resume_offset.clone(),
-                                cancel: cancel.clone(),
-                                pause_epoch: pause_epoch.clone(),
-                                turn_delivered: turn_delivered.clone(),
-                            },
-                        );
-                        let ts2 = chrono::Local::now().format("%H:%M:%S");
-                        if truncated {
-                            println!(
-                                "  [{ts2}] ↻ recovery: output truncated for #{} (saved offset {}, file len {}), restarting watcher from 0",
-                                tmux_session_name, state.last_offset, current_len
-                            );
-                        }
-                        println!(
-                            "  [{ts2}] 👁 recovery: spawned watcher for #{} at offset {}",
-                            tmux_session_name, initial_offset
-                        );
-                        #[cfg(unix)]
+                        // #226: Atomic claim via try_claim_watcher
+                        let handle = TmuxWatcherHandle {
+                            paused: paused.clone(),
+                            resume_offset: resume_offset.clone(),
+                            cancel: cancel.clone(),
+                            pause_epoch: pause_epoch.clone(),
+                            turn_delivered: turn_delivered.clone(),
+                        };
+                        if super::tmux::try_claim_watcher(&shared.tmux_watchers, channel_id, handle)
                         {
-                            tokio::spawn(super::tmux::tmux_output_watcher(
-                                channel_id,
-                                http.clone(),
-                                shared.clone(),
-                                output_path,
-                                tmux_session_name.clone(),
-                                initial_offset,
-                                cancel,
-                                paused,
-                                resume_offset,
-                                pause_epoch,
-                                turn_delivered,
-                            ));
+                            let ts2 = chrono::Local::now().format("%H:%M:%S");
+                            if truncated {
+                                println!(
+                                    "  [{ts2}] ↻ recovery: output truncated for #{} (saved offset {}, file len {}), restarting watcher from 0",
+                                    tmux_session_name, state.last_offset, current_len
+                                );
+                            }
+                            println!(
+                                "  [{ts2}] 👁 recovery: spawned watcher for #{} at offset {}",
+                                tmux_session_name, initial_offset
+                            );
+                            #[cfg(unix)]
+                            {
+                                tokio::spawn(super::tmux::tmux_output_watcher(
+                                    channel_id,
+                                    http.clone(),
+                                    shared.clone(),
+                                    output_path,
+                                    tmux_session_name.clone(),
+                                    initial_offset,
+                                    cancel,
+                                    paused,
+                                    resume_offset,
+                                    pause_epoch,
+                                    turn_delivered,
+                                ));
+                            }
                         }
                     }
                 }
@@ -900,9 +899,7 @@ pub(super) async fn restore_inflight_turns(
             }
 
             // Immediately spawn watcher to avoid race condition.
-            if std::fs::metadata(&output_path).is_ok()
-                && !shared.tmux_watchers.contains_key(&channel_id)
-            {
+            if std::fs::metadata(&output_path).is_ok() {
                 let (initial_offset, current_len, truncated) =
                     recovery_watcher_start_offset(&output_path, state.last_offset);
                 let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -910,42 +907,42 @@ pub(super) async fn restore_inflight_turns(
                 let resume_offset = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
                 let pause_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                 let turn_delivered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                shared.tmux_watchers.insert(
-                    channel_id,
-                    TmuxWatcherHandle {
-                        paused: paused.clone(),
-                        resume_offset: resume_offset.clone(),
-                        cancel: cancel.clone(),
-                        pause_epoch: pause_epoch.clone(),
-                        turn_delivered: turn_delivered.clone(),
-                    },
-                );
-                let ts2 = chrono::Local::now().format("%H:%M:%S");
-                if truncated {
+                // #226: Atomic claim via try_claim_watcher
+                let handle = TmuxWatcherHandle {
+                    paused: paused.clone(),
+                    resume_offset: resume_offset.clone(),
+                    cancel: cancel.clone(),
+                    pause_epoch: pause_epoch.clone(),
+                    turn_delivered: turn_delivered.clone(),
+                };
+                if super::tmux::try_claim_watcher(&shared.tmux_watchers, channel_id, handle) {
+                    let ts2 = chrono::Local::now().format("%H:%M:%S");
+                    if truncated {
+                        println!(
+                            "  [{ts2}] ↻ recovery: output truncated for #{} (saved offset {}, file len {}), restarting watcher from 0",
+                            tmux_session_name, state.last_offset, current_len
+                        );
+                    }
                     println!(
-                        "  [{ts2}] ↻ recovery: output truncated for #{} (saved offset {}, file len {}), restarting watcher from 0",
-                        tmux_session_name, state.last_offset, current_len
+                        "  [{ts2}] 👁 recovery: spawned watcher for #{} at offset {}",
+                        tmux_session_name, initial_offset
                     );
-                }
-                println!(
-                    "  [{ts2}] 👁 recovery: spawned watcher for #{} at offset {}",
-                    tmux_session_name, initial_offset
-                );
-                #[cfg(unix)]
-                {
-                    tokio::spawn(super::tmux::tmux_output_watcher(
-                        channel_id,
-                        http.clone(),
-                        shared.clone(),
-                        output_path.clone(),
-                        tmux_session_name.clone(),
-                        initial_offset,
-                        cancel,
-                        paused,
-                        resume_offset,
-                        pause_epoch,
-                        turn_delivered,
-                    ));
+                    #[cfg(unix)]
+                    {
+                        tokio::spawn(super::tmux::tmux_output_watcher(
+                            channel_id,
+                            http.clone(),
+                            shared.clone(),
+                            output_path.clone(),
+                            tmux_session_name.clone(),
+                            initial_offset,
+                            cancel,
+                            paused,
+                            resume_offset,
+                            pause_epoch,
+                            turn_delivered,
+                        ));
+                    }
                 }
             }
 

@@ -19,6 +19,24 @@ use super::settings::{
 };
 use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};
 
+/// #226: Atomically claim a channel for watcher creation using DashMap::entry().
+/// Returns true if the claim succeeded (caller should spawn the watcher).
+/// Returns false if a watcher already exists (caller should skip).
+pub(super) fn try_claim_watcher(
+    watchers: &dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+) -> bool {
+    use dashmap::mapref::entry::Entry;
+    match watchers.entry(channel_id) {
+        Entry::Occupied(_) => false,
+        Entry::Vacant(entry) => {
+            entry.insert(handle);
+            true
+        }
+    }
+}
+
 use crate::utils::format::tail_with_ellipsis;
 
 use crate::services::tmux_common::{current_tmux_owner_marker, tmux_exact_target, tmux_owner_path};
@@ -1525,11 +1543,24 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
     }
 
     // Spawn watchers
-    // #226: Re-check contains_key before each spawn. The pending list was built
-    // during the scan phase (above), which includes async Discord API calls.
-    // A normal turn may have started and created a watcher in the meantime.
+    // #226: Use try_claim_watcher for atomic check-and-insert. The pending list
+    // was built during the scan phase, which includes async Discord API calls.
+    // A normal turn may have created a watcher in the meantime.
     for pw in pending {
-        if shared.tmux_watchers.contains_key(&pw.channel_id) {
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
+        let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let handle = TmuxWatcherHandle {
+            paused: paused.clone(),
+            resume_offset: resume_offset.clone(),
+            cancel: cancel.clone(),
+            pause_epoch: pause_epoch.clone(),
+            turn_delivered: turn_delivered.clone(),
+        };
+        if !try_claim_watcher(&shared.tmux_watchers, pw.channel_id, handle) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "  [{ts}] ⏭ watcher skip for {} — already watching (created during scan)",
@@ -1542,23 +1573,6 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         println!(
             "  [{ts}] ↻ Restoring tmux watcher for {} (offset {})",
             pw.session_name, pw.initial_offset
-        );
-
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
-        let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        shared.tmux_watchers.insert(
-            pw.channel_id,
-            TmuxWatcherHandle {
-                paused: paused.clone(),
-                resume_offset: resume_offset.clone(),
-                cancel: cancel.clone(),
-                pause_epoch: pause_epoch.clone(),
-                turn_delivered: turn_delivered.clone(),
-            },
         );
 
         tokio::spawn(tmux_output_watcher(

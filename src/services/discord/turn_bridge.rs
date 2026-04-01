@@ -1180,23 +1180,25 @@ pub(super) fn spawn_turn_bridge(
                             inflight_state.input_fifo_path = Some(input_fifo_path);
                             inflight_state.last_offset = last_offset;
 
-                            let already_watching =
-                                shared_owned.tmux_watchers.contains_key(&channel_id);
-                            if !already_watching {
-                                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
-                                let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
-                                let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
-                                let turn_delivered =
-                                    Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                let handle = TmuxWatcherHandle {
-                                    paused: paused.clone(),
-                                    resume_offset: resume_offset.clone(),
-                                    cancel: cancel.clone(),
-                                    pause_epoch: pause_epoch.clone(),
-                                    turn_delivered: turn_delivered.clone(),
-                                };
-                                shared_owned.tmux_watchers.insert(channel_id, handle);
+                            // #226: Atomic claim via try_claim_watcher
+                            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                            let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
+                            let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
+                            let turn_delivered =
+                                Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            let handle = TmuxWatcherHandle {
+                                paused: paused.clone(),
+                                resume_offset: resume_offset.clone(),
+                                cancel: cancel.clone(),
+                                pause_epoch: pause_epoch.clone(),
+                                turn_delivered: turn_delivered.clone(),
+                            };
+                            if super::tmux::try_claim_watcher(
+                                &shared_owned.tmux_watchers,
+                                channel_id,
+                                handle,
+                            ) {
                                 #[cfg(unix)]
                                 {
                                     let http_bg = http.clone();
