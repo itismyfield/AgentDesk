@@ -1108,16 +1108,24 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                             .map_or(false, |gc| gc.check.as_deref() == Some("review_verdict_pass"))
                     });
                     if needs_review_pass {
-                        let has_pass: bool = conn
+                        // Mirror kanban.rs:112-125 — check the LATEST completed review
+                        // dispatch only, not any historical pass. A card with pass R1
+                        // then rework R2 must not skip the current review round.
+                        let latest_verdict: Option<String> = conn
                             .query_row(
-                                "SELECT COUNT(*) > 0 FROM task_dispatches \
+                                "SELECT json_extract(result, '$.verdict') FROM task_dispatches \
                                  WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
                                  AND status = 'completed' \
-                                 AND json_extract(result, '$.verdict') IN ('pass', 'approved')",
+                                 ORDER BY updated_at DESC LIMIT 1",
                                 [&card_id],
                                 |row| row.get(0),
                             )
-                            .unwrap_or(false);
+                            .ok()
+                            .flatten();
+                        let has_pass = matches!(
+                            latest_verdict.as_deref(),
+                            Some("pass") | Some("approved")
+                        );
                         if !has_pass {
                             return format!(
                                 r#"{{"error":"gate blocked: review_verdict_pass — no review pass verdict","from":"{}","to":"{}"}}"#,
