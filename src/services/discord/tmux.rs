@@ -1007,7 +1007,8 @@ pub(super) async fn tmux_output_watcher(
                     })
                 })
             });
-            if pct >= ctx_cfg.compact_pct && !is_prompt_too_long && compact_cooldown_ok {
+            // DISABLED — token counting still unreliable
+            if false && pct >= ctx_cfg.compact_pct && !is_prompt_too_long && compact_cooldown_ok {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 eprintln!(
                     "  [{ts}] ⚡ [watcher] Auto-compact: {} at {pct}% ({tokens} tokens)",
