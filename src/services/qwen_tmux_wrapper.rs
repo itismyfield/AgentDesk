@@ -316,6 +316,8 @@ fn build_turn_args(prompt: &str, model: Option<&str>, session_id: Option<&str>) 
     if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
         args.push("--resume".to_string());
         args.push(session_id.to_string());
+    } else {
+        args.push("--continue".to_string());
     }
     args.push("-p".to_string());
     args.push(prompt.to_string());
@@ -766,7 +768,7 @@ fn emit_json_line(output: &mut std::fs::File, value: Value) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_external_prompt, normalize_qwen_line};
+    use super::{build_turn_args, decode_external_prompt, normalize_qwen_line};
 
     #[test]
     fn test_decode_external_prompt_keeps_plain_line() {
@@ -793,5 +795,20 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "assistant");
         assert_eq!(events[0]["message"]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn build_turn_args_uses_continue_without_resume_token() {
+        let args = build_turn_args("hello", Some("qwen-max"), None);
+        assert!(args.windows(2).any(|pair| pair == ["--model", "qwen-max"]));
+        assert!(args.iter().any(|arg| arg == "--continue"));
+        assert!(!args.iter().any(|arg| arg == "--resume"));
+    }
+
+    #[test]
+    fn build_turn_args_prefers_resume_token_when_present() {
+        let args = build_turn_args("hello", None, Some("session-123"));
+        assert!(args.windows(2).any(|pair| pair == ["--resume", "session-123"]));
+        assert!(!args.iter().any(|arg| arg == "--continue"));
     }
 }

@@ -38,14 +38,11 @@ pub(crate) fn discord_token_hash(token: &str) -> String {
 }
 
 fn default_allowed_tools_for_provider(provider: &ProviderKind) -> Vec<String> {
-    if matches!(provider, ProviderKind::Qwen) {
-        Vec::new()
-    } else {
-        DEFAULT_ALLOWED_TOOLS
-            .iter()
-            .map(|tool| (*tool).to_string())
-            .collect()
-    }
+    let _ = provider;
+    DEFAULT_ALLOWED_TOOLS
+        .iter()
+        .map(|tool| (*tool).to_string())
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -674,6 +671,7 @@ mod tests {
     use poise::serenity_prelude::ChannelId;
     use tempfile::TempDir;
 
+    use crate::services::claude::DEFAULT_ALLOWED_TOOLS;
     use crate::services::provider::ProviderKind;
 
     use super::{
@@ -754,6 +752,37 @@ mod tests {
             assert_eq!(
                 settings.allowed_tools,
                 vec!["WebFetch".to_string(), "Bash".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_uses_default_allowed_tools_for_qwen_when_omitted() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "qwen-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "provider": "qwen"
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert_eq!(settings.provider, ProviderKind::Qwen);
+            assert_eq!(
+                settings.allowed_tools,
+                DEFAULT_ALLOWED_TOOLS
+                    .iter()
+                    .map(|tool| (*tool).to_string())
+                    .collect::<Vec<_>>()
             );
         });
     }

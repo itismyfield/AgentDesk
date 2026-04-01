@@ -1,10 +1,13 @@
 use poise::serenity_prelude as serenity;
 
 use crate::services::discord::model_catalog::{
-    DEFAULT_PICKER_VALUE, SOURCE_PROVIDER_DEFAULT, is_default_picker_value, resolved_default_model,
-    resolved_models,
+    DEFAULT_PICKER_VALUE, ModelCatalogEntry, SOURCE_PROVIDER_DEFAULT, is_default_picker_value,
+    resolved_default_model, resolved_models,
 };
 use crate::services::provider::ProviderKind;
+
+const DISCORD_SELECT_MENU_OPTION_LIMIT: usize = 25;
+const EXPLICIT_MODEL_OPTION_LIMIT: usize = DISCORD_SELECT_MENU_OPTION_LIMIT - 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ModelPickerOptionSpec {
@@ -110,6 +113,35 @@ fn default_picker_option_description(
     }
 }
 
+fn capped_model_picker_explicit_entries<'a>(
+    resolved_models: &'a [ModelCatalogEntry],
+    selected_explicit_model: Option<&str>,
+) -> Vec<&'a ModelCatalogEntry> {
+    let mut entries: Vec<&ModelCatalogEntry> = resolved_models
+        .iter()
+        .take(EXPLICIT_MODEL_OPTION_LIMIT)
+        .collect();
+
+    if let Some(selected_value) = selected_explicit_model {
+        if let Some(selected_entry) = resolved_models
+            .iter()
+            .find(|entry| selected_value.eq_ignore_ascii_case(entry.value))
+        {
+            if !entries
+                .iter()
+                .any(|entry| entry.value.eq_ignore_ascii_case(selected_entry.value))
+            {
+                if entries.len() == EXPLICIT_MODEL_OPTION_LIMIT {
+                    entries.pop();
+                }
+                entries.push(selected_entry);
+            }
+        }
+    }
+
+    entries
+}
+
 pub(super) fn build_model_picker_option_specs(
     provider: &ProviderKind,
     pending_model: Option<&str>,
@@ -140,7 +172,7 @@ pub(super) fn build_model_picker_option_specs(
         ),
         selected: default_selected,
     });
-    options.extend(resolved_models.iter().map(|entry| ModelPickerOptionSpec {
+    options.extend(capped_model_picker_explicit_entries(&resolved_models, selected_explicit_model).iter().map(|entry| ModelPickerOptionSpec {
         value: entry.value.to_string(),
         label: entry.label.to_string(),
         description: entry.picker_description(),
@@ -173,4 +205,43 @@ pub(super) fn build_model_picker_options(
             .default_selection(entry.selected)
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EXPLICIT_MODEL_OPTION_LIMIT, capped_model_picker_explicit_entries};
+    use crate::services::discord::model_catalog::ModelCatalogEntry;
+
+    fn leaked(value: &str) -> &'static str {
+        Box::leak(value.to_string().into_boxed_str())
+    }
+
+    fn sample_entry(index: usize) -> ModelCatalogEntry {
+        ModelCatalogEntry {
+            value: leaked(&format!("model-{index}")),
+            label: leaked(&format!("Model {index}")),
+            primary_summary: "summary",
+            secondary_summary: "catalog",
+        }
+    }
+
+    #[test]
+    fn capped_model_picker_explicit_entries_obeys_discord_limit() {
+        let models: Vec<ModelCatalogEntry> = (0..40).map(sample_entry).collect();
+        let capped = capped_model_picker_explicit_entries(&models, None);
+
+        assert_eq!(capped.len(), EXPLICIT_MODEL_OPTION_LIMIT);
+        assert_eq!(capped.first().unwrap().value, "model-0");
+        assert_eq!(capped.last().unwrap().value, "model-23");
+    }
+
+    #[test]
+    fn capped_model_picker_explicit_entries_keeps_selected_model_visible() {
+        let models: Vec<ModelCatalogEntry> = (0..40).map(sample_entry).collect();
+        let capped = capped_model_picker_explicit_entries(&models, Some("model-39"));
+
+        assert_eq!(capped.len(), EXPLICIT_MODEL_OPTION_LIMIT);
+        assert!(capped.iter().any(|entry| entry.value == "model-39"));
+        assert!(!capped.iter().any(|entry| entry.value == "model-23"));
+    }
 }
