@@ -1525,7 +1525,19 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
     }
 
     // Spawn watchers
+    // #226: Re-check contains_key before each spawn. The pending list was built
+    // during the scan phase (above), which includes async Discord API calls.
+    // A normal turn may have started and created a watcher in the meantime.
     for pw in pending {
+        if shared.tmux_watchers.contains_key(&pw.channel_id) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] ⏭ watcher skip for {} — already watching (created during scan)",
+                pw.session_name
+            );
+            continue;
+        }
+
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!(
             "  [{ts}] ↻ Restoring tmux watcher for {} (offset {})",
