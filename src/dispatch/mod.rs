@@ -722,9 +722,13 @@ fn complete_dispatch_inner(
     // These are dispatches created outside any card transition context.
     notify_hook_created_dispatches(db, pre_hook_max_rowid);
 
-    // #139: Safety net — if card transitioned to review but OnReviewEnter failed
-    // to create a review dispatch (engine lock contention, JS error, etc.),
-    // re-fire OnReviewEnter to guarantee review dispatch creation.
+    // #139/#220: Safety net — if card transitioned to review but OnReviewEnter
+    // failed to create a review dispatch (engine lock contention causing
+    // try_lock WouldBlock → hook deferred, JS error, etc.), re-fire
+    // OnReviewEnter with a blocking lock to guarantee execution.
+    // Uses fire_hook_by_name_blocking (lock() not try_lock()) so the hook
+    // always runs — preserving all JS policy guards and state updates
+    // (review_round, review_status, counter-model checks, etc.).
     {
         let needs_review_dispatch = db
             .lock()
@@ -746,7 +750,6 @@ fn complete_dispatch_inner(
                         |row| row.get(0),
                     )
                     .unwrap_or(false);
-                // Pipeline-driven: check if current state has OnReviewEnter hook (card's effective pipeline)
                 let is_review_state = card_status.as_deref().map_or(false, |s| {
                     let eff = crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref());
                     eff.hooks_for_state(s)
@@ -759,10 +762,10 @@ fn complete_dispatch_inner(
         if needs_review_dispatch {
             let cid = kanban_card_id.as_deref().unwrap_or("unknown");
             tracing::warn!(
-                "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter (#139)",
+                "[dispatch] Card {} in review-like state but no review dispatch — re-firing OnReviewEnter with blocking lock (#220)",
                 cid
             );
-            let _ = engine.try_fire_hook_by_name("OnReviewEnter", json!({ "card_id": cid }));
+            let _ = engine.fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": cid }));
             crate::kanban::drain_hook_side_effects(db, engine);
             notify_hook_created_dispatches(db, pre_hook_max_rowid);
         }
