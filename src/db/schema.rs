@@ -557,7 +557,6 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_ste_dispatch_id ON session_termination_events(dispatch_id);
         CREATE INDEX IF NOT EXISTS idx_ste_created_at ON session_termination_events(created_at);",
     )?;
-
     seed_builtin_pipeline_stages(conn)?;
 
     Ok(())

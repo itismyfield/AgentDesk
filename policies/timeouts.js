@@ -567,6 +567,21 @@ var timeouts = {
     }
   },
 
+  // #219: Check if a tmux session has at least one live (non-dead) pane.
+  // Mirrors Rust's has_live_pane() — uses #{pane_dead} format instead of
+  // has-session (which returns true for zombie sessions with dead panes).
+  _tmuxHasLivePane: function(tmuxName) {
+    try {
+      // "=" prefix prevents tmux prefix-matching (exact_target convention)
+      var out = agentdesk.exec("tmux", ["list-panes", "-t", "=" + tmuxName, "-F", "#{pane_dead}"]);
+      // Success: lines of "0" (alive) or "1" (dead). Any "0" = live pane exists.
+      // Failure: "ERROR: ..." (session gone)
+      return typeof out === "string" && out.indexOf("ERROR") === -1 && out.indexOf("0") !== -1;
+    } catch(e) {
+      return false;
+    }
+  },
+
   _section_I: function() {
     // ─── [I] 턴 데드락 감지 + 자동 복구 (15분 주기) ─────────
     // 판별: sessions.last_heartbeat 기반 (연속 스톨만 카운트)
@@ -601,18 +616,10 @@ var timeouts = {
     for (var sw = 0; sw < staleWorkingSessions.length; sw++) {
       var swKey = staleWorkingSessions[sw].session_key;
       var tmuxName = (swKey || "").split(":").pop();
-      // #219: Check if tmux session exists (not just "agentdesk" process).
-      // Agents running child processes (cargo, node, claude) show those in
-      // pane_current_command, so checking for "agentdesk" misses active sessions.
-      var tmuxAlive = false;
-      try {
-        var checkOut = agentdesk.exec("tmux", ["has-session", "-t", tmuxName]);
-        // has-session: success = "" (empty stdout), failure = "ERROR: ..."
-        tmuxAlive = typeof checkOut === "string" && checkOut.indexOf("ERROR") === -1;
-      } catch(e) { tmuxAlive = false; }
-      // Note: has-session correctly detects all live tmux sessions regardless
-      // of child process. The old pane_current_command check missed sessions
-      // running cargo/node/claude. No output file fallback needed.
+      // #219: Check if tmux session has a live pane (not just session existence).
+      // has-session returns true for zombie sessions with dead panes;
+      // list-panes #{pane_dead} distinguishes live vs dead workers.
+      var tmuxAlive = timeouts._tmuxHasLivePane(tmuxName);
       if (!tmuxAlive) {
         // #219: Fail any pending dispatch before transitioning to idle.
         // Without this, the dispatch stays "pending" as an orphan and gets
@@ -651,6 +658,15 @@ var timeouts = {
     for (var dl = 0; dl < staleSessions.length; dl++) {
       var sess = staleSessions[dl];
       var deadlockKey = "deadlock_check:" + sess.session_key;
+
+      // #219: If tmux session has a live pane, the agent is actively working
+      // despite stale heartbeat (long tool calls, subagents). Reset counter
+      // and skip — heartbeat staleness alone is not sufficient for deadlock.
+      var dlTmuxName = (sess.session_key || "").split(":").pop();
+      if (timeouts._tmuxHasLivePane(dlTmuxName)) {
+        agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
+        continue;
+      }
 
       // Check extension count + last check timestamp
       var extRecord = agentdesk.db.query(

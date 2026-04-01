@@ -1630,7 +1630,7 @@ mod tests {
             "MockNotifier receives both calls (production dedup is in send_dispatch_to_discord)"
         );
 
-        // Both entries should transition to done
+        // Both entries should transition to done (second via idempotent reservation check)
         assert_eq!(outbox_status(&db, "d-160d"), vec!["done", "done"]);
     }
 
