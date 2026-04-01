@@ -197,6 +197,7 @@ pub fn api_router(
             "/dispatches/{id}",
             get(dispatches::get_dispatch).patch(dispatches::update_dispatch),
         )
+        .route("/dispatches/{id}/cancel", post(dispatches::cancel_dispatch))
         .route(
             "/internal/link-dispatch-thread",
             post(dispatches::link_dispatch_thread),

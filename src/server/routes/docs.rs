@@ -562,6 +562,13 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
             "analytics",
             "Skill usage trend by day",
         ),
+        // Cancel dispatch + kill session
+        ep(
+            "POST",
+            "/api/dispatches/{id}/cancel",
+            "dispatches",
+            "Cancel dispatch and kill associated agent session",
+        ),
         // Resume
         ep(
             "POST",
