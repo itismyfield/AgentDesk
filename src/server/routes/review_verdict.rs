@@ -875,6 +875,49 @@ pub async fn submit_review_decision(
             // that only handled transitions and missed dispatch notifications.
             crate::kanban::drain_hook_side_effects(&state.db, &state.engine);
 
+            // #229: Safety net — if card is still in a review-like state but no
+            // pending review dispatch exists (OnReviewEnter hook may have failed
+            // due to lock contention or JS error), re-fire with blocking lock.
+            {
+                crate::pipeline::ensure_loaded();
+                let needs_review = state.db.lock().ok().map(|conn| {
+                    let (card_status, repo_id, agent_id): (Option<String>, Option<String>, Option<String>) = conn
+                        .query_row(
+                            "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                            [&body.card_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .unwrap_or((None, None, None));
+                    let has_review_dispatch: bool = conn
+                        .query_row(
+                            "SELECT COUNT(*) > 0 FROM task_dispatches \
+                             WHERE kanban_card_id = ?1 AND dispatch_type IN ('review', 'review-decision') \
+                             AND status IN ('pending', 'dispatched')",
+                            [&body.card_id],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(false);
+                    let is_review_state = card_status.as_deref().map_or(false, |s| {
+                        let eff = crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref());
+                        eff.hooks_for_state(s)
+                            .map_or(false, |h| h.on_enter.iter().any(|n| n == "OnReviewEnter"))
+                    });
+                    is_review_state && !has_review_dispatch
+                }).unwrap_or(false);
+
+                if needs_review {
+                    tracing::warn!(
+                        "[review-decision] Card {} in review state but no review dispatch after dispute — re-firing OnReviewEnter (#229)",
+                        body.card_id
+                    );
+                    let _ = state.engine.fire_hook_by_name_blocking(
+                        "OnReviewEnter",
+                        json!({ "card_id": body.card_id }),
+                    );
+                    crate::kanban::drain_hook_side_effects(&state.db, &state.engine);
+                }
+            }
+
             // #117: Update canonical review state before returning
             update_card_review_state(
                 &state.db,

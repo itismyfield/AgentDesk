@@ -54,38 +54,17 @@ fn build_review_context(
                     &wt.commit[..8.min(wt.commit.len())]
                 );
             } else {
-                // Fall back: check previous review dispatch for persisted branch info
-                let prev_branch: Option<(String, String)> =
-                    db.separate_conn().ok().and_then(|conn| {
-                        let ctx_str: Option<String> = conn
-                            .query_row(
-                                "SELECT context FROM task_dispatches \
-                             WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
-                             AND status IN ('completed', 'failed', 'cancelled') \
-                             ORDER BY created_at DESC LIMIT 1",
-                                [kanban_card_id],
-                                |row| row.get(0),
-                            )
-                            .ok()
-                            .flatten();
-                        ctx_str.and_then(|s| {
-                            let v: serde_json::Value = serde_json::from_str(&s).ok()?;
-                            let b = v.get("branch")?.as_str()?.to_string();
-                            let c = v.get("reviewed_commit")?.as_str()?.to_string();
-                            Some((b, c))
-                        })
-                    });
-
-                if let Some((branch, commit)) = prev_branch {
+                // #229: No worktree found — use main HEAD directly.
+                // Previous dispatch context is NOT reused because it may reference
+                // commits from a different issue (e.g., after worktree cleanup the
+                // latest completed review dispatch may belong to a prior issue).
+                if let Some(commit) = crate::services::platform::git_head_commit(&repo_dir) {
                     obj.insert("reviewed_commit".to_string(), json!(commit));
-                    obj.insert("branch".to_string(), json!(branch));
                     tracing::info!(
-                        "[dispatch] Review dispatch for card {}: reusing previous branch '{}'",
+                        "[dispatch] Review dispatch for card {}: no worktree, using main HEAD ({})",
                         kanban_card_id,
-                        branch
+                        &commit[..8.min(commit.len())]
                     );
-                } else if let Some(commit) = crate::services::platform::git_head_commit(&repo_dir) {
-                    obj.insert("reviewed_commit".to_string(), json!(commit));
                 }
             }
         }
