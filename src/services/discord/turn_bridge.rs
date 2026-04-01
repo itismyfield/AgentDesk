@@ -2334,6 +2334,7 @@ mod tests {
 
     #[test]
     fn terminal_session_reset_helper_matches_terminal_recovery_failures() {
+    fn terminal_session_reset_helper_matches_terminal_recovery_failures() {
         assert!(stream_error_requires_terminal_session_reset(
             "Gemini session could not be recovered after retry: Gemini stream ended without a terminal result",
             "",
