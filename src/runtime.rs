@@ -92,7 +92,7 @@ impl SessionRuntime for TmuxRuntime {
             return false;
         }
         // Use the provider-specific readiness check
-        crate::services::claude::tmux_session_ready_for_input(session_name)
+        crate::services::provider::tmux_session_ready_for_input(session_name)
     }
 
     fn kill_session(&self, session_name: &str) -> Result<()> {

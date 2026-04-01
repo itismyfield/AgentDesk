@@ -10,7 +10,7 @@ use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
 use crate::services::provider::{
-    CancelToken, FollowupResult, ProviderKind, ReadOutputResult, cancel_requested,
+    CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
     fold_read_output_result, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
@@ -209,37 +209,6 @@ pub enum StreamMessage {
     },
     /// Latest read offset in a growing tmux output file
     OutputOffset { offset: u64 },
-}
-
-#[cfg(unix)]
-fn tmux_session_alive(tmux_session_name: &str) -> bool {
-    tmux_session_has_live_pane(tmux_session_name)
-}
-
-#[cfg(unix)]
-fn tmux_capture_indicates_ready_for_input(capture: &str) -> bool {
-    // Only check the last few non-empty lines of the capture.
-    // The "Ready for input" prompt from a *previous* turn can linger in
-    // the scrollback buffer while a new message is being processed, so
-    // checking the entire capture leads to false positives.
-    capture
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(3)
-        .any(|l| l.contains("Ready for input (type message + Enter)"))
-}
-
-#[cfg(unix)]
-pub(crate) fn tmux_session_ready_for_input(tmux_session_name: &str) -> bool {
-    crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
-        .map(|stdout| tmux_capture_indicates_ready_for_input(&stdout))
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn tmux_session_ready_for_input(_tmux_session_name: &str) -> bool {
-    false
 }
 
 /// Cached regex pattern for session ID validation
@@ -1947,54 +1916,6 @@ fn send_followup_to_tmux(
     ))
 }
 
-/// Callbacks for session status checks during output file polling.
-pub(crate) struct SessionProbe {
-    /// Returns true if the session process is still running.
-    pub is_alive: Box<dyn Fn() -> bool + Send>,
-    /// Returns true if the session is idle and ready for new input.
-    /// Only meaningful for tmux sessions (capture-pane check).
-    /// ProcessBackend returns false (relies on JSONL "result" event instead).
-    pub is_ready_for_input: Box<dyn Fn() -> bool + Send>,
-}
-
-impl SessionProbe {
-    /// Create a tmux-based probe (existing behavior).
-    #[cfg(unix)]
-    pub fn tmux(session_name: String) -> Self {
-        let name_alive = session_name.clone();
-        let name_ready = session_name;
-        Self {
-            is_alive: Box::new(move || tmux_session_alive(&name_alive)),
-            is_ready_for_input: Box::new(move || tmux_session_ready_for_input(&name_ready)),
-        }
-    }
-
-    /// Non-unix stub: tmux is not available.
-    #[cfg(not(unix))]
-    pub fn tmux(_session_name: String) -> Self {
-        Self {
-            is_alive: Box::new(|| false),
-            is_ready_for_input: Box::new(|| false),
-        }
-    }
-
-    /// Create a process-based probe (PID check, no ready-for-input).
-    pub fn process(session_name: String) -> Self {
-        Self {
-            is_alive: Box::new(move || {
-                let handles = PROCESS_HANDLES.lock().unwrap();
-                if let Some(handle) = handles.get(&session_name) {
-                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
-                    ProcessBackend::new().is_alive(handle)
-                } else {
-                    false
-                }
-            }),
-            is_ready_for_input: Box::new(|| false),
-        }
-    }
-}
-
 /// Poll-read the output file from a given offset until a "result" event is received.
 /// Uses raw File::read to handle growing file (not BufReader which caches EOF).
 /// Returns ReadOutputResult indicating how the read ended.
@@ -2185,7 +2106,18 @@ pub(crate) fn execute_streaming_local_process(
         0,
         sender.clone(),
         cancel_token,
-        SessionProbe::process(session_name.to_string()),
+        SessionProbe::process({
+            let session_name = session_name.to_string();
+            move || {
+                let handles = PROCESS_HANDLES.lock().unwrap();
+                if let Some(handle) = handles.get(&session_name) {
+                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
+                    ProcessBackend::new().is_alive(handle)
+                } else {
+                    false
+                }
+            }
+        }),
     )?;
 
     fold_read_output_result(
@@ -2272,7 +2204,18 @@ fn send_followup_to_process(
         start_offset,
         sender.clone(),
         cancel_token,
-        SessionProbe::process(session_name.to_string()),
+        SessionProbe::process({
+            let session_name = session_name.to_string();
+            move || {
+                let handles = PROCESS_HANDLES.lock().unwrap();
+                if let Some(handle) = handles.get(&session_name) {
+                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
+                    ProcessBackend::new().is_alive(handle)
+                } else {
+                    false
+                }
+            }
+        }),
     )?;
 
     Ok(fold_read_output_result(
@@ -2598,14 +2541,14 @@ mod tests {
     #[cfg(unix)]
     fn test_tmux_capture_detects_ready_prompt() {
         let capture = "...\n▶ Ready for input (type message + Enter)\n";
-        assert!(tmux_capture_indicates_ready_for_input(capture));
+        assert!(crate::services::provider::tmux_capture_indicates_ready_for_input(capture));
     }
 
     #[test]
     #[cfg(unix)]
     fn test_tmux_capture_ignores_non_ready_prompt() {
         let capture = "Claude is still working...\n";
-        assert!(!tmux_capture_indicates_ready_for_input(capture));
+        assert!(!crate::services::provider::tmux_capture_indicates_ready_for_input(capture));
     }
 
     // ========== parse_stream_message thinking tests ==========
