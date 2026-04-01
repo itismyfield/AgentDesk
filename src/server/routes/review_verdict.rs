@@ -847,6 +847,43 @@ pub async fn submit_review_decision(
             );
             spawn_aggregate_if_needed(&state.db);
 
+            // #229: Cancel stale pending/dispatched review dispatches for this card.
+            // Without this, the dedup guard in create_dispatch_core blocks
+            // OnReviewEnter from creating a fresh review dispatch after dispute.
+            if let Ok(conn) = state.db.lock() {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id FROM task_dispatches \
+                     WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+                     AND status IN ('pending', 'dispatched')",
+                    )
+                    .ok();
+                if let Some(ref mut s) = stmt {
+                    let stale_ids: Vec<String> = s
+                        .query_map([&body.card_id], |row| row.get::<_, String>(0))
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    for stale_id in &stale_ids {
+                        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                            &conn,
+                            stale_id,
+                            Some("superseded_by_dispute_re_review"),
+                        )
+                        .ok();
+                    }
+                    if !stale_ids.is_empty() {
+                        tracing::info!(
+                            "[review-decision] #229 Cancelled {} stale review dispatch(es) for card {} before dispute re-review",
+                            stale_ids.len(),
+                            body.card_id
+                        );
+                    }
+                }
+            }
+
             // Fire on_enter hooks for current state (should be a review-like state with OnReviewEnter)
             let dispute_status: String = state
                 .db
