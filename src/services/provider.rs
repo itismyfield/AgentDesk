@@ -424,6 +424,173 @@ pub fn followup_result_from_read_output_result(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn poll_output_file_until_result<
+    State,
+    IsAlive,
+    IsReady,
+    EmitOffset,
+    ProcessLine,
+    HasFinal,
+    EmitSyntheticDone,
+    EmitDeferredError,
+>(
+    output_path: &str,
+    start_offset: u64,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    state: &mut State,
+    mut is_alive: IsAlive,
+    mut is_ready_for_input: IsReady,
+    mut emit_output_offset: EmitOffset,
+    mut process_line: ProcessLine,
+    has_final: HasFinal,
+    mut emit_synthetic_done: EmitSyntheticDone,
+    mut emit_deferred_error: EmitDeferredError,
+) -> Result<ReadOutputResult, String>
+where
+    IsAlive: FnMut() -> bool,
+    IsReady: FnMut() -> bool,
+    EmitOffset: FnMut(u64),
+    ProcessLine: FnMut(&str, &mut State) -> bool,
+    HasFinal: Fn(&State) -> bool,
+    EmitSyntheticDone: FnMut(&State) -> bool,
+    EmitDeferredError: FnMut(&State),
+{
+    use std::io::{Read, Seek, SeekFrom};
+    use std::time::{Duration, Instant};
+
+    let wait_start = Instant::now();
+    let mut wait_interval = Duration::from_millis(10);
+    let max_wait_interval = Duration::from_millis(500);
+    loop {
+        if std::fs::metadata(output_path).is_ok() {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(30) {
+            return Err("Timeout waiting for output file".to_string());
+        }
+        if cancel_requested(cancel_token.as_deref()) {
+            return Ok(ReadOutputResult::Cancelled {
+                offset: start_offset,
+            });
+        }
+        std::thread::sleep(wait_interval);
+        wait_interval = std::cmp::min(
+            Duration::from_millis((wait_interval.as_millis() as f64 * 1.5) as u64),
+            max_wait_interval,
+        );
+    }
+
+    let mut file = std::fs::File::open(output_path)
+        .map_err(|e| format!("Failed to open output file: {}", e))?;
+    file.seek(SeekFrom::Start(start_offset))
+        .map_err(|e| format!("Failed to seek output file: {}", e))?;
+
+    let mut current_offset = start_offset;
+    let mut partial_line = String::new();
+    let mut buf = [0u8; 8192];
+    let mut no_data_count: u32 = 0;
+    let mut consecutive_ready_count: u32 = 0;
+    let mut first_ready_at: Option<Instant> = None;
+
+    loop {
+        if cancel_requested(cancel_token.as_deref()) {
+            return Ok(ReadOutputResult::Cancelled {
+                offset: current_offset,
+            });
+        }
+
+        match file.read(&mut buf) {
+            Ok(0) => {
+                no_data_count += 1;
+                if no_data_count % 25 == 0 {
+                    if !is_alive() {
+                        let file_len = std::fs::metadata(output_path)
+                            .map(|meta| meta.len())
+                            .unwrap_or(current_offset);
+                        if file_len > current_offset {
+                            continue;
+                        }
+                        break;
+                    }
+
+                    let file_len = std::fs::metadata(output_path)
+                        .map(|meta| meta.len())
+                        .unwrap_or(current_offset);
+                    let has_new_bytes = file_len > current_offset;
+                    let output_ever_grew = current_offset > start_offset;
+                    if !has_new_bytes && output_ever_grew && is_ready_for_input() {
+                        if first_ready_at.is_none() {
+                            first_ready_at = Some(Instant::now());
+                        }
+                        consecutive_ready_count += 1;
+                        let ready_elapsed = first_ready_at
+                            .expect("first_ready_at set above before elapsed check")
+                            .elapsed();
+                        if ready_elapsed >= Duration::from_secs(15) && consecutive_ready_count >= 3
+                        {
+                            if !emit_synthetic_done(state) {
+                                return Ok(ReadOutputResult::Cancelled {
+                                    offset: current_offset,
+                                });
+                            }
+                            return Ok(ReadOutputResult::Completed {
+                                offset: current_offset,
+                            });
+                        }
+                    } else {
+                        consecutive_ready_count = 0;
+                        first_ready_at = None;
+                    }
+                }
+
+                let read_interval = if no_data_count < 5 {
+                    Duration::from_millis(10)
+                } else if no_data_count < 20 {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_millis(200)
+                };
+                std::thread::sleep(read_interval);
+            }
+            Ok(n) => {
+                no_data_count = 0;
+                consecutive_ready_count = 0;
+                first_ready_at = None;
+                current_offset += n as u64;
+                emit_output_offset(current_offset);
+                partial_line.push_str(&String::from_utf8_lossy(&buf[..n]));
+
+                while let Some(pos) = partial_line.find('\n') {
+                    let line: String = partial_line.drain(..=pos).collect();
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    if !process_line(trimmed, state) {
+                        return Ok(ReadOutputResult::Cancelled {
+                            offset: current_offset,
+                        });
+                    }
+
+                    if has_final(state) {
+                        return Ok(ReadOutputResult::Completed {
+                            offset: current_offset,
+                        });
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    emit_deferred_error(state);
+    Ok(ReadOutputResult::SessionDied {
+        offset: current_offset,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamAttemptFailure {
     pub message: String,
@@ -494,8 +661,8 @@ mod tests {
         CancelToken, FollowupResult, ProviderKind, ReadOutputResult, StreamAttemptFailure,
         StreamAttemptResult, StreamFinalState, cancel_requested, compose_structured_turn_prompt,
         fold_read_output_result, followup_result_from_read_output_result,
-        parse_provider_and_channel_from_tmux_name, register_child_pid,
-        run_retrying_stream_attempts,
+        parse_provider_and_channel_from_tmux_name, poll_output_file_until_result,
+        register_child_pid, run_retrying_stream_attempts,
     };
     use crate::dispatch::extract_thread_channel_id;
 
@@ -1051,5 +1218,81 @@ mod tests {
                 error: "session died during follow-up output reading".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn test_poll_output_file_until_result_completes_after_terminal_line() {
+        #[derive(Default)]
+        struct TestState {
+            saw_done: bool,
+            lines: Vec<String>,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("stream.jsonl");
+        std::fs::write(&output_path, "hello\nDONE\n").unwrap();
+
+        let mut state = TestState::default();
+        let mut offsets = Vec::new();
+        let result = poll_output_file_until_result(
+            output_path.to_str().unwrap(),
+            0,
+            None,
+            &mut state,
+            || true,
+            || false,
+            |offset| offsets.push(offset),
+            |line: &str, state| {
+                state.lines.push(line.to_string());
+                if line == "DONE" {
+                    state.saw_done = true;
+                }
+                true
+            },
+            |state| state.saw_done,
+            |_| true,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ReadOutputResult::Completed {
+                offset: std::fs::metadata(&output_path).unwrap().len(),
+            }
+        );
+        assert_eq!(state.lines, vec!["hello".to_string(), "DONE".to_string()]);
+        assert_eq!(
+            offsets,
+            vec![std::fs::metadata(&output_path).unwrap().len()],
+        );
+    }
+
+    #[test]
+    fn test_poll_output_file_until_result_honors_preexisting_cancel_before_file_exists() {
+        let token = std::sync::Arc::new(CancelToken::new());
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().join("missing.jsonl");
+
+        let mut state = ();
+        let result = poll_output_file_until_result(
+            missing_path.to_str().unwrap(),
+            17,
+            Some(token),
+            &mut state,
+            || true,
+            || false,
+            |_| {},
+            |_, _| true,
+            |_| false,
+            |_| true,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(result, ReadOutputResult::Cancelled { offset: 17 });
     }
 }
