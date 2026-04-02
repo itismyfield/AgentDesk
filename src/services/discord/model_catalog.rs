@@ -862,11 +862,13 @@ mod tests {
         let temp_project = TempDir::new().unwrap();
 
         let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
         let prev_system_defaults = std::env::var_os("QWEN_CODE_SYSTEM_DEFAULTS_PATH");
         let prev_system_settings = std::env::var_os("QWEN_CODE_SYSTEM_SETTINGS_PATH");
 
         unsafe {
             std::env::set_var("HOME", temp_home.path());
+            std::env::set_var("USERPROFILE", temp_home.path());
             std::env::remove_var("QWEN_CODE_SYSTEM_DEFAULTS_PATH");
             std::env::remove_var("QWEN_CODE_SYSTEM_SETTINGS_PATH");
         }
@@ -876,6 +878,10 @@ mod tests {
         match prev_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },
+        }
+        match prev_userprofile {
+            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
         }
         match prev_system_defaults {
             Some(value) => unsafe { std::env::set_var("QWEN_CODE_SYSTEM_DEFAULTS_PATH", value) },
