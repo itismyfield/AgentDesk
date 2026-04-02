@@ -310,6 +310,55 @@ pub(super) struct TmuxWatcherHandle {
     pub(super) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Atomically claim a channel for watcher creation using DashMap::entry().
+/// Returns true if the claim succeeded (caller should spawn the watcher).
+/// Returns false if a watcher already exists (caller should skip).
+pub(super) fn try_claim_watcher(
+    watchers: &dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+) -> bool {
+    use dashmap::mapref::entry::Entry;
+
+    match watchers.entry(channel_id) {
+        Entry::Occupied(_) => false,
+        Entry::Vacant(entry) => {
+            entry.insert(handle);
+            true
+        }
+    }
+}
+
+fn synthetic_thread_channel_name(parent_name: &str, channel_id: ChannelId) -> String {
+    format!("{parent_name}-t{}", channel_id.get())
+}
+
+fn is_synthetic_thread_channel_name(channel_name: &str, channel_id: ChannelId) -> bool {
+    channel_name.ends_with(&format!("-t{}", channel_id.get()))
+}
+
+fn choose_restore_channel_name(
+    existing_channel_name: Option<&str>,
+    live_channel_name: Option<&str>,
+    thread_parent: Option<(ChannelId, Option<String>)>,
+    channel_id: ChannelId,
+) -> Option<String> {
+    if let Some(existing_name) = existing_channel_name {
+        if is_synthetic_thread_channel_name(existing_name, channel_id) {
+            return Some(existing_name.to_string());
+        }
+    }
+
+    if let Some((parent_id, parent_name)) = thread_parent {
+        let parent_name = parent_name.unwrap_or_else(|| parent_id.get().to_string());
+        return Some(synthetic_thread_channel_name(&parent_name, channel_id));
+    }
+
+    live_channel_name
+        .or(existing_channel_name)
+        .map(ToOwned::to_owned)
+}
+
 #[derive(Clone)]
 pub(super) struct ModelPickerPendingState {
     pub(super) owner_user_id: UserId,
@@ -3023,7 +3072,19 @@ pub(super) async fn auto_restore_session(
     serenity_ctx: &serenity::prelude::Context,
 ) {
     // Resolve channel/category before taking the lock for mutation
-    let (ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
+    let (live_ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
+    let existing_channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let restore_ch_name = choose_restore_channel_name(
+        existing_channel_name.as_deref(),
+        live_ch_name.as_deref(),
+        resolve_thread_parent(&serenity_ctx.http, channel_id).await,
+        channel_id,
+    );
 
     // Read settings first to get last_sessions/last_remotes info
     // DB cwd takes priority over yaml last_sessions (preserves worktree paths)
@@ -3035,9 +3096,10 @@ pub(super) async fn auto_restore_session(
         let saved_remote = settings.last_remotes.get(&channel_key).cloned();
         let provider = settings.provider.clone();
 
-        // Use the live Discord channel name here so restart recovery cannot
-        // keep querying a stale same-provider session key from another agent.
-        let db_cwd: Option<String> = ch_name.as_ref().and_then(|ch| {
+        // Use the effective tmux channel name here so restart recovery keeps
+        // looking up the same session key for thread sessions that intentionally
+        // use a synthetic "{parent}-t{thread_id}" channel name.
+        let db_cwd: Option<String> = restore_ch_name.as_ref().and_then(|ch| {
             let tmux_name = provider.build_tmux_session_name(ch);
             let hostname = crate::services::platform::hostname_short();
             let session_key = format!("{}:{}", hostname, tmux_name);
@@ -3062,7 +3124,7 @@ pub(super) async fn auto_restore_session(
     if let Some(session) = data.sessions.get_mut(&channel_id) {
         session.channel_id = Some(channel_id.get());
         session.last_active = tokio::time::Instant::now();
-        session.channel_name = ch_name.clone();
+        session.channel_name = restore_ch_name.clone();
         session.category_name = cat_name.clone();
         if session.remote_profile_name.is_none() {
             session.remote_profile_name = saved_remote.clone();
@@ -3086,7 +3148,7 @@ pub(super) async fn auto_restore_session(
                     pending_uploads: Vec::new(),
                     cleared: false,
                     channel_id: Some(channel_id.get()),
-                    channel_name: ch_name.clone(),
+                    channel_name: restore_ch_name.clone(),
                     category_name: cat_name.clone(),
                     remote_profile_name: saved_remote.clone(),
 
@@ -3097,7 +3159,7 @@ pub(super) async fn auto_restore_session(
                 });
             session.channel_id = Some(channel_id.get());
             session.last_active = tokio::time::Instant::now();
-            session.channel_name = ch_name.clone();
+            session.channel_name = restore_ch_name.clone();
             session.category_name = cat_name.clone();
             if session.remote_profile_name.is_none() {
                 session.remote_profile_name = saved_remote.clone();
@@ -3132,7 +3194,7 @@ async fn bootstrap_thread_session(
     let parent_info = resolve_thread_parent(&serenity_ctx.http, thread_channel_id).await;
     let ch_name = if let Some((_parent_id, parent_name)) = parent_info {
         let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
-        Some(format!("{}-t{}", parent, thread_channel_id.get()))
+        Some(synthetic_thread_channel_name(&parent, thread_channel_id))
     } else {
         // Not a thread (shouldn't happen here) — fall back to resolved name
         _thread_title
@@ -3386,9 +3448,11 @@ fn enrich_role_map_with_channel_ids() {
 
 #[cfg(test)]
 mod tests {
+    use super::ChannelId;
     use super::{
-        clear_family_profile_probe_pending_from_state_value,
-        pending_family_profile_probe_from_state_value,
+        choose_restore_channel_name, clear_family_profile_probe_pending_from_state_value,
+        is_synthetic_thread_channel_name, pending_family_profile_probe_from_state_value,
+        synthetic_thread_channel_name,
     };
 
     #[test]
@@ -3473,5 +3537,52 @@ mod tests {
                 .and_then(|bucket| bucket.get("pendingProbe"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn synthetic_thread_channel_name_round_trips() {
+        let channel_id = ChannelId::new(12345);
+        let synthetic = synthetic_thread_channel_name("agentdesk-codex", channel_id);
+
+        assert_eq!(synthetic, "agentdesk-codex-t12345");
+        assert!(is_synthetic_thread_channel_name(&synthetic, channel_id));
+        assert!(!is_synthetic_thread_channel_name(
+            "agentdesk-codex",
+            channel_id
+        ));
+    }
+
+    #[test]
+    fn choose_restore_channel_name_prefers_existing_synthetic_thread_name() {
+        let channel_id = ChannelId::new(12345);
+        let chosen = choose_restore_channel_name(
+            Some("agentdesk-codex-t12345"),
+            Some("새 스레드 제목"),
+            Some((ChannelId::new(777), Some("agentdesk-codex".to_string()))),
+            channel_id,
+        );
+
+        assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
+    }
+
+    #[test]
+    fn choose_restore_channel_name_builds_synthetic_name_for_threads() {
+        let channel_id = ChannelId::new(12345);
+        let chosen = choose_restore_channel_name(
+            None,
+            Some("새 스레드 제목"),
+            Some((ChannelId::new(777), Some("agentdesk-codex".to_string()))),
+            channel_id,
+        );
+
+        assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
+    }
+
+    #[test]
+    fn choose_restore_channel_name_keeps_existing_name_when_live_metadata_missing() {
+        let channel_id = ChannelId::new(12345);
+        let chosen = choose_restore_channel_name(Some("agentdesk-codex"), None, None, channel_id);
+
+        assert_eq!(chosen.as_deref(), Some("agentdesk-codex"));
     }
 }
