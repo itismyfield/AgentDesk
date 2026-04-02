@@ -378,7 +378,7 @@ AgentDesk incorporates and builds upon code from the following projects:
 
 ## License
 
-AgentDesk is licensed under the [Apache License 2.0](LICENSE).
+AgentDesk is licensed under the [MIT License](LICENSE).
 
 You are free to use, modify, and distribute this software, including for commercial purposes. **Attribution is required** — you must retain the copyright notice and include the [NOTICE](NOTICE) file in any distribution or derivative work.
 
