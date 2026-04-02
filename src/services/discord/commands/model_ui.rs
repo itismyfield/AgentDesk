@@ -172,13 +172,17 @@ pub(super) fn build_model_picker_option_specs(
         ),
         selected: default_selected,
     });
-    options.extend(capped_model_picker_explicit_entries(&resolved_models, selected_explicit_model).iter().map(|entry| ModelPickerOptionSpec {
-        value: entry.value.to_string(),
-        label: entry.label.to_string(),
-        description: entry.picker_description(),
-        selected:
-            selected_explicit_model.is_some_and(|active| active.eq_ignore_ascii_case(entry.value)),
-    }));
+    options.extend(
+        capped_model_picker_explicit_entries(&resolved_models, selected_explicit_model)
+            .iter()
+            .map(|entry| ModelPickerOptionSpec {
+                value: entry.value.to_string(),
+                label: entry.label.to_string(),
+                description: entry.picker_description(),
+                selected: selected_explicit_model
+                    .is_some_and(|active| active.eq_ignore_ascii_case(entry.value)),
+            }),
+    );
     options
 }
 

@@ -808,7 +808,10 @@ mod tests {
     #[test]
     fn build_turn_args_prefers_resume_token_when_present() {
         let args = build_turn_args("hello", None, Some("session-123"));
-        assert!(args.windows(2).any(|pair| pair == ["--resume", "session-123"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "session-123"])
+        );
         assert!(!args.iter().any(|arg| arg == "--continue"));
     }
 }

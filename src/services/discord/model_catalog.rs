@@ -1040,8 +1040,14 @@ export const VALID_GEMINI_MODELS = new Set([
             let second = super::resolve_qwen_model_catalog(Some(working_dir));
             assert_eq!(first.entries.len(), 1);
             assert_eq!(second.entries.len(), 1);
-            assert!(std::ptr::eq(first.entries[0].value, second.entries[0].value));
-            assert!(std::ptr::eq(first.entries[0].label, second.entries[0].label));
+            assert!(std::ptr::eq(
+                first.entries[0].value,
+                second.entries[0].value
+            ));
+            assert!(std::ptr::eq(
+                first.entries[0].label,
+                second.entries[0].label
+            ));
             assert!(std::ptr::eq(
                 first.default_model.unwrap(),
                 second.default_model.unwrap()

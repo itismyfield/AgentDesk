@@ -1216,11 +1216,22 @@ pub(super) fn spawn_turn_bridge(
                                 pause_epoch: pause_epoch.clone(),
                                 turn_delivered: turn_delivered.clone(),
                             };
-                            if super::tmux::try_claim_watcher(
-                                &shared_owned.tmux_watchers,
-                                channel_id,
-                                handle,
-                            ) {
+                            let watcher_claimed = {
+                                #[cfg(unix)]
+                                {
+                                    super::tmux::try_claim_watcher(
+                                        &shared_owned.tmux_watchers,
+                                        channel_id,
+                                        handle,
+                                    )
+                                }
+                                #[cfg(not(unix))]
+                                {
+                                    let _ = handle;
+                                    false
+                                }
+                            };
+                            if watcher_claimed {
                                 #[cfg(unix)]
                                 {
                                     let http_bg = http.clone();
