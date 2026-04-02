@@ -354,7 +354,9 @@ fn choose_restore_channel_name(
         return Some(synthetic_thread_channel_name(&parent_name, channel_id));
     }
 
-    live_channel_name.map(ToOwned::to_owned)
+    live_channel_name
+        .or(existing_channel_name)
+        .map(ToOwned::to_owned)
 }
 
 #[derive(Clone)]
@@ -3574,5 +3576,13 @@ mod tests {
         );
 
         assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
+    }
+
+    #[test]
+    fn choose_restore_channel_name_keeps_existing_name_when_live_metadata_missing() {
+        let channel_id = ChannelId::new(12345);
+        let chosen = choose_restore_channel_name(Some("agentdesk-codex"), None, None, channel_id);
+
+        assert_eq!(chosen.as_deref(), Some("agentdesk-codex"));
     }
 }
