@@ -17,6 +17,7 @@ set -euo pipefail
 REPO="itismyfield/AgentDesk"
 INSTALL_DIR="$HOME/.adk/release"
 LAUNCHD_LABEL="com.agentdesk.release"
+CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 
 # Read defaults from defaults.json if available (single source of truth)
 _read_default() {
@@ -46,6 +47,32 @@ info()  { echo -e "${CYAN}▸${NC} $1"; }
 ok()    { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1"; exit 1; }
+
+sign_binary_with_fallback() {
+  local target="$1"
+  local identity="${CODESIGN_IDENTITY:--}"
+
+  if [ -n "$identity" ] && [ "$identity" != "-" ] && command -v security >/dev/null 2>&1; then
+    if ! security find-identity -v -p codesigning 2>/dev/null | grep -Fq "$identity"; then
+      warn "Signing identity not found locally; falling back to ad-hoc signature"
+      identity="-"
+    fi
+  fi
+
+  if [ -z "$identity" ]; then
+    identity="-"
+  fi
+
+  if [ "$identity" = "-" ]; then
+    codesign -s "$identity" --identifier "com.itismyfield.agentdesk" --force "$target"
+  else
+    codesign -s "$identity" --options runtime --identifier "com.itismyfield.agentdesk" --force "$target"
+  fi
+
+  if ! codesign -v "$target" 2>/dev/null; then
+    fail "Codesign verification failed"
+  fi
+}
 
 # ── Detect OS and arch ────────────────────────────────────────────────────────
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -163,11 +190,7 @@ fi
 # ── Code signing (macOS) ──────────────────────────────────────────────────────
 if [ "$OS" = "darwin" ]; then
   chflags nouchg "$INSTALL_DIR/bin/agentdesk" 2>/dev/null || true
-  codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$INSTALL_DIR/bin/agentdesk"
-  if ! codesign -v "$INSTALL_DIR/bin/agentdesk" 2>/dev/null; then
-    echo "✗ Codesign verification failed"
-    exit 1
-  fi
+  sign_binary_with_fallback "$INSTALL_DIR/bin/agentdesk"
   chflags uchg "$INSTALL_DIR/bin/agentdesk"
 
   # Register with firewall

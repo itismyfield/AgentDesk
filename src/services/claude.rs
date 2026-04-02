@@ -1,4 +1,3 @@
-use regex::Regex;
 use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -6,10 +5,15 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
+use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage, is_valid_session_id};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::provider::ProviderKind;
+use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
+use crate::services::provider::{
+    CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
+    fold_read_output_result, register_child_pid,
+};
 use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -102,40 +106,6 @@ pub fn debug_log_to(filename: &str, msg: &str) {
     }
 }
 
-/// Kill a process tree by PID.
-/// On Unix, sends SIGTERM to the process group, then SIGKILL as fallback.
-#[allow(unsafe_code)]
-pub fn kill_pid_tree(pid: u32) {
-    #[cfg(unix)]
-    unsafe {
-        // Send SIGTERM to the process group (negative PID)
-        let ret = libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
-        if ret != 0 {
-            // Fallback: kill just the process
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // On Windows, use taskkill /T to kill the tree
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output();
-    }
-}
-
-/// Kill a child process and its entire process tree.
-/// On Unix, sends SIGTERM to the process group first, then SIGKILL as fallback.
-pub fn kill_child_tree(child: &mut std::process::Child) {
-    kill_pid_tree(child.id());
-    // Give processes a moment to clean up, then force kill if needed
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill(); // SIGKILL
-    }
-    let _ = child.wait();
-}
-
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub struct ClaudeResponse {
@@ -145,214 +115,6 @@ pub struct ClaudeResponse {
     pub session_id: Option<String>,
     pub error: Option<String>,
 }
-
-/// Streaming message types for real-time Claude responses
-#[derive(Debug, Clone)]
-pub enum StreamMessage {
-    /// Initialization - contains session_id
-    Init { session_id: String },
-    /// Text response chunk
-    Text { content: String },
-    /// Tool use started
-    ToolUse { name: String, input: String },
-    /// Tool execution result
-    ToolResult { content: String, is_error: bool },
-    /// Chain-of-thought thinking block with optional topic summary
-    Thinking { summary: Option<String> },
-    /// Background task notification
-    TaskNotification {
-        task_id: String,
-        status: String,
-        summary: String,
-    },
-    /// Completion
-    Done {
-        result: String,
-        session_id: Option<String>,
-    },
-    /// Error
-    Error {
-        message: String,
-        #[allow(dead_code)]
-        stdout: String,
-        stderr: String,
-        #[allow(dead_code)]
-        exit_code: Option<i32>,
-    },
-    /// Statusline info extracted from result/assistant events
-    StatusUpdate {
-        model: Option<String>,
-        cost_usd: Option<f64>,
-        total_cost_usd: Option<f64>,
-        #[allow(dead_code)]
-        duration_ms: Option<u64>,
-        #[allow(dead_code)]
-        num_turns: Option<u32>,
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-    },
-    /// tmux session is ready for background monitoring (first turn completed)
-    TmuxReady {
-        output_path: String,
-        input_fifo_path: String,
-        tmux_session_name: String,
-        last_offset: u64,
-    },
-    /// ProcessBackend session completed first turn (no tmux watcher needed)
-    ProcessReady {
-        output_path: String,
-        session_name: String,
-        last_offset: u64,
-    },
-    /// Latest read offset in a growing tmux output file
-    OutputOffset { offset: u64 },
-}
-
-/// Result from reading a tmux output file until completion or session death.
-pub enum ReadOutputResult {
-    /// Normal completion (result event received)
-    Completed { offset: u64 },
-    /// Session died without producing a result
-    #[allow(dead_code)]
-    SessionDied { offset: u64 },
-    /// User cancelled the operation
-    Cancelled { offset: u64 },
-}
-
-/// Result from sending a follow-up message to an existing tmux session.
-///
-/// When `RecreateSession` is returned, the caller should kill the current
-/// tmux session and fall through to the full session-creation path, replaying
-/// the same prompt in a fresh session.
-///
-/// **Partial-output note:** If the session dies *after* some streaming output
-/// has already been forwarded to Discord, the recreated session will produce
-/// the full response again, which may appear as duplicate text to the user.
-/// This is an acceptable trade-off: the alternative (leaving the task
-/// unfinished) is worse, and Claude/Codex prompts are generally idempotent
-/// for read/analysis tasks.  For prompts that trigger side-effects (file
-/// writes, git operations), the agent CLI itself is responsible for
-/// idempotency — the same prompt re-sent to a fresh session will not blindly
-/// re-apply already-committed changes.
-#[derive(Debug)]
-pub enum FollowupResult {
-    /// Message delivered and output successfully read to completion.
-    Delivered,
-    /// Session needs to be killed and recreated (FIFO broken or session died).
-    RecreateSession { error: String },
-}
-
-#[cfg(unix)]
-fn tmux_session_alive(tmux_session_name: &str) -> bool {
-    tmux_session_has_live_pane(tmux_session_name)
-}
-
-#[cfg(unix)]
-fn tmux_capture_indicates_ready_for_input(capture: &str) -> bool {
-    // Only check the last few non-empty lines of the capture.
-    // The "Ready for input" prompt from a *previous* turn can linger in
-    // the scrollback buffer while a new message is being processed, so
-    // checking the entire capture leads to false positives.
-    capture
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(3)
-        .any(|l| l.contains("Ready for input (type message + Enter)"))
-}
-
-#[cfg(unix)]
-pub(crate) fn tmux_session_ready_for_input(tmux_session_name: &str) -> bool {
-    crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
-        .map(|stdout| tmux_capture_indicates_ready_for_input(&stdout))
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn tmux_session_ready_for_input(_tmux_session_name: &str) -> bool {
-    false
-}
-
-/// Token for cooperative cancellation of streaming requests.
-/// Holds a flag and the child process PID so the caller can kill it externally.
-pub struct CancelToken {
-    pub cancelled: std::sync::atomic::AtomicBool,
-    pub child_pid: std::sync::Mutex<Option<u32>>,
-    /// SSH cancel flag — set to true to signal remote execution to close the channel
-    #[allow(dead_code)]
-    pub ssh_cancel: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
-    /// tmux session name for cleanup on cancel
-    pub tmux_session: std::sync::Mutex<Option<String>>,
-    /// Watchdog deadline as Unix timestamp in milliseconds.
-    /// The watchdog fires when `now_ms >= deadline_ms`. Extend by setting a future value.
-    /// Maximum absolute cap: initial deadline + MAX_EXTENSION (3 hours).
-    pub watchdog_deadline_ms: std::sync::atomic::AtomicI64,
-    /// The hard ceiling for watchdog_deadline_ms (initial + 3h). Extensions cannot exceed this.
-    pub watchdog_max_deadline_ms: std::sync::atomic::AtomicI64,
-}
-
-impl CancelToken {
-    pub fn new() -> Self {
-        Self {
-            cancelled: std::sync::atomic::AtomicBool::new(false),
-            child_pid: std::sync::Mutex::new(None),
-            ssh_cancel: std::sync::Mutex::new(None),
-            tmux_session: std::sync::Mutex::new(None),
-            watchdog_deadline_ms: std::sync::atomic::AtomicI64::new(0),
-            watchdog_max_deadline_ms: std::sync::atomic::AtomicI64::new(0),
-        }
-    }
-
-    /// Cancel and clean up any associated tmux session
-    pub fn cancel_with_tmux_cleanup(&self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(name) = self.tmux_session.lock().unwrap().take() {
-            #[cfg(unix)]
-            {
-                record_tmux_exit_reason(&name, "explicit cleanup via cancel_with_tmux_cleanup");
-                crate::services::platform::tmux::kill_session(&name);
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = &name; // suppress unused warning
-            }
-        }
-    }
-}
-
-/// Cached regex pattern for session ID validation
-fn session_id_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"^[a-zA-Z0-9_-]+$").expect("Invalid session ID regex pattern"))
-}
-
-/// Validate session ID format (alphanumeric, dashes, underscores only)
-/// Max length reduced to 64 characters for security
-fn is_valid_session_id(session_id: &str) -> bool {
-    !session_id.is_empty() && session_id.len() <= 64 && session_id_regex().is_match(session_id)
-}
-
-/// Default allowed tools for Claude CLI
-pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
-    "Bash",
-    "Read",
-    "Edit",
-    "Write",
-    "Glob",
-    "Grep",
-    "Task",
-    "TaskOutput",
-    "TaskStop",
-    "WebFetch",
-    "WebSearch",
-    "NotebookEdit",
-    "Skill",
-    "TaskCreate",
-    "TaskGet",
-    "TaskUpdate",
-    "TaskList",
-];
 
 /// Execute a command using Claude CLI
 #[allow(dead_code)]
@@ -820,9 +582,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     ));
 
     // Store child PID in cancel token so the caller can kill it externally
-    if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(child.id());
-    }
+    register_child_pid(cancel_token.as_deref(), child.id());
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -863,12 +623,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log("Entering lines loop - will block until first line arrives...");
     for line in reader.lines() {
         // Check cancel token before processing each line
-        if let Some(ref token) = cancel_token {
-            if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                debug_log("Cancel detected — killing child process tree");
-                kill_child_tree(&mut child);
-                return Ok(());
-            }
+        if cancel_requested(cancel_token.as_deref()) {
+            debug_log("Cancel detected — killing child process tree");
+            kill_child_tree(&mut child);
+            return Ok(());
         }
 
         debug_log(&format!("Line {} - read started", line_count + 1));
@@ -1015,6 +773,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         debug_log(&format!("  >>> Init: session_id={}", session_id));
                         last_session_id = Some(session_id.clone());
                     }
+                    StreamMessage::RetryBoundary => {
+                        debug_log("  >>> RetryBoundary (ignored in Claude direct execution)");
+                    }
                     StreamMessage::Text { content } => {
                         let preview: String = content.chars().take(100).collect();
                         debug_log(&format!(
@@ -1129,12 +890,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log(&format!("last_session_id: {:?}", last_session_id));
 
     // Check cancel token after exiting the loop
-    if let Some(ref token) = cancel_token {
-        if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            debug_log("Cancel detected after loop — killing child process tree");
-            kill_child_tree(&mut child);
-            return Ok(());
-        }
+    if cancel_requested(cancel_token.as_deref()) {
+        debug_log("Cancel detected after loop — killing child process tree");
+        kill_child_tree(&mut child);
+        return Ok(());
     }
 
     // Wait for process to finish
@@ -1366,12 +1125,6 @@ pub(crate) fn process_stream_line(
     }
 
     true
-}
-
-/// Shell-escape a string using single quotes (POSIX safe).
-/// Internal single quotes are replaced with `'\''`.
-pub(crate) fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Execute claude command on a remote host via SSH, streaming stdout lines
@@ -2012,72 +1765,24 @@ fn send_followup_to_tmux(
         SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
-            // Notify caller that tmux session is ready for background monitoring
+    Ok(fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path: output_path.to_string(),
                 input_fifo_path: input_fifo_path.to_string(),
                 tmux_session_name: tmux_session_name.to_string(),
                 last_offset: offset,
             });
-            Ok(FollowupResult::Delivered)
-        }
-        ReadOutputResult::SessionDied { .. } => {
+            FollowupResult::Delivered
+        },
+        |_| {
             debug_log("tmux session died during follow-up — requesting recreation");
-            Ok(FollowupResult::RecreateSession {
+            FollowupResult::RecreateSession {
                 error: "session died during follow-up output reading".to_string(),
-            })
-        }
-    }
-}
-
-/// Callbacks for session status checks during output file polling.
-pub(crate) struct SessionProbe {
-    /// Returns true if the session process is still running.
-    pub is_alive: Box<dyn Fn() -> bool + Send>,
-    /// Returns true if the session is idle and ready for new input.
-    /// Only meaningful for tmux sessions (capture-pane check).
-    /// ProcessBackend returns false (relies on JSONL "result" event instead).
-    pub is_ready_for_input: Box<dyn Fn() -> bool + Send>,
-}
-
-impl SessionProbe {
-    /// Create a tmux-based probe (existing behavior).
-    #[cfg(unix)]
-    pub fn tmux(session_name: String) -> Self {
-        let name_alive = session_name.clone();
-        let name_ready = session_name;
-        Self {
-            is_alive: Box::new(move || tmux_session_alive(&name_alive)),
-            is_ready_for_input: Box::new(move || tmux_session_ready_for_input(&name_ready)),
-        }
-    }
-
-    /// Non-unix stub: tmux is not available.
-    #[cfg(not(unix))]
-    pub fn tmux(_session_name: String) -> Self {
-        Self {
-            is_alive: Box::new(|| false),
-            is_ready_for_input: Box::new(|| false),
-        }
-    }
-
-    /// Create a process-based probe (PID check, no ready-for-input).
-    pub fn process(session_name: String) -> Self {
-        Self {
-            is_alive: Box::new(move || {
-                let handles = PROCESS_HANDLES.lock().unwrap();
-                if let Some(handle) = handles.get(&session_name) {
-                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
-                    ProcessBackend::new().is_alive(handle)
-                } else {
-                    false
-                }
-            }),
-            is_ready_for_input: Box::new(|| false),
-        }
-    }
+            }
+        },
+    ))
 }
 
 /// Poll-read the output file from a given offset until a "result" event is received.
@@ -2093,192 +1798,57 @@ pub(crate) fn read_output_file_until_result(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     probe: SessionProbe,
 ) -> Result<ReadOutputResult, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
-
     debug_log(&format!(
         "=== read_output_file_until_result: offset={} ===",
         start_offset
     ));
 
-    // Wait for output file to exist (wrapper might not have created it yet)
-    // Uses exponential backoff: 10ms → 500ms
-    let wait_start = std::time::Instant::now();
-    let mut wait_interval = Duration::from_millis(10);
-    let max_wait_interval = Duration::from_millis(500);
-    loop {
-        if std::fs::metadata(output_path).is_ok() {
-            break;
-        }
-        if wait_start.elapsed() > Duration::from_secs(30) {
-            return Err("Timeout waiting for output file".to_string());
-        }
-        if let Some(ref token) = cancel_token {
-            if token.cancelled.load(Ordering::Relaxed) {
-                return Ok(ReadOutputResult::Cancelled {
-                    offset: start_offset,
-                });
-            }
-        }
-        std::thread::sleep(wait_interval);
-        wait_interval = std::cmp::min(
-            Duration::from_millis((wait_interval.as_millis() as f64 * 1.5) as u64),
-            max_wait_interval,
-        );
-    }
-
-    let mut file = std::fs::File::open(output_path)
-        .map_err(|e| format!("Failed to open output file: {}", e))?;
-    file.seek(SeekFrom::Start(start_offset))
-        .map_err(|e| format!("Failed to seek output file: {}", e))?;
-
-    let mut current_offset = start_offset;
-    let mut partial_line = String::new();
     let mut state = StreamLineState::new();
-    let mut buf = [0u8; 8192];
-    let mut no_data_count: u32 = 0;
-    let mut consecutive_ready_count: u32 = 0;
-    let mut first_ready_at: Option<std::time::Instant> = None;
+    let SessionProbe {
+        is_alive,
+        is_ready_for_input,
+    } = probe;
+    let offset_sender = sender.clone();
+    let line_sender = sender.clone();
+    let synthetic_sender = sender.clone();
+    let error_sender = sender.clone();
 
-    loop {
-        // Check cancellation
-        if let Some(ref token) = cancel_token {
-            if token.cancelled.load(Ordering::Relaxed) {
-                debug_log("Cancel detected during output file read");
-                return Ok(ReadOutputResult::Cancelled {
-                    offset: current_offset,
+    let result = crate::services::provider::poll_output_file_until_result(
+        output_path,
+        start_offset,
+        cancel_token,
+        &mut state,
+        move || is_alive(),
+        move || is_ready_for_input(),
+        move |offset| {
+            let _ = offset_sender.send(StreamMessage::OutputOffset { offset });
+        },
+        move |line, state| process_stream_line(line, &line_sender, state),
+        |state| state.final_result.is_some(),
+        move |state| {
+            let synthetic = StreamMessage::Done {
+                result: String::new(),
+                session_id: state.last_session_id.clone(),
+            };
+            synthetic_sender.send(synthetic).is_ok()
+        },
+        move |state| {
+            if let Some((message, stdout_raw)) = &state.stdout_error {
+                let _ = error_sender.send(StreamMessage::Error {
+                    message: message.clone(),
+                    stdout: stdout_raw.clone(),
+                    stderr: String::new(),
+                    exit_code: None,
                 });
             }
-        }
+        },
+    );
 
-        match file.read(&mut buf) {
-            Ok(0) => {
-                // No new data — check if session is still alive
-                no_data_count += 1;
-                if no_data_count % 25 == 0 {
-                    // Approximately every 3-5 seconds (varies with backoff)
-                    if !(probe.is_alive)() {
-                        debug_log("Session ended while reading output");
-                        // Check for unread data before breaking
-                        let file_len = std::fs::metadata(output_path)
-                            .map(|meta| meta.len())
-                            .unwrap_or(current_offset);
-                        if file_len > current_offset {
-                            continue; // Still data to read
-                        }
-                        break;
-                    }
-
-                    let file_len = std::fs::metadata(output_path)
-                        .map(|meta| meta.len())
-                        .unwrap_or(current_offset);
-                    let has_new_bytes = file_len > current_offset;
-                    // Only consider ready-for-input if output has grown at least
-                    // once since the turn started.  When a follow-up message is
-                    // written to the FIFO but Claude hasn't begun processing yet,
-                    // the previous turn's "Ready for input" prompt still lingers
-                    // in the tmux pane — causing a false-positive completion.
-                    let output_ever_grew = current_offset > start_offset;
-                    if !has_new_bytes && output_ever_grew && (probe.is_ready_for_input)() {
-                        if first_ready_at.is_none() {
-                            first_ready_at = Some(std::time::Instant::now());
-                        }
-                        consecutive_ready_count += 1;
-                        // Time-based guard: require at least 15 seconds of continuous
-                        // ready state to avoid false positives during Claude Code
-                        // auto-continue transitions. With adaptive backoff the loop
-                        // cadence varies, so wall-clock time is the reliable measure.
-                        let ready_elapsed = first_ready_at.unwrap().elapsed();
-                        if ready_elapsed >= Duration::from_secs(15) && consecutive_ready_count >= 3
-                        {
-                            debug_log(
-                                "Session returned to ready prompt without result event; synthesizing completion",
-                            );
-                            let synthetic = StreamMessage::Done {
-                                result: String::new(),
-                                session_id: state.last_session_id.clone(),
-                            };
-                            if sender.send(synthetic).is_err() {
-                                return Ok(ReadOutputResult::Cancelled {
-                                    offset: current_offset,
-                                });
-                            }
-                            state.final_result = Some(String::new());
-                            return Ok(ReadOutputResult::Completed {
-                                offset: current_offset,
-                            });
-                        }
-                    } else {
-                        consecutive_ready_count = 0;
-                        first_ready_at = None;
-                    }
-                }
-                // Adaptive backoff: start fast (10ms), slow down to 200ms when idle
-                let read_interval = if no_data_count < 5 {
-                    Duration::from_millis(10)
-                } else if no_data_count < 20 {
-                    Duration::from_millis(50)
-                } else {
-                    Duration::from_millis(200)
-                };
-                std::thread::sleep(read_interval);
-            }
-            Ok(n) => {
-                no_data_count = 0;
-                consecutive_ready_count = 0;
-                first_ready_at = None;
-                current_offset += n as u64;
-                let _ = sender.send(StreamMessage::OutputOffset {
-                    offset: current_offset,
-                });
-                partial_line.push_str(&String::from_utf8_lossy(&buf[..n]));
-
-                // Process complete lines
-                while let Some(pos) = partial_line.find('\n') {
-                    let line: String = partial_line.drain(..=pos).collect();
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-
-                    if !process_stream_line(trimmed, &sender, &mut state) {
-                        debug_log("Channel disconnected during output file read");
-                        return Ok(ReadOutputResult::Cancelled {
-                            offset: current_offset,
-                        });
-                    }
-
-                    // Check if we got a result (turn complete)
-                    if state.final_result.is_some() {
-                        debug_log("Result received — returning from output file read");
-                        return Ok(ReadOutputResult::Completed {
-                            offset: current_offset,
-                        });
-                    }
-                }
-            }
-            Err(e) => {
-                debug_log(&format!("Error reading output file: {}", e));
-                break;
-            }
-        }
+    if let Ok(ReadOutputResult::SessionDied { .. }) = &result {
+        debug_log("=== read_output_file_until_result END (session died) ===");
     }
 
-    // Handle deferred error or missing Done message
-    if let Some((message, stdout_raw)) = state.stdout_error {
-        let _ = sender.send(StreamMessage::Error {
-            message,
-            stdout: stdout_raw,
-            stderr: String::new(),
-            exit_code: None,
-        });
-    }
-
-    debug_log("=== read_output_file_until_result END (session died) ===");
-    Ok(ReadOutputResult::SessionDied {
-        offset: current_offset,
-    })
+    result
 }
 
 // ─── ProcessBackend execution path ────────────────────────────────────────────
@@ -2405,27 +1975,38 @@ pub(crate) fn execute_streaming_local_process(
         0,
         sender.clone(),
         cancel_token,
-        SessionProbe::process(session_name.to_string()),
+        SessionProbe::process({
+            let session_name = session_name.to_string();
+            move || {
+                let handles = PROCESS_HANDLES.lock().unwrap();
+                if let Some(handle) = handles.get(&session_name) {
+                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
+                    ProcessBackend::new().is_alive(handle)
+                } else {
+                    false
+                }
+            }
+        }),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::ProcessReady {
                 output_path,
                 session_name: session_name.to_string(),
                 last_offset: offset,
             });
-        }
-        ReadOutputResult::SessionDied { .. } => {
+        },
+        |_| {
             let _ = sender.send(StreamMessage::Done {
                 result: "⚠ 프로세스가 종료되었습니다. 새 메시지를 보내면 새 세션이 시작됩니다."
                     .to_string(),
                 session_id: None,
             });
-            // Clean up dead handle
             PROCESS_HANDLES.lock().unwrap().remove(session_name);
-        }
-    }
+        },
+    );
 
     debug_log("=== execute_streaming_local_process END ===");
     Ok(())
@@ -2492,26 +2073,38 @@ fn send_followup_to_process(
         start_offset,
         sender.clone(),
         cancel_token,
-        SessionProbe::process(session_name.to_string()),
+        SessionProbe::process({
+            let session_name = session_name.to_string();
+            move || {
+                let handles = PROCESS_HANDLES.lock().unwrap();
+                if let Some(handle) = handles.get(&session_name) {
+                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
+                    ProcessBackend::new().is_alive(handle)
+                } else {
+                    false
+                }
+            }
+        }),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    Ok(fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::ProcessReady {
                 output_path: output_path.to_string(),
                 session_name: session_name.to_string(),
                 last_offset: offset,
             });
-            Ok(FollowupResult::Delivered)
-        }
-        ReadOutputResult::SessionDied { .. } => {
+            FollowupResult::Delivered
+        },
+        |_| {
             debug_log("process session died during follow-up — requesting recreation");
             PROCESS_HANDLES.lock().unwrap().remove(session_name);
-            Ok(FollowupResult::RecreateSession {
+            FollowupResult::RecreateSession {
                 error: "process died during follow-up output reading".to_string(),
-            })
-        }
-    }
+            }
+        },
+    ))
 }
 
 /// Global storage for ProcessBackend session handles.
@@ -2556,54 +2149,6 @@ fn execute_streaming_remote_tmux(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ========== is_valid_session_id tests ==========
-
-    #[test]
-    fn test_session_id_valid() {
-        assert!(is_valid_session_id("abc123"));
-        assert!(is_valid_session_id("session-1"));
-        assert!(is_valid_session_id("session_2"));
-        assert!(is_valid_session_id("ABC-XYZ_123"));
-        assert!(is_valid_session_id("a")); // Single char
-    }
-
-    #[test]
-    fn test_session_id_empty_rejected() {
-        assert!(!is_valid_session_id(""));
-    }
-
-    #[test]
-    fn test_session_id_too_long_rejected() {
-        // 64 characters should be valid
-        let max_len = "a".repeat(64);
-        assert!(is_valid_session_id(&max_len));
-
-        // 65 characters should be rejected
-        let too_long = "a".repeat(65);
-        assert!(!is_valid_session_id(&too_long));
-    }
-
-    #[test]
-    fn test_session_id_special_chars_rejected() {
-        assert!(!is_valid_session_id("session;rm -rf"));
-        assert!(!is_valid_session_id("session'OR'1=1"));
-        assert!(!is_valid_session_id("session`cmd`"));
-        assert!(!is_valid_session_id("session$(cmd)"));
-        assert!(!is_valid_session_id("session\nline2"));
-        assert!(!is_valid_session_id("session\0null"));
-        assert!(!is_valid_session_id("path/traversal"));
-        assert!(!is_valid_session_id("session with space"));
-        assert!(!is_valid_session_id("session.dot"));
-        assert!(!is_valid_session_id("session@email"));
-    }
-
-    #[test]
-    fn test_session_id_unicode_rejected() {
-        assert!(!is_valid_session_id("세션아이디"));
-        assert!(!is_valid_session_id("session_日本語"));
-        assert!(!is_valid_session_id("émoji🎉"));
-    }
 
     // ========== ClaudeResponse tests ==========
 
@@ -2699,18 +2244,6 @@ mod tests {
 
         #[cfg(not(unix))]
         assert!(!is_ai_supported());
-    }
-
-    // ========== session_id_regex tests ==========
-
-    #[test]
-    fn test_session_id_regex_caching() {
-        // Multiple calls should return the same cached regex
-        let regex1 = session_id_regex();
-        let regex2 = session_id_regex();
-
-        // Both should point to the same static instance
-        assert!(std::ptr::eq(regex1, regex2));
     }
 
     // ========== parse_stream_message tests ==========
@@ -2817,14 +2350,14 @@ mod tests {
     #[cfg(unix)]
     fn test_tmux_capture_detects_ready_prompt() {
         let capture = "...\n▶ Ready for input (type message + Enter)\n";
-        assert!(tmux_capture_indicates_ready_for_input(capture));
+        assert!(crate::services::provider::tmux_capture_indicates_ready_for_input(capture));
     }
 
     #[test]
     #[cfg(unix)]
     fn test_tmux_capture_ignores_non_ready_prompt() {
         let capture = "Claude is still working...\n";
-        assert!(!tmux_capture_indicates_ready_for_input(capture));
+        assert!(!crate::services::provider::tmux_capture_indicates_ready_for_input(capture));
     }
 
     // ========== parse_stream_message thinking tests ==========
@@ -2946,28 +2479,18 @@ mod tests {
     #[test]
     fn test_followup_result_maps_completed_to_delivered() {
         let read_result = ReadOutputResult::Completed { offset: 100 };
-        let followup = match read_result {
-            ReadOutputResult::Completed { .. } | ReadOutputResult::Cancelled { .. } => {
-                FollowupResult::Delivered
-            }
-            ReadOutputResult::SessionDied { .. } => FollowupResult::RecreateSession {
-                error: "died".to_string(),
-            },
-        };
+        let followup =
+            crate::services::provider::followup_result_from_read_output_result(read_result, "died");
         assert!(matches!(followup, FollowupResult::Delivered));
     }
 
     #[test]
     fn test_followup_result_maps_session_died_to_recreate() {
         let read_result = ReadOutputResult::SessionDied { offset: 42 };
-        let followup = match read_result {
-            ReadOutputResult::Completed { .. } | ReadOutputResult::Cancelled { .. } => {
-                FollowupResult::Delivered
-            }
-            ReadOutputResult::SessionDied { .. } => FollowupResult::RecreateSession {
-                error: "session died during follow-up output reading".to_string(),
-            },
-        };
+        let followup = crate::services::provider::followup_result_from_read_output_result(
+            read_result,
+            "session died during follow-up output reading",
+        );
         match followup {
             FollowupResult::RecreateSession { error } => {
                 assert!(error.contains("session died"));

@@ -12,11 +12,15 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::services::claude::{self, CancelToken, StreamMessage};
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::claude;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::provider::ProviderKind;
+use crate::services::process::{kill_child_tree, shell_escape};
+use crate::services::provider::{
+    CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe,
+};
 use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
@@ -370,7 +374,7 @@ fn execute_qwen_streaming_attempt(
     });
 
     if is_cancelled(cancel_token.as_deref()) {
-        claude::kill_child_tree(&mut child);
+        kill_child_tree(&mut child);
         let stderr = stderr_handle.join().unwrap_or_default();
         emit_cancellation_error(&sender, String::new(), stderr, None);
         return Ok(QwenAttemptResult::Cancelled);
@@ -381,7 +385,7 @@ fn execute_qwen_streaming_attempt(
 
     loop {
         if is_cancelled(cancel_token.as_deref()) {
-            claude::kill_child_tree(&mut child);
+            kill_child_tree(&mut child);
             let stderr = stderr_handle.join().unwrap_or_default();
             emit_cancellation_error(&sender, state.raw_stdout, stderr, None);
             return Ok(QwenAttemptResult::Cancelled);
@@ -393,7 +397,7 @@ fn execute_qwen_streaming_attempt(
                 process_qwen_stream_line(&line, &mut state);
             }
             Ok(QwenStreamEvent::ReadError(message)) => {
-                claude::kill_child_tree(&mut child);
+                kill_child_tree(&mut child);
                 let stderr = stderr_handle.join().unwrap_or_default();
                 return Ok(QwenAttemptResult::RetrySession {
                     message,
@@ -409,7 +413,7 @@ fn execute_qwen_streaming_attempt(
                 }
                 idle_ticks += 1;
                 if idle_ticks >= QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY {
-                    claude::kill_child_tree(&mut child);
+                    kill_child_tree(&mut child);
                     let stderr = stderr_handle.join().unwrap_or_default();
                     return Ok(QwenAttemptResult::RetrySession {
                         message: format!(
@@ -982,8 +986,8 @@ fn execute_streaming_local_tmux(
             cancel_token.clone(),
             tmux_session_name,
         )? {
-            claude::FollowupResult::Delivered => return Ok(()),
-            claude::FollowupResult::RecreateSession { error } => {
+            FollowupResult::Delivered => return Ok(()),
+            FollowupResult::RecreateSession { error } => {
                 record_tmux_exit_reason(
                     tmux_session_name,
                     &format!("followup failed, recreating: {}", error),
@@ -1065,27 +1069,27 @@ fn execute_streaming_local_tmux(
         --cwd {wd} \\\n  \
         --qwen-bin {qwen_bin}{model_arg}{resume_arg}{core_tool_args}\n",
         env = env_lines,
-        exe = claude::shell_escape(&exe.display().to_string()),
-        output = claude::shell_escape(&output_path),
-        input_fifo = claude::shell_escape(&input_fifo_path),
-        prompt = claude::shell_escape(&prompt_path),
-        wd = claude::shell_escape(working_dir),
-        qwen_bin = claude::shell_escape(qwen_bin),
+        exe = shell_escape(&exe.display().to_string()),
+        output = shell_escape(&output_path),
+        input_fifo = shell_escape(&input_fifo_path),
+        prompt = shell_escape(&prompt_path),
+        wd = shell_escape(working_dir),
+        qwen_bin = shell_escape(qwen_bin),
         model_arg = model
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| format!(" \\\n  --qwen-model {}", claude::shell_escape(value)))
+            .map(|value| format!(" \\\n  --qwen-model {}", shell_escape(value)))
             .unwrap_or_default(),
         resume_arg = session_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| format!(" \\\n  --resume-session-id {}", claude::shell_escape(value)))
+            .map(|value| format!(" \\\n  --resume-session-id {}", shell_escape(value)))
             .unwrap_or_default(),
         core_tool_args = allowed_core_tools
             .map(|tools| {
                 tools
                     .iter()
-                    .map(|tool| format!(" \\\n  --qwen-core-tool {}", claude::shell_escape(tool)))
+                    .map(|tool| format!(" \\\n  --qwen-core-tool {}", shell_escape(tool)))
                     .collect::<String>()
             })
             .unwrap_or_default(),
@@ -1097,7 +1101,7 @@ fn execute_streaming_local_tmux(
     let tmux_result = crate::services::platform::tmux::create_session(
         tmux_session_name,
         Some(working_dir),
-        &format!("bash {}", claude::shell_escape(&script_path)),
+        &format!("bash {}", shell_escape(&script_path)),
     )?;
 
     if !tmux_result.status.success() {
@@ -1126,12 +1130,11 @@ fn execute_streaming_local_tmux(
         0,
         sender.clone(),
         cancel_token,
-        claude::SessionProbe::tmux(tmux_session_name.to_string()),
+        SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
     match read_result {
-        claude::ReadOutputResult::Completed { offset }
-        | claude::ReadOutputResult::Cancelled { offset } => {
+        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path,
                 input_fifo_path,
@@ -1139,7 +1142,7 @@ fn execute_streaming_local_tmux(
                 last_offset: offset,
             });
         }
-        claude::ReadOutputResult::SessionDied { .. } => {
+        ReadOutputResult::SessionDied { .. } => {
             let _ = sender.send(StreamMessage::Done {
                 result: "⚠ 세션이 종료되었습니다. 새 메시지를 보내면 새 세션이 시작됩니다."
                     .to_string(),
@@ -1159,7 +1162,7 @@ fn send_followup_to_tmux(
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
     tmux_session_name: &str,
-) -> Result<claude::FollowupResult, String> {
+) -> Result<FollowupResult, String> {
     let start_offset = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
     let write_result = std::fs::OpenOptions::new()
@@ -1181,7 +1184,7 @@ fn send_followup_to_tmux(
 
     if let Err(e) = write_result {
         if should_recreate_session_after_followup_fifo_error(&e) {
-            return Ok(claude::FollowupResult::RecreateSession { error: e });
+            return Ok(FollowupResult::RecreateSession { error: e });
         }
         return Err(e);
     }
@@ -1195,25 +1198,22 @@ fn send_followup_to_tmux(
         start_offset,
         sender.clone(),
         cancel_token,
-        claude::SessionProbe::tmux(tmux_session_name.to_string()),
+        SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
     match read_result {
-        claude::ReadOutputResult::Completed { offset }
-        | claude::ReadOutputResult::Cancelled { offset } => {
+        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path: output_path.to_string(),
                 input_fifo_path: input_fifo_path.to_string(),
                 tmux_session_name: tmux_session_name.to_string(),
                 last_offset: offset,
             });
-            Ok(claude::FollowupResult::Delivered)
+            Ok(FollowupResult::Delivered)
         }
-        claude::ReadOutputResult::SessionDied { .. } => {
-            Ok(claude::FollowupResult::RecreateSession {
+        ReadOutputResult::SessionDied { .. } => Ok(FollowupResult::RecreateSession {
                 error: "session died during follow-up output reading".to_string(),
-            })
-        }
+            }),
     }
 }
 
@@ -1266,19 +1266,29 @@ fn execute_streaming_local_process(
                     start_offset,
                     sender.clone(),
                     cancel_token,
-                    claude::SessionProbe::process(session_name.to_string()),
+                    SessionProbe::process({
+                        let session_name = session_name.to_string();
+                        move || {
+                            let handles = claude::PROCESS_HANDLES.lock().unwrap();
+                            if let Some(handle) = handles.get(&session_name) {
+                                ProcessBackend::new().is_alive(handle)
+                            } else {
+                                false
+                            }
+                        }
+                    }),
                 )?;
 
                 match read_result {
-                    claude::ReadOutputResult::Completed { offset }
-                    | claude::ReadOutputResult::Cancelled { offset } => {
+                    ReadOutputResult::Completed { offset }
+                    | ReadOutputResult::Cancelled { offset } => {
                         let _ = sender.send(StreamMessage::ProcessReady {
                             output_path: output_path.to_string(),
                             session_name: session_name.to_string(),
                             last_offset: offset,
                         });
                     }
-                    claude::ReadOutputResult::SessionDied { .. } => {
+                    ReadOutputResult::SessionDied { .. } => {
                         let _ = sender.send(StreamMessage::Done {
                             result: "⚠ 세션이 종료되었습니다.".to_string(),
                             session_id: None,
@@ -1346,19 +1356,28 @@ fn execute_streaming_local_process(
         0,
         sender.clone(),
         cancel_token,
-        claude::SessionProbe::process(session_name.to_string()),
+        SessionProbe::process({
+            let session_name = session_name.to_string();
+            move || {
+                let handles = claude::PROCESS_HANDLES.lock().unwrap();
+                if let Some(handle) = handles.get(&session_name) {
+                    ProcessBackend::new().is_alive(handle)
+                } else {
+                    false
+                }
+            }
+        }),
     )?;
 
     match read_result {
-        claude::ReadOutputResult::Completed { offset }
-        | claude::ReadOutputResult::Cancelled { offset } => {
+        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
             let _ = sender.send(StreamMessage::ProcessReady {
                 output_path,
                 session_name: session_name.to_string(),
                 last_offset: offset,
             });
         }
-        claude::ReadOutputResult::SessionDied { .. } => {
+        ReadOutputResult::SessionDied { .. } => {
             let _ = sender.send(StreamMessage::Done {
                 result: "⚠ 프로세스가 종료되었습니다.".to_string(),
                 session_id: None,
@@ -1742,7 +1761,7 @@ mod tests {
         extract_text_from_json_output, normalize_resume_strategy, process_qwen_json_event,
         resolve_allowed_core_tools,
     };
-    use crate::services::claude::StreamMessage;
+    use crate::services::agent_protocol::StreamMessage;
     use serde_json::json;
 
     #[test]

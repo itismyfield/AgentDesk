@@ -35,12 +35,11 @@ use tokio::sync::Mutex;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateAttachment, CreateMessage, EditMessage, MessageId, UserId};
 
-use crate::services::claude::{
-    self, CancelToken, DEFAULT_ALLOWED_TOOLS, ReadOutputResult, StreamMessage,
-};
+use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
+use crate::services::claude;
 use crate::services::codex;
 use crate::services::gemini;
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
 use crate::services::qwen;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
 
@@ -358,7 +357,6 @@ fn choose_restore_channel_name(
         .or(existing_channel_name)
         .map(ToOwned::to_owned)
 }
-
 #[derive(Clone)]
 pub(super) struct ModelPickerPendingState {
     pub(super) owner_user_id: UserId,

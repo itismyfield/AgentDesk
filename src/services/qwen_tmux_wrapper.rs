@@ -280,7 +280,7 @@ fn run_turn(
         }
     }
 
-    crate::services::claude::kill_pid_tree(child_pid);
+    crate::services::process::kill_pid_tree(child_pid);
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let wait = child

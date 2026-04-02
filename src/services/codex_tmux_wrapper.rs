@@ -352,7 +352,7 @@ fn run_turn(
 
     // Kill Codex process tree (including any cmd.exe / bash children) before waiting.
     // Without this, child processes spawned by Codex survive as orphan processes.
-    crate::services::claude::kill_pid_tree(child_pid);
+    crate::services::process::kill_pid_tree(child_pid);
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let wait = child

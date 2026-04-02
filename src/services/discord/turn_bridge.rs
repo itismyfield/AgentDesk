@@ -2,6 +2,7 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::config::local_api_url;
+use crate::services::provider::cancel_requested;
 #[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
 #[cfg(unix)]
@@ -102,6 +103,83 @@ fn clear_local_session_state(
 ) {
     *new_session_id = None;
     inflight_state.session_id = None;
+}
+
+fn should_reset_gemini_retry_attempt_state(
+    full_response: &str,
+    current_tool_line: Option<&str>,
+    any_tool_used: bool,
+    has_post_tool_text: bool,
+) -> bool {
+    !full_response.trim().is_empty()
+        || current_tool_line.is_some()
+        || any_tool_used
+        || has_post_tool_text
+}
+
+fn reset_gemini_retry_attempt_state(
+    full_response: &mut String,
+    current_tool_line: &mut Option<String>,
+    last_tool_name: &mut Option<String>,
+    last_tool_summary: &mut Option<String>,
+    any_tool_used: &mut bool,
+    has_post_tool_text: &mut bool,
+    response_sent_offset: &mut usize,
+    inflight_state: &mut InflightTurnState,
+) {
+    full_response.clear();
+    *current_tool_line = None;
+    *last_tool_name = None;
+    *last_tool_summary = None;
+    *any_tool_used = false;
+    *has_post_tool_text = false;
+    *response_sent_offset = 0;
+    inflight_state.full_response.clear();
+    inflight_state.current_tool_line = None;
+    inflight_state.any_tool_used = false;
+    inflight_state.has_post_tool_text = false;
+    inflight_state.response_sent_offset = 0;
+}
+
+fn handle_gemini_retry_boundary(
+    full_response: &mut String,
+    current_tool_line: &mut Option<String>,
+    last_tool_name: &mut Option<String>,
+    last_tool_summary: &mut Option<String>,
+    any_tool_used: &mut bool,
+    has_post_tool_text: &mut bool,
+    response_sent_offset: &mut usize,
+    last_edit_text: &mut String,
+    new_session_id: &mut Option<String>,
+    inflight_state: &mut InflightTurnState,
+) -> bool {
+    let had_local_session = new_session_id.is_some() || inflight_state.session_id.is_some();
+    let should_reset = should_reset_gemini_retry_attempt_state(
+        full_response,
+        current_tool_line.as_deref(),
+        *any_tool_used,
+        *has_post_tool_text,
+    );
+
+    if had_local_session {
+        clear_local_session_state(new_session_id, inflight_state);
+    }
+
+    if should_reset {
+        reset_gemini_retry_attempt_state(
+            full_response,
+            current_tool_line,
+            last_tool_name,
+            last_tool_summary,
+            any_tool_used,
+            has_post_tool_text,
+            response_sent_offset,
+            inflight_state,
+        );
+        last_edit_text.clear();
+    }
+
+    had_local_session || should_reset
 }
 
 async fn reset_session_for_auto_retry(
@@ -280,7 +358,7 @@ pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, 
 
     let child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
     if let Some(pid) = child_pid {
-        claude::kill_pid_tree(pid);
+        crate::services::process::kill_pid_tree(pid);
     }
 
     if cleanup_tmux {
@@ -909,7 +987,7 @@ pub(super) fn spawn_turn_bridge(
         let mut recovery_retry = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
         let current_msg_id = bridge.current_msg_id;
-        let response_sent_offset = bridge.response_sent_offset;
+        let mut response_sent_offset = bridge.response_sent_offset;
         let mut tmux_last_offset = bridge.tmux_last_offset;
         let mut new_session_id = bridge.new_session_id.clone();
         let defer_watcher_resume = bridge.defer_watcher_resume;
@@ -955,14 +1033,14 @@ pub(super) fn spawn_turn_bridge(
         while !done {
             let mut state_dirty = false;
 
-            if cancel_token.cancelled.load(Ordering::Relaxed) {
+            if cancel_requested(Some(cancel_token.as_ref())) {
                 cancelled = true;
                 break;
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-            if cancel_token.cancelled.load(Ordering::Relaxed) {
+            if cancel_requested(Some(cancel_token.as_ref())) {
                 cancelled = true;
                 break;
             }
@@ -970,6 +1048,24 @@ pub(super) fn spawn_turn_bridge(
             loop {
                 match rx.try_recv() {
                     Ok(msg) => match msg {
+                        StreamMessage::RetryBoundary => {
+                            if provider == ProviderKind::Gemini
+                                && handle_gemini_retry_boundary(
+                                    &mut full_response,
+                                    &mut current_tool_line,
+                                    &mut last_tool_name,
+                                    &mut last_tool_summary,
+                                    &mut any_tool_used,
+                                    &mut has_post_tool_text,
+                                    &mut response_sent_offset,
+                                    &mut last_edit_text,
+                                    &mut new_session_id,
+                                    &mut inflight_state,
+                                )
+                            {
+                                state_dirty = true;
+                            }
+                        }
                         StreamMessage::Init { session_id: sid } => {
                             new_session_id = Some(sid.clone());
                             inflight_state.session_id = Some(sid);
@@ -1628,7 +1724,7 @@ pub(super) fn spawn_turn_bridge(
         } else if cancelled {
             if let Ok(guard) = cancel_token.child_pid.lock() {
                 if let Some(pid) = *guard {
-                    claude::kill_pid_tree(pid);
+                    crate::services::process::kill_pid_tree(pid);
                 }
             }
 
@@ -2260,9 +2356,10 @@ pub(super) fn spawn_turn_bridge(
 mod tests {
     use super::{
         build_verdict_payload, clear_local_session_state, contains_stale_resume_error_text,
-        extract_explicit_review_verdict, extract_review_decision,
+        extract_explicit_review_verdict, extract_review_decision, handle_gemini_retry_boundary,
         output_file_has_stale_resume_error_after_offset, persisted_context_tokens,
-        resolve_done_response, result_event_has_stale_resume_error,
+        reset_gemini_retry_attempt_state, resolve_done_response,
+        result_event_has_stale_resume_error, should_reset_gemini_retry_attempt_state,
         should_resume_watcher_after_turn, stream_error_requires_terminal_session_reset,
         total_context_tokens,
     };
@@ -2354,6 +2451,141 @@ mod tests {
             "Gemini CLI not found",
             "",
         ));
+    }
+
+    #[test]
+    fn gemini_retry_reset_helper_requires_current_turn_partial_state() {
+        assert!(should_reset_gemini_retry_attempt_state(
+            "partial answer",
+            None,
+            false,
+            false,
+        ));
+        assert!(should_reset_gemini_retry_attempt_state(
+            "",
+            Some("⚙ Bash: pwd"),
+            true,
+            false,
+        ));
+        assert!(!should_reset_gemini_retry_attempt_state(
+            "", None, false, false,
+        ));
+    }
+
+    #[test]
+    fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
+        let mut full_response = "partial answer".to_string();
+        let mut current_tool_line = Some("⚙ Bash: pwd".to_string());
+        let mut last_tool_name = Some("Bash".to_string());
+        let mut last_tool_summary = Some("pwd".to_string());
+        let mut any_tool_used = true;
+        let mut has_post_tool_text = true;
+        let mut response_sent_offset = 42usize;
+        let mut inflight_state = InflightTurnState::new(
+            ProviderKind::Gemini,
+            1479671298497183835,
+            Some("adk-gm".to_string()),
+            343742347365974026,
+            1,
+            2,
+            "resume me".to_string(),
+            Some("latest".to_string()),
+            Some("AgentDesk-gemini-adk-gm".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        inflight_state.full_response = full_response.clone();
+        inflight_state.current_tool_line = current_tool_line.clone();
+        inflight_state.any_tool_used = true;
+        inflight_state.has_post_tool_text = true;
+        inflight_state.response_sent_offset = response_sent_offset;
+
+        reset_gemini_retry_attempt_state(
+            &mut full_response,
+            &mut current_tool_line,
+            &mut last_tool_name,
+            &mut last_tool_summary,
+            &mut any_tool_used,
+            &mut has_post_tool_text,
+            &mut response_sent_offset,
+            &mut inflight_state,
+        );
+
+        assert!(full_response.is_empty());
+        assert_eq!(current_tool_line, None);
+        assert_eq!(last_tool_name, None);
+        assert_eq!(last_tool_summary, None);
+        assert!(!any_tool_used);
+        assert!(!has_post_tool_text);
+        assert_eq!(response_sent_offset, 0);
+        assert!(inflight_state.full_response.is_empty());
+        assert_eq!(inflight_state.current_tool_line, None);
+        assert!(!inflight_state.any_tool_used);
+        assert!(!inflight_state.has_post_tool_text);
+        assert_eq!(inflight_state.response_sent_offset, 0);
+    }
+
+    #[test]
+    fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() {
+        let mut full_response = "partial answer".to_string();
+        let mut current_tool_line = Some("⚙ Bash: pwd".to_string());
+        let mut last_tool_name = Some("Bash".to_string());
+        let mut last_tool_summary = Some("pwd".to_string());
+        let mut any_tool_used = true;
+        let mut has_post_tool_text = true;
+        let mut response_sent_offset = 42usize;
+        let mut last_edit_text = "partial answer".to_string();
+        let mut new_session_id = Some("stale".to_string());
+        let mut inflight_state = InflightTurnState::new(
+            ProviderKind::Gemini,
+            1479671298497183835,
+            Some("adk-gm".to_string()),
+            343742347365974026,
+            1,
+            2,
+            "resume me".to_string(),
+            Some("stale".to_string()),
+            Some("AgentDesk-gemini-adk-gm".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        inflight_state.full_response = full_response.clone();
+        inflight_state.current_tool_line = current_tool_line.clone();
+        inflight_state.any_tool_used = true;
+        inflight_state.has_post_tool_text = true;
+        inflight_state.response_sent_offset = response_sent_offset;
+
+        let changed = handle_gemini_retry_boundary(
+            &mut full_response,
+            &mut current_tool_line,
+            &mut last_tool_name,
+            &mut last_tool_summary,
+            &mut any_tool_used,
+            &mut has_post_tool_text,
+            &mut response_sent_offset,
+            &mut last_edit_text,
+            &mut new_session_id,
+            &mut inflight_state,
+        );
+
+        assert!(changed);
+        assert!(full_response.is_empty());
+        assert_eq!(current_tool_line, None);
+        assert_eq!(last_tool_name, None);
+        assert_eq!(last_tool_summary, None);
+        assert!(!any_tool_used);
+        assert!(!has_post_tool_text);
+        assert_eq!(response_sent_offset, 0);
+        assert!(last_edit_text.is_empty());
+        assert_eq!(new_session_id, None);
+        assert_eq!(inflight_state.session_id, None);
+        assert!(inflight_state.full_response.is_empty());
+        assert_eq!(inflight_state.current_tool_line, None);
+        assert!(!inflight_state.any_tool_used);
+        assert!(!inflight_state.has_post_tool_text);
+        assert_eq!(inflight_state.response_sent_offset, 0);
     }
 
     #[test]

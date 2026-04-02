@@ -1,3 +1,4 @@
+pub mod agent_protocol;
 pub mod claude;
 pub mod codex;
 #[cfg(unix)]

@@ -293,30 +293,49 @@ pub fn load_graceful() -> Config {
 mod tests {
     use super::{resolve_graceful_config_path, runtime_root};
     use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn runtime_root_returns_valid_path() {
+        let _lock = env_lock();
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+
         // runtime_root() should always return Some on systems with a home directory
         let root = runtime_root();
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+
         assert!(root.is_some(), "runtime_root() returned None");
         let path = root.unwrap();
-        // Path should end with .adk/release (unless overridden by env)
-        if std::env::var("AGENTDESK_ROOT_DIR").is_err() {
-            assert!(
-                path.ends_with(".adk/release"),
-                "expected path ending with .adk/release, got {:?}",
-                path
-            );
-        }
+        assert!(
+            path.ends_with(".adk/release"),
+            "expected path ending with .adk/release, got {:?}",
+            path
+        );
     }
 
     #[test]
     fn runtime_root_respects_env_override() {
+        let _lock = env_lock();
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
         let override_path = std::env::temp_dir().join("adk-test-root");
-        // Safety: test isolation — this test is the only one touching this env var
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &override_path) };
         let root = runtime_root();
-        unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") };
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+
         assert_eq!(root, Some(override_path));
     }
 

@@ -1,5 +1,7 @@
 use crate::utils::format::safe_prefix;
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -283,9 +285,451 @@ pub fn parse_provider_and_channel_from_tmux_name(
     Some((ProviderKind::Claude, without_suffix.to_string()))
 }
 
+pub fn compose_structured_turn_prompt(
+    prompt: &str,
+    system_prompt: Option<&str>,
+    allowed_tools: Option<&[String]>,
+) -> String {
+    let mut sections = Vec::new();
+
+    if let Some(system_prompt) = system_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!(
+            "[Authoritative Instructions]\n{}\n\nThese instructions are authoritative for this turn. Follow them over any generic assistant persona unless the user explicitly asks to inspect or compare them.",
+            system_prompt
+        ));
+    }
+
+    if let Some(allowed_tools) = allowed_tools.filter(|tools| !tools.is_empty()) {
+        sections.push(format!(
+            "[Tool Policy]\nIf tools are needed, stay within this allowlist unless the user explicitly asks to change it: {}",
+            allowed_tools.join(", ")
+        ));
+    }
+
+    if sections.is_empty() {
+        return prompt.to_string();
+    }
+
+    sections.push(format!("[User Request]\n{}", prompt));
+    sections.join("\n\n")
+}
+
+/// Cooperative cancellation token shared by provider runtimes and Discord orchestration.
+pub struct CancelToken {
+    pub cancelled: AtomicBool,
+    pub child_pid: Mutex<Option<u32>>,
+    /// SSH cancel flag — set to true to signal remote execution to close the channel
+    #[allow(dead_code)]
+    pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
+    /// tmux session name for cleanup on cancel
+    pub tmux_session: Mutex<Option<String>>,
+    /// Watchdog deadline as Unix timestamp in milliseconds.
+    /// The watchdog fires when `now_ms >= deadline_ms`. Extend by setting a future value.
+    /// Maximum absolute cap: initial deadline + MAX_EXTENSION (3 hours).
+    pub watchdog_deadline_ms: AtomicI64,
+    /// The hard ceiling for watchdog_deadline_ms (initial + 3h). Extensions cannot exceed this.
+    pub watchdog_max_deadline_ms: AtomicI64,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            child_pid: Mutex::new(None),
+            ssh_cancel: Mutex::new(None),
+            tmux_session: Mutex::new(None),
+            watchdog_deadline_ms: AtomicI64::new(0),
+            watchdog_max_deadline_ms: AtomicI64::new(0),
+        }
+    }
+
+    /// Cancel and clean up any associated tmux session.
+    pub fn cancel_with_tmux_cleanup(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Some(name) = self.tmux_session.lock().unwrap().take() {
+            #[cfg(unix)]
+            {
+                crate::services::tmux_diagnostics::record_tmux_exit_reason(
+                    &name,
+                    "explicit cleanup via cancel_with_tmux_cleanup",
+                );
+                crate::services::platform::tmux::kill_session(&name);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = &name;
+            }
+        }
+    }
+}
+
+pub fn cancel_requested(token: Option<&CancelToken>) -> bool {
+    token.is_some_and(|token| token.cancelled.load(Ordering::Relaxed))
+}
+
+pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
+    if let Some(token) = token {
+        *token.child_pid.lock().unwrap() = Some(child_pid);
+    }
+}
+
+/// Result from reading a provider session output stream until completion or session death.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadOutputResult {
+    /// Normal completion (terminal result observed)
+    Completed { offset: u64 },
+    /// Session died without producing a terminal result
+    SessionDied { offset: u64 },
+    /// User cancelled the operation
+    Cancelled { offset: u64 },
+}
+
+/// Result from sending a follow-up message to an existing provider session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowupResult {
+    /// Message delivered and output successfully read to completion.
+    Delivered,
+    /// Session needs to be killed and recreated.
+    RecreateSession { error: String },
+}
+
+/// Callbacks for session status checks during output file polling.
+pub(crate) struct SessionProbe {
+    /// Returns true if the session process is still running.
+    pub is_alive: Box<dyn Fn() -> bool + Send>,
+    /// Returns true if the session is idle and ready for new input.
+    pub is_ready_for_input: Box<dyn Fn() -> bool + Send>,
+}
+
+impl SessionProbe {
+    pub fn new(
+        is_alive: impl Fn() -> bool + Send + 'static,
+        is_ready_for_input: impl Fn() -> bool + Send + 'static,
+    ) -> Self {
+        Self {
+            is_alive: Box::new(is_alive),
+            is_ready_for_input: Box::new(is_ready_for_input),
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn tmux(session_name: String) -> Self {
+        let name_alive = session_name.clone();
+        let name_ready = session_name;
+        Self::new(
+            move || tmux_session_alive(&name_alive),
+            move || tmux_session_ready_for_input(&name_ready),
+        )
+    }
+
+    #[cfg(not(unix))]
+    pub fn tmux(_session_name: String) -> Self {
+        Self::new(|| false, || false)
+    }
+
+    pub fn process(is_alive: impl Fn() -> bool + Send + 'static) -> Self {
+        Self::new(is_alive, || false)
+    }
+}
+
+#[cfg(unix)]
+fn tmux_session_alive(tmux_session_name: &str) -> bool {
+    crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
+}
+
+#[cfg(unix)]
+pub(crate) fn tmux_capture_indicates_ready_for_input(capture: &str) -> bool {
+    capture
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .any(|l| l.contains("Ready for input (type message + Enter)"))
+}
+
+#[cfg(unix)]
+pub(crate) fn tmux_session_ready_for_input(tmux_session_name: &str) -> bool {
+    crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
+        .map(|stdout| tmux_capture_indicates_ready_for_input(&stdout))
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn tmux_session_ready_for_input(_tmux_session_name: &str) -> bool {
+    false
+}
+
+pub fn fold_read_output_result<T>(
+    read_result: ReadOutputResult,
+    on_ready: impl FnOnce(u64) -> T,
+    on_session_died: impl FnOnce(u64) -> T,
+) -> T {
+    match read_result {
+        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+            on_ready(offset)
+        }
+        ReadOutputResult::SessionDied { offset } => on_session_died(offset),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn followup_result_from_read_output_result(
+    read_result: ReadOutputResult,
+    session_died_error: impl Into<String>,
+) -> FollowupResult {
+    let session_died_error = session_died_error.into();
+    fold_read_output_result(
+        read_result,
+        |_| FollowupResult::Delivered,
+        |_| FollowupResult::RecreateSession {
+            error: session_died_error,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn poll_output_file_until_result<
+    State,
+    IsAlive,
+    IsReady,
+    EmitOffset,
+    ProcessLine,
+    HasFinal,
+    EmitSyntheticDone,
+    EmitDeferredError,
+>(
+    output_path: &str,
+    start_offset: u64,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    state: &mut State,
+    mut is_alive: IsAlive,
+    mut is_ready_for_input: IsReady,
+    mut emit_output_offset: EmitOffset,
+    mut process_line: ProcessLine,
+    has_final: HasFinal,
+    mut emit_synthetic_done: EmitSyntheticDone,
+    mut emit_deferred_error: EmitDeferredError,
+) -> Result<ReadOutputResult, String>
+where
+    IsAlive: FnMut() -> bool,
+    IsReady: FnMut() -> bool,
+    EmitOffset: FnMut(u64),
+    ProcessLine: FnMut(&str, &mut State) -> bool,
+    HasFinal: Fn(&State) -> bool,
+    EmitSyntheticDone: FnMut(&State) -> bool,
+    EmitDeferredError: FnMut(&State),
+{
+    use std::io::{Read, Seek, SeekFrom};
+    use std::time::{Duration, Instant};
+
+    let wait_start = Instant::now();
+    let mut wait_interval = Duration::from_millis(10);
+    let max_wait_interval = Duration::from_millis(500);
+    loop {
+        if std::fs::metadata(output_path).is_ok() {
+            break;
+        }
+        if wait_start.elapsed() > Duration::from_secs(30) {
+            return Err("Timeout waiting for output file".to_string());
+        }
+        if cancel_requested(cancel_token.as_deref()) {
+            return Ok(ReadOutputResult::Cancelled {
+                offset: start_offset,
+            });
+        }
+        std::thread::sleep(wait_interval);
+        wait_interval = std::cmp::min(
+            Duration::from_millis((wait_interval.as_millis() as f64 * 1.5) as u64),
+            max_wait_interval,
+        );
+    }
+
+    let mut file = std::fs::File::open(output_path)
+        .map_err(|e| format!("Failed to open output file: {}", e))?;
+    file.seek(SeekFrom::Start(start_offset))
+        .map_err(|e| format!("Failed to seek output file: {}", e))?;
+
+    let mut current_offset = start_offset;
+    let mut partial_line = String::new();
+    let mut buf = [0u8; 8192];
+    let mut no_data_count: u32 = 0;
+    let mut consecutive_ready_count: u32 = 0;
+    let mut first_ready_at: Option<Instant> = None;
+
+    loop {
+        if cancel_requested(cancel_token.as_deref()) {
+            return Ok(ReadOutputResult::Cancelled {
+                offset: current_offset,
+            });
+        }
+
+        match file.read(&mut buf) {
+            Ok(0) => {
+                no_data_count += 1;
+                if no_data_count % 25 == 0 {
+                    if !is_alive() {
+                        let file_len = std::fs::metadata(output_path)
+                            .map(|meta| meta.len())
+                            .unwrap_or(current_offset);
+                        if file_len > current_offset {
+                            continue;
+                        }
+                        break;
+                    }
+
+                    let file_len = std::fs::metadata(output_path)
+                        .map(|meta| meta.len())
+                        .unwrap_or(current_offset);
+                    let has_new_bytes = file_len > current_offset;
+                    let output_ever_grew = current_offset > start_offset;
+                    if !has_new_bytes && output_ever_grew && is_ready_for_input() {
+                        if first_ready_at.is_none() {
+                            first_ready_at = Some(Instant::now());
+                        }
+                        consecutive_ready_count += 1;
+                        let ready_elapsed = first_ready_at
+                            .expect("first_ready_at set above before elapsed check")
+                            .elapsed();
+                        if ready_elapsed >= Duration::from_secs(15) && consecutive_ready_count >= 3
+                        {
+                            if !emit_synthetic_done(state) {
+                                return Ok(ReadOutputResult::Cancelled {
+                                    offset: current_offset,
+                                });
+                            }
+                            return Ok(ReadOutputResult::Completed {
+                                offset: current_offset,
+                            });
+                        }
+                    } else {
+                        consecutive_ready_count = 0;
+                        first_ready_at = None;
+                    }
+                }
+
+                let read_interval = if no_data_count < 5 {
+                    Duration::from_millis(10)
+                } else if no_data_count < 20 {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_millis(200)
+                };
+                std::thread::sleep(read_interval);
+            }
+            Ok(n) => {
+                no_data_count = 0;
+                consecutive_ready_count = 0;
+                first_ready_at = None;
+                current_offset += n as u64;
+                emit_output_offset(current_offset);
+                partial_line.push_str(&String::from_utf8_lossy(&buf[..n]));
+
+                while let Some(pos) = partial_line.find('\n') {
+                    let line: String = partial_line.drain(..=pos).collect();
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    if !process_line(trimmed, state) {
+                        return Ok(ReadOutputResult::Cancelled {
+                            offset: current_offset,
+                        });
+                    }
+
+                    if has_final(state) {
+                        return Ok(ReadOutputResult::Completed {
+                            offset: current_offset,
+                        });
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    emit_deferred_error(state);
+    Ok(ReadOutputResult::SessionDied {
+        offset: current_offset,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamAttemptFailure {
+    pub message: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+impl StreamAttemptFailure {
+    pub fn with_message(mut self, message: String) -> Self {
+        self.message = message;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamAttemptResult {
+    Completed,
+    RetrySession(StreamAttemptFailure),
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamFinalState {
+    Done {
+        result: String,
+        session_id: Option<String>,
+    },
+    Error(StreamAttemptFailure),
+    RetrySession(StreamAttemptFailure),
+}
+
+pub fn run_retrying_stream_attempts<F, G>(
+    provider_name: &str,
+    mut resume_selector: Option<String>,
+    max_session_retries: usize,
+    mut execute_attempt: F,
+    mut on_retry_exhausted: G,
+) -> Result<(), String>
+where
+    F: FnMut(Option<String>) -> Result<StreamAttemptResult, String>,
+    G: FnMut(StreamAttemptFailure),
+{
+    for attempt in 0..=max_session_retries {
+        match execute_attempt(resume_selector.clone())? {
+            StreamAttemptResult::Completed | StreamAttemptResult::Cancelled => return Ok(()),
+            StreamAttemptResult::RetrySession(failure) => {
+                if attempt < max_session_retries {
+                    resume_selector = None;
+                    continue;
+                }
+                let exhausted_message = format!(
+                    "{} session could not be recovered after retry: {}",
+                    provider_name, failure.message
+                );
+                on_retry_exhausted(failure.with_message(exhausted_message));
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ProviderKind, parse_provider_and_channel_from_tmux_name};
+    use super::{
+        CancelToken, FollowupResult, ProviderKind, ReadOutputResult, StreamAttemptFailure,
+        StreamAttemptResult, StreamFinalState, cancel_requested, compose_structured_turn_prompt,
+        fold_read_output_result, followup_result_from_read_output_result,
+        parse_provider_and_channel_from_tmux_name, poll_output_file_until_result,
+        register_child_pid, run_retrying_stream_attempts,
+    };
     use crate::dispatch::extract_thread_channel_id;
 
     #[test]
@@ -685,5 +1129,339 @@ mod tests {
         assert!(ProviderKind::Qwen.uses_managed_tmux_backend());
         assert!(!ProviderKind::Gemini.uses_managed_tmux_backend());
         assert!(!ProviderKind::Unsupported("gpt".to_string()).uses_managed_tmux_backend());
+    }
+
+    #[test]
+    fn test_cancel_token_helpers_register_and_report_state() {
+        let token = CancelToken::new();
+        assert!(!cancel_requested(Some(&token)));
+        assert!(!cancel_requested(None));
+
+        register_child_pid(Some(&token), 4242);
+        assert_eq!(*token.child_pid.lock().unwrap(), Some(4242));
+
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(cancel_requested(Some(&token)));
+    }
+
+    #[test]
+    fn test_run_retrying_stream_attempts_resets_resume_selector_after_retry() {
+        let mut selectors = Vec::new();
+
+        let result = run_retrying_stream_attempts(
+            "Gemini",
+            Some("latest".to_string()),
+            1,
+            |selector| {
+                selectors.push(selector.clone());
+                if selectors.len() == 1 {
+                    Ok(StreamAttemptResult::RetrySession(StreamAttemptFailure {
+                        message: "dead session".to_string(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: None,
+                    }))
+                } else {
+                    Ok(StreamAttemptResult::Completed)
+                }
+            },
+            |_| panic!("retry should have recovered"),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(selectors, vec![Some("latest".to_string()), None]);
+    }
+
+    #[test]
+    fn test_run_retrying_stream_attempts_reports_exhausted_failure() {
+        let mut exhausted: Option<StreamAttemptFailure> = None;
+
+        let result = run_retrying_stream_attempts(
+            "Gemini",
+            Some("latest".to_string()),
+            1,
+            |_| {
+                Ok(StreamAttemptResult::RetrySession(StreamAttemptFailure {
+                    message: "dead session".to_string(),
+                    stdout: "partial".to_string(),
+                    stderr: String::new(),
+                    exit_code: None,
+                }))
+            },
+            |failure| exhausted = Some(failure),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            exhausted,
+            Some(StreamAttemptFailure {
+                message: "Gemini session could not be recovered after retry: dead session"
+                    .to_string(),
+                stdout: "partial".to_string(),
+                stderr: String::new(),
+                exit_code: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_stream_final_state_done_preserves_result_and_session_id() {
+        let final_state = StreamFinalState::Done {
+            result: "hello".to_string(),
+            session_id: Some("latest".to_string()),
+        };
+
+        assert_eq!(
+            final_state,
+            StreamFinalState::Done {
+                result: "hello".to_string(),
+                session_id: Some("latest".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_compose_structured_turn_prompt_includes_authoritative_sections() {
+        let prompt = compose_structured_turn_prompt(
+            "role과 mission만 답해줘.",
+            Some("role: PMD\nmission: 백로그 관리"),
+            Some(&["Bash".to_string(), "Read".to_string()]),
+        );
+
+        assert!(prompt.contains("[Authoritative Instructions]"));
+        assert!(prompt.contains("role: PMD"));
+        assert!(prompt.contains("[Tool Policy]"));
+        assert!(prompt.contains("Bash, Read"));
+        assert!(prompt.contains("[User Request]\nrole과 mission만 답해줘."));
+    }
+
+    #[test]
+    fn test_compose_structured_turn_prompt_returns_plain_prompt_without_overrides() {
+        let prompt = compose_structured_turn_prompt("just answer", None, None);
+        assert_eq!(prompt, "just answer");
+    }
+
+    #[test]
+    fn test_fold_read_output_result_maps_completed_to_ready_offset() {
+        let outcome = fold_read_output_result(
+            ReadOutputResult::Completed { offset: 42 },
+            |offset| format!("ready:{offset}"),
+            |offset| format!("dead:{offset}"),
+        );
+        assert_eq!(outcome, "ready:42");
+    }
+
+    #[test]
+    fn test_fold_read_output_result_maps_session_died_to_dead_branch() {
+        let outcome = fold_read_output_result(
+            ReadOutputResult::SessionDied { offset: 7 },
+            |offset| format!("ready:{offset}"),
+            |offset| format!("dead:{offset}"),
+        );
+        assert_eq!(outcome, "dead:7");
+    }
+
+    #[test]
+    fn test_followup_result_from_read_output_result_maps_completed_to_delivered() {
+        let outcome = followup_result_from_read_output_result(
+            ReadOutputResult::Completed { offset: 99 },
+            "session died during follow-up output reading",
+        );
+        assert_eq!(outcome, FollowupResult::Delivered);
+    }
+
+    #[test]
+    fn test_followup_result_from_read_output_result_maps_session_died_to_recreate() {
+        let outcome = followup_result_from_read_output_result(
+            ReadOutputResult::SessionDied { offset: 99 },
+            "session died during follow-up output reading",
+        );
+        assert_eq!(
+            outcome,
+            FollowupResult::RecreateSession {
+                error: "session died during follow-up output reading".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_fold_read_output_result_maps_cancelled_to_ready_offset() {
+        let outcome = fold_read_output_result(
+            ReadOutputResult::Cancelled { offset: 15 },
+            |offset| format!("ready:{offset}"),
+            |offset| format!("dead:{offset}"),
+        );
+        assert_eq!(outcome, "ready:15");
+    }
+
+    #[test]
+    fn test_followup_result_from_read_output_result_maps_cancelled_to_delivered() {
+        let outcome = followup_result_from_read_output_result(
+            ReadOutputResult::Cancelled { offset: 99 },
+            "session died during follow-up output reading",
+        );
+        assert_eq!(outcome, FollowupResult::Delivered);
+    }
+
+    #[test]
+    fn test_run_retrying_stream_attempts_returns_early_on_cancelled() {
+        let mut exhausted: Option<StreamAttemptFailure> = None;
+        let mut calls = 0usize;
+
+        let result = run_retrying_stream_attempts(
+            "Gemini",
+            Some("latest".to_string()),
+            1,
+            |_| {
+                calls += 1;
+                Ok(StreamAttemptResult::Cancelled)
+            },
+            |failure| exhausted = Some(failure),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(calls, 1);
+        assert!(exhausted.is_none());
+    }
+
+    #[test]
+    fn test_poll_output_file_until_result_completes_after_terminal_line() {
+        #[derive(Default)]
+        struct TestState {
+            saw_done: bool,
+            lines: Vec<String>,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("stream.jsonl");
+        std::fs::write(&output_path, "hello\nDONE\n").unwrap();
+
+        let mut state = TestState::default();
+        let mut offsets = Vec::new();
+        let result = poll_output_file_until_result(
+            output_path.to_str().unwrap(),
+            0,
+            None,
+            &mut state,
+            || true,
+            || false,
+            |offset| offsets.push(offset),
+            |line: &str, state| {
+                state.lines.push(line.to_string());
+                if line == "DONE" {
+                    state.saw_done = true;
+                }
+                true
+            },
+            |state| state.saw_done,
+            |_| true,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ReadOutputResult::Completed {
+                offset: std::fs::metadata(&output_path).unwrap().len(),
+            }
+        );
+        assert_eq!(state.lines, vec!["hello".to_string(), "DONE".to_string()]);
+        assert_eq!(
+            offsets,
+            vec![std::fs::metadata(&output_path).unwrap().len()],
+        );
+    }
+
+    #[test]
+    fn test_poll_output_file_until_result_honors_preexisting_cancel_before_file_exists() {
+        let token = std::sync::Arc::new(CancelToken::new());
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().join("missing.jsonl");
+
+        let mut state = ();
+        let result = poll_output_file_until_result(
+            missing_path.to_str().unwrap(),
+            17,
+            Some(token),
+            &mut state,
+            || true,
+            || false,
+            |_| {},
+            |_, _| true,
+            |_| false,
+            |_| true,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(result, ReadOutputResult::Cancelled { offset: 17 });
+    }
+
+    #[test]
+    fn test_poll_output_file_until_result_reports_session_died_without_terminal_result() {
+        #[derive(Default)]
+        struct TestState {
+            lines: Vec<String>,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("stream.jsonl");
+        std::fs::write(&output_path, "partial\n").unwrap();
+
+        let mut state = TestState::default();
+        let mut alive_checks = 0usize;
+        let result = poll_output_file_until_result(
+            output_path.to_str().unwrap(),
+            0,
+            None,
+            &mut state,
+            || {
+                alive_checks += 1;
+                alive_checks < 1
+            },
+            || false,
+            |_| {},
+            |line: &str, state| {
+                state.lines.push(line.to_string());
+                true
+            },
+            |_| false,
+            |_| true,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ReadOutputResult::SessionDied {
+                offset: std::fs::metadata(&output_path).unwrap().len(),
+            }
+        );
+        assert_eq!(state.lines, vec!["partial".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_tmux_capture_indicates_ready_for_input_detects_recent_ready_banner() {
+        let capture = "\
+build logs\n\
+Ready for input (type message + Enter)\n\
+> ";
+        assert!(super::tmux_capture_indicates_ready_for_input(capture));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_tmux_capture_indicates_ready_for_input_rejects_non_ready_capture() {
+        let capture = "\
+build logs\n\
+waiting for tool output\n\
+still running";
+        assert!(!super::tmux_capture_indicates_ready_for_input(capture));
     }
 }

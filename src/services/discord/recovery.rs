@@ -851,7 +851,7 @@ pub(super) async fn restore_inflight_turns(
         }
 
         let tmux_ready_without_new_output = tmux_session_name.as_deref().map_or(false, |name| {
-            !output_has_new_bytes && claude::tmux_session_ready_for_input(name)
+            !output_has_new_bytes && crate::services::provider::tmux_session_ready_for_input(name)
         });
 
         if tmux_ready_without_new_output {
@@ -1175,7 +1175,7 @@ pub(super) async fn restore_inflight_turns(
                 start_offset,
                 tx.clone(),
                 Some(cancel_for_reader),
-                claude::SessionProbe::tmux(tmux_for_reader.clone()),
+                crate::services::provider::SessionProbe::tmux(tmux_for_reader.clone()),
             ) {
                 Ok(ReadOutputResult::Completed { offset })
                 | Ok(ReadOutputResult::Cancelled { offset }) => {
