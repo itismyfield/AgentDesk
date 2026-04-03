@@ -81,9 +81,15 @@ _resolve_shared_credential_dir() {
     if [ -L "$release_credential" ]; then
         local target
         target=$(readlink "$release_credential" 2>/dev/null || true)
-        if [ -n "$target" ] && [ -d "$target" ]; then
-            printf '%s\n' "$target"
-            return 0
+        if [ -n "$target" ]; then
+            # Resolve relative symlinks against the symlink's parent directory
+            if [[ "$target" != /* ]]; then
+                target="$(cd "$(dirname "$release_credential")" && cd "$(dirname "$target")" && pwd)/$(basename "$target")"
+            fi
+            if [ -d "$target" ]; then
+                printf '%s\n' "$target"
+                return 0
+            fi
         fi
     fi
 
@@ -183,6 +189,7 @@ export AGENTDESK_REPO_DIR=$(printf '%q' "$REPO")
 export AGENTDESK_DEPLOY_DEV_DETACHED_CHILD=1
 export AGENTDESK_DEPLOY_DEV_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_DEPLOY_DEV_TEST_MODE=$(printf '%q' "$DEV_DEPLOY_TEST_MODE")
+${AGENTDESK_SHARED_CREDENTIAL_DIR:+export AGENTDESK_SHARED_CREDENTIAL_DIR=$(printf '%q' "$AGENTDESK_SHARED_CREDENTIAL_DIR")}
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/deploy-dev.sh")${quoted_args}
 EOF
