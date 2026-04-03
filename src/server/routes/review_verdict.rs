@@ -777,79 +777,91 @@ pub async fn submit_review_decision(
                 }
             };
 
-            let (rework_dispatch_created, direct_review_created) = if skip_rework {
-                // #246: Skip rework — create review dispatch directly
-                let review_target = effective_pipeline
+            // #246: If agent already committed new work, skip rework and re-enter
+            // review via a two-step transition (rework_target → review) so that
+            // OnReviewEnter fires naturally (increments review_round, sets
+            // review_status, creates review dispatch via review-automation.js).
+            let direct_review_created = if skip_rework {
+                // Find the review state from the pipeline (gated transition from rework_target)
+                let review_state = effective_pipeline
                     .transitions
                     .iter()
                     .find(|t| {
                         t.from == rework_target
                             && t.transition_type == crate::pipeline::TransitionType::Gated
                     })
-                    .map(|t| t.to.clone())
-                    .unwrap_or(card_status_now.clone());
+                    .map(|t| t.to.clone());
 
-                let review_created = if let Some(ref agent_id) = card_agent_id {
-                    let review_title = format!(
-                        "[Review] {}",
-                        card_title.as_deref().unwrap_or(&body.card_id)
-                    );
-                    match crate::dispatch::create_dispatch_core(
+                if let Some(ref review_st) = review_state {
+                    // Step 1: Transition to rework_target (e.g., in_progress)
+                    let step1_ok = crate::kanban::transition_status_with_opts(
                         &state.db,
+                        &state.engine,
                         &body.card_id,
-                        agent_id,
-                        "review",
-                        &review_title,
-                        &json!({}),
-                    ) {
-                        Ok((dispatch_id, _, _)) => {
-                            tracing::info!(
-                                "[review-decision] #246 Direct review dispatch created: card={} dispatch={}",
-                                body.card_id,
-                                dispatch_id
-                            );
-                            true
+                        &rework_target,
+                        "review_decision_accept_skip_rework_step1",
+                        true,
+                    )
+                    .is_ok();
+
+                    if step1_ok {
+                        // Step 2: Transition to review — fires OnReviewEnter
+                        match crate::kanban::transition_status_with_opts(
+                            &state.db,
+                            &state.engine,
+                            &body.card_id,
+                            review_st,
+                            "review_decision_accept_skip_rework_step2",
+                            true,
+                        ) {
+                            Ok(_) => {
+                                tracing::info!(
+                                    "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
+                                    body.card_id,
+                                    card_status_now,
+                                    rework_target,
+                                    review_st
+                                );
+                                true
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
+                                    review_st,
+                                    body.card_id
+                                );
+                                false
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                "[review-decision] #246 Direct review dispatch failed for card {}: {e} — falling back to rework",
-                                body.card_id
-                            );
-                            false
-                        }
+                    } else {
+                        false
                     }
                 } else {
                     false
-                };
+                }
+            } else {
+                false
+            };
 
-                if review_created {
-                    // Transition to review state instead of rework
+            // Create rework dispatch (original path, or fallback if direct review failed)
+            let rework_dispatch_created = if !direct_review_created {
+                // Transition card to rework target (e.g., in_progress) — only if not already done
+                if !skip_rework {
                     if let Err(e) = crate::kanban::transition_status_with_opts(
                         &state.db,
                         &state.engine,
                         &body.card_id,
-                        &review_target,
-                        "review_decision_accept_direct_review",
+                        &rework_target,
+                        "review_decision_accept",
                         true,
                     ) {
                         tracing::warn!(
-                            "[review-decision] #246 Transition to review failed for card {}: {e}",
+                            "[review-decision] #195 Transition to rework target failed for card {}: {e}",
                             body.card_id
                         );
                     }
-                    (false, true)
-                } else {
-                    // Fallback: create rework as before
-                    (false, false) // will be handled below
                 }
-            } else {
-                (false, false)
-            };
 
-            // Create rework dispatch if not skipped (original path or fallback)
-            let rework_dispatch_created = if !skip_rework
-                || (!rework_dispatch_created && !direct_review_created)
-            {
                 if let Some(ref agent_id) = card_agent_id {
                     let rework_title = format!(
                         "[Rework] {}",
@@ -887,25 +899,8 @@ pub async fn submit_review_decision(
                     false
                 }
             } else {
-                rework_dispatch_created
+                false
             };
-
-            // Transition card to rework target (e.g., in_progress) — only if not already transitioned
-            if !direct_review_created {
-                if let Err(e) = crate::kanban::transition_status_with_opts(
-                    &state.db,
-                    &state.engine,
-                    &body.card_id,
-                    &rework_target,
-                    "review_decision_accept",
-                    true,
-                ) {
-                    tracing::warn!(
-                        "[review-decision] #195 Transition to rework target failed for card {}: {e}",
-                        body.card_id
-                    );
-                }
-            }
 
             // Clear suggestion_pending_at (same as timeouts.js auto-accept)
             if let Ok(c) = state.db.lock() {
@@ -920,8 +915,17 @@ pub async fn submit_review_decision(
             record_decision_tuning(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
             spawn_aggregate_if_needed(&state.db);
 
-            // #117: Update canonical review state → rework_pending
-            update_card_review_state(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
+            // #117: Update canonical review state.
+            // For direct review: OnReviewEnter already set the state, so skip the
+            // rework_pending override that would conflict with the live review dispatch.
+            if !direct_review_created {
+                update_card_review_state(
+                    &state.db,
+                    &body.card_id,
+                    "accept",
+                    pending_rd_id.as_deref(),
+                );
+            }
 
             // Emit kanban_card_updated for real-time dashboard
             if let Ok(conn) = state.db.lock() {
