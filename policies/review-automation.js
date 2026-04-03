@@ -12,7 +12,25 @@ function sendDiscordReview(target, content, bot) {
   agentdesk.message.queue(target, content, bot || "announce", "system");
 }
 
+// #231: Cross-path cooldown for PM decision notifications (shared with timeouts.js)
+var PM_DECISION_COOLDOWN_SEC = 300;  // 5 min — same as timeouts.js
+
 function notifyPmdPendingDecision(cardId, reason) {
+  // #231: Check kv_meta cooldown to avoid duplicates across policies
+  var cooldownKey = "pm_decision_sent:" + cardId;
+  var existing = agentdesk.db.query(
+    "SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]
+  );
+  if (existing.length > 0) {
+    var sentAt = parseInt(existing[0].value, 10) || 0;
+    var now = Math.floor(Date.now() / 1000);
+    if (now - sentAt < PM_DECISION_COOLDOWN_SEC) {
+      agentdesk.log.info("[PM dedup] review-automation: skipped notification for card " + cardId +
+        " (cooldown " + (now - sentAt) + "s/" + PM_DECISION_COOLDOWN_SEC + "s)");
+      return;
+    }
+  }
+
   var cards = agentdesk.db.query(
     "SELECT title, github_issue_number, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
     [cardId]
@@ -26,17 +44,20 @@ function notifyPmdPendingDecision(cardId, reason) {
     (issueUrl ? "\nGitHub: " + issueUrl : "") +
     "\n\n/api/pm-decision API로 처리해주세요. (resume/rework/dismiss/requeue)";
 
-  // Send to PMD channel — find pmd_channel from agents or use config
-  var pmdChannel = agentdesk.config.get("pmd_channel_id");
+  // Send to PMD channel — use canonical config key (same as timeouts.js)
+  var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
   if (!pmdChannel) {
-    // Fallback: find agent with 'pmd' in id
-    var pmdAgents = agentdesk.db.query(
-      "SELECT discord_channel_id FROM agents WHERE id LIKE '%pmd%' LIMIT 1"
-    );
-    if (pmdAgents.length > 0) pmdChannel = pmdAgents[0].discord_channel_id;
+    agentdesk.log.warn("[PM dedup] review-automation: no kanban_manager_channel_id configured, skipping");
+    return;
   }
-  if (pmdChannel) {
-    sendDiscordReview("channel:" + pmdChannel, msg, "notify");
+  var pmdTarget = "channel:" + pmdChannel;
+  if (pmdTarget) {
+    sendDiscordReview(pmdTarget, msg, "announce");
+    // #231: Set cooldown with TTL
+    agentdesk.db.execute(
+      "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
+      [cooldownKey, String(Math.floor(Date.now() / 1000)), String(PM_DECISION_COOLDOWN_SEC)]
+    );
   }
 }
 
