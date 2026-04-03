@@ -383,6 +383,16 @@ mod tests {
         assert!(output.contains("⚙\u{fe0f} Edit"));
         assert!(output.contains("Done"));
     }
+
+    #[test]
+    fn test_filter_codex_tool_logs_ignores_non_tool_brackets() {
+        let input = "[Summary] final answer\n[Stopped]\n[HTTP2] note\n[Note] something";
+        let output = filter_codex_tool_logs(input);
+        assert_eq!(
+            output, input,
+            "Non-tool bracketed lines must not be filtered"
+        );
+    }
 }
 
 pub(super) fn floor_char_boundary(s: &str, index: usize) -> usize {
@@ -702,16 +712,36 @@ fn parse_table_cells(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// Known tool names emitted by Claude Code / Codex CLI.
+const CODEX_TOOL_NAMES: &[&str] = &[
+    "Bash",
+    "Read",
+    "Edit",
+    "Write",
+    "Grep",
+    "Glob",
+    "Agent",
+    "LSP",
+    "WebFetch",
+    "WebSearch",
+    "Skill",
+    "NotebookEdit",
+    "TaskOutput",
+    "TaskStop",
+];
+
 /// Filter Codex CLI tool-call log lines from response text.
 /// Replaces `[Bash] command...` -> `⚙️ Bash`, etc.
-/// Only the tool-log lines are replaced; all other text is preserved verbatim.
-/// Lines inside code blocks (``` ... ```) are NOT filtered.
+/// Only lines matching known tool names are replaced; all other text is
+/// preserved verbatim. Lines inside code blocks (``` ... ```) are NOT filtered.
 pub(super) fn filter_codex_tool_logs(s: &str) -> String {
     use regex::Regex;
     use std::sync::LazyLock;
 
-    static TOOL_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^\s*\[([A-Z][a-zA-Z0-9]*)\](\s.*)?$").unwrap());
+    static TOOL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        let names = CODEX_TOOL_NAMES.join("|");
+        Regex::new(&format!(r"^\s*\[({names})\](\s.*)?$")).unwrap()
+    });
 
     let mut result = Vec::new();
     let mut in_code_block = false;
@@ -736,6 +766,21 @@ pub(super) fn filter_codex_tool_logs(s: &str) -> String {
     }
 
     result.join("\n")
+}
+
+/// Apply Codex tool-log filter (if provider is Codex) then format for Discord.
+pub(super) fn format_for_discord_with_provider(
+    s: &str,
+    provider: &crate::services::provider::ProviderKind,
+) -> String {
+    let filtered;
+    let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
+        filtered = filter_codex_tool_logs(s);
+        &filtered
+    } else {
+        s
+    };
+    format_for_discord(input)
 }
 
 /// Mechanical formatting for Discord readability.

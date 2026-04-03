@@ -2190,8 +2190,10 @@ pub async fn run_bot(
                         let restart_notice = if state.full_response.trim().is_empty() {
                             "⚠️ dcserver 재시작으로 중단됨 — 곧 복원됩니다".to_string()
                         } else {
-                            let partial =
-                                formatting::format_for_discord(state.full_response.trim());
+                            let partial = formatting::format_for_discord_with_provider(
+                                state.full_response.trim(),
+                                &provider_for_shutdown,
+                            );
                             format!("{partial}\n\n⚠️ dcserver 재시작으로 중단됨 — 곧 복원됩니다")
                         };
                         let edit_fut = channel.edit_message(
