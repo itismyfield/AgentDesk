@@ -1,7 +1,7 @@
 use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower::ServiceExt;
 
 fn test_db() -> Db {
@@ -15,9 +15,9 @@ fn test_db() -> Db {
 fn seed_test_agents(db: &Db) {
     let c = db.separate_conn().unwrap();
     c.execute_batch(
-        "INSERT OR IGNORE INTO agents (id, name, discord_channel_id) VALUES ('ch-td', 'TD', 'ch-td');
-         INSERT OR IGNORE INTO agents (id, name, discord_channel_id) VALUES ('ag1', 'Agent1', 'ag1');
-         INSERT OR IGNORE INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', 'ch-1');"
+        "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('ch-td', 'TD', '111', '222');
+         INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('ag1', 'Agent1', '333', '444');
+         INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '555', '666');"
     ).unwrap();
 }
 
@@ -766,6 +766,14 @@ async fn dispatch_create_and_get() {
         })
         .unwrap();
     assert_eq!(card_status, "requested");
+    let notify_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
+            [&dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(notify_count, 1, "API create must persist notify outbox");
     drop(conn);
 
     // GET single dispatch
@@ -786,6 +794,84 @@ async fn dispatch_create_and_get() {
         .unwrap();
     let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
     assert_eq!(json2["dispatch"]["id"], dispatch_id);
+}
+
+#[tokio::test]
+async fn resume_requested_creates_single_notify_backed_dispatch() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-resume");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, created_at, updated_at
+            ) VALUES (
+                'card-resume', 'Resume Card', 'requested', 'medium', 'agent-resume',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-resume/resume")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let dispatch_id = json["action"]["dispatch_id"].as_str().unwrap().to_string();
+    assert_eq!(json["action"]["type"], "new_implementation_dispatch");
+
+    let conn = db.lock().unwrap();
+    let (dispatch_type, dispatch_status, context, latest_dispatch_id): (
+        String,
+        String,
+        String,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT td.dispatch_type, td.status, td.context, kc.latest_dispatch_id
+             FROM task_dispatches td
+             JOIN kanban_cards kc ON kc.id = td.kanban_card_id
+             WHERE td.id = ?1",
+            [&dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(dispatch_type, "implementation");
+    assert_eq!(dispatch_status, "pending");
+    assert_eq!(latest_dispatch_id.as_deref(), Some(dispatch_id.as_str()));
+    let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
+    assert_eq!(context_json["resume"], true);
+    assert_eq!(context_json["resumed_from"], "requested");
+
+    let notify_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
+            [&dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        notify_count, 1,
+        "resume(requested) must create exactly one notify outbox row via canonical core"
+    );
 }
 
 #[tokio::test]
@@ -1283,7 +1369,7 @@ fn seed_repo(db: &Db, repo_id: &str) {
 fn seed_agent(db: &Db, agent_id: &str) {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES (?1, ?1, 'ch1', 'ch2')",
+        "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES (?1, ?1, '111', '222')",
         [agent_id],
     )
     .unwrap();
@@ -2294,17 +2380,28 @@ async fn auto_queue_activate_unified_thread_run_dispatches_to_same_run() {
         )
         .unwrap();
     assert_eq!(entry_status, "dispatched");
-    assert!(dispatch_id.is_some(), "entry must have linked dispatch_id");
+    let dispatch_id = dispatch_id.expect("entry must have linked dispatch_id");
 
     // Verify the dispatch references the correct card
     let dispatch_card: String = conn
         .query_row(
             "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
-            [&dispatch_id.unwrap()],
+            [&dispatch_id],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(dispatch_card, "card-unified-1");
+    let notify_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
+            [&dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        notify_count, 1,
+        "auto-queue activation must use canonical notify persistence"
+    );
 
     // Second entry stays pending (sequential within group)
     let entry2_status: String = conn
@@ -2470,7 +2567,10 @@ fn seed_parallel_test_cards(db: &Db) -> Vec<String> {
     for i in 1..=4 {
         conn.execute(
             &format!(
-                "INSERT INTO agents (id, name, provider, status) VALUES ('agent-{i}', 'Agent{i}', 'claude', 'idle')"
+                "INSERT INTO agents (id, name, provider, status, discord_channel_id, discord_channel_alt)
+                 VALUES ('agent-{i}', 'Agent{i}', 'claude', 'idle', '{}', '{}')",
+                1000 + i,
+                2000 + i,
             ),
             [],
         )

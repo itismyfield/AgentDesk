@@ -2418,30 +2418,6 @@ pub async fn get_card_thread(
 
 // ── #144: Dispatch Notification Outbox ───────────────────────
 
-/// Ensure a dispatch notification exists for async delivery via the outbox worker.
-///
-/// Replaces `tokio::spawn(send_dispatch_to_discord(...))` with a durable
-/// outbox insert. The worker loop drains these entries and calls
-/// `send_dispatch_to_discord` / `handle_completed_dispatch_followups`.
-pub(crate) fn queue_dispatch_notify(
-    db: &crate::db::Db,
-    dispatch_id: &str,
-    agent_id: &str,
-    card_id: &str,
-    title: &str,
-) {
-    if let Ok(conn) = db.separate_conn() {
-        crate::dispatch::ensure_dispatch_notify_outbox_on_conn(
-            &conn,
-            dispatch_id,
-            agent_id,
-            card_id,
-            title,
-        )
-        .ok();
-    }
-}
-
 /// Queue a dispatch completion followup for async processing.
 ///
 /// Replaces `tokio::spawn(handle_completed_dispatch_followups(...))`.

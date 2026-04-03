@@ -452,23 +452,7 @@ pub fn fire_state_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from: &st
 ///
 /// Used when re-entering the same state (e.g., restarting review from awaiting_dod)
 /// where `fire_state_hooks` would no-op because from == to.
-///
-/// #108: Also detects dispatches created by on_enter hooks (e.g., OnReviewEnter
-/// creating a review dispatch during dispute) and queues Discord notifications.
-/// Without this, callers had to manually re-query the DB to find new dispatches,
-/// which introduced race conditions.
 pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &str) {
-    // Capture pre-hook dispatch ID to detect new dispatches created by hooks (#108)
-    let pre_dispatch_id: Option<String> = db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten()
-    });
-
     crate::pipeline::ensure_loaded();
     let effective = db.lock().ok().map(|conn| {
         let repo_id: Option<String> = conn
@@ -503,10 +487,6 @@ pub fn fire_enter_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, state: &s
         }
     }
     drain_hook_side_effects(db, engine);
-
-    // #108: After all hooks, check if new dispatches were created and queue
-    // Discord notifications. Same pattern as fire_transition_hooks.
-    notify_new_dispatches_after_hooks(db, card_id, pre_dispatch_id.as_deref());
 }
 
 /// Fire hooks for a status transition that already happened in the DB.
@@ -520,17 +500,6 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     if let Ok(conn) = db.lock() {
         log_audit(&conn, card_id, from, to, "hook", "OK");
     }
-
-    // Capture pre-hook dispatch ID to detect new dispatches created by hooks
-    let pre_dispatch_id: Option<String> = db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten()
-    });
 
     // Resolve effective pipeline for this card (#135)
     crate::pipeline::ensure_loaded();
@@ -577,100 +546,6 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     }
 
     drain_hook_side_effects(db, engine);
-
-    // After all hooks, check if a new dispatch was created (by onCardTerminal, onReviewEnter, etc.)
-    // and send Discord notification. This handles auto-queue's next dispatch creation.
-    notify_new_dispatches_after_hooks(db, card_id, pre_dispatch_id.as_deref());
-}
-
-/// Check if hooks created new dispatches and backfill missing notify outbox rows.
-///
-/// Uses rowid-based ordering to find dispatches created during hook execution.
-/// Cross-card misroute is prevented by using each dispatch's own kanban_card_id
-/// for routing (not the triggering card's ID). The card_id filter is intentionally
-/// NOT applied because hooks (e.g. OnCardTerminal → auto-queue) legitimately
-/// create dispatches for OTHER cards.
-fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Option<&str>) {
-    // Query ALL pending dispatches inserted after the pre-hook snapshot (by rowid).
-    // Uses rowid comparison instead of timestamp — SQLite datetime('now') has only
-    // second-level resolution, so dispatches created in the same second would be missed.
-    // Rowid is monotonically increasing and survives same-second inserts.
-    //
-    // No card_id filter: hooks like OnCardTerminal can create dispatches for different
-    // cards (e.g. auto-queue dispatching the next ready card). Each dispatch's own
-    // kanban_card_id is used for Discord routing below, preventing cross-card misroute.
-    let pending_dispatches: Vec<(String, String, String, String)> = db
-        .lock()
-        .ok()
-        .map(|conn| {
-            if let Some(pre_id) = pre_dispatch_id {
-                // Find any pending dispatches inserted after the pre-hook dispatch (by rowid)
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT td.id, td.to_agent_id, td.kanban_card_id, kc.title \
-                         FROM task_dispatches td \
-                         JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
-                         WHERE td.status = 'pending' \
-                           AND td.rowid > (SELECT rowid FROM task_dispatches WHERE id = ?1)",
-                    )
-                    .ok();
-                stmt.as_mut()
-                    .and_then(|s| {
-                        s.query_map(rusqlite::params![pre_id], |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                        })
-                        .ok()
-                    })
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    .unwrap_or_default()
-            } else {
-                // No pre-hook dispatch — find any pending dispatch for this card
-                // that matches the current latest_dispatch_id
-                let latest_id: Option<String> = conn
-                    .query_row(
-                        "SELECT latest_dispatch_id FROM kanban_cards WHERE id = ?1",
-                        [card_id],
-                        |row| row.get(0),
-                    )
-                    .ok()
-                    .flatten();
-                let Some(lid) = latest_id else {
-                    return Vec::new();
-                };
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT td.id, td.to_agent_id, td.kanban_card_id, kc.title \
-                         FROM task_dispatches td \
-                         JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
-                         WHERE td.id = ?1 AND td.status = 'pending'",
-                    )
-                    .ok();
-                stmt.as_mut()
-                    .and_then(|s| {
-                        s.query_map([&lid], |row| {
-                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                        })
-                        .ok()
-                    })
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    .unwrap_or_default()
-            }
-        })
-        .unwrap_or_default();
-
-    if pending_dispatches.is_empty() {
-        return;
-    }
-
-    for (dispatch_id, agent_id, dispatch_card_id, title) in pending_dispatches {
-        crate::server::routes::dispatches::queue_dispatch_notify(
-            db,
-            &dispatch_id,
-            &agent_id,
-            &dispatch_card_id,
-            &title,
-        );
-    }
 }
 
 /// Sync GitHub issue state when kanban card transitions (pipeline-driven).
@@ -1166,147 +1041,6 @@ mod tests {
         let result =
             transition_status_with_opts(&db, &engine, "card-force", "in_progress", "pmd", true);
         assert!(result.is_ok(), "force=true should bypass dispatch check");
-    }
-
-    /// Regression: same-second dispatch creation must still be detected by rowid comparison.
-    /// Previously used `created_at >` which has only second-level resolution and missed
-    /// dispatches created in the same wall-clock second.
-    #[test]
-    fn notify_query_detects_same_second_dispatch_via_rowid() {
-        let db = test_db();
-        seed_card(&db, "card-notify", "in_progress");
-
-        // Insert pre-hook dispatch (simulates the dispatch that existed before hooks ran)
-        let pre_dispatch_id = "dispatch-pre";
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
-                 VALUES (?1, 'card-notify', 'agent-1', 'implementation', 'dispatched', 'Pre', datetime('now'), datetime('now'))",
-                [pre_dispatch_id],
-            ).unwrap();
-        }
-
-        // Insert hook-created dispatch in the SAME second (same datetime('now'))
-        let new_dispatch_id = "dispatch-new";
-        {
-            let conn = db.lock().unwrap();
-            // Use the exact same timestamp to simulate same-second creation
-            let pre_ts: String = conn
-                .query_row(
-                    "SELECT created_at FROM task_dispatches WHERE id = ?1",
-                    [pre_dispatch_id],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
-                 VALUES (?1, 'card-notify', 'agent-1', 'review', 'pending', 'New', ?2, ?2)",
-                rusqlite::params![new_dispatch_id, pre_ts],
-            ).unwrap();
-            conn.execute(
-                "UPDATE kanban_cards SET latest_dispatch_id = ?1 WHERE id = 'card-notify'",
-                [new_dispatch_id],
-            )
-            .unwrap();
-        }
-
-        // Verify: the rowid-based query used by notify_new_dispatches_after_hooks
-        // finds the new dispatch even though created_at is identical.
-        // No card_id filter — hooks can create dispatches for any card.
-        let found: Vec<String> = {
-            let conn = db.lock().unwrap();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT td.id FROM task_dispatches td \
-                 JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
-                 WHERE td.status = 'pending' \
-                   AND td.rowid > (SELECT rowid FROM task_dispatches WHERE id = ?1)",
-                )
-                .unwrap();
-            stmt.query_map(rusqlite::params![pre_dispatch_id], |row| row.get(0))
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect()
-        };
-
-        assert_eq!(found.len(), 1, "must find exactly 1 new dispatch");
-        assert_eq!(found[0], new_dispatch_id);
-
-        // Counter-check: the old timestamp-based approach would fail here
-        let found_by_ts: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT COUNT(*) FROM task_dispatches td \
-                 WHERE td.status = 'pending' \
-                   AND td.created_at > (SELECT created_at FROM task_dispatches WHERE id = ?1)",
-                [pre_dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
-        assert_eq!(
-            found_by_ts, 0,
-            "timestamp-based query misses same-second dispatch (proving rowid fix is necessary)"
-        );
-    }
-
-    /// Regression: cross-card dispatches created by hooks (e.g. auto-queue) must be
-    /// found by the notification query AND each dispatch must carry its own card_id
-    /// so that send_dispatch_to_discord routes to the correct thread/issue.
-    #[test]
-    fn notify_query_finds_cross_card_dispatch_with_correct_card_id() {
-        let db = test_db();
-        seed_card(&db, "card-x", "in_progress");
-        seed_card(&db, "card-y", "ready");
-
-        // Pre-hook dispatch for card-x (the card going through transition)
-        let pre_id = "dispatch-x-pre";
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
-                 VALUES (?1, 'card-x', 'agent-1', 'implementation', 'dispatched', 'X-Pre', datetime('now'), datetime('now'))",
-                [pre_id],
-            ).unwrap();
-        }
-
-        // Hook creates dispatch for card-y (auto-queue dispatching next card)
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
-                 VALUES ('dispatch-y-new', 'card-y', 'agent-1', 'implementation', 'pending', 'Y-New', datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-        }
-
-        // The rowid-based query (no card_id filter) must find card-y's dispatch
-        let found: Vec<(String, String)> = {
-            let conn = db.lock().unwrap();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT td.id, td.kanban_card_id FROM task_dispatches td \
-                 JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
-                 WHERE td.status = 'pending' \
-                   AND td.rowid > (SELECT rowid FROM task_dispatches WHERE id = ?1)",
-                )
-                .unwrap();
-            stmt.query_map(rusqlite::params![pre_id], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
-        };
-
-        assert_eq!(found.len(), 1, "must find cross-card dispatch");
-        assert_eq!(found[0].0, "dispatch-y-new");
-        // Critical: the dispatch carries card-y's ID, not card-x's
-        assert_eq!(
-            found[0].1, "card-y",
-            "dispatch must carry its own card_id for correct routing"
-        );
     }
 
     #[test]

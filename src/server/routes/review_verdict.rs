@@ -2368,6 +2368,30 @@ mod tests {
         .await;
         assert_eq!(status1, StatusCode::OK);
 
+        let conn = db.lock().unwrap();
+        let latest_dispatch_id: String = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-dup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (dispatch_type, notify_count): (String, i64) = conn
+            .query_row(
+                "SELECT td.dispatch_type, \
+                        (SELECT COUNT(*) FROM dispatch_outbox o WHERE o.dispatch_id = td.id AND o.action = 'notify') \
+                 FROM task_dispatches td WHERE td.id = ?1",
+                [&latest_dispatch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(dispatch_type, "rework");
+        assert_eq!(
+            notify_count, 1,
+            "review-decision accept must create rework dispatch via canonical notify persistence"
+        );
+        drop(conn);
+
         // Second accept should fail — dispatch already consumed
         let (status2, _) = submit_review_decision(
             State(state),
