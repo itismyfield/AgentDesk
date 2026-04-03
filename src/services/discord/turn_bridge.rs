@@ -1315,11 +1315,14 @@ pub(super) fn spawn_turn_bridge(
                             let watcher_claimed = {
                                 #[cfg(unix)]
                                 {
-                                    super::tmux::try_claim_watcher(
+                                    // #243: Use claim_or_replace to avoid races where
+                                    // a stale watcher blocks the new turn's watcher.
+                                    super::tmux::claim_or_replace_watcher(
                                         &shared_owned.tmux_watchers,
                                         channel_id,
                                         handle,
-                                    )
+                                    );
+                                    true
                                 }
                                 #[cfg(not(unix))]
                                 {
