@@ -414,7 +414,20 @@ fn process_gemini_json_event(
     match json.get("type").and_then(|v| v.as_str()) {
         Some("init") => {
             if let Some(session_id) = json.get("session_id").and_then(|v| v.as_str()) {
-                state.last_resume_selector = observed_session_to_resume_selector(session_id);
+                // P1: Preserve existing numeric/latest resume selector — only update
+                // if the observed value is itself resumable, or we have no selector yet.
+                let observed = observed_session_to_resume_selector(session_id);
+                let existing_is_resumable =
+                    state.last_resume_selector.as_ref().map_or(false, |s| {
+                        s == GEMINI_RESUME_LATEST || s.chars().all(|c| c.is_ascii_digit())
+                    });
+                if !existing_is_resumable
+                    || observed
+                        .as_ref()
+                        .map_or(false, |o| o != GEMINI_RESUME_LATEST)
+                {
+                    state.last_resume_selector = observed;
+                }
                 let _ = sender.send(StreamMessage::Init {
                     session_id: state
                         .last_resume_selector
@@ -1006,6 +1019,24 @@ mod tests {
         match rx.recv().unwrap() {
             StreamMessage::Text { content } => assert_eq!(content, "hello"),
             other => panic!("expected Text, got {:?}", other),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn init_uuid_metadata_does_not_override_numeric_resume_selector() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = GeminiAttemptState::new(Some("12".to_string()));
+        process_gemini_stream_line(
+            r#"{"type":"init","session_id":"aa678e6b-c6d3-4dd2-9197-58580c00cc6c","model":"gemini-2.5-flash"}"#,
+            &mut state,
+            &tx,
+        );
+
+        assert_eq!(state.last_resume_selector.as_deref(), Some("12"));
+        match rx.recv().unwrap() {
+            StreamMessage::Init { session_id } => assert_eq!(session_id, "12"),
+            other => panic!("expected Init, got {:?}", other),
         }
         assert!(rx.try_recv().is_err());
     }
