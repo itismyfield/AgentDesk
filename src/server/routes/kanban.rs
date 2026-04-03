@@ -733,7 +733,7 @@ pub async fn retry_card(
 
         // Create dispatch directly (bypass policy to avoid from===requested skip)
         if !agent_id_for_dispatch.is_empty() {
-            let retry_result = crate::dispatch::create_dispatch(
+            let _retry_result = crate::dispatch::create_dispatch(
                 &state.db,
                 &state.engine,
                 &card_id_owned,
@@ -742,18 +742,6 @@ pub async fn retry_card(
                 &card_title,
                 &json!({"retry": true}),
             );
-            // Async Discord notification — use exact dispatch_id to avoid
-            // latest_dispatch_id re-query race.
-            if let Ok(ref d) = retry_result {
-                let dispatch_id = d["id"].as_str().unwrap_or("").to_string();
-                super::dispatches::queue_dispatch_notify(
-                    &state.db,
-                    &dispatch_id,
-                    &agent_id_for_dispatch,
-                    &card_id_owned,
-                    &card_title,
-                );
-            }
         }
     } // drop conn lock
 
@@ -861,7 +849,7 @@ pub async fn redispatch_card(
 
         // Create dispatch directly (bypass policy to avoid from===requested skip)
         if !agent_id.is_empty() {
-            let redispatch_result = crate::dispatch::create_dispatch(
+            let _redispatch_result = crate::dispatch::create_dispatch(
                 &state.db,
                 &state.engine,
                 &card_id_owned,
@@ -870,18 +858,6 @@ pub async fn redispatch_card(
                 &card_title,
                 &json!({"redispatch": true}),
             );
-            // Async Discord notification — use exact dispatch_id to avoid
-            // latest_dispatch_id re-query race.
-            if let Ok(ref d) = redispatch_result {
-                let dispatch_id = d["id"].as_str().unwrap_or("").to_string();
-                super::dispatches::queue_dispatch_notify(
-                    &state.db,
-                    &dispatch_id,
-                    &agent_id,
-                    &card_id_owned,
-                    &card_title,
-                );
-            }
         }
     }
 

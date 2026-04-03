@@ -1291,14 +1291,6 @@ pub async fn activate(
         .ok();
         drop(conn);
 
-        super::dispatches::queue_dispatch_notify(
-            &state.db,
-            &dispatch_id,
-            &agent_id,
-            &card_id,
-            &title,
-        );
-
         // #140: Update local per-agent count so subsequent iterations respect max_concurrent_per_agent
         *agent_dispatch_counts.entry(agent_id.clone()).or_insert(0) += 1;
 

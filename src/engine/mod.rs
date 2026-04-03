@@ -565,8 +565,6 @@ impl PolicyEngine {
     /// Calls `intent::execute_intents` to apply them and returns the result.
     /// Transitions in the result should be fed into `fire_transition_hooks`.
     ///
-    /// #248: Also collects dispatches created synchronously by dispatch.create()
-    /// from the `__createdDispatches` outbox (populated by dispatch_create_sync).
     pub fn drain_pending_intents(&self) -> intent::IntentExecutionResult {
         let inner = match self.inner.lock() {
             Ok(g) => g,
@@ -580,35 +578,19 @@ impl PolicyEngine {
                 };
             }
         };
-        // #248: Drain both pending intents AND created dispatches outbox in one JS eval
-        let (json_str, outbox_str): (String, String) = inner.context.with(|ctx| {
+        let json_str: String = inner.context.with(|ctx| {
             let code = r#"
                 var arr = agentdesk.__pendingIntents || [];
                 agentdesk.__pendingIntents = [];
-                var outbox = agentdesk.__createdDispatches || [];
-                agentdesk.__createdDispatches = [];
-                JSON.stringify([arr, outbox]);
+                JSON.stringify(arr);
             "#;
             let result: rquickjs::Result<String> = ctx.eval(code);
             match result {
-                Ok(json) => {
-                    // Parse the two-element array
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(&json).unwrap_or(serde_json::json!([[], []]));
-                    let intents = parsed
-                        .get(0)
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "[]".to_string());
-                    let outbox = parsed
-                        .get(1)
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "[]".to_string());
-                    (intents, outbox)
-                }
+                Ok(json) => json,
                 Err(e) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ⚠ drain_pending_intents: JS eval error: {e}");
-                    ("[]".to_string(), "[]".to_string())
+                    "[]".to_string()
                 }
             }
         });
@@ -617,7 +599,7 @@ impl PolicyEngine {
         drop(inner);
 
         let intents: Vec<intent::Intent> = serde_json::from_str(&json_str).unwrap_or_default();
-        let mut result = if intents.is_empty() {
+        let result = if intents.is_empty() {
             intent::IntentExecutionResult {
                 transitions: Vec::new(),
                 created_dispatches: Vec::new(),
@@ -627,44 +609,6 @@ impl PolicyEngine {
             intent::execute_intents(&self.db, intents)
         };
 
-        // #248: Collect synchronously created dispatches from outbox
-        let outbox_items: Vec<serde_json::Value> =
-            serde_json::from_str(&outbox_str).unwrap_or_default();
-        for item in outbox_items {
-            let dispatch_id = item
-                .get("dispatch_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let card_id = item
-                .get("card_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let agent_id = item
-                .get("agent_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let dispatch_type = item
-                .get("dispatch_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let issue_url = item
-                .get("issue_url")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            if !dispatch_id.is_empty() {
-                result.created_dispatches.push(intent::CreatedDispatch {
-                    dispatch_id,
-                    card_id,
-                    agent_id,
-                    dispatch_type,
-                    issue_url,
-                });
-            }
-        }
         result
     }
 

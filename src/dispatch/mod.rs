@@ -487,10 +487,39 @@ pub fn create_dispatch(
     Ok(dispatch)
 }
 
+/// Ensure a durable notify outbox row exists for a dispatch.
+///
+/// Used both by the authoritative dispatch creation transaction and by
+/// fallback/backfill paths that must avoid duplicate notify entries.
+pub(crate) fn ensure_dispatch_notify_outbox_on_conn(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+    agent_id: &str,
+    card_id: &str,
+    title: &str,
+) -> rusqlite::Result<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
+        [dispatch_id],
+        |row| row.get(0),
+    )?;
+    if exists {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title) \
+         VALUES (?1, 'notify', ?2, ?3, ?4)",
+        rusqlite::params![dispatch_id, agent_id, card_id, title],
+    )?;
+    Ok(true)
+}
+
 /// #155: Insert dispatch row + apply DispatchAttached transition intents atomically.
 ///
 /// Both the `task_dispatches` INSERT and the card-state intents execute inside
 /// a single transaction so that reducer failure rolls back the dispatch row too.
+/// #249 also inserts the notify outbox row inside the same transaction.
 fn apply_dispatch_attached_intents(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -558,6 +587,7 @@ fn apply_dispatch_attached_intents(
             }
             return Err(e.into());
         }
+        ensure_dispatch_notify_outbox_on_conn(conn, dispatch_id, to_agent_id, card_id, title)?;
         for intent in &decision.intents {
             transition::execute_intent_on_conn(conn, intent)?;
         }
@@ -784,9 +814,9 @@ fn complete_dispatch_inner(
     Ok(dispatch)
 }
 
-/// Send Discord notifications for any pending dispatches created after `pre_hook_max_rowid`.
-/// Uses the `dispatch_notified` dedup guard in `send_dispatch_to_discord` to avoid
-/// double-notifying dispatches already handled by `notify_new_dispatches_after_hooks`.
+/// Backfill missing notify outbox rows for pending dispatches created after `pre_hook_max_rowid`.
+/// This is a fallback for legacy/manual dispatch creation paths that may still
+/// bypass the authoritative transaction helper.
 pub(crate) fn notify_hook_created_dispatches(db: &Db, pre_hook_max_rowid: i64) {
     let dispatches: Vec<(String, String, String, String)> = db
         .separate_conn()
@@ -818,15 +848,11 @@ pub(crate) fn notify_hook_created_dispatches(db: &Db, pre_hook_max_rowid: i64) {
         return;
     }
 
-    // #144: Queue via dispatch outbox instead of tokio::spawn.
-    for (dispatch_id, agent_id, card_id, title) in dispatches {
-        crate::server::routes::dispatches::queue_dispatch_notify(
-            db,
-            &dispatch_id,
-            &agent_id,
-            &card_id,
-            &title,
-        );
+    if let Ok(conn) = db.separate_conn() {
+        for (dispatch_id, agent_id, card_id, title) in dispatches {
+            ensure_dispatch_notify_outbox_on_conn(&conn, &dispatch_id, &agent_id, &card_id, &title)
+                .ok();
+        }
     }
 }
 
@@ -1071,6 +1097,15 @@ mod tests {
             [agent_id],
         )
         .unwrap();
+    }
+
+    fn count_notify_outbox(conn: &rusqlite::Connection, dispatch_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1357,6 +1392,11 @@ mod tests {
         let dispatch = query_dispatch_row(&conn, &dispatch_id).unwrap();
         assert_eq!(dispatch["status"], "pending");
         assert_eq!(dispatch["kanban_card_id"], "card-core");
+        assert_eq!(
+            count_notify_outbox(&conn, &dispatch_id),
+            1,
+            "core creation must atomically enqueue exactly one notify outbox row"
+        );
         drop(conn);
 
         // create_dispatch delegates to core — verify same invariants
@@ -1372,6 +1412,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(full_dispatch["status"], "pending");
+    }
+
+    #[test]
+    fn create_dispatch_core_with_id_atomically_inserts_notify_outbox() {
+        let db = test_db();
+        seed_card(&db, "card-core-id", "ready");
+
+        let (dispatch_id, old_status, reused) = create_dispatch_core_with_id(
+            &db,
+            "dispatch-core-id",
+            "card-core-id",
+            "agent-1",
+            "implementation",
+            "Core with id",
+            &json!({}),
+        )
+        .unwrap();
+
+        assert_eq!(dispatch_id, "dispatch-core-id");
+        assert_eq!(old_status, "ready");
+        assert!(!reused);
+
+        let conn = db.separate_conn().unwrap();
+        assert_eq!(
+            count_notify_outbox(&conn, "dispatch-core-id"),
+            1,
+            "pre-assigned dispatch creation must also enqueue notify outbox inside the transaction"
+        );
     }
 
     #[test]
@@ -1663,5 +1731,41 @@ mod tests {
         .unwrap();
         assert!(reused2, "duplicate must be flagged as reused");
         assert_eq!(id1, id2);
+
+        let conn = db.separate_conn().unwrap();
+        assert_eq!(
+            count_notify_outbox(&conn, &id1),
+            1,
+            "reused dispatch must not create a second notify outbox row"
+        );
+    }
+
+    #[test]
+    fn notify_hook_created_dispatches_backfills_missing_outbox_idempotently() {
+        let db = test_db();
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at) \
+             VALUES ('card-backfill', 'Backfill Card', 'requested', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('dispatch-backfill', 'card-backfill', 'agent-1', 'implementation', 'pending', 'Backfill Title', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        notify_hook_created_dispatches(&db, 0);
+        notify_hook_created_dispatches(&db, 0);
+
+        let conn = db.separate_conn().unwrap();
+        assert_eq!(
+            count_notify_outbox(&conn, "dispatch-backfill"),
+            1,
+            "fallback backfill must create at most one notify outbox row"
+        );
     }
 }
