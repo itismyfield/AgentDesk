@@ -2456,7 +2456,7 @@ async fn notify_source_agent(
     Ok(())
 }
 
-/// Parse a channel identifier — numeric ID or name alias (e.g. "윤호키우기") → u64.
+/// Parse a channel identifier — numeric ID or name alias (e.g. "윤호네비서") → u64.
 fn resolve_channel_to_u64(raw: &str) -> Result<u64, String> {
     raw.parse::<u64>().or_else(|_| {
         crate::server::routes::dispatches::resolve_channel_alias_pub(raw)
