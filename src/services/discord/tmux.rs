@@ -835,15 +835,13 @@ pub(super) async fn tmux_output_watcher(
         // #225 P1-2: Track relay success across branches
         let mut relay_ok = false;
         if !full_response.trim().is_empty() {
-            let is_codex = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
-                .map(|(p, _)| matches!(p, crate::services::provider::ProviderKind::Codex))
-                .unwrap_or(false);
-            let filtered = if is_codex {
-                super::formatting::filter_codex_tool_logs(&full_response)
-            } else {
-                full_response.clone()
-            };
-            let formatted = format_for_discord(&filtered);
+            let watcher_provider = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
+                .map(|(p, _)| p)
+                .unwrap_or(crate::services::provider::ProviderKind::Claude);
+            let formatted = super::formatting::format_for_discord_with_provider(
+                &full_response,
+                &watcher_provider,
+            );
             let prefixed = formatted.to_string();
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
