@@ -57,49 +57,56 @@ function getTimeoutInterval(key, fallbackMinutes) {
   return "-" + val + " minutes";
 }
 
-// #231: PM Decision notification dedup.
-// Reasons are collected across all tier handlers in a scheduler pass
-// (Rust fires 30s→1min→5min→onTick back-to-back when cadences align).
-// _flushPMDecisions runs in onTick (legacy, 5min) AFTER all tiered handlers,
-// combining every reason into one notification per card.
-// For non-aligned ticks (only 30s or 30s+1min fire), buffered reasons
-// are deferred until the next onTick (~5 min max delay — acceptable for
-// PM decisions which are human-reviewed asynchronously).
-var _pendingPMDecisions = {};  // { cardId: { title: string, reasons: string[] } }
+// #231: PM Decision notification dedup — durable kv_meta buffer.
+// Reasons are persisted to kv_meta (survives restart) and flushed
+// in onTick (legacy, 5min) AFTER all tiered handlers to combine
+// cross-tier reasons into one notification per card.
 var PM_DECISION_COOLDOWN_SEC = 300;  // 5-min cross-tick cooldown
+var PM_PENDING_TTL_SEC = 600;  // 10-min TTL for pending entries (auto-cleanup)
 
 function _queuePMDecision(cardId, title, reason) {
-  if (!_pendingPMDecisions[cardId]) {
-    _pendingPMDecisions[cardId] = { title: title, reasons: [] };
+  var pendingKey = "pm_pending:" + cardId;
+  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
+  var entry;
+  if (existing.length > 0) {
+    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
   }
-  // Deduplicate identical reasons within the same buffer
-  if (_pendingPMDecisions[cardId].reasons.indexOf(reason) === -1) {
-    _pendingPMDecisions[cardId].reasons.push(reason);
+  if (!entry) {
+    entry = { title: title, reasons: [] };
   }
+  // Deduplicate identical reasons
+  if (entry.reasons.indexOf(reason) === -1) {
+    entry.reasons.push(reason);
+  }
+  agentdesk.db.execute(
+    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
+    [pendingKey, JSON.stringify(entry), String(PM_PENDING_TTL_SEC)]
+  );
 }
 
 function _flushPMDecisions() {
   var pmdCh = getPMDChannel();
-  if (!pmdCh) { _pendingPMDecisions = {}; return; }
-  var ids = Object.keys(_pendingPMDecisions);
-  for (var i = 0; i < ids.length; i++) {
-    var cardId = ids[i];
-    var entry = _pendingPMDecisions[cardId];
-    // Cross-tick cooldown: skip if notified recently
+  var rows = agentdesk.db.query("SELECT key, value FROM kv_meta WHERE key LIKE 'pm_pending:%'");
+  for (var i = 0; i < rows.length; i++) {
+    var cardId = rows[i].key.substring("pm_pending:".length);
+    var entry;
+    try { entry = JSON.parse(rows[i].value); } catch(e) { continue; }
+    // Delete the pending entry first (consumed regardless of cooldown)
+    agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [rows[i].key]);
+    // Cross-tick cooldown: skip send if notified recently
     var cooldownKey = "pm_decision_sent:" + cardId;
-    var existing = agentdesk.db.query(
-      "SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]
-    );
-    if (existing.length > 0) {
-      var sentAt = parseInt(existing[0].value, 10) || 0;
+    var cooldownRow = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]);
+    if (cooldownRow.length > 0) {
+      var sentAt = parseInt(cooldownRow[0].value, 10) || 0;
       var now = Math.floor(Date.now() / 1000);
       if (now - sentAt < PM_DECISION_COOLDOWN_SEC) {
         agentdesk.log.info("[PM dedup] Skipped notification for card " + cardId +
-          " (" + entry.reasons.length + " reasons, cooldown " + (now - sentAt) + "s/" + PM_DECISION_COOLDOWN_SEC + "s)");
+          " (" + entry.reasons.length + " reasons, cooldown " + (now - sentAt) + "s)");
         continue;
       }
     }
     // Send combined notification with all accumulated reasons
+    if (!pmdCh) continue;
     var msg = "[PM Decision] " + entry.title + "\n사유: " + entry.reasons.join("; ");
     agentdesk.message.queue(pmdCh, msg, "announce", "system");
     // Set cooldown with TTL
@@ -108,19 +115,13 @@ function _flushPMDecisions() {
       [cooldownKey, String(Math.floor(Date.now() / 1000)), String(PM_DECISION_COOLDOWN_SEC)]
     );
   }
-  _pendingPMDecisions = {};
 }
 
 var timeouts = {
   name: "timeouts",
   priority: 100,
 
-  // Legacy onTick: fires after all tiered handlers when cadences align
-  // (Rust scheduler: 30s→1min→5min→onTick). Used as the single flush
-  // point for #231 PM decision dedup so cross-tier reasons are combined.
-  onTick: function() {
-    _flushPMDecisions();
-  },
+  // onTick: assigned after object literal (line ~1282) to flush PM decisions (#231)
 
   // ── Section methods (extracted from onTick for tiered execution) ──
 
@@ -358,6 +359,10 @@ var timeouts = {
       // #117: sync canonical review state
       agentdesk.reviewState.sync(staleReviews[k].card_id, "idle");
       agentdesk.log.warn("[timeout] Stale review → pending_decision: card " + staleReviews[k].card_id);
+      // #231: Queue deduped PM notification
+      var staleRevInfo = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [staleReviews[k].card_id]);
+      var staleRevTitle = (staleRevInfo.length > 0) ? staleRevInfo[0].title : staleReviews[k].card_id;
+      _queuePMDecision(staleReviews[k].card_id, staleRevTitle, "stale review — dispatch 완료 30분+ verdict 없음 → pending_decision");
     }
   },
 
@@ -381,6 +386,10 @@ var timeouts = {
       // #117: sync canonical review state
       agentdesk.reviewState.sync(stuckDod[d].id, "idle");
       agentdesk.log.warn("[timeout] DoD await timeout → pending_decision: card " + stuckDod[d].id);
+      // #231: Queue deduped PM notification
+      var dodInfo = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [stuckDod[d].id]);
+      var dodTitle = (dodInfo.length > 0) ? dodInfo[0].title : stuckDod[d].id;
+      _queuePMDecision(stuckDod[d].id, dodTitle, "DoD 대기 15분 초과 → pending_decision");
     }
   },
 
@@ -1270,7 +1279,9 @@ timeouts.onTick5min = function(ev) {
   agentdesk.log.debug("[tick5min] total " + (Date.now() - start) + "ms");
 };
 
-// Legacy onTick: no-op (tiered hooks handle everything)
-timeouts.onTick = function() {};
+// Legacy onTick: flush PM decision buffer after all tiered handlers (#231)
+timeouts.onTick = function() {
+  _flushPMDecisions();
+};
 
 agentdesk.registerPolicy(timeouts);
