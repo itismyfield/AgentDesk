@@ -37,6 +37,39 @@ pub(super) fn try_claim_watcher(
     }
 }
 
+/// #243: Claim a channel for watcher creation, cancelling any existing watcher.
+/// Unlike try_claim_watcher (which skips if occupied), this always succeeds:
+/// if a watcher already exists, it is cancelled and replaced.
+/// Returns true if a fresh slot was created, false if an existing watcher was replaced.
+pub(super) fn claim_or_replace_watcher(
+    watchers: &dashmap::DashMap<ChannelId, TmuxWatcherHandle>,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+) -> bool {
+    use dashmap::mapref::entry::Entry;
+    match watchers.entry(channel_id) {
+        Entry::Occupied(mut entry) => {
+            // Cancel the existing watcher — it will exit on its next loop iteration
+            // and skip DashMap removal (since cancel is set).
+            entry
+                .get()
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] ♻ watcher replaced for channel {} — cancelled stale watcher",
+                channel_id
+            );
+            entry.insert(handle);
+            false
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(handle);
+            true
+        }
+    }
+}
+
 use crate::utils::format::tail_with_ellipsis;
 
 use crate::services::tmux_common::{current_tmux_owner_marker, tmux_exact_target, tmux_owner_path};
@@ -1062,8 +1095,12 @@ pub(super) async fn tmux_output_watcher(
         }
     }
 
-    // Cleanup
-    shared.tmux_watchers.remove(&channel_id);
+    // Cleanup: only remove from DashMap if we weren't cancelled/replaced.
+    // #243: When a watcher is cancelled (replaced by a new watcher or shutdown),
+    // the replacement already occupies the slot — removing would delete the new entry.
+    if !cancel.load(Ordering::Relaxed) {
+        shared.tmux_watchers.remove(&channel_id);
+    }
 
     // Kill dead tmux session to prevent accumulation (especially for thread sessions
     // which are created per-dispatch and would otherwise linger for 24h).
