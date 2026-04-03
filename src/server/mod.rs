@@ -107,6 +107,19 @@ pub async fn run(
         });
     }
 
+    // #189: Spawn DM reply notification retry loop (5-min interval)
+    {
+        let dm_retry_db = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                crate::services::discord::retry_failed_dm_notifications(&dm_retry_db).await;
+            }
+        });
+    }
+
     // Resolve dashboard dist path relative to runtime root or binary location
     let dashboard_dir = crate::cli::agentdesk_runtime_root()
         .map(|r| r.join("dashboard/dist"))

@@ -2429,8 +2429,7 @@ async fn notify_source_agent(
 
     // Prefer the stored channel_id from the pending row (supports alt/thread channels)
     let channel_id: u64 = if let Some(ch) = stored_channel_id {
-        ch.parse::<u64>()
-            .map_err(|e| format!("invalid stored channel_id: {e}"))?
+        resolve_channel_to_u64(ch)?
     } else {
         // Fall back to the agent's primary discord_channel_id
         let db = db.clone();
@@ -2446,10 +2445,8 @@ async fn notify_source_agent(
         })
         .await
         .map_err(|e| format!("join: {e}"))??;
-        ch_opt
-            .ok_or("agent has no discord_channel_id")?
-            .parse::<u64>()
-            .map_err(|e| format!("invalid channel id: {e}"))?
+        let raw = ch_opt.ok_or("agent has no discord_channel_id")?;
+        resolve_channel_to_u64(&raw)?
     };
 
     let message = format!("DM_REPLY:{reply_id} from {username}: {answer}");
@@ -2457,6 +2454,93 @@ async fn notify_source_agent(
         .await
         .map_err(|e| format!("{e}"))?;
     Ok(())
+}
+
+/// Parse a channel identifier — numeric ID or name alias (e.g. "윤호키우기") → u64.
+fn resolve_channel_to_u64(raw: &str) -> Result<u64, String> {
+    raw.parse::<u64>().or_else(|_| {
+        crate::server::routes::dispatches::resolve_channel_alias_pub(raw)
+            .ok_or_else(|| format!("cannot resolve channel '{raw}'"))
+    })
+}
+
+/// Retry DM reply notifications that previously failed (`_notify_failed` in context).
+/// Called from the 5-min tick loop.
+pub async fn retry_failed_dm_notifications(db: &crate::db::Db) {
+    let db2 = db.clone();
+    let entries: Vec<(i64, String, String, Option<String>)> =
+        match tokio::task::spawn_blocking(move || {
+            let conn = db2.separate_conn().map_err(|e| format!("{e}"))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
+                     WHERE status = 'consumed' AND json_extract(context, '$._notify_failed') IS NOT NULL \
+                     LIMIT 10",
+                )
+                .map_err(|e| format!("{e}"))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .map_err(|e| format!("{e}"))?
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            Ok::<_, String>(rows)
+        })
+        .await
+        {
+            Ok(Ok(v)) => v,
+            _ => return,
+        };
+
+    if entries.is_empty() {
+        return;
+    }
+
+    for (id, source_agent, context_str, channel_id) in entries {
+        let ctx: serde_json::Value =
+            serde_json::from_str(&context_str).unwrap_or(serde_json::json!({}));
+        let answer = ctx
+            .get("_answer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if answer.is_empty() {
+            continue;
+        }
+
+        match notify_source_agent(
+            db,
+            &source_agent,
+            id,
+            channel_id.as_deref(),
+            "(retry)",
+            &answer,
+        )
+        .await
+        {
+            Ok(()) => {
+                // Clear _notify_failed on success
+                let db3 = db.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = db3.separate_conn() {
+                        let _ = conn.execute(
+                            "UPDATE pending_dm_replies SET context = \
+                             json_remove(context, '$._notify_failed', '$._notify_error') \
+                             WHERE id = ?1",
+                            rusqlite::params![id],
+                        );
+                    }
+                })
+                .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ✉️ DM reply retry OK: id={id} agent={source_agent}");
+            }
+            Err(e) => {
+                eprintln!("  [dm-reply] retry still failing id={id}: {e}");
+            }
+        }
+    }
 }
 
 struct ConsumedDmReply {
