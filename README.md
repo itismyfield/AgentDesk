@@ -120,6 +120,9 @@ A React-based dashboard served from the same binary:
 ### Round-Table Meetings
 Coordinate multi-agent discussions with structured rounds, automatic transcript recording, and post-meeting issue extraction to GitHub.
 
+### OpenClaw Migration
+Import OpenClaw agent/runtime state into AgentDesk with `agentdesk migrate openclaw`. See [`docs/openclaw-migrate.md`](docs/openclaw-migrate.md) for dry-run, apply, resume, and audit output details.
+
 ## Configuration
 
 ### agentdesk.yaml

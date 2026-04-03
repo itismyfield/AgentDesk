@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
@@ -17,7 +17,7 @@ pub struct Config {
     pub data: DataConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
@@ -27,7 +27,7 @@ pub struct ServerConfig {
     pub auth_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DiscordConfig {
     #[serde(default)]
     pub bots: std::collections::HashMap<String, BotConfig>,
@@ -35,7 +35,7 @@ pub struct DiscordConfig {
     pub guild_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BotConfig {
     #[serde(default)]
     pub token: Option<String>,
@@ -43,7 +43,7 @@ pub struct BotConfig {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentDef {
     pub id: String,
     pub name: String,
@@ -59,7 +59,7 @@ pub struct AgentDef {
     pub avatar_emoji: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct GitHubConfig {
     #[serde(default)]
     pub repos: Vec<String>,
@@ -67,7 +67,7 @@ pub struct GitHubConfig {
     pub sync_interval_minutes: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PoliciesConfig {
     #[serde(default = "default_policies_dir")]
     pub dir: PathBuf,
@@ -75,7 +75,7 @@ pub struct PoliciesConfig {
     pub hot_reload: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DataConfig {
     #[serde(default = "default_data_dir")]
     pub dir: PathBuf,
@@ -221,6 +221,27 @@ pub fn load() -> Result<Config> {
     std::fs::create_dir_all(&config.data.dir)?;
 
     Ok(config)
+}
+
+pub fn load_from_path_graceful(path: &Path) -> Config {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
+            Ok(config) => config,
+            Err(_) => Config::default(),
+        },
+        Err(_) => Config::default(),
+    }
+}
+
+pub fn save_to_path(path: &Path, config: &Config) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let rendered = serde_yaml::to_string(config)
+        .with_context(|| format!("Failed to serialize config for {}", path.display()))?;
+    std::fs::write(path, rendered)
+        .with_context(|| format!("Failed to write config {}", path.display()))?;
+    Ok(())
 }
 
 fn resolve_graceful_config_path(

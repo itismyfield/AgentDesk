@@ -261,6 +261,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Migration helpers
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -277,6 +282,12 @@ enum DispatchAction {
         /// Kanban card ID
         card_id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum MigrateAction {
+    /// Import OpenClaw durable state into AgentDesk
+    Openclaw(cli::migrate::OpenClawMigrateArgs),
 }
 
 #[derive(Subcommand)]
@@ -525,6 +536,11 @@ fn main() -> Result<()> {
                 } else {
                     exit_for_cli(cli::doctor::cmd_doctor(fix, json))
                 };
+            }
+            Some(Commands::Migrate { action }) => {
+                return exit_for_cli(match action {
+                    MigrateAction::Openclaw(args) => cli::migrate::cmd_migrate_openclaw(args),
+                });
             }
             None => {
                 // No subcommand — fall through to server start

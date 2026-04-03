@@ -9,6 +9,7 @@ mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
 mod org_schema;
+pub(crate) mod org_writer;
 mod prompt_builder;
 mod recovery;
 pub(crate) mod restart_report;

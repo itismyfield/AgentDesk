@@ -29,7 +29,11 @@ pub(super) fn role_map_path() -> Option<PathBuf> {
 }
 
 pub(super) fn org_schema_path() -> Option<PathBuf> {
-    agentdesk_root().map(|root| root.join("config").join("org.yaml"))
+    agentdesk_root().map(|root| org_schema_path_for_root(&root))
+}
+
+pub(crate) fn org_schema_path_for_root(root: &Path) -> PathBuf {
+    root.join("config").join("org.yaml")
 }
 
 pub(super) fn discord_uploads_root() -> Option<PathBuf> {
