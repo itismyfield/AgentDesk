@@ -865,16 +865,6 @@ fn create_and_notify(
     )
     .map_err(|e| format!("dispatch creation failed: {e}"))?;
 
-    let dispatch_id = dispatch["id"].as_str().unwrap_or("").to_string();
-    let was_reused = dispatch
-        .get("__reused")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    if !was_reused {
-        super::dispatches::queue_dispatch_notify(&state.db, &dispatch_id, agent_id, card_id, title);
-    }
-
     Ok(dispatch)
 }
 

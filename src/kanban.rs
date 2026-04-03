@@ -377,32 +377,6 @@ pub fn drain_hook_side_effects(db: &Db, engine: &PolicyEngine) {
         let mut transitions = intent_result.transitions;
         transitions.extend(engine.drain_pending_transitions());
 
-        // #108: Immediately notify dispatches created by JS policy intents.
-        // Without this, dispatches created outside fire_transition_hooks
-        // (e.g. timeouts.js, review-automation.js) would sit pending until
-        // the [I-0] 2min recovery sweep picked them up.
-        for cd in &intent_result.created_dispatches {
-            let title: String = db
-                .separate_conn()
-                .ok()
-                .and_then(|conn| {
-                    conn.query_row(
-                        "SELECT title FROM kanban_cards WHERE id = ?1",
-                        [&cd.card_id],
-                        |row| row.get(0),
-                    )
-                    .ok()
-                })
-                .unwrap_or_default();
-            crate::server::routes::dispatches::queue_dispatch_notify(
-                db,
-                &cd.dispatch_id,
-                &cd.agent_id,
-                &cd.card_id,
-                &title,
-            );
-        }
-
         if transitions.is_empty() {
             break;
         }
@@ -609,7 +583,7 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     notify_new_dispatches_after_hooks(db, card_id, pre_dispatch_id.as_deref());
 }
 
-/// Check if hooks created new dispatches and send Discord notifications.
+/// Check if hooks created new dispatches and backfill missing notify outbox rows.
 ///
 /// Uses rowid-based ordering to find dispatches created during hook execution.
 /// Cross-card misroute is prevented by using each dispatch's own kanban_card_id
@@ -688,8 +662,6 @@ fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Op
         return;
     }
 
-    // #144: Queue via dispatch outbox instead of tokio::spawn.
-    // Each dispatch uses its own kanban_card_id for correct thread/issue routing.
     for (dispatch_id, agent_id, dispatch_card_id, title) in pending_dispatches {
         crate::server::routes::dispatches::queue_dispatch_notify(
             db,

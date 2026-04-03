@@ -21,7 +21,7 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
     globals.set("agentdesk", ad)?;
 
     // ── agentdesk.__pendingIntents — intent accumulator for deferred mutations (#121)
-    ctx.eval::<(), _>(r#"agentdesk.__pendingIntents = []; agentdesk.__createdDispatches = [];"#)?;
+    ctx.eval::<(), _>(r#"agentdesk.__pendingIntents = [];"#)?;
 
     // ── agentdesk.__generateId — UUID v4 generation from Rust
     let gen_id = Function::new(ctx.clone(), || -> String {
@@ -486,7 +486,7 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
     ad.set("dispatch", dispatch_obj)?;
 
-    // JS wrapper — #121: push CreateDispatch intent with pre-assigned ID
+    // JS wrapper — synchronous dispatch creation with Rust-side validation/INSERT
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
@@ -499,11 +499,6 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 var result = JSON.parse(sync(cardId, agentId, dt, t));
                 if (result.error) throw new Error(result.error);
                 var dispatchId = result.dispatch_id;
-                // #248: Push to outbox for post-hook notification dispatch
-                if (result.outbox && !result.reused) {
-                    agentdesk.__createdDispatches = agentdesk.__createdDispatches || [];
-                    agentdesk.__createdDispatches.push(result.outbox);
-                }
                 return dispatchId;
             };
             var rawFail = agentdesk.dispatch.__mark_failed_raw;
@@ -540,9 +535,9 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     Ok(())
 }
 
-/// #248: Synchronous dispatch creation — validates, inserts into DB immediately,
-/// and returns the dispatch ID. Side effects (kickoff hooks, notifications) are
-/// deferred to the `__createdDispatches` outbox, drained after hook execution.
+/// #248/#249: Synchronous dispatch creation — validates and inserts into DB
+/// immediately. The notify outbox row is now inserted atomically inside
+/// `create_dispatch_core`, so no JS-side outbox buffering is needed.
 fn dispatch_create_sync(
     db: &Db,
     card_id: &str,
@@ -561,9 +556,7 @@ fn dispatch_create_sync(
     ) {
         Ok((dispatch_id, _old_status, reused)) => {
             if reused {
-                return format!(
-                    r#"{{"dispatch_id":"{dispatch_id}","card_id":"{card_id}","agent_id":"{agent_id}","reused":true}}"#
-                );
+                return format!(r#"{{"dispatch_id":"{dispatch_id}","reused":true}}"#);
             }
             // #117/#158: Update card_review_state for review-decision dispatches
             if dispatch_type == "review-decision" {
@@ -577,28 +570,7 @@ fn dispatch_create_sync(
                     .to_string(),
                 );
             }
-            // Get issue URL for Discord notification (used by drain outbox)
-            let issue_url: Option<String> = db.separate_conn().ok().and_then(|conn| {
-                conn.query_row(
-                    "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
-                    [card_id],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten()
-            });
-            // Serialize created dispatch info for outbox collection
-            let outbox_json = serde_json::json!({
-                "dispatch_id": dispatch_id,
-                "card_id": card_id,
-                "agent_id": agent_id,
-                "dispatch_type": dispatch_type,
-                "issue_url": issue_url,
-            });
-            format!(
-                r#"{{"dispatch_id":"{dispatch_id}","card_id":"{card_id}","agent_id":"{agent_id}","outbox":{}}}"#,
-                outbox_json
-            )
+            format!(r#"{{"dispatch_id":"{dispatch_id}"}}"#)
         }
         Err(e) => {
             format!(r#"{{"error":"{}"}}"#, e.to_string().replace('"', "'"))

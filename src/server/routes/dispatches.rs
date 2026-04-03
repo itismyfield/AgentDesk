@@ -255,18 +255,7 @@ pub async fn create_dispatch(
         &context,
     ) {
         Ok(d) => {
-            let dispatch_id = d["id"].as_str().unwrap_or("").to_string();
             let was_reused = d.get("__reused").and_then(|v| v.as_bool()).unwrap_or(false);
-            // Only send Discord notification for genuinely new dispatches (#173)
-            if !was_reused {
-                queue_dispatch_notify(
-                    &state.db,
-                    &dispatch_id,
-                    &body.to_agent_id,
-                    &body.kanban_card_id,
-                    &body.title,
-                );
-            }
             let status_code = if was_reused {
                 StatusCode::OK
             } else {
@@ -889,7 +878,7 @@ async fn send_dispatch_to_discord_inner(
     };
 
     // For review dispatches, use the alternate channel (counter-model)
-    let mut use_alt = use_counter_model_channel(dispatch_type.as_deref());
+    let use_alt = use_counter_model_channel(dispatch_type.as_deref());
 
     // #145: Check if this dispatch is in a unified thread auto-queue run (dispatch_id path)
     // #218: Check unified run by dispatch_id first, then card_id for review/rework
@@ -1668,8 +1657,9 @@ async fn try_reuse_thread(
     }
 }
 
-/// Send review result notification to the agent's PRIMARY channel.
-/// Called after a counter-model review dispatch completes.
+/// Handle primary-channel followup after a counter-model review completes.
+/// pass/unknown verdicts send an immediate message; improve/rework/reject
+/// create a review-decision dispatch whose notify row is delivered by outbox.
 pub(super) async fn send_review_result_to_primary(
     db: &crate::db::Db,
     card_id: &str,
@@ -1694,6 +1684,73 @@ pub(super) async fn send_review_result_to_primary(
             Err(_) => return Err(format!("card {card_id} not found or missing agent")),
         }
     };
+
+    // For improve/rework/reject: create a review-decision dispatch via the
+    // authoritative path and let the outbox worker deliver the message.
+    if verdict != "pass" && verdict != "approved" && verdict != "unknown" {
+        // #118: If approach-change already created a rework dispatch (review_status = rework_pending),
+        // skip creating the review-decision dispatch to avoid double dispatch.
+        {
+            let skip = db
+                .lock()
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT review_status FROM kanban_cards WHERE id = ?1",
+                        [card_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .map(|s| s == "rework_pending")
+                .unwrap_or(false);
+            if skip {
+                tracing::info!(
+                    "[review-followup] #118 skipping review-decision for {card_id} — approach-change rework already dispatched"
+                );
+                return Ok(());
+            }
+        }
+
+        return match crate::dispatch::create_dispatch_core(
+            db,
+            card_id,
+            &agent_id,
+            "review-decision",
+            &format!("[리뷰 검토] {title}"),
+            &serde_json::json!({"verdict": verdict}),
+        ) {
+            Ok((id, _old_status, _reused)) => {
+                if let Ok(conn) = db.lock() {
+                    crate::engine::ops::review_state_sync_on_conn(
+                        &conn,
+                        &serde_json::json!({
+                            "card_id": card_id,
+                            "state": "suggestion_pending",
+                            "pending_dispatch_id": id,
+                            "last_verdict": verdict,
+                        })
+                        .to_string(),
+                    );
+                }
+                tracing::info!(
+                    "[review-followup] enqueued review-decision dispatch {} for card {}",
+                    id,
+                    card_id
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[review-followup] skipping review-decision dispatch for card {card_id}: {e}"
+                );
+                Err(format!(
+                    "create_dispatch_core failed for review-decision: {e}"
+                ))
+            }
+        };
+    }
 
     // Resolve channel ID (may be a name alias)
     let channel_id_num: u64 = match channel_id.parse() {
@@ -1804,11 +1861,6 @@ pub(super) async fn send_review_result_to_primary(
     } else {
         channel_id.clone()
     };
-    let sending_to_thread = active_thread_id
-        .as_ref()
-        .map(|t| *t == target_channel)
-        .unwrap_or(false);
-
     // For pass/approved verdict, just send a simple notification (no action needed).
     // #116: accept is NOT a counter-model verdict — it's a review-decision action.
     if verdict == "pass" || verdict == "approved" {
@@ -1875,154 +1927,7 @@ pub(super) async fn send_review_result_to_primary(
         }
     }
 
-    // #118: If approach-change already created a rework dispatch (review_status = rework_pending),
-    // skip creating the review-decision dispatch to avoid double dispatch.
-    {
-        let skip = db
-            .lock()
-            .ok()
-            .and_then(|conn| {
-                conn.query_row(
-                    "SELECT review_status FROM kanban_cards WHERE id = ?1",
-                    [card_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .ok()
-                .flatten()
-            })
-            .map(|s| s == "rework_pending")
-            .unwrap_or(false);
-        if skip {
-            tracing::info!(
-                "[review-followup] #118 skipping review-decision for {card_id} — approach-change rework already dispatched"
-            );
-            return Ok(()); // Not an error — intentional skip
-        }
-    }
-
-    // For improve/rework/reject: create a review-decision dispatch via central create_dispatch_core
-    // to enforce the done terminal guard (prevents review-decision on done cards).
-    let dispatch_id = match crate::dispatch::create_dispatch_core(
-        db,
-        card_id,
-        &agent_id,
-        "review-decision",
-        &format!("[리뷰 검토] {title}"),
-        &serde_json::json!({"verdict": verdict}),
-    ) {
-        Ok((id, _old_status, _reused)) => {
-            // #117/#158: Update canonical card_review_state via unified entrypoint
-            if let Ok(conn) = db.lock() {
-                crate::engine::ops::review_state_sync_on_conn(
-                    &conn,
-                    &serde_json::json!({
-                        "card_id": card_id,
-                        "state": "suggestion_pending",
-                        "pending_dispatch_id": id,
-                        "last_verdict": verdict,
-                    })
-                    .to_string(),
-                );
-            }
-            id
-        }
-        Err(e) => {
-            tracing::warn!(
-                "[review-followup] skipping review-decision dispatch for card {card_id}: {e}"
-            );
-            return Err(format!(
-                "create_dispatch_core failed for review-decision: {e}"
-            ));
-        }
-    };
-
-    let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
-    let message = format!(
-        "DISPATCH:{dispatch_id} [⚖️ 리뷰 검토] - {title}\n\
-         ⛔ 코드 리뷰 금지 — 이미 완료된 리뷰 결과를 검토하는 단계입니다\n\
-         📝 카운터모델 리뷰 결과: **{verdict}**\n\
-         GitHub 이슈 코멘트에서 피드백을 확인하고 다음 중 하나를 선택하세요:\n\
-         • **수용** → 피드백 반영 수정 후 review-decision API에 `accept` 호출\n\
-         • **반론** → GitHub 코멘트로 이의 제기 후 review-decision API에 `dispute` 호출\n\
-         • **무시** → review-decision API에 `dismiss` 호출{url_line}"
-    );
-    let message = prefix_dispatch_message("review-decision", &message);
-
-    // Send a single review-decision message to existing thread, or just to channel
-    if sending_to_thread {
-        let msg_url = format!(
-            "https://discord.com/api/v10/channels/{}/messages",
-            target_channel
-        );
-        let ok = client
-            .post(&msg_url)
-            .header("Authorization", format!("Bot {}", token))
-            .json(&serde_json::json!({"content": message}))
-            .send()
-            .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false);
-        if ok {
-            if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
-                    rusqlite::params![target_channel, dispatch_id],
-                )
-                .ok();
-                // Mark as notified so timeouts.js [I-0] won't resend
-                conn.execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![format!("dispatch_notified:{}", dispatch_id), dispatch_id],
-                )
-                .ok();
-            }
-            tracing::info!(
-                "[review] Sent review-decision to existing thread {target_channel} for {agent_id}"
-            );
-            Ok(())
-        } else {
-            Err(format!(
-                "discord send failed for review-decision to thread {target_channel}"
-            ))
-        }
-    } else {
-        let url = format!(
-            "https://discord.com/api/v10/channels/{}/messages",
-            target_channel
-        );
-        match client
-            .post(&url)
-            .header("Authorization", format!("Bot {}", token))
-            .json(&serde_json::json!({"content": message}))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                // Mark as notified so timeouts.js [I-0] won't resend
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                        rusqlite::params![
-                            format!("dispatch_notified:{}", dispatch_id),
-                            dispatch_id
-                        ],
-                    )
-                    .ok();
-                }
-                tracing::info!("[review] Sent review result to {agent_id} (channel {channel_id})");
-                Ok(())
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                tracing::warn!("[review] Discord API error {status}");
-                Err(format!("discord API error {status} for review-decision"))
-            }
-            Err(e) => {
-                tracing::warn!("[review] Request failed: {e}");
-                Err(format!("discord request failed for review-decision: {e}"))
-            }
-        }
-    }
+    unreachable!("explicit review verdicts should return earlier");
 }
 
 fn extract_review_verdict(result_json: Option<&str>) -> String {
@@ -2183,6 +2088,10 @@ fn format_dispatch_message(
     dispatch_type: Option<&str>,
     dispatch_context: Option<&str>,
 ) -> String {
+    let context_json = dispatch_context
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
     // Format issue link as markdown hyperlink with angle brackets to suppress embed
     let issue_link = match (issue_url, issue_number) {
         (Some(url), Some(num)) => format!("[{title} #{num}](<{url}>)"),
@@ -2203,41 +2112,45 @@ fn format_dispatch_message(
     };
 
     // Extract reason from context JSON
-    let reason = dispatch_context
-        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
-        .and_then(|v| {
-            // Try common reason fields
-            v.get("resumed_from")
-                .and_then(|r| r.as_str())
-                .map(|s| format!("resume from {s}"))
-                .or_else(|| {
-                    if v.get("retry").and_then(|r| r.as_bool()).unwrap_or(false) {
-                        Some("retry".to_string())
-                    } else if v
-                        .get("redispatch")
-                        .and_then(|r| r.as_bool())
-                        .unwrap_or(false)
-                    {
-                        Some("redispatch".to_string())
-                    } else if v
-                        .get("auto_queue")
-                        .and_then(|r| r.as_bool())
-                        .unwrap_or(false)
-                    {
-                        Some("auto-queue".to_string())
-                    } else if v
-                        .get("auto_accept")
-                        .and_then(|r| r.as_bool())
-                        .unwrap_or(false)
-                    {
-                        Some("auto-accept rework".to_string())
-                    } else {
-                        None
-                    }
-                })
+    let reason = context_json
+        .get("resumed_from")
+        .and_then(|r| r.as_str())
+        .map(|s| format!("resume from {s}"))
+        .or_else(|| {
+            if context_json
+                .get("retry")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false)
+            {
+                Some("retry".to_string())
+            } else if context_json
+                .get("redispatch")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false)
+            {
+                Some("redispatch".to_string())
+            } else if context_json
+                .get("auto_queue")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false)
+            {
+                Some("auto-queue".to_string())
+            } else if context_json
+                .get("auto_accept")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false)
+            {
+                Some("auto-accept rework".to_string())
+            } else {
+                None
+            }
         });
 
     let reason_suffix = reason.map(|r| format!(" ({r})")).unwrap_or_default();
+    let review_verdict = context_json
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
 
     if use_alt {
         let mut message = format!(
@@ -2278,6 +2191,21 @@ fn format_dispatch_message(
              \"items\":[{{\"category\":\"bug|style|perf|security|logic\",\"summary\":\"개별 지적 사항\"}}]\
              {commit_arg}{provider_arg}}}'`"
         ));
+        message
+    } else if dispatch_type == Some("review-decision") {
+        let mut message = format!(
+            "DISPATCH:{dispatch_id} [{type_label}] - {title}\n\
+             ⛔ 코드 리뷰 금지 — 이미 완료된 리뷰 결과를 검토하는 단계입니다\n\
+             📝 카운터모델 리뷰 결과: **{review_verdict}**\n\
+             GitHub 이슈 코멘트에서 피드백을 확인하고 다음 중 하나를 선택하세요:\n\
+             • **수용** → 피드백 반영 수정 후 review-decision API에 `accept` 호출\n\
+             • **반론** → GitHub 코멘트로 이의 제기 후 review-decision API에 `dispute` 호출\n\
+             • **무시** → review-decision API에 `dismiss` 호출"
+        );
+        if !issue_link.is_empty() {
+            message.push('\n');
+            message.push_str(&issue_link);
+        }
         message
     } else if !issue_link.is_empty() {
         format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")
@@ -2490,7 +2418,7 @@ pub async fn get_card_thread(
 
 // ── #144: Dispatch Notification Outbox ───────────────────────
 
-/// Queue a dispatch notification for async delivery via the outbox worker.
+/// Ensure a dispatch notification exists for async delivery via the outbox worker.
 ///
 /// Replaces `tokio::spawn(send_dispatch_to_discord(...))` with a durable
 /// outbox insert. The worker loop drains these entries and calls
@@ -2503,10 +2431,12 @@ pub(crate) fn queue_dispatch_notify(
     title: &str,
 ) {
     if let Ok(conn) = db.separate_conn() {
-        conn.execute(
-            "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title) \
-             VALUES (?1, 'notify', ?2, ?3, ?4)",
-            rusqlite::params![dispatch_id, agent_id, card_id, title],
+        crate::dispatch::ensure_dispatch_notify_outbox_on_conn(
+            &conn,
+            dispatch_id,
+            agent_id,
+            card_id,
+            title,
         )
         .ok();
     }
@@ -2754,6 +2684,30 @@ mod tests {
         ));
         assert!(!message.contains("검토 전용"));
         // Implementation dispatches should NOT include verdict instructions
+        assert!(!message.contains("review-verdict"));
+    }
+
+    #[test]
+    fn review_decision_primary_message_includes_action_instructions() {
+        let message = format_dispatch_message(
+            "dispatch-rd",
+            "[리뷰 검토] Test Card",
+            Some("https://github.com/itismyfield/AgentDesk/issues/249"),
+            Some(249),
+            false,
+            None,
+            None,
+            None,
+            Some("review-decision"),
+            Some(r#"{"verdict":"rework"}"#),
+        );
+
+        assert!(message.contains("[⚖️ 리뷰 검토]"));
+        assert!(message.contains("카운터모델 리뷰 결과: **rework**"));
+        assert!(message.contains("review-decision API에 `accept` 호출"));
+        assert!(message.contains("review-decision API에 `dispute` 호출"));
+        assert!(message.contains("review-decision API에 `dismiss` 호출"));
+        assert!(message.contains("#249](<https://github.com/itismyfield/AgentDesk/issues/249>)"));
         assert!(!message.contains("review-verdict"));
     }
 
