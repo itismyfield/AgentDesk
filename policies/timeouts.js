@@ -57,6 +57,51 @@ function getTimeoutInterval(key, fallbackMinutes) {
   return "-" + val + " minutes";
 }
 
+// #231: PM Decision notification dedup — collect reasons per card within a tick,
+// then flush a single combined notification per card at tick end.
+var _pendingPMDecisions = {};  // { cardId: { title: string, reasons: string[] } }
+var PM_DECISION_COOLDOWN_SEC = 300;  // 5-min cross-tick cooldown
+
+function _queuePMDecision(cardId, title, reason) {
+  if (!_pendingPMDecisions[cardId]) {
+    _pendingPMDecisions[cardId] = { title: title, reasons: [] };
+  }
+  _pendingPMDecisions[cardId].reasons.push(reason);
+}
+
+function _flushPMDecisions() {
+  var pmdCh = getPMDChannel();
+  if (!pmdCh) { _pendingPMDecisions = {}; return; }
+  var ids = Object.keys(_pendingPMDecisions);
+  for (var i = 0; i < ids.length; i++) {
+    var cardId = ids[i];
+    var entry = _pendingPMDecisions[cardId];
+    // Cross-tick cooldown: skip if notified recently
+    var cooldownKey = "pm_decision_sent:" + cardId;
+    var existing = agentdesk.db.query(
+      "SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]
+    );
+    if (existing.length > 0) {
+      var sentAt = parseInt(existing[0].value, 10) || 0;
+      var now = Math.floor(Date.now() / 1000);
+      if (now - sentAt < PM_DECISION_COOLDOWN_SEC) {
+        agentdesk.log.info("[PM dedup] Skipped duplicate for card " + cardId +
+          " (cooldown " + (now - sentAt) + "s/" + PM_DECISION_COOLDOWN_SEC + "s)");
+        continue;
+      }
+    }
+    // Send combined notification
+    var msg = "[PM Decision] " + entry.title + "\n사유: " + entry.reasons.join("; ");
+    agentdesk.message.queue(pmdCh, msg, "announce", "system");
+    // Set cooldown with TTL
+    agentdesk.db.execute(
+      "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
+      [cooldownKey, String(Math.floor(Date.now() / 1000)), String(PM_DECISION_COOLDOWN_SEC)]
+    );
+  }
+  _pendingPMDecisions = {};
+}
+
 var timeouts = {
   name: "timeouts",
   priority: 100,
@@ -175,13 +220,11 @@ var timeouts = {
           // #117: sync canonical review state
           agentdesk.reviewState.sync(card.id, "idle");
           agentdesk.log.warn("[reconcile] Card " + card.id + " → " + rPending + ": " + reasons.join("; "));
-          // PMD notification via async outbox (#120)
-          var pmdCh = agentdesk.config.get("kanban_manager_channel_id");
-          if (pmdCh) {
-            var cardTitle2 = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [card.id]);
-            var t2 = cardTitle2.length > 0 ? cardTitle2[0].title : card.id;
-            var pmdMsg = "[PM Decision] " + t2 + "\n사유: " + reasons.join("; ");
-            agentdesk.message.queue("channel:" + pmdCh, pmdMsg, "announce", "system");
+          // #231: Queue deduped PM notification (flushed at tick end)
+          var cardTitle2 = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [card.id]);
+          var t2 = cardTitle2.length > 0 ? cardTitle2[0].title : card.id;
+          for (var ri = 0; ri < reasons.length; ri++) {
+            _queuePMDecision(card.id, t2, reasons[ri]);
           }
           continue;
         }
@@ -236,23 +279,13 @@ var timeouts = {
           [rc.id]
         );
         agentdesk.log.warn("[timeout] Card " + rc.id + " " + aInitial + " timeout → " + aPending + " (" + MAX_DISPATCH_RETRIES + " retries exhausted)");
-        // PMD에게 결정 요청
+        // #231: Queue deduped PM notification
         var cardInfo = agentdesk.db.query(
-          "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
+          "SELECT title FROM kanban_cards WHERE id = ?",
           [rc.id]
         );
         var cardTitle = (cardInfo.length > 0) ? cardInfo[0].title : rc.id;
-        var cardUrl = (cardInfo.length > 0 && cardInfo[0].github_issue_url) ? "\n" + cardInfo[0].github_issue_url : "";
-        var assignee = (cardInfo.length > 0 && cardInfo[0].assigned_agent_id) ? cardInfo[0].assigned_agent_id : "미배정";
-        var kmChannel = getPMDChannel();
-        if (kmChannel) {
-          agentdesk.message.queue(
-            kmChannel,
-            "[PM Decision] " + cardTitle + "\n사유: " + MAX_DISPATCH_RETRIES + " retries exhausted",
-            "announce",
-            "system"
-          );
-        }
+        _queuePMDecision(rc.id, cardTitle, MAX_DISPATCH_RETRIES + " retries exhausted");
       }
     }
   },
@@ -277,23 +310,13 @@ var timeouts = {
         [staleInProgress[j].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " " + bInProgress + " stale → " + bBlocked);
-      // PMD에게 결정 요청 (announce bot)
+      // #231: Queue deduped PM notification
       var stalledInfo = agentdesk.db.query(
-        "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
+        "SELECT title FROM kanban_cards WHERE id = ?",
         [staleInProgress[j].id]
       );
       var stalledTitle = (stalledInfo.length > 0) ? stalledInfo[0].title : staleInProgress[j].id;
-      var stalledUrl = (stalledInfo.length > 0 && stalledInfo[0].github_issue_url) ? "\n" + stalledInfo[0].github_issue_url : "";
-      var stalledAssignee = (stalledInfo.length > 0 && stalledInfo[0].assigned_agent_id) ? stalledInfo[0].assigned_agent_id : "미배정";
-      var kmChannel2 = getPMDChannel();
-      if (kmChannel2) {
-        agentdesk.message.queue(
-          kmChannel2,
-          "[Stalled] " + stalledTitle + " (담당: " + stalledAssignee + ")" + stalledUrl + "\n" + staleMin + "분+ 활동 없음 → blocked",
-          "announce",
-          "system"
-        );
-      }
+      _queuePMDecision(staleInProgress[j].id, stalledTitle, staleMin + "분+ 활동 없음 → blocked");
     }
   },
 
@@ -1071,16 +1094,8 @@ var timeouts = {
       agentdesk.kanban.setReviewStatus(oc.id, null, {suggestion_pending_at: null});
       agentdesk.reviewState.sync(oc.id, "idle");
 
-      var kmChannel = getPMDChannel();
-      if (kmChannel) {
-        agentdesk.message.queue(
-          kmChannel,
-          "⚠️ [orphan-review] #" + (oc.github_issue_number || "?") + " " +
-          (oc.title || oc.id) + "\nreview 상태인데 dispatch 없음 → pending_decision 전환 (PMD 결정 필요)",
-          "announce",
-          "system"
-        );
-      }
+      // #231: Queue deduped PM notification
+      _queuePMDecision(oc.id, (oc.title || oc.id), "orphan review — dispatch 없음 → pending_decision");
     }
   },
 
@@ -1188,6 +1203,7 @@ timeouts.onTick30s = function(ev) {
   agentdesk.log.debug("[tick30s][I] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_K(); } catch(e) { agentdesk.log.warn("[tick30s] K error: " + e); }
   agentdesk.log.debug("[tick30s][K] " + (Date.now() - t) + "ms");
+  _flushPMDecisions();  // #231: flush deduped PM notifications
   agentdesk.log.debug("[tick30s] total " + (Date.now() - start) + "ms");
 };
 
@@ -1208,6 +1224,7 @@ timeouts.onTick1min = function(ev) {
   agentdesk.log.debug("[tick1min][L] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_N(); } catch(e) { agentdesk.log.warn("[tick1min] N error: " + e); }
   agentdesk.log.debug("[tick1min][N] " + (Date.now() - t) + "ms");
+  _flushPMDecisions();  // #231: flush deduped PM notifications
   agentdesk.log.debug("[tick1min] total " + (Date.now() - start) + "ms");
 };
 
@@ -1234,6 +1251,7 @@ timeouts.onTick5min = function(ev) {
   agentdesk.log.debug("[tick5min][H] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_M(); } catch(e) { agentdesk.log.warn("[tick5min] M error: " + e); }
   agentdesk.log.debug("[tick5min][M] " + (Date.now() - t) + "ms");
+  _flushPMDecisions();  // #231: flush deduped PM notifications
   // DISABLED — token counting unreliable (double-count, stale after /clear). Re-enable after fix.
   // if (timeouts.onContextCheck) {
   //   t = Date.now(); try { timeouts.onContextCheck(); } catch(e) { agentdesk.log.warn("[tick5min] ctx error: " + e); }
