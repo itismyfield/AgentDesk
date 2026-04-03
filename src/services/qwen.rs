@@ -1212,8 +1212,8 @@ fn send_followup_to_tmux(
             Ok(FollowupResult::Delivered)
         }
         ReadOutputResult::SessionDied { .. } => Ok(FollowupResult::RecreateSession {
-                error: "session died during follow-up output reading".to_string(),
-            }),
+            error: "session died during follow-up output reading".to_string(),
+        }),
     }
 }
 

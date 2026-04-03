@@ -8,6 +8,7 @@ pub mod departments;
 pub mod discord;
 pub mod dispatched_sessions;
 pub mod dispatches;
+pub mod dm_reply;
 pub mod docs;
 pub mod github;
 pub mod github_dashboard;
@@ -357,6 +358,8 @@ pub fn api_router(
             get(discord::channel_messages),
         )
         .route("/discord/channels/{id}", get(discord::channel_info))
+        // DM reply tracking (#189)
+        .route("/dm-reply/register", post(dm_reply::register_handler))
         // Round-table meetings
         .route(
             "/round-table-meetings",

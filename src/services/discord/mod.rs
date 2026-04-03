@@ -2343,8 +2343,8 @@ pub(super) async fn check_owner(user_id: UserId, shared: &Arc<SharedData>) -> bo
 }
 
 /// Check for pending DM replies and consume them. The answer text is stored
-/// in the consumed row's context (as `_answer`), and the source agent will
-/// pick it up on next poll. Returns true if a pending entry was found and consumed.
+/// in the consumed row's context (as `_answer`), and a notification is sent
+/// to the source agent's Discord channel so its session can process the reply.
 pub(super) async fn try_handle_pending_dm_reply(
     db: &crate::db::Db,
     msg: &serenity::Message,
@@ -2357,6 +2357,7 @@ pub(super) async fn try_handle_pending_dm_reply(
         return false;
     }
     let user_id_str = msg.author.id.get().to_string();
+    let username = msg.author.name.clone();
     let db = db.clone();
     let answer_owned = answer.to_string();
     let result = tokio::task::spawn_blocking(move || {
@@ -2372,6 +2373,26 @@ pub(super) async fn try_handle_pending_dm_reply(
                 info.source_agent,
                 info.id
             );
+
+            // Notify the source agent's Discord channel
+            let db2 = info.db.clone();
+            let source_agent = info.source_agent.clone();
+            let reply_id = info.id;
+            let answer_for_notify = info.answer.clone();
+            tokio::spawn(async move {
+                if let Err(e) = notify_source_agent(
+                    &db2,
+                    &source_agent,
+                    reply_id,
+                    &username,
+                    &answer_for_notify,
+                )
+                .await
+                {
+                    eprintln!("  [dm-reply] notify source agent failed: {e}");
+                }
+            });
+
             true
         }
         Ok(None) => false,
@@ -2382,9 +2403,46 @@ pub(super) async fn try_handle_pending_dm_reply(
     }
 }
 
+/// Send a notification to the source agent's Discord channel about the DM reply.
+async fn notify_source_agent(
+    db: &crate::db::Db,
+    source_agent: &str,
+    reply_id: i64,
+    username: &str,
+    answer: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let token =
+        crate::credential::read_bot_token("announce").ok_or("no announce bot token configured")?;
+
+    // Look up the source agent's discord_channel_id
+    let db = db.clone();
+    let agent_name = source_agent.to_string();
+    let channel_id: u64 = tokio::task::spawn_blocking(move || {
+        let conn = db.separate_conn()?;
+        conn.query_row(
+            "SELECT discord_channel_id FROM agents WHERE id = ?1",
+            rusqlite::params![agent_name],
+            |row| {
+                let ch: Option<String> = row.get(0)?;
+                Ok(ch)
+            },
+        )
+    })
+    .await??
+    .ok_or("agent has no discord_channel_id")?
+    .parse::<u64>()
+    .map_err(|e| format!("invalid channel id: {e}"))?;
+
+    let message = format!("DM_REPLY:{reply_id} from {username}: {answer}");
+    send_message_to_channel(&token, channel_id, &message).await?;
+    Ok(())
+}
+
 struct ConsumedDmReply {
     id: i64,
     source_agent: String,
+    answer: String,
+    db: crate::db::Db,
 }
 
 fn consume_pending_dm_reply(
@@ -2410,14 +2468,24 @@ fn consume_pending_dm_reply(
     context["_answer"] = serde_json::Value::String(answer.to_string());
     let updated_context = serde_json::to_string(&context).unwrap_or_default();
 
-    // Atomically mark as consumed with answer stored
-    let _ = conn.execute(
+    // CAS: only mark consumed if still pending (guards against race)
+    let updated = conn.execute(
         "UPDATE pending_dm_replies SET status = 'consumed', consumed_at = datetime('now'), \
          context = ?1 WHERE id = ?2 AND status = 'pending'",
         rusqlite::params![updated_context, id],
     );
+    match updated {
+        Ok(0) => return None, // already consumed by another path
+        Err(_) => return None,
+        _ => {}
+    }
 
-    Some(ConsumedDmReply { id, source_agent })
+    Some(ConsumedDmReply {
+        id,
+        source_agent,
+        answer: answer.to_string(),
+        db: db.clone(),
+    })
 }
 
 /// Rate limit helper — ensures minimum 1s gap between API calls per channel

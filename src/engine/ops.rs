@@ -2049,6 +2049,18 @@ fn register_dm_reply_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         )?,
     )?;
 
+    // __read_consumed_raw(user_id) → json (most recent consumed entry with _answer)
+    let db_read = db.clone();
+    dm_obj.set(
+        "__read_consumed_raw",
+        Function::new(
+            ctx.clone(),
+            rquickjs::function::MutFn::from(move |user_id: String| -> String {
+                dm_reply_read_consumed_raw(&db_read, &user_id)
+            }),
+        )?,
+    )?;
+
     ad.set("dmReply", dm_obj)?;
 
     ctx.eval::<(), _>(
@@ -2068,6 +2080,9 @@ fn register_dm_reply_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         };
         agentdesk.dmReply.pending = function(userId) {
             return JSON.parse(agentdesk.dmReply.__pending_raw(String(userId || "")));
+        };
+        agentdesk.dmReply.readConsumed = function(userId) {
+            return JSON.parse(agentdesk.dmReply.__read_consumed_raw(String(userId || "")));
         };
         "#,
     )?;
@@ -2130,20 +2145,35 @@ fn dm_reply_consume_raw(db: &Db, user_id: &str) -> String {
     );
     match result {
         Ok((id, source_agent, context, channel_id)) => {
-            // Atomically mark as consumed
-            let _ = conn.execute(
-                "UPDATE pending_dm_replies SET status = 'consumed', consumed_at = datetime('now') WHERE id = ?1",
+            // CAS: only mark consumed if still pending (guards against race)
+            let updated = conn.execute(
+                "UPDATE pending_dm_replies SET status = 'consumed', consumed_at = datetime('now') \
+                 WHERE id = ?1 AND status = 'pending'",
                 rusqlite::params![id],
             );
+            match updated {
+                Ok(0) => {
+                    return r#"{"ok":false,"reason":"already_consumed"}"#.to_string();
+                }
+                Err(e) => {
+                    return format!(r#"{{"error":"update failed: {e}"}}"#);
+                }
+                _ => {}
+            }
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ✉️ dmReply.consume → user={user_id} agent={source_agent} (id={id})");
-            let ch_json = match channel_id {
-                Some(ch) => format!(r#","channelId":"{ch}""#),
-                None => String::new(),
-            };
-            format!(
-                r#"{{"ok":true,"id":{id},"sourceAgent":"{source_agent}","context":{context}{ch_json}}}"#
-            )
+            let ctx: serde_json::Value =
+                serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
+            let mut resp = serde_json::json!({
+                "ok": true,
+                "id": id,
+                "sourceAgent": source_agent,
+                "context": ctx,
+            });
+            if let Some(ch) = channel_id {
+                resp["channelId"] = serde_json::Value::String(ch);
+            }
+            serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             r#"{"ok":false,"reason":"no_pending"}"#.to_string()
@@ -2167,13 +2197,50 @@ fn dm_reply_pending_raw(db: &Db, user_id: &str) -> String {
     );
     match result {
         Ok((id, source_agent, context, channel_id)) => {
-            let ch_json = match channel_id {
-                Some(ch) => format!(r#","channelId":"{ch}""#),
-                None => String::new(),
-            };
-            format!(
-                r#"{{"ok":true,"id":{id},"sourceAgent":"{source_agent}","context":{context}{ch_json}}}"#
-            )
+            let ctx: serde_json::Value =
+                serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
+            let mut resp = serde_json::json!({
+                "ok": true,
+                "id": id,
+                "sourceAgent": source_agent,
+                "context": ctx,
+            });
+            if let Some(ch) = channel_id {
+                resp["channelId"] = serde_json::Value::String(ch);
+            }
+            serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(),
+        Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
+    }
+}
+
+fn dm_reply_read_consumed_raw(db: &Db, user_id: &str) -> String {
+    let conn = match db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"db connection: {e}"}}"#),
+    };
+    let result: Result<(i64, String, String, Option<String>), _> = conn.query_row(
+        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
+         WHERE user_id = ?1 AND status = 'consumed' \
+         ORDER BY consumed_at DESC LIMIT 1",
+        rusqlite::params![user_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    );
+    match result {
+        Ok((id, source_agent, context, channel_id)) => {
+            let ctx: serde_json::Value =
+                serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
+            let mut resp = serde_json::json!({
+                "ok": true,
+                "id": id,
+                "sourceAgent": source_agent,
+                "context": ctx,
+            });
+            if let Some(ch) = channel_id {
+                resp["channelId"] = serde_json::Value::String(ch);
+            }
+            serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(),
         Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
