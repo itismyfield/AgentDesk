@@ -201,7 +201,7 @@ struct BotSettingsEntryPlan {
     provider: String,
     role_id: Option<String>,
     token: String,
-    allowed_channel_ids: Vec<u64>,
+    allowed_channel_ids: Option<Vec<u64>>,
     allowed_tools: Option<Vec<String>>,
 }
 
@@ -335,11 +335,15 @@ pub(super) fn apply_import_plan(
     )?;
 
     let result = (|| -> Result<(), String> {
-        let mut config = config::load_from_path_graceful(&yaml_path);
-        if !yaml_path.exists() {
+        let mut config = if yaml_path.exists() {
+            config::load_from_path(&yaml_path)
+                .map_err(|e| format!("Failed to load '{}': {e}", yaml_path.display()))?
+        } else {
+            let mut config = config::Config::default();
             config.data.dir = runtime_root.join("data");
             config.policies.dir = runtime_root.join("policies");
-        }
+            config
+        };
         merge_imported_agents(&mut config, plan, args.overwrite)?;
         if !args.write_db && !importable_agents.is_empty() {
             warnings.push(
@@ -2145,12 +2149,20 @@ fn build_bot_settings_entry_plans(
             tool_policy_mode,
             warnings,
         );
+        let allowed_channel_ids = if args.with_channel_bindings
+            && args.write_org
+            && !accumulator.channel_ids.is_empty()
+        {
+            Some(accumulator.channel_ids.into_iter().collect())
+        } else {
+            None
+        };
         entries.push(BotSettingsEntryPlan {
             account_id,
             provider,
             role_id,
             token,
-            allowed_channel_ids: accumulator.channel_ids.into_iter().collect(),
+            allowed_channel_ids,
             allowed_tools,
         });
     }
@@ -2263,10 +2275,12 @@ fn render_bot_settings_json(
         entry_json.insert("token".to_string(), serde_json::json!(entry.token));
         entry_json.insert("provider".to_string(), serde_json::json!(entry.provider));
         entry_json.insert("agent".to_string(), serde_json::json!(entry.role_id));
-        entry_json.insert(
-            "allowed_channel_ids".to_string(),
-            serde_json::json!(entry.allowed_channel_ids),
-        );
+        if let Some(allowed_channel_ids) = entry.allowed_channel_ids.as_ref() {
+            entry_json.insert(
+                "allowed_channel_ids".to_string(),
+                serde_json::json!(allowed_channel_ids),
+            );
+        }
         if let Some(allowed_tools) = entry.allowed_tools.as_ref() {
             entry_json.insert(
                 "allowed_tools".to_string(),
@@ -2312,6 +2326,7 @@ struct SecretRefSpec {
     source: String,
     provider: String,
     id: String,
+    implicit_provider: bool,
 }
 
 fn resolve_token_value(
@@ -2363,6 +2378,9 @@ fn parse_secret_ref(
                 source: "env".to_string(),
                 provider,
                 id: name.to_string(),
+                implicit_provider: secrets
+                    .and_then(|value| value.defaults.env.as_ref())
+                    .is_none(),
             }));
         }
         return Ok(None);
@@ -2385,6 +2403,13 @@ fn parse_secret_ref(
     else {
         return Err("SecretRef token is missing id".to_string());
     };
+    let implicit_provider = object.get("provider").is_none()
+        && match source.as_str() {
+            "env" => secrets
+                .and_then(|secrets| secrets.defaults.env.as_ref())
+                .is_none(),
+            _ => false,
+        };
     let provider = object
         .get("provider")
         .and_then(serde_json::Value::as_str)
@@ -2402,6 +2427,7 @@ fn parse_secret_ref(
         source,
         provider,
         id: id.to_string(),
+        implicit_provider,
     }))
 }
 
@@ -2410,6 +2436,15 @@ fn resolve_secret_ref_value(
     secrets: Option<&OpenClawSecretsConfig>,
     source_root: &Path,
 ) -> Result<String, String> {
+    if secret_ref.source == "env" && secret_ref.implicit_provider {
+        return std::env::var(&secret_ref.id).map_err(|_| {
+            format!(
+                "Env SecretRef '{}' is not set in the current environment.",
+                secret_ref.id
+            )
+        });
+    }
+
     let provider = secrets
         .and_then(|secrets| secrets.providers.get(&secret_ref.provider))
         .ok_or_else(|| {

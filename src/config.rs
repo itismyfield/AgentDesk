@@ -223,14 +223,12 @@ pub fn load() -> Result<Config> {
     Ok(config)
 }
 
-pub fn load_from_path_graceful(path: &Path) -> Config {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
-            Ok(config) => config,
-            Err(_) => Config::default(),
-        },
-        Err(_) => Config::default(),
-    }
+pub fn load_from_path(path: &Path) -> Result<Config> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read config {}", path.display()))?;
+    let config = serde_yaml::from_str::<Config>(&contents)
+        .with_context(|| format!("Failed to parse config {}", path.display()))?;
+    Ok(config)
 }
 
 pub fn save_to_path(path: &Path, config: &Config) -> Result<()> {

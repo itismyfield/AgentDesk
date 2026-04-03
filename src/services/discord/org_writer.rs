@@ -180,6 +180,7 @@ fn load_org_document(path: &Path) -> Result<OrgDocument, String> {
 mod tests {
     use std::fs;
 
+    use serde_yaml::Value;
     use tempfile::tempdir;
 
     use super::{OrgAgentUpdate, OrgChannelBindingUpdate, merge_org_updates};
@@ -227,11 +228,11 @@ agents:
         .unwrap();
 
         assert!(rendered.contains("prompts_root: ~/.adk/prompts"));
-        assert!(rendered.contains("\"123\""));
-        assert!(rendered.contains("existing:"));
-        assert!(rendered.contains("alpha:"));
-        assert!(rendered.contains("display_name: Alpha"));
-        assert!(rendered.contains("provider: codex"));
-        assert!(rendered.contains("\"555\""));
+        let document: Value = serde_yaml::from_str(&rendered).unwrap();
+        assert_eq!(document["channels"]["by_id"]["123"]["agent"], "existing");
+        assert_eq!(document["agents"]["existing"]["display_name"], "Existing");
+        assert_eq!(document["agents"]["alpha"]["display_name"], "Alpha");
+        assert_eq!(document["agents"]["alpha"]["provider"], "codex");
+        assert_eq!(document["channels"]["by_id"]["555"]["agent"], "alpha");
     }
 }

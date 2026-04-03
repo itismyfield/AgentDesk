@@ -803,6 +803,124 @@ fn live_write_bot_settings_resolves_file_secret_tokens() {
 }
 
 #[test]
+fn live_write_bot_settings_preserves_existing_allowlist_when_bindings_disabled() {
+    let temp = TempDir::new().unwrap();
+    let runtime = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("IDENTITY.md"), "# Alpha\n").unwrap();
+    fs::write(workspace.join("MEMORY.md"), "# Memory\n").unwrap();
+
+    write_openclaw_config(
+        temp.path(),
+        r#"{
+            "agents":{"list":[{"id":"alpha","default":true,"model":"openai/gpt-5","workspace":"workspace"}]},
+            "bindings":[{"agentId":"alpha","match":{"channel":"discord"}}],
+            "channels":{
+                "discord":{
+                    "token":"discord-token-plaintext",
+                    "guilds":{"g1":{"channels":{"1234567890":{"allow":true}}}}
+                }
+            }
+        }"#,
+    );
+
+    let existing_key =
+        crate::services::discord::settings::discord_token_hash("discord-token-plaintext");
+    fs::create_dir_all(runtime.path().join("config")).unwrap();
+    fs::write(
+        runtime.path().join("config").join("bot_settings.json"),
+        serde_json::json!({
+            existing_key.clone(): {
+                "token": "discord-token-plaintext",
+                "provider": "codex",
+                "agent": "alpha",
+                "allowed_channel_ids": [777u64]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let source = resolve_source(&temp);
+    let mut args = base_args();
+    args.dry_run = false;
+    args.write_bot_settings = true;
+    args.discord_token_mode = "plaintext-only".to_string();
+
+    let plan = build_import_plan(&source, &args, Some(runtime.path())).unwrap();
+    apply::apply_import_plan(&plan, &source, &args, runtime.path()).unwrap();
+
+    let bot_settings = read_json_value(&runtime.path().join("config").join("bot_settings.json"));
+    assert_eq!(
+        bot_settings[&existing_key]["allowed_channel_ids"],
+        serde_json::json!([777u64])
+    );
+}
+
+#[test]
+fn live_write_bot_settings_resolves_env_placeholder_without_provider() {
+    let temp = TempDir::new().unwrap();
+    let runtime = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("IDENTITY.md"), "# Alpha\n").unwrap();
+    fs::write(workspace.join("MEMORY.md"), "# Memory\n").unwrap();
+
+    let env_key = format!(
+        "OPENCLAW_MIGRATE_TOKEN_{}",
+        temp.path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .replace('-', "_")
+    );
+    unsafe {
+        std::env::set_var(&env_key, "discord-token-env");
+    }
+
+    write_openclaw_config(
+        temp.path(),
+        &format!(
+            r#"{{
+                "agents":{{"list":[{{"id":"alpha","default":true,"model":"openai/gpt-5","workspace":"workspace"}}]}},
+                "bindings":[{{"agentId":"alpha","match":{{"channel":"discord"}}}}],
+                "channels":{{
+                    "discord":{{
+                        "token":"${{{}}}",
+                        "guilds":{{"g1":{{"channels":{{"1234567890":{{"allow":true}}}}}}}}
+                    }}
+                }}
+            }}"#,
+            env_key
+        ),
+    );
+
+    let source = resolve_source(&temp);
+    let mut args = base_args();
+    args.dry_run = false;
+    args.write_org = true;
+    args.write_bot_settings = true;
+    args.with_channel_bindings = true;
+    args.discord_token_mode = "resolve-env-file".to_string();
+
+    let plan = build_import_plan(&source, &args, Some(runtime.path())).unwrap();
+    apply::apply_import_plan(&plan, &source, &args, runtime.path()).unwrap();
+
+    let bot_settings = read_json_value(&runtime.path().join("config").join("bot_settings.json"));
+    let key = crate::services::discord::settings::discord_token_hash("discord-token-env");
+    assert_eq!(bot_settings[&key]["provider"], "codex");
+    assert_eq!(
+        bot_settings[&key]["allowed_channel_ids"],
+        serde_json::json!([1234567890u64])
+    );
+
+    unsafe {
+        std::env::remove_var(&env_key);
+    }
+}
+
+#[test]
 fn session_import_writes_ai_sessions_session_map_and_db_rows() {
     let temp = TempDir::new().unwrap();
     let runtime = TempDir::new().unwrap();
@@ -1231,6 +1349,33 @@ fn audit_reports_include_richer_tool_and_discord_details() {
             .iter()
             .any(|value| value == "alpha")
     );
+}
+
+#[test]
+fn apply_fails_when_existing_agentdesk_yaml_is_invalid() {
+    let temp = TempDir::new().unwrap();
+    let runtime = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("IDENTITY.md"), "# Alpha\n").unwrap();
+    fs::write(workspace.join("MEMORY.md"), "# Memory\n").unwrap();
+    fs::write(runtime.path().join("agentdesk.yaml"), "server: [").unwrap();
+
+    write_openclaw_config(
+        temp.path(),
+        r#"{
+            "agents":{"list":[{"id":"alpha","default":true,"model":"openai/gpt-5","workspace":"workspace"}]}
+        }"#,
+    );
+
+    let source = resolve_source(&temp);
+    let mut args = base_args();
+    args.dry_run = false;
+
+    let plan = build_import_plan(&source, &args, Some(runtime.path())).unwrap();
+    let err = apply::apply_import_plan(&plan, &source, &args, runtime.path()).unwrap_err();
+    assert!(err.contains("Failed to load"));
+    assert!(err.contains("agentdesk.yaml"));
 }
 
 #[test]
