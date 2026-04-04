@@ -432,7 +432,7 @@ pub(super) fn apply_import_plan(
                         .as_ref()
                         .and_then(|entry| entry.prompt_path.clone())
                 } else {
-                    let prompt_content = render_imported_prompt(agent);
+                    let prompt_content = render_imported_prompt(agent, runtime_root, args);
                     write_text_file(
                         &prompt_path,
                         &prompt_content,
@@ -2663,11 +2663,34 @@ fn merge_imported_agents(
     Ok(())
 }
 
-fn render_imported_prompt(agent: &ImportAgentPlan) -> String {
+fn render_imported_prompt(
+    agent: &ImportAgentPlan,
+    runtime_root: &Path,
+    args: &OpenClawMigrateArgs,
+) -> String {
     let workspace = Path::new(&agent.workspace_source);
+    let memory_dir = runtime_root
+        .join("role-context")
+        .join(format!("{}.memory", agent.final_role_id));
+    let workspace_dir = runtime_root
+        .join("openclaw")
+        .join("workspaces")
+        .join(&agent.final_role_id);
     let mut sections = vec![format!(
-        "# Imported OpenClaw Role\n\n- role_id: `{}`\n- source_agent: `{}`\n- workspace: `{}`",
-        agent.final_role_id, agent.source_id, agent.workspace_source
+        "# Imported OpenClaw Role\n\n- role_id: `{}`\n- source_agent: `{}`\n- agentdesk_memory_dir: `{}`\n- agentdesk_workspace_dir: `{}`\n- source_workspace: `{}`\n\n## AgentDesk Runtime References\n\nUse AgentDesk-managed runtime paths when they exist. Treat the original OpenClaw workspace as provenance, not the default live runtime state.",
+        agent.final_role_id,
+        agent.source_id,
+        if args.no_memory {
+            "not imported (--no-memory)".to_string()
+        } else {
+            memory_dir.display().to_string()
+        },
+        if args.no_workspace {
+            "not copied (--no-workspace)".to_string()
+        } else {
+            workspace_dir.display().to_string()
+        },
+        agent.workspace_source
     )];
 
     for (file_name, heading) in BOOTSTRAP_PROMPT_SECTIONS {

@@ -465,6 +465,29 @@ fn base_apply_writes_agentdesk_prompt_memory_workspace_and_audit() {
     assert!(prompt.contains("Imported OpenClaw Identity"));
     assert!(prompt.contains("Imported OpenClaw Agent Rules"));
     assert!(prompt.contains("Imported OpenClaw Boot Intent"));
+    assert!(prompt.contains("AgentDesk Runtime References"));
+    assert!(
+        prompt.contains(
+            &runtime
+                .path()
+                .join("role-context")
+                .join("alpha.memory")
+                .display()
+                .to_string()
+        )
+    );
+    assert!(
+        prompt.contains(
+            &runtime
+                .path()
+                .join("openclaw")
+                .join("workspaces")
+                .join("alpha")
+                .display()
+                .to_string()
+        )
+    );
+    assert!(prompt.contains(&workspace.display().to_string()));
 
     let memory_md = fs::read_to_string(
         runtime

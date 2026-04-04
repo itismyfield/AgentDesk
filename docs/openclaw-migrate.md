@@ -10,6 +10,7 @@
 - provider/model 힌트 해석과 fallback provider 매핑
 - 프롬프트 부트스트랩 파일 병합
 - `MEMORY.md`, 일자별 memory markdown, workspace 복사
+- 생성된 AgentDesk prompt에 migrated memory/workspace 경로 고정
 - Discord channel binding 미리보기와 `org.yaml` 반영
 - `bot_settings.json` 토큰/허용 채널 반영
 - `ai_sessions` 및 DB 세션 이관
@@ -69,6 +70,14 @@ channel binding, bot 설정, 세션까지 함께 이관:
 - `HEARTBEAT.md`
 
 추가로 `MEMORY.md`와 `memory/` 아래 markdown 파일을 AgentDesk memory 구조로 복사합니다.
+
+생성된 `prompts/agents/<role>/IDENTITY.md` 상단에는 아래 migrated runtime 참조가 함께 기록됩니다.
+
+- `role-context/<role>.memory/` 경로
+- `openclaw/workspaces/<role>/` 경로
+- 원본 OpenClaw workspace 경로
+
+운영 기준은 AgentDesk가 생성한 memory/workspace 경로이며, 원본 OpenClaw 경로는 provenance로만 남깁니다. `--no-memory` 또는 `--no-workspace`를 쓴 경우에는 prompt에 해당 상태가 그대로 표시됩니다.
 
 ## 주요 플래그
 
