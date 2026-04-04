@@ -201,12 +201,13 @@ var reviewAutomation = {
         agentdesk.log.info("[review] create-pr completion skipped — card " + dispatch.kanban_card_id + " already terminal");
         return;
       }
-      var init2 = agentdesk.pipeline.kickoffState(cfg2);
-      var ip2 = agentdesk.pipeline.nextGatedTarget(init2, cfg2);
-      var rev2 = agentdesk.pipeline.nextGatedTarget(ip2, cfg2);
-      var term2 = agentdesk.pipeline.nextGatedTargetWithGate(rev2, "review_passed", cfg2) || agentdesk.pipeline.terminalState(cfg2);
-      agentdesk.kanban.setStatus(dispatch.kanban_card_id, term2);
-      agentdesk.log.info("[review] Create-PR completed for card " + dispatch.kanban_card_id + " → " + term2);
+      // #257: Set card to wait for CI before going terminal
+      // ci-recovery.js will poll CI status and transition to terminal on success
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = ?",
+        [dispatch.kanban_card_id]
+      );
+      agentdesk.log.info("[review] Create-PR completed for card " + dispatch.kanban_card_id + " → waiting for CI");
       return;
     }
 
