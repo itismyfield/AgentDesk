@@ -9,21 +9,25 @@ use crate::engine::PolicyEngine;
 /// Looks up the card's `github_issue_number`, then searches for an active
 /// git worktree whose commits reference that issue.
 /// Returns `(worktree_path, worktree_branch, head_commit)` if found.
+///
+/// Uses the card's `repo_id` + `github_issue_number` to identify the
+/// canonical worktree.  Currently `repo_id` maps to a single repo
+/// directory via `resolve_repo_dir()` (multi-repo workspace support is
+/// not yet implemented); the field is read so future multi-repo
+/// expansion has a clear attachment point.
 pub(crate) fn resolve_card_worktree(db: &Db, card_id: &str) -> Option<(String, String, String)> {
-    let repo_dir = crate::services::platform::resolve_repo_dir()?;
-    let issue_number: Option<i64> = db
-        .separate_conn()
-        .ok()
-        .and_then(|conn| {
+    let (issue_number, _repo_id): (Option<i64>, Option<String>) =
+        db.separate_conn().ok().and_then(|conn| {
             conn.query_row(
-                "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+                "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = ?1",
                 [card_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .ok()
-        })
-        .flatten();
+        })?;
     let issue_number = issue_number?;
+    // TODO: when multi-repo workspaces land, resolve repo_dir from _repo_id
+    let repo_dir = crate::services::platform::resolve_repo_dir()?;
     crate::services::platform::find_worktree_for_issue(&repo_dir, issue_number)
         .map(|wt| (wt.path, wt.branch, wt.commit))
 }
