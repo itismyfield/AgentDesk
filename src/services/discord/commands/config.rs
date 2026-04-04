@@ -656,6 +656,50 @@ pub(in crate::services::discord) async fn cmd_removeuser(
     Ok(())
 }
 
+/// /allowall <enabled> — Allow every Discord user to use the bot (owner only)
+#[poise::command(slash_command, rename = "allowall")]
+pub(in crate::services::discord) async fn cmd_allowall(
+    ctx: Context<'_>,
+    #[description = "Enable public access for all Discord users"] enabled: bool,
+) -> Result<(), Error> {
+    let author_id = ctx.author().id;
+    let author_name = &ctx.author().name;
+    if !check_auth(
+        author_id,
+        author_name,
+        &ctx.data().shared,
+        &ctx.data().token,
+    )
+    .await
+    {
+        return Ok(());
+    }
+    if !check_owner(author_id, &ctx.data().shared).await {
+        ctx.say("Only the owner can change public access.").await?;
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!("  [{ts}] ◀ [{author_name}] /allowall {enabled}");
+
+    let response = {
+        let mut settings = ctx.data().shared.settings.write().await;
+        settings.allow_all_users = enabled;
+        save_bot_settings(&ctx.data().token, &settings);
+        if enabled {
+            "Public access enabled. Any Discord user can talk to this bot in allowed channels."
+                .to_string()
+        } else {
+            "Public access disabled. Only the owner and authorized users can talk to this bot."
+                .to_string()
+        }
+    };
+
+    ctx.say(&response).await?;
+    println!("  [{ts}] ▶ {response}");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::services::discord::model_catalog::{

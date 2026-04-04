@@ -2475,6 +2475,7 @@ Any other message is sent to {p}.
 `!queue [all]` — Show pending queue
 
 **User Management** (owner only)
+`!allowall on|off|status` — Allow everyone or restrict to authorized users
 `!adduser <user_id>` — Allow a user to use the bot
 `!removeuser <user_id>` — Remove a user's access
 `!help` — Show this help",
@@ -2631,6 +2632,62 @@ Any other message is sent to {p}.
                 )
                 .await;
             println!("  [{ts}] ▶ Added user: {target_id}");
+            return Ok(true);
+        }
+
+        "!allowall" => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ◀ [{}] !allowall {}", msg.author.name, arg1);
+
+            if !check_owner(msg.author.id, &data.shared).await {
+                let _ = msg
+                    .reply(&ctx.http, "Only the owner can change public access.")
+                    .await;
+                return Ok(true);
+            }
+
+            let action = arg1.trim().to_ascii_lowercase();
+            if action.is_empty() || action == "status" {
+                let enabled = {
+                    let settings = data.shared.settings.read().await;
+                    settings.allow_all_users
+                };
+                let message = if enabled {
+                    "Public access is enabled. Any Discord user can talk to this bot in allowed channels."
+                } else {
+                    "Public access is disabled. Only the owner and authorized users can talk to this bot."
+                };
+                let _ = msg.reply(&ctx.http, message).await;
+                return Ok(true);
+            }
+
+            let enabled = match action.as_str() {
+                "on" | "true" | "enable" | "enabled" => true,
+                "off" | "false" | "disable" | "disabled" => false,
+                _ => {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            "Usage: `!allowall on`, `!allowall off`, or `!allowall status`",
+                        )
+                        .await;
+                    return Ok(true);
+                }
+            };
+
+            let response = {
+                let mut settings = data.shared.settings.write().await;
+                settings.allow_all_users = enabled;
+                save_bot_settings(&data.token, &settings);
+                if enabled {
+                    "Public access enabled. Any Discord user can talk to this bot in allowed channels."
+                } else {
+                    "Public access disabled. Only the owner and authorized users can talk to this bot."
+                }
+            };
+
+            let _ = msg.reply(&ctx.http, response).await;
+            println!("  [{ts}] ▶ {response}");
             return Ok(true);
         }
 

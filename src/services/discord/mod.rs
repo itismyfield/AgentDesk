@@ -268,6 +268,8 @@ pub(super) struct DiscordBotSettings {
     pub(super) owner_user_id: Option<u64>,
     /// Additional authorized user IDs (added by owner via /adduser)
     pub(super) allowed_user_ids: Vec<u64>,
+    /// When true, any Discord user may talk to this bot in allowed channels.
+    pub(super) allow_all_users: bool,
     /// Bot IDs whose messages are NOT ignored (e.g. announce bot for CEO directives)
     pub(super) allowed_bot_ids: Vec<u64>,
 }
@@ -287,6 +289,7 @@ impl Default for DiscordBotSettings {
             channel_model_overrides: std::collections::HashMap::new(),
             owner_user_id: None,
             allowed_user_ids: Vec::new(),
+            allow_all_users: false,
             allowed_bot_ids: Vec::new(),
         }
     }
@@ -1723,6 +1726,7 @@ pub async fn run_bot(
                 commands::cmd_allowedtools(),
                 commands::cmd_allowed(),
                 commands::cmd_debug(),
+                commands::cmd_allowall(),
                 commands::cmd_adduser(),
                 commands::cmd_removeuser(),
                 commands::cmd_receipt(),
@@ -2307,9 +2311,9 @@ pub(super) async fn check_auth(
             );
             true
         }
-        Some(owner_id) => {
+        Some(_) => {
             let uid = user_id.get();
-            if uid == owner_id || settings.allowed_user_ids.contains(&uid) {
+            if user_is_authorized(&settings, uid) {
                 true
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2318,6 +2322,12 @@ pub(super) async fn check_auth(
             }
         }
     }
+}
+
+fn user_is_authorized(settings: &DiscordBotSettings, user_id: u64) -> bool {
+    settings.allow_all_users
+        || settings.owner_user_id == Some(user_id)
+        || settings.allowed_user_ids.contains(&user_id)
 }
 
 /// Check if a user is the owner (not just allowed)
@@ -3365,8 +3375,8 @@ fn enrich_role_map_with_channel_ids() {
 mod tests {
     use super::ChannelId;
     use super::{
-        choose_restore_channel_name, is_synthetic_thread_channel_name,
-        synthetic_thread_channel_name,
+        DiscordBotSettings, choose_restore_channel_name, is_synthetic_thread_channel_name,
+        synthetic_thread_channel_name, user_is_authorized,
     };
 
     #[test]
@@ -3414,5 +3424,26 @@ mod tests {
         let chosen = choose_restore_channel_name(Some("agentdesk-codex"), None, None, channel_id);
 
         assert_eq!(chosen.as_deref(), Some("agentdesk-codex"));
+    }
+
+    #[test]
+    fn user_is_authorized_allows_owner_and_explicit_users() {
+        let mut settings = DiscordBotSettings::default();
+        settings.owner_user_id = Some(42);
+        settings.allowed_user_ids = vec![7];
+
+        assert!(user_is_authorized(&settings, 42));
+        assert!(user_is_authorized(&settings, 7));
+        assert!(!user_is_authorized(&settings, 99));
+    }
+
+    #[test]
+    fn user_is_authorized_allows_everyone_when_flag_enabled() {
+        let mut settings = DiscordBotSettings::default();
+        settings.owner_user_id = Some(42);
+        settings.allow_all_users = true;
+
+        assert!(user_is_authorized(&settings, 42));
+        assert!(user_is_authorized(&settings, 99));
     }
 }

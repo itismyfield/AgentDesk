@@ -18,7 +18,7 @@ pub(in crate::services::discord) use config::{
     effective_model_snapshot, model_picker_pending_to_override, parse_model_picker_custom_id,
     resolve_model_for_turn, update_channel_model_override,
 };
-pub(super) use config::{cmd_adduser, cmd_allowed, cmd_allowedtools, cmd_removeuser};
+pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
 pub(super) use control::{cmd_clear, cmd_down, cmd_shell, cmd_stop};
 pub(in crate::services::discord) use diagnostics::{
     build_health_report, build_inflight_report, build_queue_report, build_status_report,

@@ -525,6 +525,10 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(json_u64).collect())
         .unwrap_or_default();
+    let allow_all_users = entry
+        .get("allow_all_users")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let allowed_bot_ids = entry
         .get("allowed_bot_ids")
         .and_then(|v| v.as_array())
@@ -557,6 +561,7 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
                     last_sessions,
                     last_remotes,
                     allowed_user_ids,
+                    allow_all_users,
                     allowed_bot_ids,
                     ..DiscordBotSettings::default()
                 };
@@ -574,6 +579,7 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         channel_model_overrides,
         owner_user_id,
         allowed_user_ids,
+        allow_all_users,
         allowed_bot_ids,
     }
 }
@@ -603,6 +609,7 @@ pub(super) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
         "last_remotes": settings.last_remotes,
         "channel_model_overrides": settings.channel_model_overrides,
         "allowed_user_ids": settings.allowed_user_ids,
+        "allow_all_users": settings.allow_all_users,
         "allowed_bot_ids": settings.allowed_bot_ids,
     });
     if let Some(owner_id) = settings.owner_user_id {
@@ -944,6 +951,44 @@ mod tests {
 
             let loaded = load_bot_settings(token);
             assert_eq!(loaded.allowed_channel_ids, vec![123, 456]);
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_reads_allow_all_users() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "allow_all_users": true
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert!(settings.allow_all_users);
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_persists_allow_all_users() {
+        with_temp_home(|_temp_home: &TempDir| {
+            let token = "test-token";
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings.allow_all_users = true;
+
+            save_bot_settings(token, &settings);
+
+            let loaded = load_bot_settings(token);
+            assert!(loaded.allow_all_users);
         });
     }
 
