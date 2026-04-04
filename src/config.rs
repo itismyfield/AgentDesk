@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
@@ -17,7 +17,7 @@ pub struct Config {
     pub data: DataConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
@@ -27,7 +27,7 @@ pub struct ServerConfig {
     pub auth_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DiscordConfig {
     #[serde(default)]
     pub bots: std::collections::HashMap<String, BotConfig>,
@@ -35,7 +35,7 @@ pub struct DiscordConfig {
     pub guild_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BotConfig {
     #[serde(default)]
     pub token: Option<String>,
@@ -43,7 +43,7 @@ pub struct BotConfig {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentDef {
     pub id: String,
     pub name: String,
@@ -59,7 +59,7 @@ pub struct AgentDef {
     pub avatar_emoji: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct GitHubConfig {
     #[serde(default)]
     pub repos: Vec<String>,
@@ -67,7 +67,7 @@ pub struct GitHubConfig {
     pub sync_interval_minutes: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PoliciesConfig {
     #[serde(default = "default_policies_dir")]
     pub dir: PathBuf,
@@ -75,7 +75,7 @@ pub struct PoliciesConfig {
     pub hot_reload: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DataConfig {
     #[serde(default = "default_data_dir")]
     pub dir: PathBuf,
@@ -223,6 +223,25 @@ pub fn load() -> Result<Config> {
     Ok(config)
 }
 
+pub fn load_from_path(path: &Path) -> Result<Config> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read config {}", path.display()))?;
+    let config = serde_yaml::from_str::<Config>(&contents)
+        .with_context(|| format!("Failed to parse config {}", path.display()))?;
+    Ok(config)
+}
+
+pub fn save_to_path(path: &Path, config: &Config) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let rendered = serde_yaml::to_string(config)
+        .with_context(|| format!("Failed to serialize config for {}", path.display()))?;
+    std::fs::write(path, rendered)
+        .with_context(|| format!("Failed to write config {}", path.display()))?;
+    Ok(())
+}
+
 fn resolve_graceful_config_path(
     explicit: Option<std::path::PathBuf>,
     runtime_root: Option<std::path::PathBuf>,
@@ -291,7 +310,10 @@ pub fn load_graceful() -> Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_graceful_config_path, runtime_root};
+    use super::{
+        AgentDef, BotConfig, Config, load_from_path, resolve_graceful_config_path, runtime_root,
+        save_to_path,
+    };
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -397,6 +419,64 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(cwd);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn save_and_load_round_trip_preserves_config_fields() {
+        let dir = make_temp_dir("roundtrip");
+        let path = dir.join("nested").join("agentdesk.yaml");
+
+        let mut config = Config::default();
+        config.server.port = 4317;
+        config.server.host = "127.0.0.42".to_string();
+        config.server.auth_token = Some("secret-token".to_string());
+        config.discord.guild_id = Some("guild-123".to_string());
+        config.discord.bots.insert(
+            "announce".to_string(),
+            BotConfig {
+                token: Some("bot-token".to_string()),
+                description: Some("announce bot".to_string()),
+            },
+        );
+        config.agents.push(AgentDef {
+            id: "agent-1".to_string(),
+            name: "Agent One".to_string(),
+            name_ko: Some("에이전트 원".to_string()),
+            provider: "codex".to_string(),
+            channels: std::collections::HashMap::from([(
+                "claude".to_string(),
+                "123456789012345678".to_string(),
+            )]),
+            department: Some("platform".to_string()),
+            avatar_emoji: Some(":robot:".to_string()),
+        });
+
+        save_to_path(&path, &config).unwrap();
+        assert!(path.exists());
+        let loaded = load_from_path(&path).unwrap();
+
+        assert_eq!(loaded.server.port, 4317);
+        assert_eq!(loaded.server.host, "127.0.0.42");
+        assert_eq!(loaded.server.auth_token.as_deref(), Some("secret-token"));
+        assert_eq!(loaded.discord.guild_id.as_deref(), Some("guild-123"));
+        assert_eq!(loaded.discord.bots.len(), 1);
+        assert_eq!(
+            loaded.discord.bots["announce"].description.as_deref(),
+            Some("announce bot")
+        );
+        assert_eq!(loaded.agents.len(), 1);
+        assert_eq!(loaded.agents[0].id, "agent-1");
+        assert_eq!(loaded.agents[0].name, "Agent One");
+        assert_eq!(loaded.agents[0].name_ko.as_deref(), Some("에이전트 원"));
+        assert_eq!(loaded.agents[0].provider, "codex");
+        assert_eq!(loaded.agents[0].department.as_deref(), Some("platform"));
+        assert_eq!(loaded.agents[0].avatar_emoji.as_deref(), Some(":robot:"));
+        assert_eq!(
+            loaded.agents[0].channels.get("claude").map(String::as_str),
+            Some("123456789012345678")
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
