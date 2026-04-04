@@ -2367,11 +2367,13 @@ pub async fn get_card_thread(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     )> = conn
         .query_row(
             "SELECT kc.id, kc.active_thread_id, td.dispatch_type, \
                     (SELECT a.discord_channel_alt FROM agents a WHERE a.id = td.to_agent_id), \
-                    (SELECT a.discord_channel_id FROM agents a WHERE a.id = td.to_agent_id) \
+                    (SELECT a.discord_channel_id FROM agents a WHERE a.id = td.to_agent_id), \
+                    td.context \
              FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.id = ?1",
@@ -2383,13 +2385,21 @@ pub async fn get_card_thread(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
         .ok();
 
     match result {
-        Some((card_id, _legacy_thread_id, dispatch_type, alt_channel, primary_channel)) => {
+        Some((
+            card_id,
+            _legacy_thread_id,
+            dispatch_type,
+            alt_channel,
+            primary_channel,
+            dispatch_context,
+        )) => {
             // Determine target channel for this dispatch type
             let use_alt = matches!(dispatch_type.as_deref(), Some("review"));
             let target_channel = if use_alt {
@@ -2409,6 +2419,7 @@ pub async fn get_card_thread(
                     "active_thread_id": thread_id,
                     "dispatch_type": dispatch_type,
                     "discord_channel_alt": alt_channel,
+                    "dispatch_context": dispatch_context,
                 })),
             )
         }

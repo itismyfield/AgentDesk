@@ -4,9 +4,33 @@ use serde_json::json;
 use crate::db::Db;
 use crate::engine::PolicyEngine;
 
+/// Resolve the canonical worktree for a card's GitHub issue.
+///
+/// Looks up the card's `github_issue_number`, then searches for an active
+/// git worktree whose commits reference that issue.
+/// Returns `(worktree_path, worktree_branch, head_commit)` if found.
+pub(crate) fn resolve_card_worktree(db: &Db, card_id: &str) -> Option<(String, String, String)> {
+    let repo_dir = crate::services::platform::resolve_repo_dir()?;
+    let issue_number: Option<i64> = db
+        .separate_conn()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| row.get(0),
+            )
+            .ok()
+        })
+        .flatten();
+    let issue_number = issue_number?;
+    crate::services::platform::find_worktree_for_issue(&repo_dir, issue_number)
+        .map(|wt| (wt.path, wt.branch, wt.commit))
+}
+
 /// Build the context JSON string for a review dispatch.
 ///
-/// Injects `reviewed_commit`, `branch`, and provider info.
+/// Injects `reviewed_commit`, `branch`, `worktree_path`, and provider info.
 /// Prefers worktree branch (if found for this card's issue) over main HEAD.
 fn build_review_context(
     db: &Db,
@@ -21,44 +45,32 @@ fn build_review_context(
     };
     if let Some(obj) = ctx_val.as_object_mut() {
         if !obj.contains_key("reviewed_commit") {
-            let repo_dir = crate::services::platform::resolve_repo_dir().ok_or_else(|| {
-                anyhow::anyhow!("Cannot resolve repo dir; set AGENTDESK_REPO_DIR")
-            })?;
+            // #193/#259: Use resolve_card_worktree() for consistent worktree lookup
+            // across all dispatch types. This also injects worktree_path so review
+            // agents use the same directory as implementation agents.
+            let wt_info = resolve_card_worktree(db, kanban_card_id);
 
-            // #193: Try to find a worktree branch for this card's issue.
-            // Without this, reviews always inspect main HEAD and miss
-            // unmerged implementation commits, causing stale review loops.
-            let issue_number: Option<i64> = db
-                .separate_conn()
-                .ok()
-                .and_then(|conn| {
-                    conn.query_row(
-                        "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
-                        [kanban_card_id],
-                        |row| row.get(0),
-                    )
-                    .ok()
-                })
-                .flatten();
-
-            let wt_info = issue_number
-                .and_then(|num| crate::services::platform::find_worktree_for_issue(&repo_dir, num));
-
-            if let Some(ref wt) = wt_info {
-                obj.insert("reviewed_commit".to_string(), json!(wt.commit));
-                obj.insert("branch".to_string(), json!(wt.branch));
+            if let Some((ref wt_path, ref wt_branch, ref wt_commit)) = wt_info {
+                obj.insert("reviewed_commit".to_string(), json!(wt_commit));
+                obj.insert("branch".to_string(), json!(wt_branch));
+                obj.insert("worktree_path".to_string(), json!(wt_path));
                 tracing::info!(
-                    "[dispatch] Review dispatch for card {}: using worktree branch '{}' (commit {})",
+                    "[dispatch] Review dispatch for card {}: using worktree branch '{}' (commit {}, path: {})",
                     kanban_card_id,
-                    wt.branch,
-                    &wt.commit[..8.min(wt.commit.len())]
+                    wt_branch,
+                    &wt_commit[..8.min(wt_commit.len())],
+                    wt_path
                 );
             } else {
                 // #229: No worktree found — use main HEAD directly.
                 // Previous dispatch context is NOT reused because it may reference
                 // commits from a different issue (e.g., after worktree cleanup the
                 // latest completed review dispatch may belong to a prior issue).
-                if let Some(commit) = crate::services::platform::git_head_commit(&repo_dir) {
+                let repo_dir = crate::services::platform::resolve_repo_dir();
+                if let Some(commit) = repo_dir
+                    .as_deref()
+                    .and_then(crate::services::platform::git_head_commit)
+                {
                     obj.insert("reviewed_commit".to_string(), json!(commit));
                     tracing::info!(
                         "[dispatch] Review dispatch for card {}: no worktree, using main HEAD ({})",
@@ -283,7 +295,29 @@ fn create_dispatch_core_internal(
     let context_str = if dispatch_type == "review" {
         build_review_context(db, kanban_card_id, to_agent_id, context)?
     } else {
-        serde_json::to_string(context)?
+        // #259: For ALL non-review dispatch types, inject worktree_path and
+        // worktree_branch so the session uses the same issue worktree as review
+        // dispatches. Without this, implementation/rework dispatches use the
+        // parent channel CWD (main repo), causing stale commit loops.
+        let mut base = serde_json::to_string(context)?;
+        if let Some((wt_path, wt_branch, _)) = resolve_card_worktree(db, kanban_card_id) {
+            if let Ok(mut obj) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&base)
+            {
+                obj.entry("worktree_path".to_string())
+                    .or_insert(json!(wt_path));
+                obj.entry("worktree_branch".to_string())
+                    .or_insert(json!(wt_branch));
+                tracing::info!(
+                    "[dispatch] {} dispatch for card {}: injecting worktree_path={}",
+                    dispatch_type,
+                    kanban_card_id,
+                    wt_path
+                );
+                base = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or(base);
+            }
+        }
+        base
     };
 
     // Use separate_conn to avoid blocking request handlers while
@@ -1809,6 +1843,51 @@ mod tests {
             count_notify_outbox(&conn, &id1),
             1,
             "reused dispatch must not create a second notify outbox row"
+        );
+    }
+
+    #[test]
+    fn resolve_card_worktree_returns_none_without_issue_number() {
+        let db = test_db();
+        seed_card(&db, "card-no-issue", "ready");
+        // Card has no github_issue_number → should return None
+        let result = resolve_card_worktree(&db, "card-no-issue");
+        assert!(
+            result.is_none(),
+            "card without issue number should return None"
+        );
+    }
+
+    #[test]
+    fn non_review_dispatch_injects_worktree_context() {
+        // When resolve_card_worktree returns None (no issue), the context
+        // should pass through unchanged (no worktree_path/worktree_branch).
+        let db = test_db();
+        seed_card(&db, "card-ctx", "ready");
+        let engine = test_engine(&db);
+
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-ctx",
+            "agent-1",
+            "implementation",
+            "Impl task",
+            &json!({"custom_key": "custom_value"}),
+        )
+        .unwrap();
+
+        // context is returned as parsed JSON by query_dispatch_row
+        let ctx = &dispatch["context"];
+        assert_eq!(ctx["custom_key"], "custom_value");
+        // No issue number → no worktree injection
+        assert!(
+            ctx.get("worktree_path").is_none(),
+            "no worktree_path without issue"
+        );
+        assert!(
+            ctx.get("worktree_branch").is_none(),
+            "no worktree_branch without issue"
         );
     }
 }
