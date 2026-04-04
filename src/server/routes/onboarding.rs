@@ -846,6 +846,7 @@ pub async fn complete(
             "version": 1,
             "byChannelId": by_channel_id,
             "byChannelName": by_channel_name,
+            "fallbackByChannelName": { "enabled": true },
         });
 
         let role_map_path = config_dir.join("role_map.json");
