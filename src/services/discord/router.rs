@@ -934,9 +934,34 @@ pub(super) async fn handle_text_message(
         .is_some();
     let dispatch_id_for_thread = super::adk_session::parse_dispatch_id(user_text);
     let mut dispatch_type_str: Option<String> = None;
+    // #259: Fetch dispatch metadata once before thread creation so we can extract
+    // worktree_path for both thread bootstrap and the subsequent session CWD override.
+    let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
+        lookup_dispatch_info(shared.api_port, did).await
+    } else {
+        None
+    };
+    // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
+    // All dispatch types now inject worktree_path into context via resolve_card_worktree().
+    let dispatch_worktree_path = dispatch_info_cached
+        .as_ref()
+        .and_then(|info| {
+            info.context
+                .as_ref()
+                .and_then(|ctx_str| serde_json::from_str::<serde_json::Value>(ctx_str).ok())
+                .and_then(|v| v.get("worktree_path")?.as_str().map(String::from))
+        })
+        .filter(|p| std::path::Path::new(p).exists());
+    if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
+    }
+    let dispatch_effective_path = dispatch_worktree_path
+        .clone()
+        .unwrap_or_else(|| current_path.clone());
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
-        // Fetch dispatch metadata for thread reuse and cross-channel role override
-        let dispatch_info = lookup_dispatch_info(shared.api_port, did).await;
+        // Use cached dispatch metadata for thread reuse and cross-channel role override
+        let dispatch_info = &dispatch_info_cached;
         dispatch_type_str = dispatch_info.as_ref().and_then(|i| i.dispatch_type.clone());
         let is_counter_model_dispatch =
             crate::server::routes::dispatches::use_counter_model_channel(
@@ -987,7 +1012,8 @@ pub(super) async fn handle_text_message(
                         "  [{ts}] 🧵 Reusing existing thread {} for dispatch {}",
                         tid, did
                     );
-                    super::bootstrap_thread_session(shared, tid, &current_path, ctx).await;
+                    super::bootstrap_thread_session(shared, tid, &dispatch_effective_path, ctx)
+                        .await;
                     shared.dispatch_thread_parents.insert(channel_id, tid);
                     // For review dispatches reusing an implementation thread,
                     // override role/model to use the counter-model channel.
@@ -1043,8 +1069,13 @@ pub(super) async fn handle_text_message(
                             "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
                             thread.id, did
                         );
-                        super::bootstrap_thread_session(shared, thread.id, &current_path, ctx)
-                            .await;
+                        super::bootstrap_thread_session(
+                            shared,
+                            thread.id,
+                            &dispatch_effective_path,
+                            ctx,
+                        )
+                        .await;
                         shared.dispatch_thread_parents.insert(channel_id, thread.id);
                         link_dispatch_thread(
                             shared.api_port,
@@ -1065,6 +1096,18 @@ pub(super) async fn handle_text_message(
         }
     } else {
         channel_id
+    };
+
+    // #259: Override current_path with the pre-computed dispatch worktree path.
+    // Also update the in-memory session so the worktree sticks for subsequent turns.
+    let current_path = if dispatch_worktree_path.is_some() {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.current_path = Some(dispatch_effective_path.clone());
+        }
+        dispatch_effective_path.clone()
+    } else {
+        current_path
     };
 
     // Send placeholder message
@@ -2991,6 +3034,8 @@ struct DispatchInfo {
     active_thread_id: Option<String>,
     dispatch_type: Option<String>,
     discord_channel_alt: Option<String>,
+    /// #259: Dispatch context JSON — used to extract worktree_path for session CWD.
+    context: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -3025,6 +3070,10 @@ async fn lookup_dispatch_info(api_port: u16, dispatch_id: &str) -> Option<Dispat
             .map(|s| s.to_string()),
         discord_channel_alt: body
             .get("discord_channel_alt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        context: body
+            .get("dispatch_context")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
     })
