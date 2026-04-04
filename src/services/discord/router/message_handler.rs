@@ -1010,15 +1010,15 @@ pub(in crate::services::discord) async fn handle_text_message(
     let model_for_turn =
         super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
 
-    // Fetch context compact percent from ADK settings
+    // Fetch context compact percent from ADK settings (provider-specific)
     let ctx_thresholds = super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
-    let compact_percent = ctx_thresholds.compact_pct;
+    let compact_percent = ctx_thresholds.compact_pct_for(&provider);
     // Use model-specific context window (reads Codex models cache), falling
     // back to the provider default if the model isn't found.
     let model_context_window = provider.resolve_context_window(model_for_turn.as_deref());
 
     // Pre-compute provider-specific compact config
-    let compact_percent_for_claude = Some(compact_percent);
+    let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
     let compact_token_limit_for_codex = {
         let cli_config = provider.compact_cli_config(compact_percent, model_context_window);
         cli_config

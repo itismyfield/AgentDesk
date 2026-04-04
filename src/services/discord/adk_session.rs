@@ -638,8 +638,11 @@ mod tests {
 
 /// Context window management thresholds.
 /// Single source of truth used by both Rust turn-end compact and JS onContextCheck.
+/// Provider-specific overrides: `context_compact_percent_codex`, `context_compact_percent_claude`, etc.
 pub(super) struct ContextThresholds {
     pub compact_pct: u64,
+    /// Provider-specific override (if set). Falls back to compact_pct.
+    pub compact_pct_codex: u64,
     pub context_window: u64,
 }
 
@@ -647,13 +650,25 @@ impl Default for ContextThresholds {
     fn default() -> Self {
         Self {
             compact_pct: 60,
+            compact_pct_codex: 100,
             context_window: 1_000_000,
+        }
+    }
+}
+
+impl ContextThresholds {
+    /// Get compact percent for a specific provider.
+    pub fn compact_pct_for(&self, provider: &crate::services::provider::ProviderKind) -> u64 {
+        match provider {
+            crate::services::provider::ProviderKind::Codex => self.compact_pct_codex,
+            _ => self.compact_pct,
         }
     }
 }
 
 /// Fetch context thresholds from the ADK config API (individual kv_meta keys).
 /// Falls back to defaults on any error.
+/// Supports provider-specific overrides: `context_compact_percent_codex`, etc.
 pub(super) async fn fetch_context_thresholds(api_port: u16) -> ContextThresholds {
     let defaults = ContextThresholds::default();
     let url = local_api_url(api_port, "/api/settings/config");
@@ -666,17 +681,25 @@ pub(super) async fn fetch_context_thresholds(api_port: u16) -> ContextThresholds
         _ => return defaults,
     };
     let entries = body.get("entries").and_then(|v| v.as_array());
-    let compact_pct = entries
-        .and_then(|arr| {
-            arr.iter()
-                .find(|e| e.get("key").and_then(|k| k.as_str()) == Some("context_compact_percent"))
-        })
-        .and_then(|e| e.get("value"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(defaults.compact_pct);
+
+    let find_u64 = |key: &str| -> Option<u64> {
+        entries
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|e| e.get("key").and_then(|k| k.as_str()) == Some(key))
+            })
+            .and_then(|e| e.get("value"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+
+    let compact_pct = find_u64("context_compact_percent").unwrap_or(defaults.compact_pct);
+    let compact_pct_codex =
+        find_u64("context_compact_percent_codex").unwrap_or(defaults.compact_pct_codex);
+
     ContextThresholds {
         compact_pct,
+        compact_pct_codex,
         context_window: defaults.context_window,
     }
 }
