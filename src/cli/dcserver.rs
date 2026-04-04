@@ -1243,14 +1243,15 @@ pub fn handle_dcserver(token: Option<String>) {
             }
             None => {
                 let configs = services::discord::load_discord_bot_launch_configs();
-                if configs.is_empty() {
+                if should_run_http_only_onboarding(token.as_deref(), configs.len()) {
                     eprintln!(
-                        "Error: no bot tokens found in {}",
+                        "  ⚠ No bot tokens found in {} — continuing in onboarding mode (HTTP only)",
                         settings_path
                             .as_deref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "bot_settings.json".to_string())
                     );
+                    std::future::pending::<()>().await;
                     return;
                 }
 
@@ -1298,4 +1299,28 @@ pub fn handle_dcserver(token: Option<String>) {
             }
         }
     });
+}
+
+fn should_run_http_only_onboarding(token: Option<&str>, launch_config_count: usize) -> bool {
+    token.is_none() && launch_config_count == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_run_http_only_onboarding;
+
+    #[test]
+    fn onboarding_mode_when_no_explicit_token_and_no_saved_bots() {
+        assert!(should_run_http_only_onboarding(None, 0));
+    }
+
+    #[test]
+    fn explicit_token_disables_http_only_onboarding() {
+        assert!(!should_run_http_only_onboarding(Some("token"), 0));
+    }
+
+    #[test]
+    fn saved_bot_configs_disable_http_only_onboarding() {
+        assert!(!should_run_http_only_onboarding(None, 1));
+    }
 }
