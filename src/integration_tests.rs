@@ -285,12 +285,12 @@ mod tests {
         assert!(kanban::transition_status(&db, &engine, "card-s4", "ready").is_ok());
         assert_eq!(get_card_status(&db, "card-s4"), "ready");
 
-        // ready → requested (needs dispatch)
-        seed_dispatch(&db, "d-s4-impl", "card-s4", "implementation", "pending");
+        // ready → requested (free transition, no dispatch needed — #255 preflight state)
         assert!(kanban::transition_status(&db, &engine, "card-s4", "requested").is_ok());
         assert_eq!(get_card_status(&db, "card-s4"), "requested");
 
-        // requested → in_progress
+        // requested → in_progress (needs dispatch — gated transition)
+        seed_dispatch(&db, "d-s4-impl", "card-s4", "implementation", "pending");
         assert!(kanban::transition_status(&db, &engine, "card-s4", "in_progress").is_ok());
         assert_eq!(get_card_status(&db, "card-s4"), "in_progress");
 
@@ -551,7 +551,8 @@ mod tests {
             ).unwrap();
         }
 
-        // Default pipeline kickoff is "requested", but simple pipeline kickoff is "in_progress"
+        // #255: Default pipeline kickoff is "in_progress" (requested is now a free preflight state,
+        // so the dispatchable state is "requested" with gated target "in_progress").
         let default_kickoff = crate::pipeline::get()
             .transitions
             .iter()
@@ -564,8 +565,8 @@ mod tests {
             .map(|t| t.to.as_str())
             .unwrap();
         assert_eq!(
-            default_kickoff, "requested",
-            "default pipeline kickoff must be 'requested'"
+            default_kickoff, "in_progress",
+            "default pipeline kickoff must be 'in_progress' (#255: requested is preflight)"
         );
 
         // Create dispatch via create_dispatch_core_with_id — should use card's effective pipeline
@@ -584,11 +585,11 @@ mod tests {
             result.err()
         );
 
-        // Card status must be "in_progress" (override kickoff), NOT "requested" (default kickoff)
+        // Card status must be "in_progress" (both override and default kickoff target the same)
         let status = get_card_status(&db, "card-s7");
         assert_eq!(
             status, "in_progress",
-            "dispatch must use card's effective pipeline kickoff, not global default"
+            "dispatch must use card's effective pipeline kickoff"
         );
 
         // Also test create_dispatch_core (the non-ID path)

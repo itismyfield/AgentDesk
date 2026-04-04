@@ -305,37 +305,10 @@ var rules = {
     var blockedTargets = agentdesk.pipeline.forceOnlyTargets(inProgressForForce, cfg);
     var pendingState = blockedTargets[0];
 
-    // → initialState: auto-create dispatch
-    if (payload.to === initialState && payload.from !== initialState) {
-      var cards = agentdesk.db.query(
-        "SELECT assigned_agent_id, title, latest_dispatch_id FROM kanban_cards WHERE id = ?",
-        [payload.card_id]
-      );
-      if (cards.length > 0 && cards[0].assigned_agent_id) {
-        var existingDispatch = cards[0].latest_dispatch_id
-          ? agentdesk.db.query("SELECT status FROM task_dispatches WHERE id = ?", [cards[0].latest_dispatch_id])
-          : [];
-        var alreadyPending = existingDispatch.length > 0 && existingDispatch[0].status === "pending";
-
-        if (!alreadyPending) {
-          try {
-            var dispatchId = agentdesk.dispatch.create(
-              payload.card_id,
-              cards[0].assigned_agent_id,
-              "implementation",
-              cards[0].title
-            );
-            agentdesk.log.info("[kanban] dispatch created: " + dispatchId);
-            // Discord notification is handled by the Rust handler (async send_dispatch_to_discord)
-            // to avoid ureq deadlock on tokio runtime.
-          } catch (e) {
-            agentdesk.log.warn("[kanban] dispatch creation failed: " + e);
-          }
-        }
-      } else {
-        agentdesk.log.warn("[kanban] card " + payload.card_id + " has no assignee — dispatch skipped");
-      }
-    }
+    // → initialState: no-op (preflight state, dispatch created by auto-queue or tick)
+    // #255: removed implementation dispatch creation — requested is now a dispatch-free
+    // preflight state. Dispatch is created separately, which triggers DispatchAttached
+    // to advance the card from requested → in_progress.
 
     // → blocked (force-only target): PMD 알림 (Agent in the Loop)
     // "blocked" is a force-only target from in_progress — check all force targets

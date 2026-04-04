@@ -385,6 +385,24 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
   var entry = nextEntry[0];
   agentdesk.log.info("[auto-queue] Dispatching group " + threadGroup + " entry for " + agentId + ": " + entry.kanban_card_id);
 
+  // #255: Ensure card is in the preflight state (requested) before creating dispatch.
+  // requested is now a dispatch-free preflight state; creating a dispatch triggers
+  // DispatchAttached which advances the card from requested → in_progress.
+  var pCfg = agentdesk.pipeline.getConfig();
+  var pKickoff = agentdesk.pipeline.kickoffState(pCfg);
+  var cardStatus = agentdesk.db.query(
+    "SELECT status FROM kanban_cards WHERE id = ?",
+    [entry.kanban_card_id]
+  );
+  if (cardStatus.length > 0 && cardStatus[0].status !== pKickoff) {
+    try {
+      agentdesk.kanban.setStatus(entry.kanban_card_id, pKickoff);
+      agentdesk.log.info("[auto-queue] Card " + entry.kanban_card_id + " → " + pKickoff + " (preflight)");
+    } catch (e) {
+      agentdesk.log.warn("[auto-queue] Failed to move card " + entry.kanban_card_id + " to " + pKickoff + ": " + e);
+    }
+  }
+
   try {
     // #173: Use dispatch.create which defers INSERT via intent.
     // Mark entry as dispatched ONLY after dispatch.create succeeds validation.
