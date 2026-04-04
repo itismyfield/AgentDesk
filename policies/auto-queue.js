@@ -388,7 +388,7 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
   // #255: Walk the card through free transitions to the preflight state (requested)
   // before creating dispatch. requested is dispatch-free; creating a dispatch triggers
   // DispatchAttached which advances the card from requested → in_progress.
-  var pCfg = agentdesk.pipeline.getConfig();
+  var pCfg = agentdesk.pipeline.resolveForCard(entry.kanban_card_id) || agentdesk.pipeline.getConfig();
   var pKickoff = agentdesk.pipeline.kickoffState(pCfg);
   var cardStatus = agentdesk.db.query(
     "SELECT status FROM kanban_cards WHERE id = ?",
