@@ -799,15 +799,37 @@ pub async fn complete(
         let config_dir = root.join("config");
         std::fs::create_dir_all(&config_dir).ok();
 
+        // Create workspace directories for each agent
+        let workspaces_dir = root.join("workspaces");
+        std::fs::create_dir_all(&workspaces_dir).ok();
+        for mapping in &resolved_channels {
+            let ws_dir = workspaces_dir.join(&mapping.role_id);
+            std::fs::create_dir_all(&ws_dir).ok();
+        }
+
         let mut by_channel_id = serde_json::Map::new();
         let mut by_channel_name = serde_json::Map::new();
 
         for mapping in &resolved_channels {
+            let workspace_tilde = dirs::home_dir()
+                .and_then(|home| {
+                    let ws = root.join("workspaces").join(&mapping.role_id);
+                    ws.strip_prefix(&home)
+                        .ok()
+                        .map(|rel| format!("~/{}", rel.display()))
+                })
+                .unwrap_or_else(|| {
+                    root.join("workspaces")
+                        .join(&mapping.role_id)
+                        .display()
+                        .to_string()
+                });
             by_channel_id.insert(
                 mapping.channel_id.clone(),
                 json!({
                     "roleId": mapping.role_id,
                     "provider": provider,
+                    "workspace": workspace_tilde,
                 }),
             );
             by_channel_name.insert(
