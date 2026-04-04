@@ -353,6 +353,10 @@ pub fn verify_dcserver_ready_since(start_offset: u64, timeout: Duration) -> Resu
             return Ok(());
         }
 
+        if recent.contains("continuing in onboarding mode") {
+            return Ok(());
+        }
+
         if recent.contains(" bot error:") || recent.contains("Error: no bot tokens found") {
             return Err("dcserver emitted startup error".to_string());
         }
@@ -546,28 +550,15 @@ pub fn handle_restart_dcserver(
         }
     };
 
-    match std::fs::read_to_string(&settings_path) {
-        Ok(_) => {}
-        Err(_) => {
-            eprintln!("Error: {} not found.", settings_path.display());
-            eprintln!("Run 'agentdesk dcserver' after configuring bot_settings.json.");
-            write_restart_report(
-                "failed",
-                "bot_settings.json이 없어서 dcserver restart를 시작하지 못했습니다.".to_string(),
-            );
-            return;
-        }
-    }
-
+    let has_settings_file = std::fs::read_to_string(&settings_path).is_ok();
     let configs = load_discord_bot_launch_configs();
-    if configs.is_empty() {
-        eprintln!("Error: no bot tokens found in bot_settings.json");
-        write_restart_report(
-            "failed",
-            "bot_settings.json에 bot token이 없어서 dcserver restart를 시작하지 못했습니다."
-                .to_string(),
+    let onboarding_mode = !has_settings_file || configs.is_empty();
+
+    if onboarding_mode {
+        eprintln!(
+            "  ⚠ No bot tokens found in {} — dcserver will start in onboarding mode",
+            settings_path.display()
         );
-        return;
     }
 
     // Increment generation counter — every restart request gets a unique generation,
@@ -586,7 +577,11 @@ pub fn handle_restart_dcserver(
     }
 
     println!("🔄 Restarting Discord bot server...");
-    println!("   Configured bots: {}", configs.len());
+    if onboarding_mode {
+        println!("   Mode: onboarding (HTTP-only, no Discord bots)");
+    } else {
+        println!("   Configured bots: {}", configs.len());
+    }
 
     let previous_release = previous_release_link_path()
         .as_deref()
