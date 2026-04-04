@@ -2069,7 +2069,7 @@ pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
     resolve_channel_alias(alias)
 }
 
-fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
+pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
     // "review" and "e2e-test" (#197) go to the counter-model channel.
     // "review-decision" is sent to the original agent's primary channel
     // so it reuses the implementation thread.

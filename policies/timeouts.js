@@ -267,6 +267,12 @@ var timeouts = {
     );
     for (var i = 0; i < staleRequested.length; i++) {
       var rc = staleRequested[i];
+      // #255: Skip cards without a dispatch — they are in preflight state,
+      // waiting for auto-queue or tick to create a dispatch.
+      if (!rc.latest_dispatch_id) {
+        agentdesk.log.info("[timeout] Card " + rc.id + " in " + aInitial + " without dispatch — preflight, skipping timeout");
+        continue;
+      }
       // Dispatch를 failed로 — skip state changes if dispatch was already terminal
       if (rc.latest_dispatch_id) {
         var failResult = agentdesk.dispatch.markFailed(rc.latest_dispatch_id, "Timed out waiting for agent");

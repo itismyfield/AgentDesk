@@ -45,12 +45,12 @@ transitions:
     to: backlog
     type: free
 
-  # Dispatch-gated transitions
+  # Preflight transition (no dispatch required)
   - from: ready
     to: requested
-    type: gated
-    gates: [active_dispatch]
+    type: free
 
+  # Dispatch-gated transitions
   - from: requested
     to: in_progress
     type: gated

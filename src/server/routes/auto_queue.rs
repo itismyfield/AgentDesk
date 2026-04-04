@@ -189,6 +189,11 @@ fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<Str
     if pipeline.is_valid_state("requested") && !states.iter().any(|s| s == "requested") {
         states.push("requested".to_string());
     }
+    // #255: ready is a free-transition predecessor to the dispatchable state.
+    // Allow enqueueing cards in ready — activate will walk them to the dispatchable state.
+    if pipeline.is_valid_state("ready") && !states.iter().any(|s| s == "ready") {
+        states.push("ready".to_string());
+    }
     states
 }
 
@@ -351,18 +356,18 @@ pub async fn generate(
     };
     ensure_tables(&conn);
 
-    // Build filter — pipeline-driven dispatchable states
+    // Build filter — pipeline-driven enqueueable states (dispatchable + free predecessors)
     crate::pipeline::ensure_loaded();
-    let dispatchable = crate::pipeline::try_get()
+    let enqueueable = crate::pipeline::try_get()
         .map(|p| {
-            p.dispatchable_states()
+            enqueueable_states_for(p)
                 .iter()
                 .map(|s| format!("'{}'", s))
                 .collect::<Vec<_>>()
                 .join(",")
         })
-        .unwrap_or_else(|| "'ready'".to_string());
-    let mut conditions = vec![format!("kc.status IN ({})", dispatchable)];
+        .unwrap_or_else(|| "'ready','backlog','requested'".to_string());
+    let mut conditions = vec![format!("kc.status IN ({})", enqueueable)];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref repo) = body.repo {
         conditions.push(format!("kc.repo_id = ?{}", params.len() + 1));

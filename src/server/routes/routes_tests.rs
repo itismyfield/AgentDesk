@@ -669,7 +669,8 @@ async fn kanban_assign_card() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["card"]["status"], "ready");
+    // #255: assign walks through free transitions to the dispatchable state (requested)
+    assert_eq!(json["card"]["status"], "requested");
     assert_eq!(json["card"]["assigned_agent_id"], "ch-td");
 }
 
@@ -758,14 +759,14 @@ async fn dispatch_create_and_get() {
     assert_eq!(json["dispatch"]["status"], "pending");
     assert_eq!(json["dispatch"]["kanban_card_id"], "c1");
 
-    // Card should be "requested"
+    // #255: ready→requested is free, so dispatch from ready kicks off to "in_progress"
     let conn = db.lock().unwrap();
     let card_status: String = conn
         .query_row("SELECT status FROM kanban_cards WHERE id = 'c1'", [], |r| {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(card_status, "requested");
+    assert_eq!(card_status, "in_progress");
     let notify_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
