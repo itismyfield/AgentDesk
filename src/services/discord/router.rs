@@ -867,6 +867,16 @@ pub(super) async fn handle_text_message(
                         .unwrap_or_else(|| canonical.clone());
                     let (ch_name_resolved, cat_name) =
                         resolve_channel_category(ctx, channel_id).await;
+                    // For thread channels, build a stable channel_name from the
+                    // parent channel name so resolve_agent_id_from_channel_name
+                    // can match it (same logic as bootstrap_thread_session).
+                    let ch_name = match super::resolve_thread_parent(&ctx.http, channel_id).await {
+                        Some((_parent_id, parent_name)) => {
+                            let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
+                            Some(super::synthetic_thread_channel_name(&parent, channel_id))
+                        }
+                        None => ch_name_resolved,
+                    };
                     {
                         let mut data = shared.core.lock().await;
                         let session =
@@ -888,7 +898,7 @@ pub(super) async fn handle_text_message(
                                     born_generation: super::runtime_store::load_generation(),
                                 });
                         session.current_path = Some(eff_path.clone());
-                        session.channel_name = ch_name_resolved;
+                        session.channel_name = ch_name;
                         session.category_name = cat_name;
                         session.channel_id = Some(channel_id.get());
                         session.last_active = tokio::time::Instant::now();

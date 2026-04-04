@@ -312,7 +312,7 @@ pub(super) struct TmuxWatcherHandle {
     pub(super) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
 }
 
-fn synthetic_thread_channel_name(parent_name: &str, channel_id: ChannelId) -> String {
+pub(super) fn synthetic_thread_channel_name(parent_name: &str, channel_id: ChannelId) -> String {
     format!("{parent_name}-t{}", channel_id.get())
 }
 
