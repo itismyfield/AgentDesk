@@ -809,16 +809,16 @@ pub async fn complete(
                 _ => ("General", "일반", "📁", "#6b7280"),
             };
 
-        let office_id = uuid::Uuid::new_v4().to_string();
+        let office_id = "hq";
         conn.execute(
-            "INSERT OR IGNORE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR REPLACE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
         )
         .ok();
 
         let dept_id = body.template.as_deref().unwrap_or("general").to_string();
         conn.execute(
-            "INSERT OR IGNORE INTO departments (id, name, name_ko, icon, color, office_id, sort_order) \
+            "INSERT OR REPLACE INTO departments (id, name, name_ko, icon, color, office_id, sort_order) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
             rusqlite::params![
                 dept_id,
