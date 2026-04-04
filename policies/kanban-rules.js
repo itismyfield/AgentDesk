@@ -498,10 +498,12 @@ var rules = {
         title = blockInfo[0].title || title;
       }
 
-      // Create pm-decision dispatch to PMD
+      // #267: Create pm-decision dispatch to PMD — the dispatch itself
+      // sends a notification via dispatch outbox, so only fall back to
+      // the canonical pm_pending buffer when dispatch creation fails.
+      var dispatchSent = false;
       var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
       if (pmdChannel) {
-        // Find PMD agent by channel
         var pmdAgent = agentdesk.db.query(
           "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? LIMIT 1",
           [pmdChannel, pmdChannel]
@@ -514,6 +516,7 @@ var rules = {
               "pm-decision",
               "[PM Decision] " + title
             );
+            dispatchSent = true;
           } catch (e) {
             agentdesk.log.warn("[kanban] pm-decision dispatch failed: " + e);
           }
@@ -522,7 +525,9 @@ var rules = {
         }
       }
 
-      notifyPMD(payload.card_id, reason);
+      if (!dispatchSent) {
+        notifyPMD(payload.card_id, reason);
+      }
     }
   },
 
