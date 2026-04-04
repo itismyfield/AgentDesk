@@ -532,17 +532,35 @@ pub async fn assign_card(
     }
     drop(conn);
 
-    // Status transition via reducer (ensures hooks, clocks, audit)
+    // #255: Walk through free transitions to reach the dispatchable state.
+    // e.g., backlog → ready → requested (each step fires hooks, clocks, audit).
     if old_status != ready_state {
-        if let Err(e) = crate::kanban::transition_status_with_opts(
-            &state.db,
-            &state.engine,
-            &id,
-            &ready_state,
-            "assign",
-            false,
-        ) {
-            tracing::warn!("[assign_card] transition failed: {e}");
+        if let Some(path) = pipeline.free_path_to_dispatchable(&old_status) {
+            for step in &path {
+                if let Err(e) = crate::kanban::transition_status_with_opts(
+                    &state.db,
+                    &state.engine,
+                    &id,
+                    step,
+                    "assign",
+                    false,
+                ) {
+                    tracing::warn!("[assign_card] walk step to '{step}' failed: {e}");
+                    break;
+                }
+            }
+        } else {
+            // Direct transition (already dispatchable or single hop)
+            if let Err(e) = crate::kanban::transition_status_with_opts(
+                &state.db,
+                &state.engine,
+                &id,
+                &ready_state,
+                "assign",
+                false,
+            ) {
+                tracing::warn!("[assign_card] transition failed: {e}");
+            }
         }
     }
 
@@ -552,11 +570,6 @@ pub async fn assign_card(
         })
         .ok()
     });
-
-    // Fire pipeline-defined hooks for the state transition (#134)
-    if old_status != ready_state {
-        crate::kanban::fire_state_hooks(&state.db, &state.engine, &id, &old_status, &ready_state);
-    }
 
     match card {
         Some(c) => {

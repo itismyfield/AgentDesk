@@ -149,7 +149,7 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
 }
 
 fn dispatch_uses_alt_channel(dispatch_type: &str) -> bool {
-    matches!(dispatch_type, "review" | "e2e-test")
+    matches!(dispatch_type, "review" | "e2e-test" | "consultation")
 }
 
 fn resolve_dispatch_channel_id(channel: &str) -> Option<u64> {
@@ -357,7 +357,8 @@ fn create_dispatch_core_internal(
 
     let is_review_type = dispatch_type == "review"
         || dispatch_type == "review-decision"
-        || dispatch_type == "rework";
+        || dispatch_type == "rework"
+        || dispatch_type == "consultation";
 
     if dispatch_type == "review-decision" {
         let mut stmt = conn.prepare(
@@ -1094,7 +1095,8 @@ mod tests {
         assert_eq!(dispatch["dispatch_type"], "implementation");
         assert_eq!(dispatch["title"], "Do the thing");
 
-        // Card should be updated
+        // Card should be updated — #255: ready→requested is free, so kickoff_for("ready")
+        // falls back to first dispatchable state target = "in_progress"
         let conn = db.separate_conn().unwrap();
         let (card_status, latest_dispatch_id): (String, String) = conn
             .query_row(
@@ -1103,7 +1105,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(card_status, "requested");
+        assert_eq!(card_status, "in_progress");
         assert_eq!(latest_dispatch_id, dispatch["id"].as_str().unwrap());
     }
 
@@ -1340,6 +1342,7 @@ mod tests {
 
         assert_eq!(old_status, "ready");
 
+        // #255: ready→requested is free, so kickoff_for("ready") returns "in_progress"
         let conn = db.separate_conn().unwrap();
         let (card_status, latest_dispatch_id): (String, String) = conn
             .query_row(
@@ -1348,7 +1351,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(card_status, "requested");
+        assert_eq!(card_status, "in_progress");
         assert_eq!(latest_dispatch_id, dispatch_id);
 
         // Dispatch row exists

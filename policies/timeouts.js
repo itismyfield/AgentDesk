@@ -259,7 +259,7 @@ var timeouts = {
     var requestedInterval = getTimeoutInterval("requested_timeout_min", 45);
     var staleRequested = agentdesk.db.query(
       "SELECT kc.id, kc.assigned_agent_id, kc.latest_dispatch_id, " +
-      "COALESCE(td.retry_count, 0) as retry_count " +
+      "COALESCE(td.retry_count, 0) as retry_count, td.dispatch_type " +
       "FROM kanban_cards kc " +
       "LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id " +
       "WHERE kc.status = ? AND kc.requested_at IS NOT NULL AND kc.requested_at < datetime('now', '" + requestedInterval + "')",
@@ -267,6 +267,18 @@ var timeouts = {
     );
     for (var i = 0; i < staleRequested.length; i++) {
       var rc = staleRequested[i];
+      // #255: Skip cards without a dispatch — they are in preflight state,
+      // waiting for auto-queue or tick to create a dispatch.
+      if (!rc.latest_dispatch_id) {
+        agentdesk.log.info("[timeout] Card " + rc.id + " in " + aInitial + " without dispatch — preflight, skipping timeout");
+        continue;
+      }
+      // #256: Skip cards with consultation dispatch — consultation has its own
+      // lifecycle via onDispatchCompleted; let it resolve naturally.
+      if (rc.dispatch_type === "consultation") {
+        agentdesk.log.info("[timeout] Card " + rc.id + " in " + aInitial + " with consultation dispatch — skipping timeout");
+        continue;
+      }
       // Dispatch를 failed로 — skip state changes if dispatch was already terminal
       if (rc.latest_dispatch_id) {
         var failResult = agentdesk.dispatch.markFailed(rc.latest_dispatch_id, "Timed out waiting for agent");

@@ -2070,10 +2070,13 @@ pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
 }
 
 pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
-    // "review" and "e2e-test" (#197) go to the counter-model channel.
+    // "review", "e2e-test" (#197), and "consultation" (#256) go to the counter-model channel.
     // "review-decision" is sent to the original agent's primary channel
     // so it reuses the implementation thread.
-    matches!(dispatch_type, Some("review") | Some("e2e-test"))
+    matches!(
+        dispatch_type,
+        Some("review") | Some("e2e-test") | Some("consultation")
+    )
 }
 
 fn format_dispatch_message(
@@ -2560,6 +2563,8 @@ mod tests {
     #[test]
     fn review_dispatch_uses_counter_model_channel() {
         assert!(use_counter_model_channel(Some("review")));
+        // #256: consultation dispatches go to counter-model channel
+        assert!(use_counter_model_channel(Some("consultation")));
         // review-decision goes to the original agent's primary channel,
         // not the counter-model channel, to reuse the implementation thread
         assert!(!use_counter_model_channel(Some("review-decision")));

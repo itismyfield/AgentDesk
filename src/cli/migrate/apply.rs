@@ -2071,6 +2071,9 @@ fn build_bot_settings_entry_plans(
 
     let mut by_account = BTreeMap::<String, BotAccountAccumulator>::new();
     for binding in &plan.discord.bindings {
+        if binding.mode != "live_applicable" {
+            continue;
+        }
         let Some(account_id) = binding.selected_account_id.as_deref() else {
             continue;
         };

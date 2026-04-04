@@ -669,7 +669,8 @@ async fn kanban_assign_card() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["card"]["status"], "ready");
+    // #255: assign walks through free transitions to the dispatchable state (requested)
+    assert_eq!(json["card"]["status"], "requested");
     assert_eq!(json["card"]["assigned_agent_id"], "ch-td");
 }
 
@@ -758,14 +759,14 @@ async fn dispatch_create_and_get() {
     assert_eq!(json["dispatch"]["status"], "pending");
     assert_eq!(json["dispatch"]["kanban_card_id"], "c1");
 
-    // Card should be "requested"
+    // #255: ready→requested is free, so dispatch from ready kicks off to "in_progress"
     let conn = db.lock().unwrap();
     let card_status: String = conn
         .query_row("SELECT status FROM kanban_cards WHERE id = 'c1'", [], |r| {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(card_status, "requested");
+    assert_eq!(card_status, "in_progress");
     let notify_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
@@ -1838,7 +1839,7 @@ async fn force_transition_succeeds_with_correct_channel() {
 }
 
 #[tokio::test]
-async fn auto_queue_enqueue_accepts_backlog_without_creating_dispatch() {
+async fn auto_queue_enqueue_rejects_backlog_card() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -1865,12 +1866,28 @@ async fn auto_queue_enqueue_accepts_backlog_without_creating_dispatch() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["ok"], true);
+    assert_eq!(json["status"], "backlog");
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ready/requested/dispatchable"),
+        "error should explain that only prepared work can be enqueued"
+    );
+    let allowed_states = json["allowed_states"]
+        .as_array()
+        .expect("allowed_states should be an array");
+    assert!(
+        !allowed_states
+            .iter()
+            .any(|state| state.as_str() == Some("backlog")),
+        "backlog must not appear in allowed enqueue states"
+    );
 
     let conn = db.lock().unwrap();
     let dispatch_count: i64 = conn
@@ -1882,22 +1899,19 @@ async fn auto_queue_enqueue_accepts_backlog_without_creating_dispatch() {
         .unwrap();
     assert_eq!(
         dispatch_count, 0,
-        "enqueue must not create a side dispatch for backlog cards"
+        "rejected backlog enqueue must not create a side dispatch"
     );
-    let (run_status, entry_status): (String, String) = conn
+    let queued_count: i64 = conn
         .query_row(
-            "SELECT r.status, e.status FROM auto_queue_runs r \
-             JOIN auto_queue_entries e ON e.run_id = r.id \
-             WHERE e.kanban_card_id = 'card-eq-backlog'",
+            "SELECT COUNT(*) FROM auto_queue_entries WHERE kanban_card_id = 'card-eq-backlog'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .unwrap();
     assert_eq!(
-        run_status, "pending",
-        "enqueue creates run in pending state — requires activate to dispatch"
+        queued_count, 0,
+        "rejected backlog enqueue must not create queue entries"
     );
-    assert_eq!(entry_status, "pending");
 }
 
 #[tokio::test]

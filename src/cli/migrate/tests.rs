@@ -1079,6 +1079,12 @@ fn live_write_bot_settings_skips_shared_account_without_live_channel_scope() {
     args.discord_token_mode = "plaintext-only".to_string();
 
     let plan = build_import_plan(&source, &args, Some(runtime.path())).unwrap();
+    assert!(
+        plan.discord
+            .bindings
+            .iter()
+            .all(|binding| binding.mode == "preview_only")
+    );
     apply::apply_import_plan(&plan, &source, &args, runtime.path()).unwrap();
 
     assert!(
@@ -1088,8 +1094,57 @@ fn live_write_bot_settings_skips_shared_account_without_live_channel_scope() {
             .join("bot_settings.json")
             .exists()
     );
-    let warnings = fs::read_to_string(audit_root(&plan).join("warnings.txt")).unwrap();
-    assert!(warnings.contains("multiple imported agents share the same token"));
+}
+
+#[test]
+fn live_write_bot_settings_skips_preview_only_bindings() {
+    let temp = TempDir::new().unwrap();
+    let runtime = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("IDENTITY.md"), "# Alpha\n").unwrap();
+    fs::write(workspace.join("MEMORY.md"), "# Memory\n").unwrap();
+
+    write_openclaw_config(
+        temp.path(),
+        r#"{
+            "agents":{"list":[{"id":"alpha","default":true,"model":"openai/gpt-5","workspace":"workspace"}]},
+            "bindings":[{"agentId":"alpha","match":{"channel":"discord"}}],
+            "channels":{
+                "discord":{
+                    "accounts":{
+                        "a":{
+                            "token":"token-a",
+                            "guilds":{"g1":{"channels":{"111":{"allow":true}}}}
+                        },
+                        "b":{
+                            "token":"token-b",
+                            "guilds":{"g2":{"channels":{"222":{"allow":true}}}}
+                        }
+                    }
+                }
+            }
+        }"#,
+    );
+
+    let source = resolve_source(&temp);
+    let mut args = base_args();
+    args.dry_run = false;
+    args.write_bot_settings = true;
+    args.discord_token_mode = "plaintext-only".to_string();
+
+    let plan = build_import_plan(&source, &args, Some(runtime.path())).unwrap();
+    assert_eq!(plan.discord.bindings[0].mode, "preview_only");
+
+    apply::apply_import_plan(&plan, &source, &args, runtime.path()).unwrap();
+
+    assert!(
+        !runtime
+            .path()
+            .join("config")
+            .join("bot_settings.json")
+            .exists()
+    );
 }
 
 #[test]
