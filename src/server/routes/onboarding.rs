@@ -837,6 +837,7 @@ pub async fn complete(
                 json!({
                     "roleId": mapping.role_id,
                     "channelId": mapping.channel_id,
+                    "workspace": workspace_tilde,
                 }),
             );
         }
