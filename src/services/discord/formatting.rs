@@ -393,6 +393,31 @@ mod tests {
             "Non-tool bracketed lines must not be filtered"
         );
     }
+
+    #[test]
+    fn test_filter_codex_tool_logs_task_family() {
+        let input =
+            "[Task] worker\n[TaskCreate] issue\n[TaskGet] 123\n[TaskUpdate] 123\n[TaskList]\nDone";
+        let output = filter_codex_tool_logs(input);
+        assert!(output.contains("⚙\u{fe0f} Task\n"), "Task must be filtered");
+        assert!(
+            output.contains("⚙\u{fe0f} TaskCreate"),
+            "TaskCreate must be filtered"
+        );
+        assert!(
+            output.contains("⚙\u{fe0f} TaskGet"),
+            "TaskGet must be filtered"
+        );
+        assert!(
+            output.contains("⚙\u{fe0f} TaskUpdate"),
+            "TaskUpdate must be filtered"
+        );
+        assert!(
+            output.contains("⚙\u{fe0f} TaskList"),
+            "TaskList must be filtered"
+        );
+        assert!(output.contains("Done"));
+    }
 }
 
 pub(super) fn floor_char_boundary(s: &str, index: usize) -> usize {
@@ -712,23 +737,17 @@ fn parse_table_cells(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// Known tool names emitted by Claude Code / Codex CLI.
-const CODEX_TOOL_NAMES: &[&str] = &[
-    "Bash",
-    "Read",
-    "Edit",
-    "Write",
-    "Grep",
-    "Glob",
-    "Agent",
-    "LSP",
-    "WebFetch",
-    "WebSearch",
-    "Skill",
-    "NotebookEdit",
-    "TaskOutput",
-    "TaskStop",
-];
+/// Build tool-name regex alternation from ALL_TOOLS plus extra names
+/// that appear in logs but aren't in the interactive tool list.
+fn tool_name_pattern() -> String {
+    let mut names: Vec<&str> = ALL_TOOLS.iter().map(|(name, _, _)| *name).collect();
+    for extra in &["Agent", "LSP"] {
+        if !names.contains(extra) {
+            names.push(extra);
+        }
+    }
+    names.join("|")
+}
 
 /// Filter Codex CLI tool-call log lines from response text.
 /// Replaces `[Bash] command...` -> `⚙️ Bash`, etc.
@@ -739,7 +758,7 @@ pub(super) fn filter_codex_tool_logs(s: &str) -> String {
     use std::sync::LazyLock;
 
     static TOOL_RE: LazyLock<Regex> = LazyLock::new(|| {
-        let names = CODEX_TOOL_NAMES.join("|");
+        let names = tool_name_pattern();
         Regex::new(&format!(r"^\s*\[({names})\](\s.*)?$")).unwrap()
     });
 

@@ -11,9 +11,7 @@ use crate::services::tmux_diagnostics::{
     tmux_session_exists, tmux_session_has_live_pane,
 };
 
-use super::formatting::{
-    format_for_discord, format_tool_input, normalize_empty_lines, send_long_message_raw,
-};
+use super::formatting::{format_tool_input, normalize_empty_lines, send_long_message_raw};
 use super::settings::{
     channel_supports_provider, resolve_role_binding, validate_bot_channel_routing,
 };
