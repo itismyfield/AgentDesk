@@ -310,7 +310,10 @@ pub fn load_graceful() -> Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_graceful_config_path, runtime_root};
+    use super::{
+        AgentDef, BotConfig, Config, load_from_path, resolve_graceful_config_path, runtime_root,
+        save_to_path,
+    };
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -416,6 +419,64 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(cwd);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn save_and_load_round_trip_preserves_config_fields() {
+        let dir = make_temp_dir("roundtrip");
+        let path = dir.join("nested").join("agentdesk.yaml");
+
+        let mut config = Config::default();
+        config.server.port = 4317;
+        config.server.host = "127.0.0.42".to_string();
+        config.server.auth_token = Some("secret-token".to_string());
+        config.discord.guild_id = Some("guild-123".to_string());
+        config.discord.bots.insert(
+            "announce".to_string(),
+            BotConfig {
+                token: Some("bot-token".to_string()),
+                description: Some("announce bot".to_string()),
+            },
+        );
+        config.agents.push(AgentDef {
+            id: "agent-1".to_string(),
+            name: "Agent One".to_string(),
+            name_ko: Some("에이전트 원".to_string()),
+            provider: "codex".to_string(),
+            channels: std::collections::HashMap::from([(
+                "claude".to_string(),
+                "123456789012345678".to_string(),
+            )]),
+            department: Some("platform".to_string()),
+            avatar_emoji: Some(":robot:".to_string()),
+        });
+
+        save_to_path(&path, &config).unwrap();
+        assert!(path.exists());
+        let loaded = load_from_path(&path).unwrap();
+
+        assert_eq!(loaded.server.port, 4317);
+        assert_eq!(loaded.server.host, "127.0.0.42");
+        assert_eq!(loaded.server.auth_token.as_deref(), Some("secret-token"));
+        assert_eq!(loaded.discord.guild_id.as_deref(), Some("guild-123"));
+        assert_eq!(loaded.discord.bots.len(), 1);
+        assert_eq!(
+            loaded.discord.bots["announce"].description.as_deref(),
+            Some("announce bot")
+        );
+        assert_eq!(loaded.agents.len(), 1);
+        assert_eq!(loaded.agents[0].id, "agent-1");
+        assert_eq!(loaded.agents[0].name, "Agent One");
+        assert_eq!(loaded.agents[0].name_ko.as_deref(), Some("에이전트 원"));
+        assert_eq!(loaded.agents[0].provider, "codex");
+        assert_eq!(loaded.agents[0].department.as_deref(), Some("platform"));
+        assert_eq!(loaded.agents[0].avatar_emoji.as_deref(), Some(":robot:"));
+        assert_eq!(
+            loaded.agents[0].channels.get("claude").map(String::as_str),
+            Some("123456789012345678")
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

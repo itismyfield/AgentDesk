@@ -410,15 +410,11 @@ pub(super) fn apply_import_plan(
                 Some(&session_map),
             )?;
 
-            let rendered_yaml = serde_yaml::to_string(&config)
-                .map_err(|e| format!("Failed to serialize '{}': {e}", yaml_path.display()))?;
-            write_text_file(
-                &yaml_path,
-                &rendered_yaml,
-                runtime_root,
-                &backups_root,
-                true,
-            )?;
+            if yaml_path.exists() {
+                backup_existing_path(&yaml_path, runtime_root, &backups_root)?;
+            }
+            config::save_to_path(&yaml_path, &config)
+                .map_err(|e| format!("Failed to write '{}': {e}", yaml_path.display()))?;
             written_paths.push(yaml_path.display().to_string());
 
             for agent in importable_agents.iter().copied() {
