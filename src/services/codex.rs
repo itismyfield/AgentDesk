@@ -115,6 +115,7 @@ pub fn execute_command_streaming(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     model: Option<&str>,
+    compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
 
@@ -166,6 +167,7 @@ pub fn execute_command_streaming(
                 tmux_name,
                 report_channel_id,
                 report_provider,
+                compact_token_limit,
             );
         }
         // ProcessBackend fallback for Codex (no tmux or non-unix)
@@ -176,6 +178,7 @@ pub fn execute_command_streaming(
             sender,
             cancel_token,
             tmux_name,
+            compact_token_limit,
         );
     }
 
@@ -188,6 +191,7 @@ pub fn execute_command_streaming(
         cancel_token,
         report_channel_id,
         report_provider,
+        compact_token_limit,
     )
 }
 
@@ -208,9 +212,19 @@ fn execute_streaming_direct(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let codex_bin = get_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
-    let args = base_exec_args(session_id, prompt, model);
+    let mut args = base_exec_args(session_id, prompt, model);
+    if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
+        // Insert -c config before the "exec" subcommand
+        let exec_pos = args.iter().position(|a| a == "exec").unwrap_or(0);
+        args.insert(
+            exec_pos,
+            format!(r#"model_auto_compact_token_limit="{}""#, limit),
+        );
+        args.insert(exec_pos, "-c".to_string());
+    }
 
     let mut command = Command::new(codex_bin);
     crate::services::platform::apply_runtime_path(&mut command);
@@ -339,6 +353,7 @@ fn execute_streaming_local_tmux(
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
@@ -462,7 +477,7 @@ fn execute_streaming_local_tmux(
         --input-fifo {input_fifo} \\\n  \
         --prompt-file {prompt} \\\n  \
         --cwd {wd} \\\n  \
-        --codex-bin {codex_bin}{model_arg}{effort_arg}\n",
+        --codex-bin {codex_bin}{model_arg}{effort_arg}{compact_arg}\n",
         env = env_lines,
         exe = shell_escape(&exe.display().to_string()),
         output = shell_escape(&output_path),
@@ -474,6 +489,10 @@ fn execute_streaming_local_tmux(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| format!(" \\\n  --codex-model {}", shell_escape(value)))
+            .unwrap_or_default(),
+        compact_arg = compact_token_limit
+            .filter(|&l| l > 0)
+            .map(|l| format!(" \\\n  --compact-token-limit {}", l))
             .unwrap_or_default(),
         effort_arg = std::env::var("AGENTDESK_CODEX_REASONING_EFFORT")
             .ok()
@@ -617,6 +636,7 @@ fn execute_streaming_local_process_codex(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     session_name: &str,
+    compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     use crate::services::session_backend::{
         ProcessBackend, SessionBackend, SessionConfig, SessionHandle,
@@ -729,6 +749,10 @@ fn execute_streaming_local_process_codex(
                     args.push("--reasoning-effort".to_string());
                     args.push(effort);
                 }
+            }
+            if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
+                args.push("--compact-token-limit".to_string());
+                args.push(limit.to_string());
             }
             args
         },

@@ -938,10 +938,10 @@ pub(super) async fn handle_text_message(
         // Fetch dispatch metadata for thread reuse and cross-channel role override
         let dispatch_info = lookup_dispatch_info(shared.api_port, did).await;
         dispatch_type_str = dispatch_info.as_ref().and_then(|i| i.dispatch_type.clone());
-        let is_review_dispatch = dispatch_type_str
-            .as_deref()
-            .map(|t| t == "review")
-            .unwrap_or(false);
+        let is_counter_model_dispatch =
+            crate::server::routes::dispatches::use_counter_model_channel(
+                dispatch_type_str.as_deref(),
+            );
         let alt_channel_id = dispatch_info
             .as_ref()
             .and_then(|i| i.discord_channel_alt.as_deref())
@@ -955,7 +955,7 @@ pub(super) async fn handle_text_message(
             );
             // For review dispatches in reused threads, set role override
             // so this turn uses the counter-model channel's role/model.
-            if is_review_dispatch {
+            if is_counter_model_dispatch {
                 if let Some(alt_ch) = alt_channel_id {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
@@ -991,7 +991,7 @@ pub(super) async fn handle_text_message(
                     shared.dispatch_thread_parents.insert(channel_id, tid);
                     // For review dispatches reusing an implementation thread,
                     // override role/model to use the counter-model channel.
-                    if is_review_dispatch {
+                    if is_counter_model_dispatch {
                         if let Some(alt_ch) = alt_channel_id {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             println!(
@@ -1672,6 +1672,20 @@ pub(super) async fn handle_text_message(
     let model_for_turn =
         super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
 
+    // Fetch context compact percent from ADK settings
+    let ctx_thresholds = super::adk_session::fetch_context_thresholds(shared.api_port).await;
+    let compact_percent = ctx_thresholds.compact_pct;
+    let context_window = ctx_thresholds.context_window;
+
+    // Pre-compute provider-specific compact config
+    let compact_percent_for_claude = Some(compact_percent);
+    let compact_token_limit_for_codex = {
+        let cli_config = provider.compact_cli_config(compact_percent, context_window);
+        cli_config
+            .first()
+            .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
+    };
+
     // Run the provider in a blocking thread
     let provider_for_blocking = provider.clone();
     tokio::task::spawn_blocking(move || {
@@ -1691,6 +1705,7 @@ pub(super) async fn handle_text_message(
                         Some(channel_id.get()),
                         Some(provider_for_blocking.clone()),
                         model_for_turn.as_deref(),
+                        compact_percent_for_claude,
                     ),
                     ProviderKind::Codex => codex::execute_command_streaming(
                         &context_prompt,
@@ -1705,6 +1720,7 @@ pub(super) async fn handle_text_message(
                         Some(channel_id.get()),
                         Some(provider_for_blocking.clone()),
                         model_for_turn.as_deref(),
+                        compact_token_limit_for_codex,
                     ),
                     ProviderKind::Gemini => gemini::execute_command_streaming(
                         &context_prompt,
@@ -1719,6 +1735,7 @@ pub(super) async fn handle_text_message(
                         Some(channel_id.get()),
                         Some(provider_for_blocking.clone()),
                         model_for_turn.as_deref(),
+                        None, // Gemini: compact not supported
                     ),
                     ProviderKind::Qwen => qwen::execute_command_streaming(
                         &context_prompt,
@@ -1733,6 +1750,7 @@ pub(super) async fn handle_text_message(
                         Some(channel_id.get()),
                         Some(provider_for_blocking.clone()),
                         model_for_turn.as_deref(),
+                        None, // Qwen: compact not supported
                     ),
                     ProviderKind::Unsupported(name) => {
                         let _ = tx.send(StreamMessage::Error {

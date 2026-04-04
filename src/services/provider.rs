@@ -216,6 +216,35 @@ impl ProviderKind {
         matches!(self, Self::Claude)
     }
 
+    /// Returns provider-specific environment variables for auto-compact configuration.
+    /// - Claude: CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = percent
+    /// - Codex: uses CLI args instead (see compact_cli_config)
+    pub fn compact_env_vars(&self, percent: u64) -> Vec<(String, String)> {
+        match self {
+            Self::Claude => vec![(
+                "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
+                percent.to_string(),
+            )],
+            // Codex uses -c CLI arg, not env vars
+            _ => vec![],
+        }
+    }
+
+    /// Returns Codex-specific CLI config overrides for auto-compact.
+    /// Codex uses model_auto_compact_token_limit (absolute token count).
+    pub fn compact_cli_config(&self, percent: u64, context_window: u64) -> Vec<(String, String)> {
+        match self {
+            Self::Codex => {
+                let token_limit = context_window * percent / 100;
+                vec![(
+                    "model_auto_compact_token_limit".to_string(),
+                    token_limit.to_string(),
+                )]
+            }
+            _ => vec![],
+        }
+    }
+
     /// Returns true when this provider can own a reusable local tmux/process
     /// session that AgentDesk may need to clear or pre-seed in inflight state.
     pub fn uses_managed_tmux_backend(&self) -> bool {

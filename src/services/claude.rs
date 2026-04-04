@@ -372,6 +372,7 @@ pub fn execute_command_streaming(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     model_override: Option<&str>,
+    compact_percent: Option<u64>,
 ) -> Result<(), String> {
     debug_log("========================================");
     debug_log("=== execute_command_streaming START ===");
@@ -487,6 +488,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     tmux_name,
                     report_channel_id,
                     report_provider,
+                    compact_percent,
                 );
             } else {
                 // Local without tmux → ProcessBackend (new path)
@@ -498,6 +500,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     sender,
                     cancel_token,
                     tmux_name,
+                    compact_percent,
                 );
             }
         }
@@ -513,6 +516,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 sender,
                 cancel_token,
                 tmux_name,
+                compact_percent,
             );
         }
     }
@@ -565,6 +569,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
     }
     if let Some(provider) = report_provider {
         command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
+    }
+    if let Some(pct) = compact_percent.filter(|&p| p > 0) {
+        command.env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", pct.to_string());
     }
 
     let mut child = command.spawn().map_err(|e| {
@@ -1397,6 +1404,7 @@ fn execute_streaming_local_tmux(
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    compact_percent: Option<u64>,
 ) -> Result<(), String> {
     debug_log(&format!(
         "=== execute_streaming_local_tmux START: {} ===",
@@ -1528,6 +1536,9 @@ fn execute_streaming_local_tmux(
             RESTART_REPORT_PROVIDER_ENV,
             provider.as_str()
         ));
+    }
+    if let Some(pct) = compact_percent.filter(|&p| p > 0) {
+        env_lines.push_str(&format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={}\n", pct));
     }
 
     let script_content = format!(
@@ -1862,6 +1873,7 @@ pub(crate) fn execute_streaming_local_process(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     session_name: &str,
+    compact_percent: Option<u64>,
 ) -> Result<(), String> {
     use crate::services::session_backend::{
         ProcessBackend, SessionBackend, SessionConfig, SessionHandle,
@@ -1943,6 +1955,13 @@ pub(crate) fn execute_streaming_local_process(
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
+    let mut env_vars = vec![];
+    if let Some(pct) = compact_percent.filter(|&p| p > 0) {
+        env_vars.push((
+            "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
+            pct.to_string(),
+        ));
+    }
     let config = SessionConfig {
         session_name: session_name.to_string(),
         working_dir: working_dir.to_string(),
@@ -1951,7 +1970,7 @@ pub(crate) fn execute_streaming_local_process(
         prompt_path: prompt_path.clone(),
         wrapper_subcommand: "tmux-wrapper".to_string(),
         wrapper_args,
-        env_vars: vec![],
+        env_vars,
     };
 
     let backend = ProcessBackend::new();

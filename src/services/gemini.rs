@@ -138,6 +138,7 @@ pub fn execute_command_streaming(
     _report_channel_id: Option<u64>,
     _report_provider: Option<ProviderKind>,
     model: Option<&str>,
+    _compact_percent: Option<u64>,
 ) -> Result<(), String> {
     if remote_profile.is_some() {
         return Err(remote_profile_not_supported_message());
@@ -1227,6 +1228,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap_err();
 
@@ -1247,6 +1249,7 @@ mod tests {
             None,
             None,
             Some(token.clone()),
+            None,
             None,
             None,
             None,
@@ -1503,6 +1506,7 @@ mod tests {
             None,
             None,
             Some(&remote_profile),
+            None,
             None,
             None,
             None,

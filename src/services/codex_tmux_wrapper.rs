@@ -16,6 +16,7 @@ pub fn run(
     codex_model: Option<&str>,
     reasoning_effort: Option<&str>,
     input_mode: InputMode,
+    compact_token_limit: Option<u64>,
 ) {
     let mode_label = match input_mode {
         InputMode::Fifo => "tmux resume loop",
@@ -141,6 +142,7 @@ pub fn run(
         &expanded_dir,
         &prompt,
         &mut thread_id,
+        compact_token_limit,
     ) {
         emit_result_error(&mut output, &err);
         let exit_reason_path = format!("{}.exit_reason", output_file);
@@ -160,6 +162,7 @@ pub fn run(
             &expanded_dir,
             next_prompt.trim(),
             &mut thread_id,
+            compact_token_limit,
         ) {
             emit_result_error(&mut output, &err);
             followup_error = Some(err);
@@ -208,6 +211,7 @@ fn run_turn(
     working_dir: &str,
     prompt: &str,
     thread_id: &mut Option<String>,
+    compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     emit_status("[sending...]");
 
@@ -221,6 +225,10 @@ fn run_turn(
         args.push(format!(r#"model_reasoning_effort="{}""#, effort));
         args.push("-m".to_string());
         args.push(model.to_string());
+    }
+    if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
+        args.push("-c".to_string());
+        args.push(format!(r#"model_auto_compact_token_limit="{}""#, limit));
     }
     args.push("exec".to_string());
     if let Some(existing_thread_id) = thread_id.as_deref() {
