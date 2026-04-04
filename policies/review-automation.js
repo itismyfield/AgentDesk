@@ -193,6 +193,14 @@ var reviewAutomation = {
     // #198: create-pr dispatch completed — transition card to terminal
     if (dispatch.dispatch_type === "create-pr") {
       var cfg2 = agentdesk.pipeline.resolveForCard(dispatch.kanban_card_id);
+      // Terminal guard — skip if card already reached terminal state
+      var cardStatus2 = agentdesk.db.query(
+        "SELECT status FROM kanban_cards WHERE id = ?", [dispatch.kanban_card_id]
+      );
+      if (cardStatus2.length > 0 && agentdesk.pipeline.isTerminal(cardStatus2[0].status, cfg2)) {
+        agentdesk.log.info("[review] create-pr completion skipped — card " + dispatch.kanban_card_id + " already terminal");
+        return;
+      }
       var init2 = agentdesk.pipeline.kickoffState(cfg2);
       var ip2 = agentdesk.pipeline.nextGatedTarget(init2, cfg2);
       var rev2 = agentdesk.pipeline.nextGatedTarget(ip2, cfg2);
