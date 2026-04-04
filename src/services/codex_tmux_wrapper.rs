@@ -228,7 +228,7 @@ fn run_turn(
     }
     if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
         args.push("-c".to_string());
-        args.push(format!(r#"model_auto_compact_token_limit="{}""#, limit));
+        args.push(format!("model_auto_compact_token_limit={}", limit));
     }
     args.push("exec".to_string());
     if let Some(existing_thread_id) = thread_id.as_deref() {
