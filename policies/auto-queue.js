@@ -62,7 +62,7 @@ var autoQueue = {
     );
     if (remaining.length > 0 && remaining[0].cnt === 0) {
       var runInfo = agentdesk.db.query(
-        "SELECT unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count FROM auto_queue_runs WHERE id = ?",
+        "SELECT repo, unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count FROM auto_queue_runs WHERE id = ?",
         [runId]
       );
       if (runInfo.length > 0 && runInfo[0].unified_thread_id) {
@@ -103,6 +103,7 @@ var autoQueue = {
         "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
         [runId]
       );
+      notifyRunCompleted(runId, runInfo.length > 0 ? runInfo[0] : null);
       return;
     }
 
@@ -438,6 +439,66 @@ function dispatchNextEntry(agentId) {
 
   var entry = nextEntry[0];
   dispatchNextEntryInGroup(agentId, entry.run_id, entry.thread_group);
+}
+
+function collectRunMainChannels(runId, runInfo) {
+  var targets = {};
+
+  if (runInfo && runInfo.unified_thread_id) {
+    try {
+      var map = JSON.parse(runInfo.unified_thread_id);
+      for (var key in map) {
+        if (!Object.prototype.hasOwnProperty.call(map, key)) continue;
+        var value = map[key];
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          for (var nestedKey in value) {
+            if (!Object.prototype.hasOwnProperty.call(value, nestedKey)) continue;
+            if (/^\d+$/.test(nestedKey)) targets[nestedKey] = true;
+          }
+        } else if (/^\d+$/.test(key)) {
+          targets[key] = true;
+        }
+      }
+    } catch (e) {
+      agentdesk.log.warn("[auto-queue] Failed to parse unified_thread_id for run " + runId + ": " + e);
+    }
+  }
+
+  var channelIds = Object.keys(targets);
+  if (channelIds.length > 0) return channelIds;
+
+  var fallback = agentdesk.db.query(
+    "SELECT DISTINCT COALESCE(a.discord_channel_id, '') as channel_id " +
+    "FROM auto_queue_entries e " +
+    "JOIN agents a ON a.id = e.agent_id " +
+    "WHERE e.run_id = ? AND COALESCE(a.discord_channel_id, '') != ''",
+    [runId]
+  );
+  for (var i = 0; i < fallback.length; i++) {
+    if (fallback[i].channel_id) targets[fallback[i].channel_id] = true;
+  }
+  return Object.keys(targets);
+}
+
+function notifyRunCompleted(runId, runInfo) {
+  var channelIds = collectRunMainChannels(runId, runInfo);
+  if (channelIds.length === 0) {
+    agentdesk.log.info("[auto-queue] Run " + runId + " complete — no main channel found for notify");
+    return;
+  }
+
+  var totals = agentdesk.db.query(
+    "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ?",
+    [runId]
+  );
+  var totalCount = (totals.length > 0) ? totals[0].cnt : 0;
+  var repoLabel = (runInfo && runInfo.repo) ? runInfo.repo : "auto-queue";
+  var shortRun = runId.substring(0, 8);
+  var message = "자동큐 완료: " + repoLabel + " / run " + shortRun + " / " + totalCount + "개";
+
+  for (var i = 0; i < channelIds.length; i++) {
+    agentdesk.message.queue("channel:" + channelIds[i], message, "notify", "system");
+  }
 }
 
 agentdesk.registerPolicy(autoQueue);

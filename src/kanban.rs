@@ -1150,6 +1150,12 @@ mod tests {
                 ai_model    TEXT,
                 ai_rationale TEXT,
                 timeout_minutes INTEGER DEFAULT 120,
+                unified_thread INTEGER DEFAULT 0,
+                unified_thread_id TEXT,
+                unified_thread_channel_id TEXT,
+                max_concurrent_threads INTEGER DEFAULT 1,
+                max_concurrent_per_agent INTEGER DEFAULT 1,
+                thread_group_count INTEGER DEFAULT 1,
                 created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
                 completed_at DATETIME
             );
@@ -1161,6 +1167,8 @@ mod tests {
                 priority_rank   INTEGER DEFAULT 0,
                 reason          TEXT,
                 status          TEXT DEFAULT 'pending',
+                dispatch_id     TEXT,
+                thread_group    INTEGER DEFAULT 0,
                 created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
                 dispatched_at   DATETIME,
                 completed_at    DATETIME
@@ -1325,6 +1333,73 @@ mod tests {
         assert_eq!(
             entry_status, "done",
             "Rust must mark auto_queue_entry as done"
+        );
+    }
+
+    #[test]
+    fn run_completion_enqueues_notify_to_main_channel() {
+        let db = test_db();
+        ensure_auto_queue_tables(&db);
+        let engine = test_engine(&db);
+
+        seed_card_with_repo(&db, "card-notify", "review", "repo-1");
+        seed_dispatch(&db, "card-notify", "pending");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (
+                    id, repo, agent_id, status, unified_thread, unified_thread_id, thread_group_count, created_at
+                 ) VALUES (?1, ?2, ?3, 'active', 1, ?4, 1, datetime('now'))",
+                rusqlite::params![
+                    "run-notify",
+                    "repo-1",
+                    "agent-1",
+                    r#"{"123":"thread-999"}"#
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (
+                    id, run_id, kanban_card_id, agent_id, status, dispatch_id, priority_rank
+                 ) VALUES (?1, ?2, ?3, ?4, 'dispatched', ?5, 1)",
+                rusqlite::params![
+                    "entry-notify",
+                    "run-notify",
+                    "card-notify",
+                    "agent-1",
+                    "dispatch-card-notify-pending"
+                ],
+            )
+            .unwrap();
+        }
+
+        let result =
+            transition_status_with_opts(&db, &engine, "card-notify", "done", "review", true);
+        assert!(result.is_ok(), "transition to done should succeed");
+
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-notify'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(run_status, "completed");
+
+        let (target, bot, content): (String, String, String) = conn
+            .query_row(
+                "SELECT target, bot, content FROM message_outbox ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(target, "channel:123");
+        assert_eq!(bot, "notify");
+        assert!(
+            content.contains("자동큐 완료: repo-1 / run run-noti / 1개"),
+            "notify message should summarize the completed run"
         );
     }
 
