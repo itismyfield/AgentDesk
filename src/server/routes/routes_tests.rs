@@ -1762,6 +1762,23 @@ fn seed_auto_queue_card(db: &Db, card_id: &str, issue_number: i64, status: &str,
     .unwrap();
 }
 
+fn seed_live_auto_queue_run(db: &Db, run_id: &str, agent_id: &str, existing_card_id: &str) {
+    ensure_auto_queue_tables(db);
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES (?1, 'test-repo', ?2, 'active')",
+        rusqlite::params![run_id, agent_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
+         VALUES (?1, ?2, ?3, ?4, 'pending', 0)",
+        rusqlite::params![format!("entry-{run_id}"), run_id, existing_card_id, agent_id],
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn force_transition_rejects_without_channel_header() {
     let db = test_db();
@@ -1920,6 +1937,19 @@ async fn auto_queue_enqueue_accepts_requested_without_active_dispatch() {
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-eq-requested");
+    seed_auto_queue_card(
+        &db,
+        "card-live-requested",
+        9101,
+        "ready",
+        "agent-eq-requested",
+    );
+    seed_live_auto_queue_run(
+        &db,
+        "run-live-requested",
+        "agent-eq-requested",
+        "card-live-requested",
+    );
     seed_auto_queue_card(
         &db,
         "card-eq-requested",
@@ -2223,6 +2253,8 @@ async fn auto_queue_enqueue_accepts_ready_cards_unchanged() {
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-eq-ready");
+    seed_auto_queue_card(&db, "card-live-ready", 9102, "ready", "agent-eq-ready");
+    seed_live_auto_queue_run(&db, "run-live-ready", "agent-eq-ready", "card-live-ready");
     seed_auto_queue_card(&db, "card-eq-ready", 1623, "ready", "agent-eq-ready");
 
     let app = test_api_router(db.clone(), engine, None);
@@ -2272,6 +2304,101 @@ async fn auto_queue_enqueue_accepts_ready_cards_unchanged() {
         )
         .unwrap();
     assert_eq!(entry_status, "pending");
+}
+
+/// #259 regression: enqueue must reject when there is no live active/pending run.
+/// A stale finished run left as `active` should be auto-completed first instead of
+/// silently absorbing new entries that will never dispatch.
+#[tokio::test]
+async fn auto_queue_enqueue_rejects_when_only_stale_finished_run_exists() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-eq-stale");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(&db, "card-stale-finished", 9103, "done", "agent-eq-stale");
+    seed_auto_queue_card(
+        &db,
+        "card-eq-stale-target",
+        16235,
+        "ready",
+        "agent-eq-stale",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-stale-finished', 'test-repo', 'agent-eq-stale', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, completed_at)
+             VALUES ('entry-stale-finished', 'run-stale-finished', 'card-stale-finished', 'agent-eq-stale', 'done', 0, datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/enqueue")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "issue_number": 16235,
+                        "agent_id": "agent-eq-stale",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("completed runs cannot accept enqueue"),
+        "error should explain that enqueue requires a live run"
+    );
+    assert_eq!(json["last_run_id"], "run-stale-finished");
+    assert_eq!(json["last_run_status"], "completed");
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-stale-finished'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        run_status, "completed",
+        "stale active run must be auto-completed before rejecting enqueue"
+    );
+    let queued_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_entries WHERE kanban_card_id = 'card-eq-stale-target'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        queued_count, 0,
+        "rejected enqueue must not create queue entries"
+    );
 }
 
 /// #162 DoD: active dispatch guard — rejects enqueue for cards with pending/dispatched dispatch.

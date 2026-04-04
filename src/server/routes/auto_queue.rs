@@ -1904,10 +1904,46 @@ pub async fn enqueue(
         )
         .unwrap_or_default();
 
-    // Find existing active/pending run (do NOT create yet — preserves idempotent retry)
+    // Complete stale active/pending runs that no longer have actionable entries.
+    // A finished run must not silently absorb new work just because its status
+    // was left behind as active/pending.
+    conn.execute(
+        "UPDATE auto_queue_runs
+         SET status = 'completed',
+             completed_at = COALESCE(completed_at, datetime('now'))
+         WHERE id IN (
+             SELECT r.id
+             FROM auto_queue_runs r
+             WHERE r.status IN ('active', 'pending')
+               AND (r.repo = ?1 OR r.repo IS NULL)
+               AND (r.agent_id = ?2 OR r.agent_id IS NULL)
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   WHERE e.run_id = r.id
+                     AND e.status IN ('pending', 'dispatched')
+               )
+         )",
+        rusqlite::params![body.repo, agent_id],
+    )
+    .ok();
+
+    // Find existing live active/pending run (do NOT create yet — preserves idempotent retry)
     let existing_run_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM auto_queue_runs WHERE status IN ('active', 'pending') AND (repo = ?1 OR repo IS NULL) AND (agent_id = ?2 OR agent_id IS NULL) ORDER BY created_at DESC LIMIT 1",
+            "SELECT r.id
+             FROM auto_queue_runs r
+             WHERE r.status IN ('active', 'pending')
+               AND (r.repo = ?1 OR r.repo IS NULL)
+               AND (r.agent_id = ?2 OR r.agent_id IS NULL)
+               AND EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   WHERE e.run_id = r.id
+                     AND e.status IN ('pending', 'dispatched')
+               )
+             ORDER BY r.created_at DESC
+             LIMIT 1",
             rusqlite::params![body.repo, agent_id],
             |row| row.get(0),
         )
@@ -1977,16 +2013,36 @@ pub async fn enqueue(
         );
     }
 
-    // Use existing run or create new one (pending — requires activate to dispatch).
-    let run_id = existing_run_id.unwrap_or_else(|| {
-        let id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES (?1, ?2, ?3, 'pending')",
-            rusqlite::params![id, body.repo, agent_id],
-        )
-        .ok();
-        id
-    });
+    // Enqueue only appends to an already-live run. Creating a brand-new pending
+    // run here is confusing because nothing dispatches until a separate activate.
+    // Reject instead so callers explicitly generate/activate a queue first.
+    let run_id = match existing_run_id {
+        Some(id) => id,
+        None => {
+            let last_run: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT id, status
+                     FROM auto_queue_runs
+                     WHERE (repo = ?1 OR repo IS NULL)
+                       AND (agent_id = ?2 OR agent_id IS NULL)
+                     ORDER BY created_at DESC
+                     LIMIT 1",
+                    rusqlite::params![body.repo, agent_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok();
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "no live active/pending auto-queue run available; completed runs cannot accept enqueue. Generate or activate a queue first",
+                    "card_id": card_id,
+                    "agent_id": agent_id,
+                    "last_run_id": last_run.as_ref().map(|(id, _)| id.clone()),
+                    "last_run_status": last_run.as_ref().map(|(_, status)| status.clone()),
+                })),
+            );
+        }
+    };
 
     let entry_id = uuid::Uuid::new_v4().to_string();
     let max_rank: i64 = conn
