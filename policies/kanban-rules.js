@@ -40,6 +40,34 @@ function _extractRepoFromUrl(url) {
   return match ? match[1] : null;
 }
 
+function _loadCardMetadata(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT metadata FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  if (rows.length === 0 || !rows[0].metadata) return {};
+  try {
+    var parsed = JSON.parse(rows[0].metadata);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function _mergeCardMetadata(cardId, patch) {
+  var meta = _loadCardMetadata(cardId);
+  for (var key in patch) {
+    if (Object.prototype.hasOwnProperty.call(patch, key)) {
+      meta[key] = patch[key];
+    }
+  }
+  agentdesk.db.execute(
+    "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
+    [JSON.stringify(meta), cardId]
+  );
+  return meta;
+}
+
 function _runPreflight(cardId) {
   var card = agentdesk.db.query(
     "SELECT kc.id, kc.title, kc.github_issue_number, kc.github_issue_url, kc.status, kc.description, " +
@@ -267,19 +295,12 @@ var rules = {
     if (dispatch.dispatch_type === "consultation") {
       var consultResult = {};
       try { consultResult = JSON.parse(dispatch.result || "{}"); } catch(e) {}
-      var meta = {};
-      var metaRow = agentdesk.db.query(
-        "SELECT metadata FROM kanban_cards WHERE id = ?",
-        [dispatch.kanban_card_id]
-      );
-      if (metaRow.length > 0 && metaRow[0].metadata) {
-        try { meta = JSON.parse(metaRow[0].metadata); } catch(e) {}
-      }
+      var meta = _loadCardMetadata(dispatch.kanban_card_id);
       meta.consultation_status = "completed";
       meta.consultation_result = consultResult;
       // If consultation clarified the issue, update preflight_status to "clear"
-      // so auto-queue will create an implementation dispatch on next tick.
-      // Otherwise escalate to pending_decision.
+      // and immediately resume the linked auto-queue entry with a fresh
+      // implementation dispatch. Otherwise escalate to pending_decision.
       if (consultResult.verdict === "clear" || consultResult.verdict === "proceed") {
         meta.preflight_status = "clear";
         meta.preflight_summary = "Consultation resolved: " + (consultResult.summary || "clarified");
@@ -287,7 +308,31 @@ var rules = {
           "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
           [JSON.stringify(meta), dispatch.kanban_card_id]
         );
-        agentdesk.log.info("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " → clear");
+        var aqEntries = agentdesk.db.query(
+          "SELECT id, agent_id FROM auto_queue_entries WHERE dispatch_id = ? AND status = 'dispatched' LIMIT 1",
+          [dispatch.id]
+        );
+        if (aqEntries.length > 0) {
+          try {
+            var nextDispatchId = agentdesk.dispatch.create(
+              dispatch.kanban_card_id,
+              aqEntries[0].agent_id,
+              "implementation",
+              card.title || "Implementation"
+            );
+            if (nextDispatchId) {
+              agentdesk.db.execute(
+                "UPDATE auto_queue_entries SET dispatch_id = ?, dispatched_at = datetime('now'), completed_at = NULL WHERE id = ? AND status = 'dispatched'",
+                [nextDispatchId, aqEntries[0].id]
+              );
+              agentdesk.log.info("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " — resumed implementation dispatch " + nextDispatchId);
+            }
+          } catch (e) {
+            agentdesk.log.warn("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " but implementation redispatch failed: " + e);
+          }
+        } else {
+          agentdesk.log.info("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " → clear");
+        }
       } else {
         meta.preflight_status = "escalated";
         meta.preflight_summary = "Consultation did not resolve: " + (consultResult.summary || "still ambiguous");
@@ -408,16 +453,12 @@ var rules = {
     // by auto-queue, which triggers DispatchAttached to advance requested → in_progress.
     if (payload.to === initialState && payload.from !== initialState) {
       var preflight = _runPreflight(payload.card_id);
-      // Store preflight result in metadata
-      var metaJson = JSON.stringify({
+      // Store preflight result in metadata without clobbering unrelated keys.
+      _mergeCardMetadata(payload.card_id, {
         preflight_status: preflight.status,
         preflight_summary: preflight.summary,
         preflight_checked_at: new Date().toISOString()
       });
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
-        [metaJson, payload.card_id]
-      );
 
       if (preflight.status === "invalid" || preflight.status === "already_applied") {
         // Move to done without implementation dispatch

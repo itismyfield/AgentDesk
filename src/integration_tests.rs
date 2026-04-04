@@ -61,6 +61,40 @@ mod tests {
         .unwrap();
     }
 
+    fn ensure_auto_queue_tables(db: &db::Db) {
+        let conn = db.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+                id          TEXT PRIMARY KEY,
+                repo        TEXT,
+                agent_id    TEXT,
+                status      TEXT DEFAULT 'active',
+                ai_model    TEXT,
+                ai_rationale TEXT,
+                timeout_minutes INTEGER DEFAULT 120,
+                unified_thread  INTEGER DEFAULT 0,
+                unified_thread_id TEXT,
+                unified_thread_channel_id TEXT,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME
+            );
+            CREATE TABLE IF NOT EXISTS auto_queue_entries (
+                id              TEXT PRIMARY KEY,
+                run_id          TEXT REFERENCES auto_queue_runs(id),
+                kanban_card_id  TEXT REFERENCES kanban_cards(id),
+                agent_id        TEXT,
+                priority_rank   INTEGER DEFAULT 0,
+                reason          TEXT,
+                status          TEXT DEFAULT 'pending',
+                dispatch_id     TEXT,
+                created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                dispatched_at   DATETIME,
+                completed_at    DATETIME
+            );",
+        )
+        .unwrap();
+    }
+
     fn get_card_status(db: &db::Db, card_id: &str) -> String {
         let conn = db.lock().unwrap();
         conn.query_row(
@@ -1871,5 +1905,158 @@ mod tests {
             crate::server::routes::dispatches::use_counter_model_channel(Some("consultation")),
             "#256: consultation must route to counter-model channel"
         );
+    }
+
+    #[test]
+    fn requested_preflight_preserves_existing_metadata_keys() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-preflight-meta", "ready");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET description = ?1, metadata = ?2 WHERE id = ?3",
+                rusqlite::params![
+                    "too short",
+                    serde_json::json!({
+                        "deps": "#42",
+                        "triage_label": "needs-spec"
+                    })
+                    .to_string(),
+                    "card-preflight-meta"
+                ],
+            )
+            .unwrap();
+        }
+
+        let result = kanban::transition_status(&db, &engine, "card-preflight-meta", "requested");
+        assert!(
+            result.is_ok(),
+            "ready -> requested preflight should succeed"
+        );
+
+        let metadata_json: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT metadata FROM kanban_cards WHERE id = 'card-preflight-meta'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+
+        assert_eq!(metadata["deps"], "#42");
+        assert_eq!(metadata["triage_label"], "needs-spec");
+        assert_eq!(metadata["preflight_status"], "consult_required");
+        assert!(metadata["preflight_summary"].is_string());
+        assert!(metadata["preflight_checked_at"].is_string());
+    }
+
+    #[test]
+    fn consultation_clear_redispatches_linked_auto_queue_entry() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-consult-clear", "requested");
+        ensure_auto_queue_tables(&db);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    serde_json::json!({
+                        "preflight_status": "consult_required",
+                        "deps": "#42"
+                    })
+                    .to_string(),
+                    "card-consult-clear"
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-consult-clear', 'repo-1', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let consultation = dispatch::create_dispatch(
+            &db,
+            &engine,
+            "card-consult-clear",
+            "agent-1",
+            "consultation",
+            "[Consultation] Clarify",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let consultation_id = consultation["id"].as_str().unwrap().to_string();
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatch_id, dispatched_at) \
+                 VALUES ('entry-consult-clear', 'run-consult-clear', 'card-consult-clear', 'agent-1', 'dispatched', 1, ?1, datetime('now'))",
+                rusqlite::params![consultation_id],
+            )
+            .unwrap();
+        }
+
+        let completed = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            &consultation_id,
+            &serde_json::json!({
+                "verdict": "clear",
+                "summary": "clarified"
+            }),
+        )
+        .unwrap();
+        assert_eq!(completed["status"], "completed");
+
+        let (card_status, latest_dispatch_id, metadata_json): (String, String, String) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status, latest_dispatch_id, metadata FROM kanban_cards WHERE id = 'card-consult-clear'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(card_status, "in_progress");
+        assert_eq!(metadata["consultation_status"], "completed");
+        assert_eq!(metadata["consultation_result"]["verdict"], "clear");
+        assert_eq!(metadata["preflight_status"], "clear");
+        assert_eq!(metadata["deps"], "#42");
+
+        let (dispatch_type, dispatch_status): (String, String) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+                rusqlite::params![latest_dispatch_id.clone()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(dispatch_type, "implementation");
+        assert_eq!(dispatch_status, "pending");
+
+        let (entry_status, entry_dispatch_id): (String, String) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-consult-clear'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(entry_status, "dispatched");
+        assert_eq!(entry_dispatch_id, latest_dispatch_id);
     }
 }
