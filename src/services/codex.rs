@@ -221,7 +221,7 @@ fn execute_streaming_direct(
         let exec_pos = args.iter().position(|a| a == "exec").unwrap_or(0);
         args.insert(
             exec_pos,
-            format!(r#"model_auto_compact_token_limit="{}""#, limit),
+            format!("model_auto_compact_token_limit={}", limit),
         );
         args.insert(exec_pos, "-c".to_string());
     }
