@@ -798,11 +798,18 @@ fn available_agent_ids(config: &OpenClawConfig) -> String {
 
 fn assign_role_id(source_id: &str, used: &mut BTreeSet<String>) -> String {
     let base = sanitize_role_id(source_id);
+    let prefixed = sanitize_role_id(&format!("openclaw-{source_id}"));
+
+    // Stable reruns should keep reusing an existing imported role id instead
+    // of drifting back to a bare source id once it becomes available again.
+    if used.contains(&prefixed) {
+        return prefixed;
+    }
+
     if used.insert(base.clone()) {
         return base;
     }
 
-    let prefixed = sanitize_role_id(&format!("openclaw-{source_id}"));
     if used.insert(prefixed.clone()) {
         return prefixed;
     }

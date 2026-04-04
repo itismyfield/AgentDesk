@@ -98,5 +98,6 @@ channel binding, bot 설정, 세션까지 함께 이관:
 ## 주의 사항
 
 - multi-agent source인데 기본 agent 표기가 없으면 `--agent` 또는 `--all-agents`가 필요합니다.
+- 같은 source를 다시 migrate할 때 runtime에 기존 `openclaw-<id>` role이 있으면 새 bare id 대신 그 role id를 재사용합니다.
 - workspace가 없거나 provider 매핑이 불가능한 agent는 audit에는 남지만 apply에서 건너뜁니다.
 - token/tool policy는 기본적으로 `report` 모드이며, 실제 쓰기 전 dry-run과 audit 결과를 먼저 확인하는 것이 안전합니다.

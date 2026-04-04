@@ -250,6 +250,33 @@ fn role_ids_prefix_when_org_yaml_collides() {
 }
 
 #[test]
+fn rerun_reuses_existing_prefixed_role_id() {
+    let temp = TempDir::new().unwrap();
+    let runtime = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(runtime.path().join("config")).unwrap();
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        runtime.path().join("agentdesk.yaml"),
+        r#"agents:
+- id: openclaw-alpha
+  name: alpha
+  provider: codex
+"#,
+    )
+    .unwrap();
+    write_openclaw_config(
+        temp.path(),
+        r#"{"agents":{"list":[{"id":"alpha","default":true,"model":"openai/gpt-5","workspace":"workspace"}]}}"#,
+    );
+
+    let source = resolve_source(&temp);
+    let plan = build_import_plan(&source, &base_args(), Some(runtime.path())).unwrap();
+
+    assert_eq!(plan.agents[0].final_role_id, "openclaw-alpha");
+}
+
+#[test]
 fn fallback_provider_maps_unsupported_sources() {
     let temp = TempDir::new().unwrap();
     let workspace = temp.path().join("workspace");
