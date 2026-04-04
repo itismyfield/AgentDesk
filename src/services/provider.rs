@@ -234,11 +234,22 @@ impl ProviderKind {
     pub fn default_context_window(&self) -> u64 {
         match self {
             Self::Claude => 1_000_000, // Claude Code (Sonnet/Opus)
-            Self::Codex => 200_000,    // Codex CLI default
+            Self::Codex => 200_000,    // Codex CLI fallback
             Self::Gemini => 1_000_000,
             Self::Qwen => 128_000,
             Self::Unsupported(_) => 200_000,
         }
+    }
+
+    /// Resolve the context window for a specific model, falling back to
+    /// the provider default if the model-specific value is unavailable.
+    pub fn resolve_context_window(&self, model: Option<&str>) -> u64 {
+        if let (Self::Codex, Some(m)) = (self, model) {
+            if let Some(window) = codex_model_context_window(m) {
+                return window;
+            }
+        }
+        self.default_context_window()
     }
 
     /// Returns Codex-specific CLI config overrides for auto-compact.
@@ -761,6 +772,20 @@ where
     Ok(())
 }
 
+/// Read Codex model context_window from the local CLI cache file.
+/// Returns None if the cache is missing, unreadable, or the model isn't found.
+fn codex_model_context_window(model: &str) -> Option<u64> {
+    let cache_path = dirs::home_dir()?.join(".codex/models_cache.json");
+    let data = std::fs::read_to_string(cache_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let models = json.get("models")?.as_array()?;
+    models
+        .iter()
+        .find(|m| m.get("slug").and_then(|s| s.as_str()) == Some(model))
+        .and_then(|m| m.get("context_window"))
+        .and_then(|v| v.as_u64())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -771,6 +796,38 @@ mod tests {
         register_child_pid, run_retrying_stream_attempts,
     };
     use crate::dispatch::extract_thread_channel_id;
+
+    #[test]
+    fn test_compact_cli_config_uses_context_window() {
+        let codex = ProviderKind::Codex;
+        // 60% of 272000 = 163200
+        let config = codex.compact_cli_config(60, 272_000);
+        assert_eq!(config.len(), 1);
+        assert_eq!(config[0].0, "model_auto_compact_token_limit");
+        assert_eq!(config[0].1, "163200");
+
+        // 60% of 128000 = 76800
+        let config = codex.compact_cli_config(60, 128_000);
+        assert_eq!(config[0].1, "76800");
+
+        // Claude returns no CLI config
+        let config = ProviderKind::Claude.compact_cli_config(60, 1_000_000);
+        assert!(config.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_context_window_fallback() {
+        // Without a matching model, falls back to provider default
+        assert_eq!(
+            ProviderKind::Codex.resolve_context_window(Some("nonexistent-model")),
+            200_000
+        );
+        assert_eq!(ProviderKind::Codex.resolve_context_window(None), 200_000);
+        assert_eq!(
+            ProviderKind::Claude.resolve_context_window(Some("opus")),
+            1_000_000
+        );
+    }
 
     #[test]
     fn test_provider_channel_support() {

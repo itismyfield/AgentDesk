@@ -1675,13 +1675,14 @@ pub(super) async fn handle_text_message(
     // Fetch context compact percent from ADK settings
     let ctx_thresholds = super::adk_session::fetch_context_thresholds(shared.api_port).await;
     let compact_percent = ctx_thresholds.compact_pct;
-    // Use provider-native context window instead of the global default
-    let provider_context_window = provider.default_context_window();
+    // Use model-specific context window (reads Codex models cache), falling
+    // back to the provider default if the model isn't found.
+    let model_context_window = provider.resolve_context_window(model_for_turn.as_deref());
 
     // Pre-compute provider-specific compact config
     let compact_percent_for_claude = Some(compact_percent);
     let compact_token_limit_for_codex = {
-        let cli_config = provider.compact_cli_config(compact_percent, provider_context_window);
+        let cli_config = provider.compact_cli_config(compact_percent, model_context_window);
         cli_config
             .first()
             .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
