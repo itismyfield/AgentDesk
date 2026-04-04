@@ -1738,27 +1738,24 @@ fn upsert_imported_sessions(
                 .display()
                 .to_string()
         };
-        let status = match session.status.as_deref() {
-            Some("running") => "working",
-            Some("failed") | Some("timeout") | Some("killed") => "idle",
-            Some("done") => "idle",
-            _ => "idle",
-        };
+        let status = "idle";
         let session_info = serde_json::json!({
             "imported_from": "openclaw",
             "source_agent_id": session.source_agent_id,
             "source_session_key": session.session_key,
             "source_session_id": session.session_id,
+            "source_status": session.status,
+            "source_updated_at": session.updated_at,
             "source_cwd": session.cwd,
             "ai_session_path": session_map.ai_session_path,
         })
         .to_string();
         let thread_channel_id = session.thread_id.clone();
-        let claude_session_id = (provider == "claude").then_some(session.session_id.clone());
+        let last_heartbeat = None::<String>;
 
         conn.execute(
             "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, thread_channel_id, claude_session_id, last_heartbeat)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, datetime('now'))
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, NULL, ?10)
              ON CONFLICT(session_key) DO UPDATE SET
                status = excluded.status,
                provider = excluded.provider,
@@ -1768,8 +1765,8 @@ fn upsert_imported_sessions(
                cwd = COALESCE(excluded.cwd, sessions.cwd),
                agent_id = COALESCE(excluded.agent_id, sessions.agent_id),
                thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
-               claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
-               last_heartbeat = datetime('now')",
+               claude_session_id = excluded.claude_session_id,
+               last_heartbeat = excluded.last_heartbeat",
             rusqlite::params![
                 session_map.db_session_key,
                 session.final_role_id,
@@ -1780,7 +1777,7 @@ fn upsert_imported_sessions(
                 0,
                 cwd,
                 thread_channel_id,
-                claude_session_id,
+                last_heartbeat,
             ],
         )
         .map_err(|e| format!("Failed to upsert imported session '{}': {e}", session.session_key))?;

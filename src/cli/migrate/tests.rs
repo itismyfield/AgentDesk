@@ -1217,9 +1217,17 @@ fn session_import_writes_ai_sessions_session_map_and_db_rows() {
 
     let db_path = runtime.path().join("data").join("agentdesk.sqlite");
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let (agent_id, provider, model, cwd, session_info): (String, String, String, String, String) =
+    let (agent_id, provider, status, model, cwd, session_info, last_heartbeat): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+    ) =
         conn.query_row(
-            "SELECT agent_id, provider, model, cwd, session_info FROM sessions WHERE session_key = ?1",
+            "SELECT agent_id, provider, status, model, cwd, session_info, last_heartbeat FROM sessions WHERE session_key = ?1",
             rusqlite::params![session_map[0]["db_session_key"].as_str().unwrap()],
             |row| {
                 Ok((
@@ -1228,12 +1236,15 @@ fn session_import_writes_ai_sessions_session_map_and_db_rows() {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .unwrap();
     assert_eq!(agent_id, "alpha");
     assert_eq!(provider, "codex");
+    assert_eq!(status, "idle");
     assert_eq!(model, "openai/gpt-5");
     assert!(
         std::path::Path::new(&cwd).ends_with(
@@ -1243,6 +1254,79 @@ fn session_import_writes_ai_sessions_session_map_and_db_rows() {
         )
     );
     assert!(session_info.contains("\"source_session_id\":\"session-1\""));
+    assert!(last_heartbeat.is_none());
+}
+
+#[test]
+fn session_import_keeps_claude_runtime_session_id_null_for_running_source_sessions() {
+    let temp = TempDir::new().unwrap();
+    let runtime = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    let sessions_dir = temp.path().join("agents").join("alpha").join("sessions");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::write(workspace.join("IDENTITY.md"), "# Alpha\n").unwrap();
+    fs::write(workspace.join("MEMORY.md"), "# Memory\n").unwrap();
+    fs::write(
+        sessions_dir.join("sessions.json"),
+        serde_json::json!({
+            "session-key-1": {
+                "sessionId": "claude-source-session-1",
+                "sessionFile": "session-1.jsonl",
+                "updatedAt": 1710000000000i64,
+                "model": "anthropic/claude-3-5-sonnet-latest",
+                "modelProvider": "claude",
+                "cwd": workspace.display().to_string(),
+                "status": "running"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        sessions_dir.join("session-1.jsonl"),
+        "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
+    )
+    .unwrap();
+
+    write_openclaw_config(
+        temp.path(),
+        r#"{
+            "agents":{"list":[{"id":"alpha","default":true,"model":"anthropic/claude-3-5-sonnet-latest","workspace":"workspace"}]}
+        }"#,
+    );
+
+    let source = resolve_source(&temp);
+    let mut args = base_args();
+    args.dry_run = false;
+    args.with_sessions = true;
+    args.write_db = true;
+
+    let plan = build_import_plan(&source, &args, Some(runtime.path())).unwrap();
+    apply::apply_import_plan(&plan, &source, &args, runtime.path()).unwrap();
+
+    let audit_root = audit_root(&plan);
+    let session_map = read_json_value(&audit_root.join("session-map.json"));
+    let db_path = runtime.path().join("data").join("agentdesk.sqlite");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let (status, claude_session_id, session_info, last_heartbeat): (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT status, claude_session_id, session_info, last_heartbeat FROM sessions WHERE session_key = ?1",
+            rusqlite::params![session_map[0]["db_session_key"].as_str().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+
+    assert_eq!(status, "idle");
+    assert!(claude_session_id.is_none());
+    assert!(last_heartbeat.is_none());
+    assert!(session_info.contains("\"source_session_id\":\"claude-source-session-1\""));
+    assert!(session_info.contains("\"source_status\":\"running\""));
 }
 
 #[test]
