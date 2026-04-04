@@ -395,21 +395,11 @@ var rules = {
         } catch (e) { /* parse fail = skip */ }
       }
 
-      // Check 2: Minimum work duration (2 min)
-      var MIN_WORK_SEC = 120;
-      var sessions = agentdesk.db.query(
-        "SELECT td.created_at as first_work, MAX(s.last_heartbeat) as last_seen " +
-        "FROM task_dispatches td " +
-        "JOIN sessions s ON s.active_dispatch_id = td.id AND s.status = 'working' " +
-        "WHERE td.id = ?",
-        [dispatch.id]
-      );
-      if (sessions.length > 0 && sessions[0].first_work && sessions[0].last_seen) {
-        var durationSec = (new Date(sessions[0].last_seen) - new Date(sessions[0].first_work)) / 1000;
-        if (durationSec < MIN_WORK_SEC) {
-          reasons.push("작업 시간 부족: " + Math.round(durationSec) + "초 (최소 " + MIN_WORK_SEC + "초)");
-        }
-      }
+      // Minimum work duration heuristic was intentionally removed.
+      // Unified-thread / turn-bridge completions can legitimately finalize with
+      // short measured wall-clock even when real work already happened, which
+      // created false PM escalations (#257, #261, #262). PM alerts must be
+      // reserved for objective failure signals, not timing heuristics.
 
       if (reasons.length > 0) {
         // Check if the only failure is DoD — give agent 15 min to complete it

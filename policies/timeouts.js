@@ -204,21 +204,10 @@ var timeouts = {
             }
           } catch (e) {}
         }
-        // Check 2: Minimum work duration (2 min)
-        var MIN_WORK_SEC = 120;
-        var sessions = agentdesk.db.query(
-          "SELECT td.created_at as first_work, MAX(s.last_heartbeat) as last_seen " +
-          "FROM task_dispatches td " +
-          "JOIN sessions s ON s.active_dispatch_id = td.id AND s.status = 'working' " +
-          "WHERE td.id = ?",
-          [di.id]
-        );
-        if (sessions.length > 0 && sessions[0].first_work && sessions[0].last_seen) {
-          var durationSec = (new Date(sessions[0].last_seen) - new Date(sessions[0].first_work)) / 1000;
-          if (durationSec < MIN_WORK_SEC) {
-            reasons.push("작업 시간 부족: " + Math.round(durationSec) + "초 (최소 " + MIN_WORK_SEC + "초)");
-          }
-        }
+        // Minimum work duration heuristic intentionally removed to keep PM
+        // escalation aligned with objective failure states only. Replay logic
+        // must match kanban-rules.js and avoid false positives from unified
+        // thread / turn-bridge completions.
         if (reasons.length > 0) {
           var dodOnly = reasons.length === 1 && reasons[0].indexOf("DoD 미완료") === 0;
           if (dodOnly) {
