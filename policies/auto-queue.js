@@ -44,8 +44,7 @@ var autoQueue = {
     var doneEntries = agentdesk.db.query(
       "SELECT e.run_id, COALESCE(e.thread_group, 0) as thread_group FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
-      "WHERE e.kanban_card_id = ? AND e.status = 'done' " +
-      "AND e.dispatch_id IS NOT NULL " +
+      "WHERE e.kanban_card_id = ? AND e.status IN ('done', 'skipped') " +
       "AND r.status IN ('active', 'paused') " +
       "ORDER BY e.completed_at DESC LIMIT 1",
       [payload.card_id]

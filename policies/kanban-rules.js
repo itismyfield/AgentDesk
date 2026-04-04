@@ -422,6 +422,11 @@ var rules = {
       if (preflight.status === "invalid" || preflight.status === "already_applied") {
         // Move to done without implementation dispatch
         agentdesk.kanban.setStatus(payload.card_id, "done", true); // force
+        // Clean up any auto-queue entries so the run doesn't stall
+        agentdesk.db.execute(
+          "UPDATE auto_queue_entries SET status = 'skipped' WHERE kanban_card_id = ? AND status = 'pending'",
+          [payload.card_id]
+        );
         agentdesk.log.info("[preflight] Card " + payload.card_id + " → done (" + preflight.status + "): " + preflight.summary);
       } else if (preflight.status === "consult_required") {
         // Store consultation status — auto-queue tick will handle consultation dispatch creation
