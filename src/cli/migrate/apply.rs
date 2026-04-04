@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{self, AgentDef as RuntimeAgentDef};
 use crate::db;
 use crate::db::agents::sync_agents_from_config;
-use crate::services::claude::DEFAULT_ALLOWED_TOOLS;
+use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::discord::org_writer::{self, OrgAgentUpdate, OrgChannelBindingUpdate};
 use crate::services::discord::runtime_store::org_schema_path_for_root;
 use crate::services::discord::settings::discord_token_hash;

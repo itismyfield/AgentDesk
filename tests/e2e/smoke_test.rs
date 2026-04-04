@@ -148,6 +148,7 @@ async fn smoke_test_full_lifecycle() {
                 "id": agent_id,
                 "name": "Test Agent",
                 "provider": "claude",
+                "discord_channel_id": "123456789012345678",
             }))
             .send()
             .await
