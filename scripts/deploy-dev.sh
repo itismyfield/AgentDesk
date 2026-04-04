@@ -116,7 +116,8 @@ _sync_dev_credentials() {
     fi
 
     if [ -e "$dev_credential_dir" ] && [ ! -L "$dev_credential_dir" ]; then
-        local backup_dir="${dev_credential_dir}.bak.$(date '+%Y%m%d-%H%M%S')"
+        local backup_dir
+        backup_dir="${dev_credential_dir}.bak.$(date '+%Y%m%d-%H%M%S')"
         mv "$dev_credential_dir" "$backup_dir"
         echo "▸ Backed up stale dev credential dir to $backup_dir"
     else
