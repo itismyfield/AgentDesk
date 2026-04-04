@@ -16,19 +16,26 @@ function sendDiscordNotification(target, content, bot) {
 }
 
 function notifyPMD(cardId, reason) {
-  var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
-  if (!pmdChannel) {
-    agentdesk.log.warn("[pm-gate] No kanban_manager_channel_id configured, skipping PMD notification");
-    return;
-  }
+  // #267: Queue to canonical pm_pending buffer (flushed by timeouts.js)
   var cards = agentdesk.db.query(
     "SELECT title FROM kanban_cards WHERE id = ?", [cardId]
   );
   var title = cards.length > 0 ? cards[0].title : cardId;
-  sendDiscordNotification(
-    "channel:" + pmdChannel,
-    "[PM Decision] " + title + "\n사유: " + reason,
-    "announce"
+  var pendingKey = "pm_pending:" + cardId;
+  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
+  var entry;
+  if (existing.length > 0) {
+    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
+  }
+  if (!entry) {
+    entry = { title: title, reasons: [] };
+  }
+  if (entry.reasons.indexOf(reason) === -1) {
+    entry.reasons.push(reason);
+  }
+  agentdesk.db.execute(
+    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+600 seconds'))",
+    [pendingKey, JSON.stringify(entry)]
   );
 }
 
@@ -473,18 +480,7 @@ var rules = {
     // blocked is typically the second force target (index 1)
     var blockedState = allForceTargets.length > 1 ? allForceTargets[1] : allForceTargets[0];
     if (payload.to === blockedState) {
-      var reason = "상태 전이: " + payload.from + " → " + payload.to;
-
-      // blocked_reason이 있으면 사용
-      var blockInfo = agentdesk.db.query(
-        "SELECT blocked_reason FROM kanban_cards WHERE id = ?",
-        [payload.card_id]
-      );
-      if (blockInfo.length > 0 && blockInfo[0].blocked_reason) {
-        reason = blockInfo[0].blocked_reason;
-      }
-
-      notifyPMD(payload.card_id, reason);
+      agentdesk.log.info("[kanban] card " + payload.card_id + " entered blocked state");
     }
 
     // → pendingState: create pm-decision dispatch + notify PMD

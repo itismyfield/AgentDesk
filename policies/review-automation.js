@@ -12,53 +12,29 @@ function sendDiscordReview(target, content, bot) {
   agentdesk.message.queue(target, content, bot || "announce", "system");
 }
 
-// #231: Cross-path cooldown for PM decision notifications (shared with timeouts.js)
-var PM_DECISION_COOLDOWN_SEC = 300;  // 5 min — same as timeouts.js
-
 function notifyPmdPendingDecision(cardId, reason) {
-  // #231: Check kv_meta cooldown to avoid duplicates across policies
-  var cooldownKey = "pm_decision_sent:" + cardId;
-  var existing = agentdesk.db.query(
-    "SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]
-  );
-  if (existing.length > 0) {
-    var sentAt = parseInt(existing[0].value, 10) || 0;
-    var now = Math.floor(Date.now() / 1000);
-    if (now - sentAt < PM_DECISION_COOLDOWN_SEC) {
-      agentdesk.log.info("[PM dedup] review-automation: skipped notification for card " + cardId +
-        " (cooldown " + (now - sentAt) + "s/" + PM_DECISION_COOLDOWN_SEC + "s)");
-      return;
-    }
-  }
-
+  // #267: Queue to canonical pm_pending buffer (flushed by timeouts.js)
   var cards = agentdesk.db.query(
-    "SELECT title, github_issue_number, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
+    "SELECT title, github_issue_number FROM kanban_cards WHERE id = ?",
     [cardId]
   );
-  if (cards.length === 0) return;
-  var card = cards[0];
-  var issueNum = card.github_issue_number || "?";
-  var issueUrl = card.github_issue_url || "";
-  var msg = "PM 판단 필요 — #" + issueNum + " " + card.title +
-    "\n\n사유: " + reason +
-    (issueUrl ? "\nGitHub: " + issueUrl : "") +
-    "\n\n/api/pm-decision API로 처리해주세요. (resume/rework/dismiss/requeue)";
-
-  // Send to PMD channel — use canonical config key (same as timeouts.js)
-  var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
-  if (!pmdChannel) {
-    agentdesk.log.warn("[PM dedup] review-automation: no kanban_manager_channel_id configured, skipping");
-    return;
+  var title = (cards.length > 0) ? ("#" + (cards[0].github_issue_number || "?") + " " + cards[0].title) : cardId;
+  var pendingKey = "pm_pending:" + cardId;
+  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
+  var entry;
+  if (existing.length > 0) {
+    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
   }
-  var pmdTarget = "channel:" + pmdChannel;
-  if (pmdTarget) {
-    sendDiscordReview(pmdTarget, msg, "announce");
-    // #231: Set cooldown with TTL
-    agentdesk.db.execute(
-      "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
-      [cooldownKey, String(Math.floor(Date.now() / 1000)), String(PM_DECISION_COOLDOWN_SEC)]
-    );
+  if (!entry) {
+    entry = { title: title, reasons: [] };
   }
+  if (entry.reasons.indexOf(reason) === -1) {
+    entry.reasons.push(reason);
+  }
+  agentdesk.db.execute(
+    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+600 seconds'))",
+    [pendingKey, JSON.stringify(entry)]
+  );
 }
 
 var reviewAutomation = {
