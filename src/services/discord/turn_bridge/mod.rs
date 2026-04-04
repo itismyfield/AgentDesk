@@ -24,9 +24,7 @@ pub(super) use tmux_runtime::stale_inflight_message;
 pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
-use completion_guard::{
-    complete_work_dispatch_on_turn_end, fail_dispatch_with_retry,
-};
+use completion_guard::{complete_work_dispatch_on_turn_end, fail_dispatch_with_retry};
 use recovery_text::{
     auto_retry_with_history, clear_local_session_state, handle_gemini_retry_boundary,
     output_file_has_stale_resume_error_after_offset, reset_session_for_auto_retry,

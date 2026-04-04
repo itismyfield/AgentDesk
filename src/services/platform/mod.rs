@@ -14,6 +14,6 @@ pub use binary_resolver::{
 };
 pub use dump_tool::capture_process_dump;
 pub use shell::{
-    async_shell_command, find_worktree_for_issue, git_head_commit, hostname_short,
-    resolve_repo_dir, shell_command,
+    async_shell_command, find_latest_commit_for_issue, find_worktree_for_issue, git_head_commit,
+    hostname_short, resolve_repo_dir, shell_command,
 };

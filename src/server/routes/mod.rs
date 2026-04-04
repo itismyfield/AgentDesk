@@ -149,6 +149,7 @@ pub fn api_router(
                 .delete(kanban::delete_card),
         )
         .route("/kanban-cards/{id}/assign", post(kanban::assign_card))
+        .route("/kanban-cards/{id}/rereview", post(kanban::rereview_card))
         .route("/kanban-cards/{id}/reopen", post(kanban::reopen_card))
         .route(
             "/kanban-cards/{id}/force-transition",

@@ -1969,6 +1969,315 @@ pub async fn pm_decision(
 // ── PMD-only reopen (done → in_progress) ─────────────────────────
 
 #[derive(Debug, Deserialize)]
+pub struct RereviewBody {
+    pub reason: Option<String>,
+}
+
+fn find_active_review_dispatch_id(conn: &rusqlite::Connection, card_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT id FROM task_dispatches
+         WHERE kanban_card_id = ?1
+           AND dispatch_type = 'review'
+           AND status IN ('pending', 'dispatched')
+         ORDER BY updated_at DESC, rowid DESC
+         LIMIT 1",
+        [card_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// POST /api/kanban-cards/:id/rereview
+///
+/// PMD-only recovery endpoint. Forces a card back through counter-model review
+/// using the best available execution target for that card's implementation.
+pub async fn rereview_card(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<RereviewBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let config = crate::config::load_graceful();
+    if let Some(expected_token) = config.server.auth_token.as_deref() {
+        if !expected_token.is_empty() {
+            let provided = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "));
+            if provided != Some(expected_token) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "rereview requires explicit Bearer token"})),
+                );
+            }
+        }
+    }
+
+    let caller_channel = headers
+        .get("x-channel-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let pmd_channel: String = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        conn.query_row(
+            "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_default()
+    };
+
+    if pmd_channel.is_empty() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "kanban_manager_channel_id not configured"})),
+        );
+    }
+
+    if caller_channel != pmd_channel {
+        tracing::warn!(
+            "[kanban] rereview rejected: X-Channel-Id '{}' != PMD channel '{}'",
+            caller_channel,
+            pmd_channel
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error": "rereview requires X-Channel-Id matching kanban_manager_channel_id"}),
+            ),
+        );
+    }
+
+    let reason = body.reason.as_deref().unwrap_or("manual rereview");
+    let (current_status, assigned_agent_id, card_title, gh_url) = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        match conn.query_row(
+            "SELECT status, assigned_agent_id, title, github_issue_url
+             FROM kanban_cards WHERE id = ?1",
+            [&id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        ) {
+            Ok(values) => values,
+            Err(_) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": format!("card not found: {id}")})),
+                );
+            }
+        }
+    };
+
+    let assigned_agent_id = match assigned_agent_id.filter(|value| !value.is_empty()) {
+        Some(value) => value,
+        None => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "card has no assigned agent"})),
+            );
+        }
+    };
+
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        let stale_ids: Vec<String> = conn
+            .prepare(
+                "SELECT id FROM task_dispatches
+                 WHERE kanban_card_id = ?1
+                   AND dispatch_type IN ('review', 'review-decision')
+                   AND status IN ('pending', 'dispatched')",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([&id], |row| row.get::<_, String>(0))
+                    .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            })
+            .unwrap_or_default();
+
+        for stale_id in &stale_ids {
+            if let Err(e) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                &conn,
+                stale_id,
+                Some("superseded_by_rereview"),
+            ) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        }
+    }
+
+    if current_status != "review" {
+        if let Err(e) = crate::kanban::transition_status_with_opts(
+            &state.db,
+            &state.engine,
+            &id,
+            "review",
+            &format!("pmd:rereview({reason})"),
+            true,
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    } else {
+        crate::kanban::fire_enter_hooks(&state.db, &state.engine, &id, "review");
+    }
+
+    let mut review_dispatch_id = state
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| find_active_review_dispatch_id(&conn, &id));
+
+    if review_dispatch_id.is_none() {
+        let _ = state
+            .engine
+            .fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": id }));
+        crate::kanban::drain_hook_side_effects(&state.db, &state.engine);
+        review_dispatch_id = state
+            .db
+            .lock()
+            .ok()
+            .and_then(|conn| find_active_review_dispatch_id(&conn, &id));
+    }
+
+    if review_dispatch_id.is_none() {
+        match crate::dispatch::create_dispatch(
+            &state.db,
+            &state.engine,
+            &id,
+            &assigned_agent_id,
+            "review",
+            &card_title,
+            &json!({ "rereview": true, "reason": reason }),
+        ) {
+            Ok(dispatch) => {
+                review_dispatch_id = dispatch["id"].as_str().map(str::to_string);
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        }
+    }
+
+    let Some(review_dispatch_id) = review_dispatch_id else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "failed to create fresh review dispatch"})),
+        );
+    };
+
+    crate::kanban::correct_tn_to_fn_on_reopen(&state.db, &id);
+
+    let card = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        conn.execute(
+            "UPDATE kanban_cards
+             SET completed_at = NULL, updated_at = datetime('now')
+             WHERE id = ?1",
+            [&id],
+        )
+        .ok();
+
+        conn.execute(
+            "UPDATE auto_queue_entries
+             SET status = 'dispatched',
+                 dispatch_id = ?1,
+                 dispatched_at = datetime('now'),
+                 completed_at = NULL
+             WHERE kanban_card_id = ?2
+               AND status IN ('pending', 'dispatched', 'done')
+               AND run_id IN (
+                   SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
+               )",
+            rusqlite::params![review_dispatch_id, id],
+        )
+        .ok();
+
+        match conn.query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
+            card_row_to_json(row)
+        }) {
+            Ok(card) => card,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        }
+    };
+
+    if !crate::pipeline::get().is_terminal("review")
+        && crate::pipeline::get().is_terminal(&current_status)
+    {
+        if let Some(url) = gh_url {
+            tokio::spawn(async move {
+                if let Err(e) = crate::github::reopen_issue_by_url(&url).await {
+                    tracing::warn!("[kanban] Failed to reopen GitHub issue {url}: {e}");
+                }
+            });
+        }
+    }
+
+    crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card.clone());
+    (
+        StatusCode::OK,
+        Json(json!({
+            "card": card,
+            "rereviewed": true,
+            "review_dispatch_id": review_dispatch_id,
+            "reason": reason,
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ReopenBody {
     pub review_status: Option<String>,
     pub dispatch_type: Option<String>,
@@ -2108,6 +2417,8 @@ pub async fn reopen_card(
         true,
     ) {
         Ok(result) => {
+            crate::kanban::correct_tn_to_fn_on_reopen(&state.db, &id);
+
             // ── Post-transition cleanup: clear completed_at and optional recovery fields ──
             let conn = match state.db.lock() {
                 Ok(c) => c,
@@ -2125,9 +2436,6 @@ pub async fn reopen_card(
                 [&id],
             )
             .ok();
-
-            // #119: Correct true_negative → false_negative (pass missed a real bug)
-            crate::kanban::correct_tn_to_fn_on_reopen(&state.db, &id);
 
             // #155: Optional review_status via intent
             if let Some(ref rs) = body.review_status {

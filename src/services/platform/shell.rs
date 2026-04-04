@@ -309,6 +309,53 @@ pub fn find_worktree_for_issue(repo_dir: &str, issue_number: i64) -> Option<Work
     Some(matches[best_idx].clone())
 }
 
+/// Find the newest mainline commit whose subject references the given issue number.
+///
+/// Used as a recovery fallback when a historical dispatch result omitted the
+/// concrete `completed_commit` that review should inspect.
+pub fn find_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option<String> {
+    let pattern = format!(r"\(#{}\)", issue_number);
+    let base_ref = upstream_base_ref(repo_dir);
+
+    for args in [
+        vec![
+            "log".to_string(),
+            "--format=%H".to_string(),
+            "--perl-regexp".to_string(),
+            "--grep".to_string(),
+            pattern.clone(),
+            "-n".to_string(),
+            "1".to_string(),
+            base_ref.clone(),
+        ],
+        vec![
+            "log".to_string(),
+            "--format=%H".to_string(),
+            "--perl-regexp".to_string(),
+            "--grep".to_string(),
+            pattern.clone(),
+            "--all".to_string(),
+            "-n".to_string(),
+            "1".to_string(),
+        ],
+    ] {
+        let output = Command::new("git")
+            .args(args.iter().map(String::as_str))
+            .current_dir(repo_dir)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !commit.is_empty() {
+            return Some(commit);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +635,27 @@ mod tests {
                 .output()
                 .ok();
         }
+    }
+
+    #[test]
+    fn find_latest_commit_for_issue_prefers_mainline_commit() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "fix: target commit (#269)"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        let expected = git_head_commit(repo_dir).unwrap();
+
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "chore: unrelated"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+
+        let found = find_latest_commit_for_issue(repo_dir, 269).unwrap();
+        assert_eq!(found, expected);
     }
 }

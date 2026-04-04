@@ -120,7 +120,20 @@ fn latest_completed_work_dispatch_target(
         });
     }
 
-    path.and_then(execution_target_from_dir)
+    let trusted_path = path.filter(|candidate| {
+        let resolved_branch = branch
+            .clone()
+            .or_else(|| crate::services::platform::shell::git_branch_name(candidate));
+        let repo_root = crate::services::platform::resolve_repo_dir();
+        let is_repo_root = repo_root.as_deref() == Some(*candidate);
+        let is_non_main_branch = resolved_branch
+            .as_deref()
+            .map(|value| value != "main" && value != "master")
+            .unwrap_or(false);
+        !is_repo_root || is_non_main_branch
+    });
+
+    trusted_path.and_then(execution_target_from_dir)
 }
 
 fn apply_review_target_context(
@@ -165,6 +178,28 @@ pub(crate) fn resolve_card_worktree(db: &Db, card_id: &str) -> Option<(String, S
     let repo_dir = crate::services::platform::resolve_repo_dir()?;
     crate::services::platform::find_worktree_for_issue(&repo_dir, issue_number)
         .map(|wt| (wt.path, wt.branch, wt.commit))
+}
+
+fn resolve_card_issue_commit_target(db: &Db, card_id: &str) -> Option<DispatchExecutionTarget> {
+    let (issue_number, _repo_id): (Option<i64>, Option<String>) =
+        db.separate_conn().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT github_issue_number, repo_id FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok()
+        })?;
+    let issue_number = issue_number?;
+    let repo_dir = crate::services::platform::resolve_repo_dir()?;
+    let reviewed_commit =
+        crate::services::platform::find_latest_commit_for_issue(&repo_dir, issue_number)?;
+    Some(DispatchExecutionTarget {
+        reviewed_commit,
+        branch: crate::services::platform::shell::git_branch_name(&repo_dir)
+            .or(Some("main".to_string())),
+        worktree_path: Some(repo_dir),
+    })
 }
 
 /// Build the context JSON string for a review dispatch.
@@ -213,6 +248,13 @@ fn build_review_context(
                     wt_branch,
                     &wt_commit[..8.min(wt_commit.len())],
                     wt_path
+                );
+            } else if let Some(target) = resolve_card_issue_commit_target(db, kanban_card_id) {
+                apply_review_target_context(&target, obj);
+                tracing::info!(
+                    "[dispatch] Review dispatch for card {}: recovered issue commit target ({})",
+                    kanban_card_id,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
                 );
             } else {
                 // Last fallback: review the current repo HEAD. This path is used
