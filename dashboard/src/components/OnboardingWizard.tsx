@@ -644,6 +644,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           guild_id: selectedGuild,
           owner_id: ownerId || null,
           provider: primaryProvider,
+          template: selectedTemplate || null,
           channels: channelAssignments.map((ca) => ({
             channel_id: ca.channelId || ca.channelName,
             channel_name: ca.channelName,

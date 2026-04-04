@@ -324,6 +324,7 @@ pub struct CompleteBody {
     pub owner_id: Option<String>,
     pub provider: Option<String>,
     pub channels: Vec<ChannelMapping>,
+    pub template: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -791,6 +792,58 @@ pub async fn complete(
         )
         .ok();
         created += 1;
+    }
+
+    // Create default office + department and assign agents
+    if !resolved_channels.is_empty() {
+        let (template_name, template_name_ko, template_icon, template_color) =
+            match body.template.as_deref() {
+                Some("household") => (
+                    "Household & Schedule",
+                    "가사 및 일정 도우미",
+                    "🏠",
+                    "#10b981",
+                ),
+                Some("startup") => ("Small Startup", "소규모 스타트업", "🚀", "#8b5cf6"),
+                Some("office") => ("Office Work", "사무업무", "🏢", "#3b82f6"),
+                _ => ("General", "일반", "📁", "#6b7280"),
+            };
+
+        let office_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT OR IGNORE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
+        )
+        .ok();
+
+        let dept_id = body.template.as_deref().unwrap_or("general").to_string();
+        conn.execute(
+            "INSERT OR IGNORE INTO departments (id, name, name_ko, icon, color, office_id, sort_order) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+            rusqlite::params![
+                dept_id,
+                template_name,
+                template_name_ko,
+                template_icon,
+                template_color,
+                office_id,
+            ],
+        )
+        .ok();
+
+        for mapping in &resolved_channels {
+            conn.execute(
+                "INSERT OR REPLACE INTO office_agents (office_id, agent_id, department_id) \
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![office_id, mapping.role_id, dept_id],
+            )
+            .ok();
+            conn.execute(
+                "UPDATE agents SET department = ?1 WHERE id = ?2",
+                rusqlite::params![dept_id, mapping.role_id],
+            )
+            .ok();
+        }
     }
 
     // Generate role_map.json
