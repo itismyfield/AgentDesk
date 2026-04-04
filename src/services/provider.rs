@@ -230,6 +230,17 @@ impl ProviderKind {
         }
     }
 
+    /// Default context window size in tokens for this provider.
+    pub fn default_context_window(&self) -> u64 {
+        match self {
+            Self::Claude => 1_000_000, // Claude Code (Sonnet/Opus)
+            Self::Codex => 200_000,    // Codex CLI default
+            Self::Gemini => 1_000_000,
+            Self::Qwen => 128_000,
+            Self::Unsupported(_) => 200_000,
+        }
+    }
+
     /// Returns Codex-specific CLI config overrides for auto-compact.
     /// Codex uses model_auto_compact_token_limit (absolute token count).
     pub fn compact_cli_config(&self, percent: u64, context_window: u64) -> Vec<(String, String)> {

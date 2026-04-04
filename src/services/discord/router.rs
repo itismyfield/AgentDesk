@@ -1675,12 +1675,13 @@ pub(super) async fn handle_text_message(
     // Fetch context compact percent from ADK settings
     let ctx_thresholds = super::adk_session::fetch_context_thresholds(shared.api_port).await;
     let compact_percent = ctx_thresholds.compact_pct;
-    let context_window = ctx_thresholds.context_window;
+    // Use provider-native context window instead of the global default
+    let provider_context_window = provider.default_context_window();
 
     // Pre-compute provider-specific compact config
     let compact_percent_for_claude = Some(compact_percent);
     let compact_token_limit_for_codex = {
-        let cli_config = provider.compact_cli_config(compact_percent, context_window);
+        let cli_config = provider.compact_cli_config(compact_percent, provider_context_window);
         cli_config
             .first()
             .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
