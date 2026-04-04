@@ -277,6 +277,55 @@ fn rerun_reuses_existing_prefixed_role_id() {
 }
 
 #[test]
+fn resume_reuses_stored_role_id_from_agent_map() {
+    let temp = TempDir::new().unwrap();
+    let runtime = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    let import_id = "resume-import-123";
+    let audit_root = runtime
+        .path()
+        .join("openclaw")
+        .join("imports")
+        .join(import_id);
+    fs::create_dir_all(runtime.path().join("config")).unwrap();
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&audit_root).unwrap();
+    fs::write(
+        runtime.path().join("agentdesk.yaml"),
+        r#"agents:
+- id: alpha
+  name: Existing alpha
+  provider: codex
+- id: openclaw-alpha
+  name: Existing imported alpha
+  provider: codex
+- id: openclaw-alpha-2
+  name: Previously imported alpha
+  provider: codex
+"#,
+    )
+    .unwrap();
+    fs::write(
+        audit_root.join("agent-map.json"),
+        r#"[
+  {"source_id":"alpha","role_id":"openclaw-alpha-2"}
+]"#,
+    )
+    .unwrap();
+    write_openclaw_config(
+        temp.path(),
+        r#"{"agents":{"list":[{"id":"alpha","default":true,"model":"openai/gpt-5","workspace":"workspace"}]}}"#,
+    );
+
+    let source = resolve_source(&temp);
+    let mut args = base_args();
+    args.resume = Some(import_id.to_string());
+    let plan = build_import_plan(&source, &args, Some(runtime.path())).unwrap();
+
+    assert_eq!(plan.agents[0].final_role_id, "openclaw-alpha-2");
+}
+
+#[test]
 fn fallback_provider_maps_unsupported_sources() {
     let temp = TempDir::new().unwrap();
     let workspace = temp.path().join("workspace");
@@ -323,6 +372,23 @@ fn defaults_workspace_is_used_for_agents_without_workspace() {
             .ends_with("shared-workspace")
     );
     assert!(plan.agents[0].workspace_exists);
+}
+
+#[test]
+fn windows_absolute_workspace_path_is_not_joined_to_source_root() {
+    let temp = TempDir::new().unwrap();
+    write_openclaw_config(
+        temp.path(),
+        r#"{"agents":{"list":[{"id":"alpha","default":true,"model":"openai/gpt-5","workspace":"C:\\openclaw\\workspace-alpha"}]}}"#,
+    );
+
+    let source = resolve_source(&temp);
+    let plan = build_import_plan(&source, &base_args(), None).unwrap();
+
+    assert_eq!(
+        plan.agents[0].workspace_source,
+        r"C:\openclaw\workspace-alpha"
+    );
 }
 
 #[test]

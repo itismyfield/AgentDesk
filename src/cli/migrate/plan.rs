@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::services::provider::ProviderKind;
@@ -171,6 +171,12 @@ pub(super) struct AgentTaskPlan {
     pub(super) mode: &'static str,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct StoredAgentMapEntry {
+    source_id: String,
+    role_id: String,
+}
+
 pub(super) fn build_import_plan(
     source: &ResolvedSourceRoot,
     args: &OpenClawMigrateArgs,
@@ -180,9 +186,11 @@ pub(super) fn build_import_plan(
     let _tool_policy_mode = parse_tool_policy_mode(&args.tool_policy_mode)?;
     let _discord_token_mode = parse_discord_token_mode(&args.discord_token_mode)?;
     let workspace_rewrite_rules = parse_workspace_rewrite_rules(&args.workspace_root_rewrite)?;
-    let existing_role_ids = load_existing_role_ids(runtime_root);
     let default_agent_id = source.config.agents.default_agent_id()?;
     let (selected_agents, selection_mode) = select_agents(&source.config, args)?;
+    let resume_role_ids =
+        load_resume_role_ids(runtime_root, args.resume.as_deref(), &selected_agents)?;
+    let existing_role_ids = load_existing_role_ids(runtime_root);
     let selected_agent_ids = selected_agents
         .iter()
         .map(|agent| agent.id.clone())
@@ -196,7 +204,12 @@ pub(super) fn build_import_plan(
         let is_default_agent = default_agent_id
             .map(|selected_default_agent_id| selected_default_agent_id == agent.id)
             .unwrap_or(false);
-        let final_role_id = assign_role_id(&agent.id, &mut used_role_ids);
+        let final_role_id = if let Some(stored_role_id) = resume_role_ids.get(&agent.id) {
+            used_role_ids.insert(stored_role_id.clone());
+            stored_role_id.clone()
+        } else {
+            assign_role_id(&agent.id, &mut used_role_ids)
+        };
         let provider_hint = direct_provider_hint(agent).map(|value| value.to_string());
         let model_hint =
             model_hint(agent, &source.config.agents.defaults).map(|value| value.to_string());
@@ -824,6 +837,70 @@ fn assign_role_id(source_id: &str, used: &mut BTreeSet<String>) -> String {
     unreachable!("role id generation exhausted");
 }
 
+fn load_resume_role_ids(
+    runtime_root: Option<&Path>,
+    import_id: Option<&str>,
+    selected_agents: &[&OpenClawAgentConfig],
+) -> Result<BTreeMap<String, String>, String> {
+    let Some(import_id) = import_id else {
+        return Ok(BTreeMap::new());
+    };
+    let runtime_root = runtime_root
+        .ok_or_else(|| "OpenClaw migrate resume requires an AgentDesk runtime root.".to_string())?;
+    let agent_map_path = runtime_root
+        .join("openclaw")
+        .join("imports")
+        .join(import_id)
+        .join("agent-map.json");
+    let agent_map_raw = fs::read_to_string(&agent_map_path)
+        .map_err(|e| format!("Failed to read '{}': {e}", agent_map_path.display()))?;
+    let agent_map: Vec<StoredAgentMapEntry> = serde_json::from_str(&agent_map_raw)
+        .map_err(|e| format!("Failed to parse '{}': {e}", agent_map_path.display()))?;
+
+    let mut by_source = BTreeMap::new();
+    for entry in agent_map {
+        if entry.source_id.trim().is_empty() || entry.role_id.trim().is_empty() {
+            return Err(format!(
+                "Resume agent map '{}' contains an empty source_id or role_id entry.",
+                agent_map_path.display()
+            ));
+        }
+        if let Some(existing_role_id) =
+            by_source.insert(entry.source_id.clone(), entry.role_id.clone())
+        {
+            if existing_role_id != entry.role_id {
+                return Err(format!(
+                    "Resume agent map '{}' contains conflicting role ids for source agent '{}'.",
+                    agent_map_path.display(),
+                    entry.source_id
+                ));
+            }
+        }
+    }
+
+    let mut selected_map = BTreeMap::new();
+    let mut seen_role_ids = BTreeSet::new();
+    for agent in selected_agents {
+        let role_id = by_source.get(&agent.id).cloned().ok_or_else(|| {
+            format!(
+                "Resume agent map '{}' is missing source agent '{}'.",
+                agent_map_path.display(),
+                agent.id
+            )
+        })?;
+        if !seen_role_ids.insert(role_id.clone()) {
+            return Err(format!(
+                "Resume agent map '{}' assigns duplicate role id '{}' across selected agents.",
+                agent_map_path.display(),
+                role_id
+            ));
+        }
+        selected_map.insert(agent.id.clone(), role_id);
+    }
+
+    Ok(selected_map)
+}
+
 fn sanitize_role_id(raw: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;
@@ -1119,9 +1196,7 @@ fn resolve_workspace_value_with_rewrites(
         }
     }
 
-    let looks_absolute = path.is_absolute()
-        || trimmed_workspace.starts_with('/')
-        || trimmed_workspace.starts_with('\\');
+    let looks_absolute = workspace_path_is_absolute(trimmed_workspace);
     if !looks_absolute {
         return source_root.join(path);
     }
@@ -1142,6 +1217,18 @@ fn resolve_workspace_value_with_rewrites(
     }
 
     path
+}
+
+fn workspace_path_is_absolute(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    let bytes = trimmed.as_bytes();
+    Path::new(trimmed).is_absolute()
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('\\')
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/'))
 }
 
 fn existing_bootstrap_files(workspace_path: &Path) -> Vec<String> {
