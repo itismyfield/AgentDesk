@@ -526,7 +526,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   }, [step, checkProviders]);
 
   const fetchChannels = async () => {
-    const token = commandBots[0]?.token || announceToken;
+    const token = announceToken || commandBots[0]?.token;
     if (!token) return;
     try {
       const r = await fetch("/api/onboarding/channels", {
@@ -1327,8 +1327,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           {guild && (
             <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
               {tr(
-                "\"새 채널\"을 선택하면 해당 이름으로 Discord에서 채널을 직접 생성해야 합니다.",
-                "Selecting \"New\" means you'll need to create that channel in Discord manually.",
+                "\"새 채널\"을 선택하면 통신 봇이 온보딩 완료 시 해당 채널을 자동 생성합니다.",
+                "Selecting \"New\" makes the communication bot create that channel automatically during onboarding.",
               )}
             </p>
           )}
