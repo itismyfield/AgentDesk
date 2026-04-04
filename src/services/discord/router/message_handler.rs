@@ -1,749 +1,8 @@
-use super::*;
+use super::super::*;
 #[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
 
-pub(super) fn should_process_turn_message(kind: serenity::model::channel::MessageType) -> bool {
-    matches!(
-        kind,
-        serenity::model::channel::MessageType::Regular
-            | serenity::model::channel::MessageType::InlineReply
-    )
-}
-
-fn should_skip_human_slash_message(
-    content: &str,
-    known_slash_commands: Option<&std::collections::HashSet<String>>,
-) -> bool {
-    if !content.starts_with('/') {
-        return false;
-    }
-
-    let command_name = content[1..].split_whitespace().next().unwrap_or("");
-    if command_name.is_empty() {
-        return false;
-    }
-
-    known_slash_commands.is_some_and(|set| set.contains(command_name))
-}
-
-fn is_model_picker_component_custom_id(
-    custom_id: &str,
-    fallback_channel_id: serenity::ChannelId,
-) -> bool {
-    super::commands::parse_model_picker_custom_id(custom_id, fallback_channel_id).is_some()
-}
-
-async fn reset_provider_session_if_pending(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) {
-    if shared
-        .model_session_reset_pending
-        .remove(&channel_id)
-        .is_none()
-    {
-        return;
-    }
-
-    let channel_name = {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.session_id = None;
-            session.channel_name.clone()
-        } else {
-            None
-        }
-    };
-
-    if provider.uses_managed_tmux_backend() {
-        if let Some(name) = channel_name.as_deref() {
-            crate::services::claude::terminate_local_session(
-                &provider.build_tmux_session_name(name),
-            );
-        }
-    }
-
-    if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
-        super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
-    }
-}
-
-pub(super) async fn handle_event(
-    ctx: &serenity::Context,
-    event: &serenity::FullEvent,
-    data: &Data,
-) -> Result<(), Error> {
-    maybe_cleanup_sessions(&data.shared).await;
-    match event {
-        serenity::FullEvent::InteractionCreate { interaction } => {
-            if let Some(component) = interaction.as_message_component() {
-                if is_model_picker_component_custom_id(
-                    &component.data.custom_id,
-                    component.channel_id,
-                ) {
-                    let settings_snapshot = { data.shared.settings.read().await.clone() };
-                    if !super::provider_handles_channel(
-                        ctx,
-                        &data.provider,
-                        &settings_snapshot,
-                        component.channel_id,
-                    )
-                    .await
-                    {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
-                            "  [{ts}] ⏭ COMPONENT-GUARD: skipping model picker in channel {} for provider {}",
-                            component.channel_id,
-                            data.provider.as_str()
-                        );
-                        return Ok(());
-                    }
-                    return handle_model_picker_interaction(ctx, component, data).await;
-                }
-            }
-        }
-        serenity::FullEvent::Message { new_message } => {
-            // ── Universal message-ID dedup ─────────────────────────────
-            // Guards against the same Discord message being processed twice,
-            // which can happen when thread messages are delivered as both a
-            // thread-context event AND a parent-channel event, or during
-            // gateway reconnections.
-            //
-            // Thread-preference: when a duplicate arrives, prefer the thread
-            // context over the parent context.  If a parent-channel event
-            // was processed first, a subsequent thread event for the same
-            // message_id is allowed through (and the parent turn will have
-            // already been filtered by should_process_turn_message or the
-            // dispatch-thread guard).
-            {
-                const MSG_DEDUP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-                let now = std::time::Instant::now();
-                let key = format!("mid:{}", new_message.id);
-
-                // Lazy cleanup of expired mid:* entries to prevent unbounded growth.
-                // Only runs every ~50 messages to amortize cost.
-                {
-                    static CLEANUP_COUNTER: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(0);
-                    let count = CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if count % 50 == 0 {
-                        data.shared.intake_dedup.retain(|k, v| {
-                            if k.starts_with("mid:") {
-                                now.duration_since(v.0) < MSG_DEDUP_TTL
-                            } else {
-                                true // non-mid entries are cleaned by their own path
-                            }
-                        });
-                    }
-                }
-
-                // Check if this arrival is from a thread context
-                let is_thread_context = resolve_thread_parent(&ctx.http, new_message.channel_id)
-                    .await
-                    .is_some();
-
-                let is_dup = match data.shared.intake_dedup.entry(key.clone()) {
-                    dashmap::mapref::entry::Entry::Occupied(mut e) => {
-                        let (ts, was_thread) = *e.get();
-                        if now.duration_since(ts) >= MSG_DEDUP_TTL {
-                            // Entry expired — treat as new
-                            e.insert((now, is_thread_context));
-                            false
-                        } else if is_thread_context && !was_thread {
-                            // Thread event for a message previously seen via parent —
-                            // allow thread through and mark as thread-processed.
-                            e.insert((now, true));
-                            false
-                        } else {
-                            true // genuine duplicate (same context or already thread-processed)
-                        }
-                    }
-                    dashmap::mapref::entry::Entry::Vacant(e) => {
-                        e.insert((now, is_thread_context));
-                        false
-                    }
-                };
-                if is_dup {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ⏭ MSG-DEDUP: skipping duplicate message {} in channel {}",
-                        new_message.id, new_message.channel_id
-                    );
-                    return Ok(());
-                }
-            }
-
-            if !should_process_turn_message(new_message.kind) {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ⏭ MSG-KIND: skipping {:?} message {} in channel {}",
-                    new_message.kind, new_message.id, new_message.channel_id
-                );
-                return Ok(());
-            }
-
-            // Ignore bot messages, unless the bot is in the allowed_bot_ids list
-            if new_message.author.bot {
-                let allowed = {
-                    let settings = data.shared.settings.read().await;
-                    settings
-                        .allowed_bot_ids
-                        .contains(&new_message.author.id.get())
-                };
-                if !allowed {
-                    return Ok(());
-                }
-            }
-
-            // Registered slash commands are handled by poise interactions.
-            // Unknown `/...` text should fall through to the AI provider.
-            if !new_message.author.bot
-                && should_skip_human_slash_message(
-                    &new_message.content,
-                    data.shared.known_slash_commands.get(),
-                )
-            {
-                return Ok(());
-            }
-
-            // Ignore messages that mention other (human) users — not directed at
-            // this bot.  Bot mentions are excluded because Discord auto-adds the
-            // replied-to author to the mentions array for InlineReply messages;
-            // filtering on those would silently drop legitimate replies to
-            // announce/notify/codex bot messages.
-            if !new_message.mentions.is_empty() {
-                let bot_id = ctx.cache.current_user().id;
-                let mentions_other_humans = new_message
-                    .mentions
-                    .iter()
-                    .any(|u| u.id != bot_id && !u.bot);
-                if mentions_other_humans {
-                    return Ok(());
-                }
-            }
-
-            let user_id = new_message.author.id;
-            let user_name = &new_message.author.name;
-            let channel_id = new_message.channel_id;
-            let is_dm = new_message.guild_id.is_none();
-            let (channel_name, _) = resolve_channel_category(ctx, channel_id).await;
-            // For threads, inherit role binding from the parent channel
-            let (effective_channel_id, effective_channel_name) =
-                if let Some((parent_id, parent_name)) =
-                    resolve_thread_parent(&ctx.http, channel_id).await
-                {
-                    (parent_id, parent_name.or_else(|| channel_name.clone()))
-                } else {
-                    (channel_id, channel_name.clone())
-                };
-            let settings_snapshot = { data.shared.settings.read().await.clone() };
-            if validate_bot_channel_routing(
-                &settings_snapshot,
-                &data.provider,
-                effective_channel_id,
-                effective_channel_name.as_deref(),
-                is_dm,
-            )
-            .is_err()
-            {
-                return Ok(());
-            }
-
-            // #189: Generic DM reply tracking — consume pending entry if present.
-            // The message always falls through to normal handling so the agent
-            // can respond contextually in the DM conversation.
-            let text = new_message.content.trim();
-            if !text.is_empty() {
-                if let Some(ref db) = data.shared.db {
-                    try_handle_pending_dm_reply(db, new_message).await;
-                }
-            }
-
-            // Auth check (allowed bots bypass auth)
-            let is_allowed_bot = new_message.author.bot && {
-                let settings = data.shared.settings.read().await;
-                settings.allowed_bot_ids.contains(&user_id.get())
-            };
-            if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
-                return Ok(());
-            }
-
-            // Handle file attachments — download regardless of session state
-            if !new_message.attachments.is_empty() {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ◀ [{user_name}] Upload: {} file(s)",
-                    new_message.attachments.len()
-                );
-                // Ensure session exists before handling uploads
-                auto_restore_session(&data.shared, channel_id, ctx).await;
-                handle_file_upload(ctx, new_message, &data.shared).await?;
-            }
-
-            if text.is_empty() {
-                return Ok(());
-            }
-
-            // ── Text commands (!start, !meeting, !stop, !clear) ──
-            // Strip leading bot mention to get the actual command text
-            let cmd_text = {
-                let re = regex::Regex::new(r"^<@!?\d+>\s*").unwrap();
-                re.replace(text, "").to_string()
-            };
-            if cmd_text.starts_with('!') {
-                let handled =
-                    handle_text_command(ctx, new_message, &data, channel_id, &cmd_text).await?;
-                if handled {
-                    return Ok(());
-                }
-            }
-
-            // Auto-restore session (for threads, fall back to parent channel's session)
-            auto_restore_session(&data.shared, channel_id, ctx).await;
-            if effective_channel_id != channel_id {
-                // Thread: if no session found for thread, try to bootstrap from parent
-                let needs_parent = {
-                    let d = data.shared.core.lock().await;
-                    !d.sessions.contains_key(&channel_id)
-                };
-                if needs_parent {
-                    auto_restore_session(&data.shared, effective_channel_id, ctx).await;
-                    // Clone parent session's path for the thread
-                    let parent_path = {
-                        let d = data.shared.core.lock().await;
-                        d.sessions
-                            .get(&effective_channel_id)
-                            .and_then(|s| s.current_path.clone())
-                    };
-                    if let Some(path) = parent_path {
-                        bootstrap_thread_session(&data.shared, channel_id, &path, ctx).await;
-                    }
-                }
-            }
-
-            // ── Intake-level dedup guard ──────────────────────────────────
-            // Prevents the same bot dispatch from starting two parallel turns
-            // when Discord delivers the message twice in rapid succession.
-            if new_message.author.bot {
-                let dedup_key =
-                    if let Some(dispatch_id) = super::adk_session::parse_dispatch_id(text) {
-                        // Same dispatch_id = genuine duplicate (Discord retry)
-                        format!("dispatch:{}", dispatch_id)
-                    } else {
-                        // Use Discord message_id as dedup key — each message is unique
-                        // This prevents false-positive dedup of different bot messages
-                        // with similar text content
-                        format!("msg:{}", new_message.id)
-                    };
-
-                const INTAKE_DEDUP_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-                let now = std::time::Instant::now();
-
-                // Lazy cleanup: remove expired bot-specific entries.
-                // Skip mid:* entries — they use a longer TTL and are cleaned
-                // separately in the universal dedup section above.
-                data.shared.intake_dedup.retain(|k, v| {
-                    if k.starts_with("mid:") {
-                        true // preserved; cleaned by universal dedup cleanup
-                    } else {
-                        now.duration_since(v.0) < INTAKE_DEDUP_TTL
-                    }
-                });
-
-                // Atomic check+insert via entry() — holds shard lock so two
-                // simultaneous arrivals cannot both see a miss.
-                let is_duplicate = match data.shared.intake_dedup.entry(dedup_key.clone()) {
-                    dashmap::mapref::entry::Entry::Occupied(e) => {
-                        now.duration_since(e.get().0) < INTAKE_DEDUP_TTL
-                    }
-                    dashmap::mapref::entry::Entry::Vacant(e) => {
-                        e.insert((now, false));
-                        false
-                    }
-                };
-                if is_duplicate {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ⏭ DEDUP: skipping duplicate intake in channel {} (key={})",
-                        channel_id, dedup_key
-                    );
-                    return Ok(());
-                }
-            }
-
-            // ── Dispatch-thread guard ─────────────────────────────────
-            // When a dispatch thread is active for this channel, bot messages
-            // to the parent channel are queued so they don't start a parallel
-            // turn (the thread's cancel_token is keyed by thread_id, leaving
-            // the parent channel "unlocked").
-            if new_message.author.bot {
-                if let Some(thread_id) = data.shared.dispatch_thread_parents.get(&channel_id) {
-                    // Thread still has an active turn?
-                    let thread_active = {
-                        let d = data.shared.core.lock().await;
-                        d.cancel_tokens.contains_key(thread_id.value())
-                    };
-                    if thread_active {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
-                            "  [{ts}] 🔀 THREAD-GUARD: bot message to parent {} queued (dispatch thread {} active)",
-                            channel_id, *thread_id
-                        );
-                        let mut d = data.shared.core.lock().await;
-                        let queue = d.intervention_queue.entry(channel_id).or_default();
-                        enqueue_intervention(
-                            queue,
-                            Intervention {
-                                author_id: user_id,
-                                message_id: new_message.id,
-                                text: text.to_string(),
-                                mode: InterventionMode::Soft,
-                                created_at: Instant::now(),
-                            },
-                        );
-                        if let Some(q) = d.intervention_queue.get(&channel_id) {
-                            save_channel_queue(&data.provider, channel_id, q);
-                        }
-                        drop(d);
-                        add_reaction(ctx, channel_id, new_message.id, '📬').await;
-                        data.shared
-                            .last_message_ids
-                            .insert(channel_id, new_message.id.get());
-                        return Ok(());
-                    } else {
-                        // Thread turn finished — clean up stale mapping
-                        data.shared.dispatch_thread_parents.remove(&channel_id);
-                    }
-                }
-            }
-
-            // ── Dispatch collision guard ────────────────────────────────
-            // When a DISPATCH: message arrives on a channel that already has
-            // an active turn (inflight), queue it as an intervention instead
-            // of starting a parallel turn that would stomp the current
-            // placeholder.
-            if text.starts_with("DISPATCH:") {
-                let mut d = data.shared.core.lock().await;
-                if d.cancel_tokens.contains_key(&channel_id) {
-                    let inserted = {
-                        let queue = d.intervention_queue.entry(channel_id).or_default();
-                        enqueue_intervention(
-                            queue,
-                            Intervention {
-                                author_id: user_id,
-                                message_id: new_message.id,
-                                text: text.to_string(),
-                                mode: InterventionMode::Soft,
-                                created_at: Instant::now(),
-                            },
-                        )
-                    };
-                    if inserted {
-                        if let Some(q) = d.intervention_queue.get(&channel_id) {
-                            save_channel_queue(&data.provider, channel_id, q);
-                        }
-                    }
-                    drop(d);
-
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] 📬 DISPATCH-GUARD: queued dispatch message in channel {} (active turn in progress)",
-                        channel_id
-                    );
-                    add_reaction(ctx, channel_id, new_message.id, '📬').await;
-                    data.shared
-                        .last_message_ids
-                        .insert(channel_id, new_message.id.get());
-                    return Ok(());
-                }
-                drop(d);
-                // No active turn — fall through to normal processing below
-            }
-
-            // Queue messages while AI is in progress (executed as next turn after current finishes)
-            {
-                let mut d = data.shared.core.lock().await;
-                if d.cancel_tokens.contains_key(&channel_id) {
-                    let inserted = {
-                        let queue = d.intervention_queue.entry(channel_id).or_default();
-                        enqueue_intervention(
-                            queue,
-                            Intervention {
-                                author_id: user_id,
-                                message_id: new_message.id,
-                                text: text.to_string(),
-                                mode: InterventionMode::Soft,
-                                created_at: Instant::now(),
-                            },
-                        )
-                    };
-
-                    // Write-through: persist this channel's queue to disk immediately
-                    // so it survives SIGKILL, OOM kill, or crash.
-                    if inserted {
-                        if let Some(q) = d.intervention_queue.get(&channel_id) {
-                            save_channel_queue(&data.provider, channel_id, q);
-                        }
-                    }
-
-                    let is_shutting_down = data
-                        .shared
-                        .shutting_down
-                        .load(std::sync::atomic::Ordering::Relaxed);
-
-                    drop(d);
-
-                    if !inserted {
-                        rate_limit_wait(&data.shared, channel_id).await;
-                        let _ = channel_id
-                            .say(&ctx.http, "↪ 같은 메시지가 방금 이미 큐잉되어서 무시했어.")
-                            .await;
-                        return Ok(());
-                    }
-
-                    // React with 📬 to indicate message is queued
-                    add_reaction(ctx, channel_id, new_message.id, '📬').await;
-
-                    // Checkpoint: message successfully queued
-                    data.shared
-                        .last_message_ids
-                        .insert(channel_id, new_message.id.get());
-                    if is_shutting_down {
-                        let ids: std::collections::HashMap<u64, u64> = data
-                            .shared
-                            .last_message_ids
-                            .iter()
-                            .map(|entry| (entry.key().get(), *entry.value()))
-                            .collect();
-                        runtime_store::save_all_last_message_ids(data.provider.as_str(), &ids);
-                    }
-                    return Ok(());
-                }
-            }
-
-            // Reconcile gate (#122): until startup recovery is complete, queue messages.
-            if !data
-                .shared
-                .reconcile_done
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                let mut d = data.shared.core.lock().await;
-                let queue = d.intervention_queue.entry(channel_id).or_default();
-                enqueue_intervention(
-                    queue,
-                    Intervention {
-                        author_id: user_id,
-                        message_id: new_message.id,
-                        text: text.to_string(),
-                        mode: InterventionMode::Soft,
-                        created_at: Instant::now(),
-                    },
-                );
-                // Write-through: persist queue to disk (matches drain-mode contract)
-                if let Some(q) = d.intervention_queue.get(&channel_id) {
-                    save_channel_queue(&data.provider, channel_id, q);
-                }
-                drop(d);
-                // Checkpoint: track last processed message
-                data.shared
-                    .last_message_ids
-                    .insert(channel_id, new_message.id.get());
-                formatting::add_reaction_raw(&ctx.http, channel_id, new_message.id, '🔄').await;
-                return Ok(());
-            }
-
-            // Drain mode: when restart is pending, queue new messages instead of
-            // starting new turns. This ensures only existing turns drain to completion.
-            if data
-                .shared
-                .restart_pending
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                let is_shutting_down = data
-                    .shared
-                    .shutting_down
-                    .load(std::sync::atomic::Ordering::Relaxed);
-
-                let mut d = data.shared.core.lock().await;
-                let queue = d.intervention_queue.entry(channel_id).or_default();
-                enqueue_intervention(
-                    queue,
-                    Intervention {
-                        author_id: user_id,
-                        message_id: new_message.id,
-                        text: text.to_string(),
-                        mode: InterventionMode::Soft,
-                        created_at: Instant::now(),
-                    },
-                );
-
-                // Write-through: persist this channel's queue to disk immediately
-                if let Some(q) = d.intervention_queue.get(&channel_id) {
-                    save_channel_queue(&data.provider, channel_id, q);
-                }
-                drop(d);
-
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ⏸ DRAIN: queued message from [{user_name}] in channel {} (restart pending)",
-                    channel_id
-                );
-
-                // React with 📬 to indicate message is queued
-                add_reaction(ctx, channel_id, new_message.id, '📬').await;
-
-                // Checkpoint: message successfully queued in drain mode
-                data.shared
-                    .last_message_ids
-                    .insert(channel_id, new_message.id.get());
-
-                if is_shutting_down {
-                    // Persist checkpoint to disk immediately during shutdown
-                    let ids: std::collections::HashMap<u64, u64> = data
-                        .shared
-                        .last_message_ids
-                        .iter()
-                        .map(|entry| (entry.key().get(), *entry.value()))
-                        .collect();
-                    runtime_store::save_all_last_message_ids(data.provider.as_str(), &ids);
-                } else {
-                    rate_limit_wait(&data.shared, channel_id).await;
-                    let _ = channel_id
-                        .say(
-                            &ctx.http,
-                            "⏸ 재시작 대기 중 — 메시지가 큐에 저장되었고, 재시작 후 처리됩니다.",
-                        )
-                        .await;
-                }
-                return Ok(());
-            }
-
-            // Meeting command from text (e.g. announce bot sending "/meeting start ...")
-            if text.starts_with("/meeting ") {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ◀ [{user_name}] Meeting cmd: {text}");
-                let http = ctx.http.clone();
-                if meeting::handle_meeting_command(
-                    http,
-                    channel_id,
-                    text,
-                    data.provider.clone(),
-                    &data.shared,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
-            }
-
-            // Shell command shortcut
-            if text.starts_with('!') {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                let preview = truncate_str(text, 60);
-                println!("  [{ts}] ◀ [{user_name}] Shell: {preview}");
-                handle_shell_command_raw(ctx, channel_id, text, &data.shared).await?;
-                return Ok(());
-            }
-
-            // Regular text → Claude AI
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            let preview = truncate_str(text, 60);
-            println!("  [{ts}] ◀ [{user_name}] {preview}");
-
-            // Extract reply context if user replied to another message
-            let reply_context = if let Some(ref_msg) = new_message.referenced_message.as_ref() {
-                let ref_author = &ref_msg.author.name;
-                let ref_content = ref_msg.content.trim();
-                let ref_text = if ref_content.is_empty() {
-                    format!("[Reply to {}'s message (no text content)]", ref_author)
-                } else {
-                    let truncated = truncate_str(ref_content, 500);
-                    format!(
-                        "[Reply context]\nAuthor: {}\nContent: {}",
-                        ref_author, truncated
-                    )
-                };
-
-                // Fetch preceding messages for Q&A context (best-effort)
-                let mut context_parts = Vec::new();
-                if let Ok(preceding) = channel_id
-                    .messages(
-                        &ctx.http,
-                        serenity::builder::GetMessages::new()
-                            .before(ref_msg.id)
-                            .limit(4),
-                    )
-                    .await
-                {
-                    // preceding comes newest-first; reverse for chronological order
-                    let mut msgs: Vec<_> = preceding
-                        .iter()
-                        .filter(|m| !m.content.trim().is_empty())
-                        .collect();
-                    msgs.reverse();
-                    // Keep last 2 Q&A-style messages (budget: ~1000 chars total)
-                    let mut budget: usize = 1000;
-                    for m in msgs
-                        .iter()
-                        .rev()
-                        .take(4)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                    {
-                        let entry =
-                            format!("{}: {}", m.author.name, truncate_str(m.content.trim(), 300));
-                        if entry.len() > budget {
-                            break;
-                        }
-                        budget -= entry.len();
-                        context_parts.push(entry);
-                    }
-                }
-
-                if context_parts.is_empty() {
-                    Some(ref_text)
-                } else {
-                    let preceding_ctx = context_parts.join("\n");
-                    Some(format!(
-                        "[Reply context — preceding conversation]\n{}\n\n{}",
-                        preceding_ctx, ref_text
-                    ))
-                }
-            } else {
-                None
-            };
-
-            // Checkpoint: message about to be processed as a turn
-            data.shared
-                .last_message_ids
-                .insert(channel_id, new_message.id.get());
-
-            handle_text_message(
-                ctx,
-                channel_id,
-                new_message.id,
-                user_id,
-                user_name,
-                text,
-                &data.shared,
-                &data.token,
-                false,
-                false,
-                false,
-                reply_context,
-            )
-            .await?;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-use super::model_picker_interaction::handle_model_picker_interaction;
-
-pub(super) async fn handle_text_message(
+pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
     user_msg_id: MessageId,
@@ -800,7 +59,7 @@ pub(super) async fn handle_text_message(
             // Fallback: if this is a thread, try resolving workspace from parent channel
             if workspace.is_none() {
                 if let Some((parent_id, parent_name)) =
-                    super::resolve_thread_parent(&ctx.http, channel_id).await
+                    super::super::resolve_thread_parent(&ctx.http, channel_id).await
                 {
                     // Use parent name from Discord API first, fall back to session map
                     let parent_ch_name = parent_name.or_else(|| {
@@ -870,10 +129,14 @@ pub(super) async fn handle_text_message(
                     // For thread channels, build a stable channel_name from the
                     // parent channel name so resolve_agent_id_from_channel_name
                     // can match it (same logic as bootstrap_thread_session).
-                    let ch_name = match super::resolve_thread_parent(&ctx.http, channel_id).await {
+                    let ch_name = match super::super::resolve_thread_parent(&ctx.http, channel_id)
+                        .await
+                    {
                         Some((_parent_id, parent_name)) => {
                             let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
-                            Some(super::synthetic_thread_channel_name(&parent, channel_id))
+                            Some(super::super::synthetic_thread_channel_name(
+                                &parent, channel_id,
+                            ))
                         }
                         None => ch_name_resolved,
                     };
@@ -895,7 +158,7 @@ pub(super) async fn handle_text_message(
                                     last_active: tokio::time::Instant::now(),
                                     worktree: None,
 
-                                    born_generation: super::runtime_store::load_generation(),
+                                    born_generation: super::super::runtime_store::load_generation(),
                                 });
                         session.current_path = Some(eff_path.clone());
                         session.channel_name = ch_name;
@@ -939,15 +202,15 @@ pub(super) async fn handle_text_message(
     // Skip if already inside a thread (threads cannot nest).
     // Thread reuse: if the card already has an active_thread_id, redirect
     // to the existing thread instead of creating a new one.
-    let is_already_thread = super::resolve_thread_parent(&ctx.http, channel_id)
+    let is_already_thread = super::super::resolve_thread_parent(&ctx.http, channel_id)
         .await
         .is_some();
-    let dispatch_id_for_thread = super::adk_session::parse_dispatch_id(user_text);
+    let dispatch_id_for_thread = super::super::adk_session::parse_dispatch_id(user_text);
     let mut dispatch_type_str: Option<String> = None;
     // #259: Fetch dispatch metadata once before thread creation so we can extract
     // worktree_path for both thread bootstrap and the subsequent session CWD override.
     let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
-        lookup_dispatch_info(shared.api_port, did).await
+        super::lookup_dispatch_info(shared.api_port, did).await
     } else {
         None
     };
@@ -966,9 +229,19 @@ pub(super) async fn handle_text_message(
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
     }
+    let dispatch_default_path = crate::services::platform::resolve_repo_dir()
+        .filter(|p| std::path::Path::new(p).is_dir())
+        .unwrap_or_else(|| current_path.clone());
     let dispatch_effective_path = dispatch_worktree_path
         .clone()
-        .unwrap_or_else(|| current_path.clone());
+        .unwrap_or_else(|| dispatch_default_path.clone());
+    if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] 🌱 Dispatch fallback CWD: using repo root instead of inherited session path: {}",
+            dispatch_effective_path
+        );
+    }
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
         // Use cached dispatch metadata for thread reuse and cross-channel role override
         let dispatch_info = &dispatch_info_cached;
@@ -1016,14 +289,19 @@ pub(super) async fn handle_text_message(
             });
 
             let reused = if let Some(tid) = reuse_tid {
-                if verify_thread_accessible(ctx, tid).await {
+                if super::verify_thread_accessible(ctx, tid).await {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
                         "  [{ts}] 🧵 Reusing existing thread {} for dispatch {}",
                         tid, did
                     );
-                    super::bootstrap_thread_session(shared, tid, &dispatch_effective_path, ctx)
-                        .await;
+                    super::super::bootstrap_thread_session(
+                        shared,
+                        tid,
+                        &dispatch_effective_path,
+                        ctx,
+                    )
+                    .await;
                     shared.dispatch_thread_parents.insert(channel_id, tid);
                     // For review dispatches reusing an implementation thread,
                     // override role/model to use the counter-model channel.
@@ -1079,7 +357,7 @@ pub(super) async fn handle_text_message(
                             "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
                             thread.id, did
                         );
-                        super::bootstrap_thread_session(
+                        super::super::bootstrap_thread_session(
                             shared,
                             thread.id,
                             &dispatch_effective_path,
@@ -1087,7 +365,7 @@ pub(super) async fn handle_text_message(
                         )
                         .await;
                         shared.dispatch_thread_parents.insert(channel_id, thread.id);
-                        link_dispatch_thread(
+                        super::link_dispatch_thread(
                             shared.api_port,
                             did,
                             thread.id.get(),
@@ -1297,6 +575,7 @@ pub(super) async fn handle_text_message(
     } else {
         None
     };
+
     let system_prompt_owned = build_system_prompt(
         &discord_context,
         &current_path,
@@ -1330,26 +609,27 @@ pub(super) async fn handle_text_message(
             // Race lost — another message already started a turn.
             // Queue this message as an intervention instead.
             let queue = data.intervention_queue.entry(channel_id).or_default();
-            super::enqueue_intervention(
+            super::super::enqueue_intervention(
                 queue,
-                super::Intervention {
+                super::super::Intervention {
                     author_id: request_owner,
                     message_id: user_msg_id,
                     text: user_text.to_string(),
-                    mode: super::InterventionMode::Soft,
+                    mode: super::super::InterventionMode::Soft,
                     created_at: std::time::Instant::now(),
                 },
             );
             // Write-through: persist this channel's queue to disk
             if let Some(q) = data.intervention_queue.get(&channel_id) {
-                super::save_channel_queue(&provider, channel_id, q);
+                super::super::save_channel_queue(&provider, channel_id, q);
             }
             drop(data);
             // Clean up: remove placeholder and reaction created before this check
             let _ = channel_id
                 .delete_message(&ctx.http, placeholder_msg_id)
                 .await;
-            super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳').await;
+            super::super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳')
+                .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
@@ -1374,7 +654,7 @@ pub(super) async fn handle_text_message(
         let watchdog_token = cancel_token.clone();
         let watchdog_shared = shared.clone();
         let watchdog_http = ctx.http.clone();
-        let timeout = super::turn_watchdog_timeout();
+        let timeout = super::super::turn_watchdog_timeout();
 
         // Set initial deadline and max ceiling (initial + 3h)
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1400,13 +680,13 @@ pub(super) async fn handle_text_message(
                     .cancelled
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    super::clear_watchdog_deadline_override(watchdog_channel_id_num);
+                    super::super::clear_watchdog_deadline_override(watchdog_channel_id_num);
                     return;
                 }
 
                 // Check for API-based deadline extension
                 if let Some(new_deadline) =
-                    super::take_watchdog_deadline_override(watchdog_channel_id_num)
+                    super::super::take_watchdog_deadline_override(watchdog_channel_id_num)
                 {
                     let max_dl = watchdog_token
                         .watchdog_max_deadline_ms
@@ -1433,7 +713,7 @@ pub(super) async fn handle_text_message(
                     let now_ms_check = chrono::Utc::now().timestamp_millis();
                     // Only auto-extend when close to deadline (within 2 minutes)
                     if now_ms_check > current_dl - 120_000 {
-                        if let Some(inflight) = super::inflight::load_inflight_state(
+                        if let Some(inflight) = super::super::inflight::load_inflight_state(
                             &watchdog_provider,
                             watchdog_channel_id_num,
                         ) {
@@ -1496,7 +776,7 @@ pub(super) async fn handle_text_message(
                         "  [{ts}] ⏰ WATCHDOG: turn timeout (~{elapsed_mins}m) for channel {}, cancelling",
                         channel_id
                     );
-                    super::turn_bridge::cancel_active_token(
+                    super::super::turn_bridge::cancel_active_token(
                         &watchdog_token,
                         true,
                         "watchdog timeout",
@@ -1507,7 +787,7 @@ pub(super) async fn handle_text_message(
                         let mut data = watchdog_shared.core.lock().await;
                         data.intervention_queue
                             .get_mut(&channel_id)
-                            .map_or(false, |q| super::has_soft_intervention(q))
+                            .map_or(false, |q| super::super::has_soft_intervention(q))
                     };
                     let msg = if has_queued {
                         format!(
@@ -1559,9 +839,12 @@ pub(super) async fn handle_text_message(
     // try to restore it from the DB's persisted provider session_id.
     let session_id = if session_id.is_none() {
         if let Some(ref key) = adk_session_key {
-            let restored =
-                super::adk_session::fetch_provider_session_id(key, &provider, shared.api_port)
-                    .await;
+            let restored = super::super::adk_session::fetch_provider_session_id(
+                key,
+                &provider,
+                shared.api_port,
+            )
+            .await;
             if restored.is_some() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!(
@@ -1601,10 +884,12 @@ pub(super) async fn handle_text_message(
     // In unified threads, user_text may contain a stale DISPATCH: prefix
     // from a previous dispatch in the same thread. DB lookup uses the
     // thread→card→dispatch link which is always current.
-    let dispatch_id =
-        super::adk_session::lookup_pending_dispatch_for_thread(shared.api_port, channel_id.get())
-            .await
-            .or_else(|| super::adk_session::parse_dispatch_id(user_text));
+    let dispatch_id = super::super::adk_session::lookup_pending_dispatch_for_thread(
+        shared.api_port,
+        channel_id.get(),
+    )
+    .await
+    .or_else(|| super::super::adk_session::parse_dispatch_id(user_text));
     post_adk_session_status(
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
@@ -1696,7 +981,7 @@ pub(super) async fn handle_text_message(
 
     // Auto-sync worktree before sending message to session
     {
-        let script = super::runtime_store::agentdesk_root()
+        let script = super::super::runtime_store::agentdesk_root()
             .unwrap_or_default()
             .join("scripts/worktree-autosync.sh");
         if script.exists() {
@@ -1723,10 +1008,10 @@ pub(super) async fn handle_text_message(
     }
 
     let model_for_turn =
-        super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
+        super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
 
     // Fetch context compact percent from ADK settings
-    let ctx_thresholds = super::adk_session::fetch_context_thresholds(shared.api_port).await;
+    let ctx_thresholds = super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
     let compact_percent = ctx_thresholds.compact_pct;
     // Use model-specific context window (reads Codex models cache), falling
     // back to the provider default if the model isn't found.
@@ -1889,7 +1174,7 @@ pub(super) async fn handle_text_message(
 }
 
 /// Handle file uploads from Discord messages
-async fn handle_file_upload(
+pub(super) async fn handle_file_upload(
     ctx: &serenity::Context,
     msg: &serenity::Message,
     shared: &Arc<SharedData>,
@@ -1987,7 +1272,7 @@ async fn handle_file_upload(
 }
 
 /// Handle shell commands from raw text messages (! prefix)
-async fn handle_shell_command_raw(
+pub(super) async fn handle_shell_command_raw(
     ctx: &serenity::Context,
     channel_id: ChannelId,
     text: &str,
@@ -2060,7 +1345,7 @@ async fn handle_shell_command_raw(
 
 /// Handle text-based commands (!start, !meeting, !stop, !clear, etc.).
 /// Returns true if the command was handled, false otherwise.
-async fn handle_text_command(
+pub(super) async fn handle_text_command(
     ctx: &serenity::Context,
     msg: &serenity::Message,
     data: &Data,
@@ -2319,11 +1604,15 @@ async fn handle_text_command(
             d.intervention_queue.remove(&channel_id);
             drop(d);
             // Clear stored provider session_id from DB
-            if let Some(key) =
-                super::adk_session::build_adk_session_key(&data.shared, channel_id, &data.provider)
-                    .await
+            if let Some(key) = super::super::adk_session::build_adk_session_key(
+                &data.shared,
+                channel_id,
+                &data.provider,
+            )
+            .await
             {
-                super::adk_session::clear_provider_session_id(&key, data.shared.api_port).await;
+                super::super::adk_session::clear_provider_session_id(&key, data.shared.api_port)
+                    .await;
             }
             // Send /clear to the actual Claude Code session via tmux
             #[cfg(unix)]
@@ -2506,8 +1795,8 @@ Any other message is sent to {p}.
 
             let mut reply = String::from("**Allowed Tools**\n\n");
             for tool in &tools {
-                let (desc, destructive) = super::formatting::tool_info(tool);
-                let badge = super::formatting::risk_badge(destructive);
+                let (desc, destructive) = super::super::formatting::tool_info(tool);
+                let badge = super::super::formatting::risk_badge(destructive);
                 if badge.is_empty() {
                     reply.push_str(&format!("`{}` — {}\n", tool, desc));
                 } else {
@@ -2516,7 +1805,7 @@ Any other message is sent to {p}.
             }
             reply.push_str(&format!(
                 "\n{} = destructive\nTotal: {}",
-                super::formatting::risk_badge(true),
+                super::super::formatting::risk_badge(true),
                 tools.len()
             ));
             send_long_message_raw(&ctx.http, channel_id, &reply, &data.shared).await?;
@@ -2556,7 +1845,7 @@ Any other message is sent to {p}.
             }
 
             let Some(tool_name) =
-                super::formatting::canonical_tool_name(raw_name).map(str::to_string)
+                super::super::formatting::canonical_tool_name(raw_name).map(str::to_string)
             else {
                 let _ = msg
                     .reply(
@@ -3095,298 +2384,39 @@ Any other message is sent to {p}.
     Ok(false)
 }
 
-/// Look up the active_thread_id for a dispatch's kanban card via internal API.
-/// Dispatch info returned by the card-thread internal API.
-struct DispatchInfo {
-    active_thread_id: Option<String>,
-    dispatch_type: Option<String>,
-    discord_channel_alt: Option<String>,
-    /// #259: Dispatch context JSON — used to extract worktree_path for session CWD.
-    context: Option<String>,
-}
-
-#[allow(dead_code)]
-async fn lookup_card_thread(api_port: u16, dispatch_id: &str) -> Option<String> {
-    let info = lookup_dispatch_info(api_port, dispatch_id).await?;
-    info.active_thread_id
-}
-
-async fn lookup_dispatch_info(api_port: u16, dispatch_id: &str) -> Option<DispatchInfo> {
-    let url = crate::config::local_api_url(
-        api_port,
-        &format!("/api/internal/card-thread?dispatch_id={dispatch_id}"),
-    );
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
+/// Private helper: reset provider session if a model change is pending.
+async fn reset_provider_session_if_pending(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) {
+    if shared
+        .model_session_reset_pending
+        .remove(&channel_id)
+        .is_none()
+    {
+        return;
     }
-    let body: serde_json::Value = resp.json().await.ok()?;
-    Some(DispatchInfo {
-        active_thread_id: body
-            .get("active_thread_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        dispatch_type: body
-            .get("dispatch_type")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        discord_channel_alt: body
-            .get("discord_channel_alt")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        context: body
-            .get("dispatch_context")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    })
-}
 
-/// Verify a thread is accessible and not locked via Discord API.
-/// Returns true if the thread exists and is not locked.
-async fn verify_thread_accessible(
-    ctx: &poise::serenity_prelude::Context,
-    thread_id: ChannelId,
-) -> bool {
-    match ctx.http.get_channel(thread_id).await {
-        Ok(channel) => {
-            if let Some(guild_channel) = channel.guild() {
-                // Check if thread is locked
-                if let Some(ref metadata) = guild_channel.thread_metadata {
-                    if metadata.locked {
-                        return false;
-                    }
-                    // Unarchive if needed — send will fail on archived threads via gateway
-                    if metadata.archived {
-                        let edit =
-                            poise::serenity_prelude::builder::EditThread::new().archived(false);
-                        if let Err(e) = thread_id.edit_thread(&ctx.http, edit).await {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!("  [{ts}] ⚠️ Failed to unarchive thread {thread_id}: {e}");
-                            return false;
-                        }
-                    }
-                }
-                true
-            } else {
-                false
-            }
+    let channel_name = {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.session_id = None;
+            session.channel_name.clone()
+        } else {
+            None
         }
-        Err(_) => false,
-    }
-}
-
-/// Link a newly created dispatch thread to the card's active_thread_id via internal API.
-async fn link_dispatch_thread(api_port: u16, dispatch_id: &str, thread_id: u64, channel_id: u64) {
-    let url = crate::config::local_api_url(api_port, "/api/internal/link-dispatch-thread");
-    let _ = reqwest::Client::new()
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(2))
-        .json(&serde_json::json!({
-            "dispatch_id": dispatch_id,
-            "thread_id": thread_id.to_string(),
-            "channel_id": channel_id.to_string(),
-        }))
-        .send()
-        .await;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::model_picker_interaction::build_model_picker_close_response;
-    use super::{
-        is_model_picker_component_custom_id, should_process_turn_message,
-        should_skip_human_slash_message,
     };
-    use poise::serenity_prelude::ChannelId;
-    use serde_json::json;
-    use serenity::model::channel::MessageType;
 
-    #[test]
-    fn turn_messages_allow_regular_and_inline_reply() {
-        assert!(should_process_turn_message(MessageType::Regular));
-        assert!(should_process_turn_message(MessageType::InlineReply));
-    }
-
-    #[test]
-    fn system_messages_are_not_processed_as_turns() {
-        assert!(!should_process_turn_message(MessageType::ThreadCreated));
-        assert!(!should_process_turn_message(
-            MessageType::ThreadStarterMessage
-        ));
-        assert!(!should_process_turn_message(MessageType::ChatInputCommand));
-    }
-
-    #[test]
-    fn known_human_slash_messages_are_skipped() {
-        let known = std::collections::HashSet::from([
-            "help".to_string(),
-            "clear".to_string(),
-            "model".to_string(),
-        ]);
-        assert!(should_skip_human_slash_message("/help", Some(&known)));
-        assert!(should_skip_human_slash_message("/clear now", Some(&known)));
-    }
-
-    #[test]
-    fn unregistered_human_slash_messages_fall_through() {
-        let known = std::collections::HashSet::from(["help".to_string()]);
-        assert!(!should_skip_human_slash_message("/unknown", Some(&known)));
-        assert!(!should_skip_human_slash_message("/", Some(&known)));
-        assert!(!should_skip_human_slash_message("/   ", Some(&known)));
-        assert!(!should_skip_human_slash_message(
-            "/unknown arg",
-            Some(&known)
-        ));
-        assert!(!should_skip_human_slash_message("/unknown", None));
-    }
-
-    /// mid:* cleanup should use the longer MSG_DEDUP_TTL (60s),
-    /// while bot-specific entries (dispatch:*, msg:*) use INTAKE_DEDUP_TTL (30s).
-    /// Verifies that bot cleanup does not prematurely evict mid:* entries.
-    #[test]
-    fn mid_entries_survive_bot_cleanup() {
-        use std::time::{Duration, Instant};
-
-        let map: dashmap::DashMap<String, (Instant, bool)> = dashmap::DashMap::new();
-        let now = Instant::now();
-
-        // Simulate: mid:* entry inserted 40s ago (within 60s TTL, outside 30s TTL)
-        let mid_time = now - Duration::from_secs(40);
-        map.insert("mid:123".to_string(), (mid_time, false));
-
-        // Simulate: dispatch:* entry inserted 40s ago (outside 30s TTL)
-        map.insert("dispatch:abc".to_string(), (mid_time, false));
-
-        // Simulate: fresh bot entry inserted just now
-        map.insert("msg:456".to_string(), (now, false));
-
-        // Bot cleanup: retain non-mid entries only if within 30s TTL
-        let intake_dedup_ttl = Duration::from_secs(30);
-        map.retain(|k, v| {
-            if k.starts_with("mid:") {
-                true // preserved; cleaned by universal dedup cleanup
-            } else {
-                now.duration_since(v.0) < intake_dedup_ttl
-            }
-        });
-
-        // mid:* should survive bot cleanup
-        assert!(
-            map.contains_key("mid:123"),
-            "mid:* entry must survive bot cleanup"
-        );
-        // dispatch:* older than 30s should be removed
-        assert!(
-            !map.contains_key("dispatch:abc"),
-            "expired dispatch:* should be removed"
-        );
-        // fresh msg:* should survive
-        assert!(map.contains_key("msg:456"), "fresh msg:* should survive");
-
-        // Universal mid:* cleanup with 60s TTL
-        let msg_dedup_ttl = Duration::from_secs(60);
-        map.retain(|k, v| {
-            if k.starts_with("mid:") {
-                now.duration_since(v.0) < msg_dedup_ttl
-            } else {
-                true
-            }
-        });
-
-        // mid:* at 40s should still survive (within 60s)
-        assert!(
-            map.contains_key("mid:123"),
-            "mid:* within TTL must survive universal cleanup"
-        );
-
-        // Now simulate mid:* at 65s ago (outside 60s TTL)
-        let old_mid_time = now - Duration::from_secs(65);
-        map.insert("mid:old".to_string(), (old_mid_time, false));
-        map.retain(|k, v| {
-            if k.starts_with("mid:") {
-                now.duration_since(v.0) < msg_dedup_ttl
-            } else {
-                true
-            }
-        });
-        assert!(
-            !map.contains_key("mid:old"),
-            "expired mid:* must be cleaned by universal cleanup"
-        );
-    }
-
-    /// Thread-preference dedup: once a message is processed as thread context,
-    /// subsequent thread duplicates (e.g. gateway reconnection) must be blocked.
-    /// Only parent→thread promotion is allowed, not thread→thread re-processing.
-    #[test]
-    fn thread_dedup_blocks_duplicate_thread_context() {
-        use std::time::{Duration, Instant};
-
-        let map: dashmap::DashMap<String, (Instant, bool)> = dashmap::DashMap::new();
-        let now = Instant::now();
-        let msg_dedup_ttl = Duration::from_secs(60);
-
-        // Case 1: First seen as parent context, then thread arrives → allow
-        map.insert("mid:100".to_string(), (now, false)); // was_thread = false
-        let entry = map.get("mid:100").unwrap();
-        let (ts, was_thread) = *entry;
-        drop(entry);
-        // is_thread_context=true, was_thread=false → should allow
-        let allow = now.duration_since(ts) < msg_dedup_ttl && !was_thread; // this is the "allow" condition for thread promotion
-        assert!(allow, "thread should be allowed when previous was parent");
-
-        // Case 2: First seen as thread context, then thread arrives again → block
-        map.insert("mid:200".to_string(), (now, true)); // was_thread = true
-        let entry = map.get("mid:200").unwrap();
-        let (ts2, was_thread2) = *entry;
-        drop(entry);
-        // is_thread_context=true, was_thread=true → should block
-        let allow2 = now.duration_since(ts2) < msg_dedup_ttl && !was_thread2;
-        assert!(!allow2, "duplicate thread context must be blocked");
-
-        // Case 3: First seen as thread context, then parent arrives → block
-        let entry = map.get("mid:200").unwrap();
-        let (ts3, _was_thread3) = *entry;
-        drop(entry);
-        // is_thread_context=false → always blocked by the main branch
-        let is_dup = now.duration_since(ts3) < msg_dedup_ttl;
-        assert!(is_dup, "parent duplicate after thread must be blocked");
-    }
-
-    #[test]
-    fn model_picker_component_dispatch_matches_all_actions() {
-        let channel_id = ChannelId::new(42);
-        let custom_ids = [
-            format!("agentdesk:model-picker:{}", channel_id.get()),
-            format!("agentdesk:model-submit:{}", channel_id.get()),
-            format!("agentdesk:model-reset:{}", channel_id.get()),
-            format!("agentdesk:model-cancel:{}", channel_id.get()),
-        ];
-
-        for custom_id in custom_ids {
-            assert!(
-                is_model_picker_component_custom_id(&custom_id, channel_id),
-                "expected model picker dispatch for {custom_id}"
+    if provider.uses_managed_tmux_backend() {
+        if let Some(name) = channel_name.as_deref() {
+            crate::services::claude::terminate_local_session(
+                &provider.build_tmux_session_name(name),
             );
         }
-
-        assert!(!is_model_picker_component_custom_id(
-            "agentdesk:other:42",
-            channel_id
-        ));
     }
 
-    #[test]
-    fn model_picker_close_response_acknowledges_component_close() {
-        let payload = serde_json::to_value(build_model_picker_close_response())
-            .expect("close response should serialize");
-
-        assert_eq!(payload["type"], json!(6));
-        assert_eq!(payload["data"], json!(null));
+    if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
+        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
     }
 }
