@@ -1,5 +1,6 @@
 mod crud;
 mod discord_delivery;
+mod outbox;
 #[cfg(test)]
 mod tests;
 mod thread_reuse;
@@ -11,11 +12,14 @@ pub use crud::{
 };
 
 // ── Re-exports: Discord delivery ─────────────────────────────
-pub use discord_delivery::resolve_channel_alias_pub;
-pub(crate) use discord_delivery::use_counter_model_channel;
-pub(crate) use discord_delivery::{
+pub(crate) use discord_delivery::send_dispatch_to_discord;
+
+// ── Re-exports: Outbox ───────────────────────────────────────
+pub use outbox::resolve_channel_alias_pub;
+pub(crate) use outbox::use_counter_model_channel;
+pub(crate) use outbox::{
     OutboxNotifier, RealOutboxNotifier, dispatch_outbox_loop, handle_completed_dispatch_followups,
-    process_outbox_batch, queue_dispatch_followup, send_dispatch_to_discord,
+    process_outbox_batch, queue_dispatch_followup,
 };
 
 // ── Re-exports: Thread reuse ─────────────────────────────────

@@ -1,4 +1,4 @@
-use super::discord_delivery::{
+use super::outbox::{
     extract_review_verdict, format_dispatch_message, handle_completed_dispatch_followups,
     prefix_dispatch_message, use_counter_model_channel,
 };

@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::dispatch;
 use crate::server::routes::AppState;
 
-use super::discord_delivery::queue_dispatch_followup;
+use super::outbox::queue_dispatch_followup;
 
 // ── Query / Body types ─────────────────────────────────────────
 
