@@ -3013,19 +3013,15 @@ fn source_fingerprint(
         if !args.no_workspace {
             collect_tree_file_hashes(workspace, &source.root, &mut inputs)?;
         }
-    }
-
-    if args.with_sessions {
-        for session in &plan.sessions {
-            collect_source_file_hash(
-                Path::new(&session.session_store_path),
-                &source.root,
-                &mut inputs,
-            )?;
-            if let Some(transcript_path) = session.transcript_path.as_deref() {
-                collect_source_file_hash(Path::new(transcript_path), &source.root, &mut inputs)?;
-            }
-        }
+        collect_tree_file_hashes(
+            &source
+                .root
+                .join("agents")
+                .join(&agent.source_id)
+                .join("sessions"),
+            &source.root,
+            &mut inputs,
+        )?;
     }
 
     collect_resolved_bot_token_hashes(source, plan, args, &mut inputs)?;

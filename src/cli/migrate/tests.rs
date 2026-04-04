@@ -1246,6 +1246,118 @@ fn session_import_writes_ai_sessions_session_map_and_db_rows() {
 }
 
 #[test]
+fn resume_allows_enabling_sessions_without_fingerprint_mismatch() {
+    let temp = TempDir::new().unwrap();
+    let runtime = TempDir::new().unwrap();
+    let workspace = temp.path().join("workspace");
+    let sessions_dir = temp.path().join("agents").join("alpha").join("sessions");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::write(workspace.join("IDENTITY.md"), "# Alpha\n").unwrap();
+    fs::write(workspace.join("MEMORY.md"), "# Memory\n").unwrap();
+    fs::write(
+        sessions_dir.join("sessions.json"),
+        serde_json::json!({
+            "session-key-1": {
+                "sessionId": "session-1",
+                "sessionFile": "session-1.jsonl",
+                "updatedAt": 1710000000000i64,
+                "model": "openai/gpt-5",
+                "modelProvider": "codex",
+                "cwd": workspace.display().to_string(),
+                "status": "done"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        sessions_dir.join("session-1.jsonl"),
+        "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n",
+    )
+    .unwrap();
+
+    write_openclaw_config(
+        temp.path(),
+        r#"{
+            "agents":{"list":[{"id":"alpha","default":true,"model":"openai/gpt-5","workspace":"workspace"}]}
+        }"#,
+    );
+
+    let source = resolve_source(&temp);
+    let mut args = base_args();
+    args.dry_run = false;
+    args.write_db = true;
+
+    let plan = build_import_plan(&source, &args, Some(runtime.path())).unwrap();
+    apply::apply_import_plan(&plan, &source, &args, runtime.path()).unwrap();
+
+    let audit_root = audit_root(&plan);
+    let import_id = audit_root
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let mut apply_result = read_json_value(&audit_root.join("apply-result.json"));
+    apply_result["status"] = serde_json::json!("failed");
+    apply_result["phases"]["sessions"]["status"] = serde_json::json!("pending");
+    apply_result["phases"]["sessions"]["started_at"] = serde_json::json!("");
+    apply_result["phases"]["sessions"]["ended_at"] = serde_json::json!("");
+    apply_result["phases"]["sessions"]["error"] = serde_json::Value::Null;
+    apply_result["phases"]["finalize"]["status"] = serde_json::json!("pending");
+    apply_result["phases"]["finalize"]["started_at"] = serde_json::json!("");
+    apply_result["phases"]["finalize"]["ended_at"] = serde_json::json!("");
+    apply_result["phases"]["finalize"]["error"] = serde_json::Value::Null;
+    apply_result["agents"]["alpha"]["tasks"]["session_import"]["status"] =
+        serde_json::json!("pending");
+    fs::write(
+        audit_root.join("apply-result.json"),
+        serde_json::to_string_pretty(&apply_result).unwrap(),
+    )
+    .unwrap();
+
+    let mut resume_state = read_json_value(&audit_root.join("resume-state.json"));
+    resume_state["status"] = serde_json::json!("failed");
+    resume_state["completed_phases"] = serde_json::json!([
+        "scan",
+        "map",
+        "prompt",
+        "memory",
+        "policy_discord",
+        "apply_files",
+        "apply_bot_settings",
+        "apply_db"
+    ]);
+    resume_state["pending_phases"] = serde_json::json!(["sessions", "finalize"]);
+    resume_state["phases"]["sessions"] = serde_json::json!("pending");
+    resume_state["phases"]["finalize"] = serde_json::json!("pending");
+    resume_state["agents"]["alpha"]["tasks"]["session_import"] = serde_json::json!("pending");
+    resume_state["next_recommended_step"] = serde_json::json!("resume_phase");
+    fs::write(
+        audit_root.join("resume-state.json"),
+        serde_json::to_string_pretty(&resume_state).unwrap(),
+    )
+    .unwrap();
+
+    let mut resume_args = base_args();
+    resume_args.dry_run = false;
+    resume_args.write_db = true;
+    resume_args.with_sessions = true;
+    resume_args.resume = Some(import_id);
+
+    let resume_plan = build_import_plan(&source, &resume_args, Some(runtime.path())).unwrap();
+    apply::apply_import_plan(&resume_plan, &source, &resume_args, runtime.path()).unwrap();
+
+    let resumed_apply = read_json_value(&audit_root.join("apply-result.json"));
+    assert_eq!(resumed_apply["status"], "completed");
+    assert_eq!(resumed_apply["phases"]["sessions"]["status"], "completed");
+
+    let session_map = read_json_value(&audit_root.join("session-map.json"));
+    assert_eq!(session_map.as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn resume_skips_completed_apply_files_tasks() {
     let temp = TempDir::new().unwrap();
     let runtime = TempDir::new().unwrap();
