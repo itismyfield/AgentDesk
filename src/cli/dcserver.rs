@@ -357,7 +357,7 @@ pub fn verify_dcserver_ready_since(start_offset: u64, timeout: Duration) -> Resu
             return Ok(());
         }
 
-        if recent.contains(" bot error:") || recent.contains("Error: no bot tokens found") {
+        if recent.contains(" bot error:") {
             return Err("dcserver emitted startup error".to_string());
         }
 
@@ -1239,7 +1239,7 @@ pub fn handle_dcserver(token: Option<String>) {
             None => {
                 let configs = services::discord::load_discord_bot_launch_configs();
                 if should_run_http_only_onboarding(token.as_deref(), configs.len()) {
-                    eprintln!(
+                    println!(
                         "  ⚠ No bot tokens found in {} — continuing in onboarding mode (HTTP only)",
                         settings_path
                             .as_deref()
