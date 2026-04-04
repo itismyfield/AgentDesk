@@ -32,6 +32,66 @@ function notifyPMD(cardId, reason) {
   );
 }
 
+// ── Preflight helpers (#256) ─────────────────────────────────
+
+function _extractRepoFromUrl(url) {
+  if (!url) return null;
+  var match = url.match(/github\.com\/([^\/]+\/[^\/]+)/);
+  return match ? match[1] : null;
+}
+
+function _runPreflight(cardId) {
+  var card = agentdesk.db.query(
+    "SELECT kc.id, kc.title, kc.github_issue_number, kc.github_issue_url, kc.status, kc.description, " +
+    "kc.assigned_agent_id, kc.metadata, kc.blocked_reason " +
+    "FROM kanban_cards kc WHERE kc.id = ?",
+    [cardId]
+  );
+  if (card.length === 0) return { status: "invalid", summary: "Card not found" };
+  var c = card[0];
+
+  // Check 1: GitHub issue closed? (uses gh CLI since no bridge exists)
+  if (c.github_issue_number && c.github_issue_url) {
+    var repo = _extractRepoFromUrl(c.github_issue_url);
+    if (repo) {
+      try {
+        var ghOutput = agentdesk.exec("gh", [
+          "issue", "view", String(c.github_issue_number),
+          "--repo", repo, "--json", "state", "--jq", ".state"
+        ]);
+        if (ghOutput && ghOutput.trim() === "CLOSED") {
+          return { status: "already_applied", summary: "GitHub issue #" + c.github_issue_number + " is closed" };
+        }
+      } catch (e) {
+        // GitHub CLI not available or failed, skip check
+      }
+    }
+  }
+
+  // Check 2: Already has terminal dispatch?
+  var terminalDispatch = agentdesk.db.query(
+    "SELECT id, status FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'implementation' AND status = 'completed'",
+    [cardId]
+  );
+  if (terminalDispatch.length > 0) {
+    return { status: "already_applied", summary: "Implementation dispatch already completed" };
+  }
+
+  // Check 3: Description/body too short or empty?
+  var body = c.description || "";
+  if (body.trim().length < 30) {
+    return { status: "consult_required", summary: "Issue body is too short or empty — needs clarification" };
+  }
+
+  // Check 4: No DoD section?
+  if (body.indexOf("DoD") === -1 && body.indexOf("Definition of Done") === -1 && body.indexOf("완료 기준") === -1) {
+    return { status: "assumption_ok", summary: "No explicit DoD found, assuming spec is sufficient" };
+  }
+
+  // All checks passed
+  return { status: "clear", summary: "Preflight checks passed" };
+}
+
 // ── Policy ───────────────────────────────────────────────────
 
 var rules = {
@@ -175,7 +235,7 @@ var rules = {
   // ── Dispatch Completed — PM Decision Gate ─────────────────
   onDispatchCompleted: function(payload) {
     var dispatches = agentdesk.db.query(
-      "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, created_at FROM task_dispatches WHERE id = ?",
+      "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, created_at, result FROM task_dispatches WHERE id = ?",
       [payload.dispatch_id]
     );
     if (dispatches.length === 0) return;
@@ -202,6 +262,44 @@ var rules = {
 
     // #197: e2e-test dispatches — handled by deploy-pipeline policy
     if (dispatch.dispatch_type === "e2e-test") return;
+
+    // #256: Consultation dispatch completed — update preflight metadata
+    if (dispatch.dispatch_type === "consultation") {
+      var consultResult = {};
+      try { consultResult = JSON.parse(dispatch.result || "{}"); } catch(e) {}
+      var meta = {};
+      var metaRow = agentdesk.db.query(
+        "SELECT metadata FROM kanban_cards WHERE id = ?",
+        [dispatch.kanban_card_id]
+      );
+      if (metaRow.length > 0 && metaRow[0].metadata) {
+        try { meta = JSON.parse(metaRow[0].metadata); } catch(e) {}
+      }
+      meta.consultation_status = "completed";
+      meta.consultation_result = consultResult;
+      // If consultation clarified the issue, update preflight_status to "clear"
+      // so auto-queue will create an implementation dispatch on next tick.
+      // Otherwise escalate to pending_decision.
+      if (consultResult.verdict === "clear" || consultResult.verdict === "proceed") {
+        meta.preflight_status = "clear";
+        meta.preflight_summary = "Consultation resolved: " + (consultResult.summary || "clarified");
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
+          [JSON.stringify(meta), dispatch.kanban_card_id]
+        );
+        agentdesk.log.info("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " → clear");
+      } else {
+        meta.preflight_status = "escalated";
+        meta.preflight_summary = "Consultation did not resolve: " + (consultResult.summary || "still ambiguous");
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET metadata = ?, blocked_reason = ? WHERE id = ?",
+          [JSON.stringify(meta), "Consultation did not resolve ambiguity", dispatch.kanban_card_id]
+        );
+        agentdesk.kanban.setStatus(dispatch.kanban_card_id, pendingState);
+        agentdesk.log.warn("[preflight] Consultation unresolved for " + dispatch.kanban_card_id + " → " + pendingState);
+      }
+      return;
+    }
 
     // Rework dispatches — skip gate, go directly to review
     if (dispatch.dispatch_type === "rework") {
@@ -305,10 +403,32 @@ var rules = {
     var blockedTargets = agentdesk.pipeline.forceOnlyTargets(inProgressForForce, cfg);
     var pendingState = blockedTargets[0];
 
-    // → initialState: no-op (preflight state, dispatch created by auto-queue or tick)
-    // #255: removed implementation dispatch creation — requested is now a dispatch-free
-    // preflight state. Dispatch is created separately, which triggers DispatchAttached
-    // to advance the card from requested → in_progress.
+    // → initialState (requested): run preflight validation (#256)
+    // #255: requested is a dispatch-free preflight state. Dispatch is created separately
+    // by auto-queue, which triggers DispatchAttached to advance requested → in_progress.
+    if (payload.to === initialState && payload.from !== initialState) {
+      var preflight = _runPreflight(payload.card_id);
+      // Store preflight result in metadata
+      var metaJson = JSON.stringify({
+        preflight_status: preflight.status,
+        preflight_summary: preflight.summary,
+        preflight_checked_at: new Date().toISOString()
+      });
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
+        [metaJson, payload.card_id]
+      );
+
+      if (preflight.status === "invalid" || preflight.status === "already_applied") {
+        // Move to done without implementation dispatch
+        agentdesk.kanban.setStatus(payload.card_id, "done", true); // force
+        agentdesk.log.info("[preflight] Card " + payload.card_id + " → done (" + preflight.status + "): " + preflight.summary);
+      } else if (preflight.status === "consult_required") {
+        // Store consultation status — auto-queue tick will handle consultation dispatch creation
+        agentdesk.log.info("[preflight] Card " + payload.card_id + " needs consultation: " + preflight.summary);
+      }
+      // "clear" and "assumption_ok" → do nothing, auto-queue will create implementation dispatch
+    }
 
     // → blocked (force-only target): PMD 알림 (Agent in the Loop)
     // "blocked" is a force-only target from in_progress — check all force targets

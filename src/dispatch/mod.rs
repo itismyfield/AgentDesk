@@ -149,7 +149,7 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
 }
 
 fn dispatch_uses_alt_channel(dispatch_type: &str) -> bool {
-    matches!(dispatch_type, "review" | "e2e-test")
+    matches!(dispatch_type, "review" | "e2e-test" | "consultation")
 }
 
 fn resolve_dispatch_channel_id(channel: &str) -> Option<u64> {
@@ -357,7 +357,8 @@ fn create_dispatch_core_internal(
 
     let is_review_type = dispatch_type == "review"
         || dispatch_type == "review-decision"
-        || dispatch_type == "rework";
+        || dispatch_type == "rework"
+        || dispatch_type == "consultation";
 
     if dispatch_type == "review-decision" {
         let mut stmt = conn.prepare(

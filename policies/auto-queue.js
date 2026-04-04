@@ -428,6 +428,33 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
     }
   }
 
+  // #256: Check preflight result before creating dispatch
+  var meta = agentdesk.db.query(
+    "SELECT metadata FROM kanban_cards WHERE id = ?",
+    [entry.kanban_card_id]
+  );
+  if (meta.length > 0 && meta[0].metadata) {
+    try {
+      var parsed = JSON.parse(meta[0].metadata);
+      if (parsed.preflight_status === "consult_required") {
+        // Create consultation dispatch instead of implementation
+        _createConsultationDispatch(entry, agentId, parsed);
+        return;
+      }
+      if (parsed.preflight_status === "invalid" || parsed.preflight_status === "already_applied") {
+        // Card should already be moved to done, skip
+        agentdesk.log.info("[auto-queue] Skipping " + entry.kanban_card_id + " — preflight: " + parsed.preflight_status);
+        agentdesk.db.execute(
+          "UPDATE auto_queue_entries SET status = 'skipped' WHERE id = ?",
+          [entry.id]
+        );
+        return;
+      }
+    } catch (e) {
+      // metadata parse error, continue with dispatch
+    }
+  }
+
   try {
     // #173: Use dispatch.create which defers INSERT via intent.
     // Mark entry as dispatched ONLY after dispatch.create succeeds validation.
@@ -450,6 +477,48 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
     }
   } catch (e) {
     agentdesk.log.warn("[auto-queue] dispatch failed for " + entry.kanban_card_id + " (group " + threadGroup + "), will retry on next tick: " + e);
+  }
+}
+
+// ── Consultation dispatch helper (#256) ─────────────────────────
+function _createConsultationDispatch(entry, agentId, preflightMeta) {
+  // Find the counterpart agent for consultation
+  var agent = agentdesk.db.query(
+    "SELECT cli_provider FROM agents WHERE id = ?",
+    [agentId]
+  );
+  var provider = (agent.length > 0) ? agent[0].cli_provider : "claude";
+  var counterProvider = (provider === "claude") ? "codex" : "claude";
+  var counterAgent = agentdesk.db.query(
+    "SELECT id FROM agents WHERE cli_provider = ? LIMIT 1",
+    [counterProvider]
+  );
+  var consultAgentId = (counterAgent.length > 0) ? counterAgent[0].id : agentId;
+
+  try {
+    var dispatchId = agentdesk.dispatch.create(
+      entry.kanban_card_id,
+      consultAgentId,
+      "consultation",
+      "[Consultation] " + entry.title
+    );
+    if (dispatchId) {
+      // Update metadata with consultation info
+      var newMeta = JSON.parse(JSON.stringify(preflightMeta));
+      newMeta.consultation_status = "pending";
+      newMeta.consultation_dispatch_id = dispatchId;
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
+        [JSON.stringify(newMeta), entry.kanban_card_id]
+      );
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = ?, dispatched_at = datetime('now') WHERE id = ?",
+        [dispatchId, entry.id]
+      );
+      agentdesk.log.info("[auto-queue] Created consultation dispatch " + dispatchId + " for " + entry.kanban_card_id);
+    }
+  } catch (e) {
+    agentdesk.log.warn("[auto-queue] Consultation dispatch failed for " + entry.kanban_card_id + ": " + e);
   }
 }
 

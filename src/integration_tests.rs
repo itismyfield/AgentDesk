@@ -1832,4 +1832,44 @@ mod tests {
             "#195: rework completion must trigger OnReviewEnter → review dispatch"
         );
     }
+
+    // ── #256: Consultation dispatch does not advance card from requested ────
+
+    #[test]
+    fn consultation_dispatch_stays_in_requested() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-consult", "requested");
+
+        // Create consultation dispatch — should NOT move card from requested
+        let result = dispatch::create_dispatch(
+            &db,
+            &engine,
+            "card-consult",
+            "agent-1",
+            "consultation",
+            "[Consultation] Test",
+            &serde_json::json!({}),
+        );
+        assert!(
+            result.is_ok(),
+            "consultation dispatch creation must succeed"
+        );
+
+        let card_status = get_card_status(&db, "card-consult");
+        assert_eq!(
+            card_status, "requested",
+            "#256: consultation dispatch must NOT advance card from requested"
+        );
+    }
+
+    #[test]
+    fn consultation_dispatch_uses_alt_channel() {
+        // Verified via unit test in dispatches.rs — this is a smoke test
+        assert!(
+            crate::server::routes::dispatches::use_counter_model_channel(Some("consultation")),
+            "#256: consultation must route to counter-model channel"
+        );
+    }
 }
