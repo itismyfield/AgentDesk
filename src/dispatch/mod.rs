@@ -4,6 +4,141 @@ use serde_json::json;
 use crate::db::Db;
 use crate::engine::PolicyEngine;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DispatchExecutionTarget {
+    reviewed_commit: String,
+    branch: Option<String>,
+    worktree_path: Option<String>,
+}
+
+fn execution_target_from_dir(dir: &str) -> Option<DispatchExecutionTarget> {
+    if !std::path::Path::new(dir).is_dir() {
+        return None;
+    }
+    let reviewed_commit = crate::services::platform::git_head_commit(dir)?;
+    let branch = crate::services::platform::shell::git_branch_name(dir);
+    Some(DispatchExecutionTarget {
+        reviewed_commit,
+        branch,
+        worktree_path: Some(dir.to_string()),
+    })
+}
+
+fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+fn latest_completed_work_dispatch_target(
+    db: &Db,
+    kanban_card_id: &str,
+) -> Option<DispatchExecutionTarget> {
+    let conn = db.separate_conn().ok()?;
+    let (result_raw, context_raw): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT result, context
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+               AND dispatch_type IN ('implementation', 'rework')
+               AND status = 'completed'
+             ORDER BY updated_at DESC, rowid DESC
+             LIMIT 1",
+            [kanban_card_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+
+    let result_json = result_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let context_json = context_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+
+    let path = result_json
+        .as_ref()
+        .and_then(|v| json_string_field(v, "completed_worktree_path"))
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "worktree_path"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "worktree_path"))
+        });
+    let branch = result_json
+        .as_ref()
+        .and_then(|v| json_string_field(v, "completed_branch"))
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "worktree_branch"))
+        })
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "branch"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "worktree_branch"))
+        })
+        .or_else(|| {
+            context_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "branch"))
+        })
+        .map(str::to_string);
+    let reviewed_commit = result_json
+        .as_ref()
+        .and_then(|v| json_string_field(v, "completed_commit"))
+        .or_else(|| {
+            result_json
+                .as_ref()
+                .and_then(|v| json_string_field(v, "reviewed_commit"))
+        })
+        .map(str::to_string);
+
+    if let Some(reviewed_commit) = reviewed_commit {
+        let worktree_path = path
+            .map(str::to_string)
+            .or_else(crate::services::platform::resolve_repo_dir);
+        let branch = branch.or_else(|| {
+            worktree_path
+                .as_deref()
+                .and_then(crate::services::platform::shell::git_branch_name)
+        });
+        return Some(DispatchExecutionTarget {
+            reviewed_commit,
+            branch,
+            worktree_path,
+        });
+    }
+
+    path.and_then(execution_target_from_dir)
+}
+
+fn apply_review_target_context(
+    target: &DispatchExecutionTarget,
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    obj.insert(
+        "reviewed_commit".to_string(),
+        json!(target.reviewed_commit.clone()),
+    );
+    if let Some(branch) = target.branch.as_deref() {
+        obj.insert("branch".to_string(), json!(branch));
+    }
+    if let Some(path) = target.worktree_path.as_deref() {
+        obj.insert("worktree_path".to_string(), json!(path));
+    }
+}
+
 /// Resolve the canonical worktree for a card's GitHub issue.
 ///
 /// Looks up the card's `github_issue_number`, then searches for an active
@@ -49,37 +184,47 @@ fn build_review_context(
     };
     if let Some(obj) = ctx_val.as_object_mut() {
         if !obj.contains_key("reviewed_commit") {
-            // #193/#259: Use resolve_card_worktree() for consistent worktree lookup
-            // across all dispatch types. This also injects worktree_path so review
-            // agents use the same directory as implementation agents.
-            let wt_info = resolve_card_worktree(db, kanban_card_id);
-
-            if let Some((ref wt_path, ref wt_branch, ref wt_commit)) = wt_info {
-                obj.insert("reviewed_commit".to_string(), json!(wt_commit));
-                obj.insert("branch".to_string(), json!(wt_branch));
-                obj.insert("worktree_path".to_string(), json!(wt_path));
+            // Prefer the actual target used by the latest completed work dispatch
+            // for this card. This keeps review aligned even when the card had no
+            // dedicated worktree and the agent worked directly in the repo root.
+            if let Some(target) = latest_completed_work_dispatch_target(db, kanban_card_id) {
+                apply_review_target_context(&target, obj);
                 tracing::info!(
-                    "[dispatch] Review dispatch for card {}: using worktree branch '{}' (commit {}, path: {})",
+                    "[dispatch] Review dispatch for card {}: reusing latest work target (commit {}, branch: {:?}, path: {:?})",
+                    kanban_card_id,
+                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())],
+                    target.branch.as_deref(),
+                    target.worktree_path.as_deref()
+                );
+            } else if let Some((ref wt_path, ref wt_branch, ref wt_commit)) =
+                resolve_card_worktree(db, kanban_card_id)
+            {
+                apply_review_target_context(
+                    &DispatchExecutionTarget {
+                        reviewed_commit: wt_commit.clone(),
+                        branch: Some(wt_branch.clone()),
+                        worktree_path: Some(wt_path.clone()),
+                    },
+                    obj,
+                );
+                tracing::info!(
+                    "[dispatch] Review dispatch for card {}: using canonical worktree branch '{}' (commit {}, path: {})",
                     kanban_card_id,
                     wt_branch,
                     &wt_commit[..8.min(wt_commit.len())],
                     wt_path
                 );
             } else {
-                // #229: No worktree found — use main HEAD directly.
-                // Previous dispatch context is NOT reused because it may reference
-                // commits from a different issue (e.g., after worktree cleanup the
-                // latest completed review dispatch may belong to a prior issue).
+                // Last fallback: review the current repo HEAD. This path is used
+                // only when we have neither an execution target nor a canonical
+                // issue worktree.
                 let repo_dir = crate::services::platform::resolve_repo_dir();
-                if let Some(commit) = repo_dir
-                    .as_deref()
-                    .and_then(crate::services::platform::git_head_commit)
-                {
-                    obj.insert("reviewed_commit".to_string(), json!(commit));
+                if let Some(target) = repo_dir.as_deref().and_then(execution_target_from_dir) {
+                    apply_review_target_context(&target, obj);
                     tracing::info!(
-                        "[dispatch] Review dispatch for card {}: no worktree, using main HEAD ({})",
+                        "[dispatch] Review dispatch for card {}: no worktree, using repo HEAD ({})",
                         kanban_card_id,
-                        &commit[..8.min(commit.len())]
+                        &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
                     );
                 }
             }
@@ -1893,5 +2038,46 @@ mod tests {
             ctx.get("worktree_branch").is_none(),
             "no worktree_branch without issue"
         );
+    }
+
+    #[test]
+    fn review_context_reuses_latest_completed_work_dispatch_target() {
+        let db = test_db();
+        seed_card(&db, "card-review-target", "review");
+
+        let repo_dir = crate::services::platform::resolve_repo_dir().unwrap();
+        let completed_commit = crate::services::platform::git_head_commit(&repo_dir).unwrap();
+        let completed_branch = crate::services::platform::shell::git_branch_name(&repo_dir);
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+             ) VALUES (
+                'dispatch-review-target', 'card-review-target', 'agent-1', 'implementation', 'completed',
+                'Done', ?1, ?2, datetime('now'), datetime('now')
+             )",
+            rusqlite::params![
+                serde_json::json!({}).to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": repo_dir.clone(),
+                    "completed_branch": completed_branch.clone(),
+                    "completed_commit": completed_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-target", "agent-1", &json!({})).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["reviewed_commit"], completed_commit);
+        assert_eq!(parsed["worktree_path"], repo_dir);
+        if let Some(branch) = completed_branch {
+            assert_eq!(parsed["branch"], branch);
+        }
     }
 }

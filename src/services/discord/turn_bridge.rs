@@ -728,6 +728,46 @@ pub(super) fn runtime_db_fallback_complete(dispatch_id: &str, source: &str) -> b
     changed > 0
 }
 
+fn work_dispatch_completion_context(adk_cwd: Option<&str>) -> Option<serde_json::Value> {
+    let cwd = adk_cwd.filter(|p| std::path::Path::new(p).is_dir())?;
+    let completed_commit = crate::services::platform::git_head_commit(cwd)?;
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "completed_worktree_path".to_string(),
+        serde_json::Value::String(cwd.to_string()),
+    );
+    obj.insert(
+        "completed_commit".to_string(),
+        serde_json::Value::String(completed_commit),
+    );
+    if let Some(branch) = crate::services::platform::shell::git_branch_name(cwd) {
+        obj.insert(
+            "completed_branch".to_string(),
+            serde_json::Value::String(branch),
+        );
+    }
+    Some(serde_json::Value::Object(obj))
+}
+
+fn completion_result_with_context(
+    source: &str,
+    needs_reconcile: bool,
+    adk_cwd: Option<&str>,
+) -> serde_json::Value {
+    let mut result = work_dispatch_completion_context(adk_cwd)
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert(
+            "completion_source".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
+        if needs_reconcile {
+            obj.insert("needs_reconcile".to_string(), serde_json::Value::Bool(true));
+        }
+    }
+    result
+}
+
 /// Unlike review dispatches (which auto-complete on session idle), these types
 /// require an explicit PATCH so the pipeline can advance deterministically.
 /// Fail a dispatch with retry on PATCH failure.
@@ -790,6 +830,7 @@ async fn fail_dispatch_with_retry(api_port: u16, dispatch_id: Option<&str>, erro
 async fn complete_work_dispatch_on_turn_end(
     shared: &Arc<super::SharedData>,
     dispatch_id: Option<&str>,
+    adk_cwd: Option<&str>,
 ) {
     let Some(dispatch_id) = dispatch_id else {
         return;
@@ -813,13 +854,14 @@ async fn complete_work_dispatch_on_turn_end(
 
     // Direct finalize_dispatch with retry — single completion authority (#143)
     if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+        let completion_context = work_dispatch_completion_context(adk_cwd);
         for attempt in 1..=3u8 {
             match crate::dispatch::finalize_dispatch(
                 db,
                 engine,
                 dispatch_id,
                 "turn_bridge_explicit",
-                None,
+                completion_context.as_ref(),
             ) {
                 Ok(_) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -843,11 +885,14 @@ async fn complete_work_dispatch_on_turn_end(
         }
         // All retries exhausted — DB fallback via pool, then runtime-root file
         let fallback_ok = db.separate_conn().ok().map_or(false, |conn| {
+            let result_json =
+                completion_result_with_context("turn_bridge_db_fallback", true, adk_cwd)
+                    .to_string();
             let changed = conn.execute(
                 "UPDATE task_dispatches SET status = 'completed', \
-                 result = '{\"completion_source\":\"turn_bridge_db_fallback\",\"needs_reconcile\":true}', \
-                 updated_at = datetime('now') WHERE id = ?1 AND status IN ('pending', 'dispatched')",
-                [dispatch_id],
+                 result = ?1, \
+                 updated_at = datetime('now') WHERE id = ?2 AND status IN ('pending', 'dispatched')",
+                rusqlite::params![result_json, dispatch_id],
             ).unwrap_or(0);
             if changed > 0 {
                 conn.execute(
@@ -871,7 +916,7 @@ async fn complete_work_dispatch_on_turn_end(
         let url = local_api_url(shared.api_port, &format!("/api/dispatches/{dispatch_id}"));
         let payload = serde_json::json!({
             "status": "completed",
-            "result": { "completion_source": "turn_bridge_explicit" },
+            "result": completion_result_with_context("turn_bridge_explicit", false, adk_cwd),
         });
         for attempt in 1..=3u8 {
             match reqwest::Client::new()
@@ -1470,7 +1515,12 @@ pub(super) fn spawn_turn_bridge(
         // Skip if: cancelled, prompt too long, or transport error.
         // transport_error is set by StreamMessage::Error — not substring matching.
         if !cancelled && !is_prompt_too_long && !transport_error {
-            complete_work_dispatch_on_turn_end(&shared_owned, dispatch_id.as_deref()).await;
+            complete_work_dispatch_on_turn_end(
+                &shared_owned,
+                dispatch_id.as_deref(),
+                adk_cwd.as_deref(),
+            )
+            .await;
         } else if transport_error && !cancelled {
             // Transport error — fail the dispatch instead of completing
             fail_dispatch_with_retry(
