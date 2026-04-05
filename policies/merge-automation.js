@@ -485,13 +485,11 @@ function notifyAgentMainChannel(agentId, prNum, title) {
   var kvKey = "conflict_notified:" + prNum;
   if (agentdesk.kv.get(kvKey)) return;
 
-  var agent = agentdesk.db.query(
-    "SELECT discord_channel_id FROM agents WHERE id = ?",
-    [agentId]
-  );
-  if (agent.length > 0) {
+  // #304: resolve primary channel via centralized resolver
+  var mainCh = agentdesk.agents.resolvePrimaryChannel(agentId);
+  if (mainCh) {
     agentdesk.message.queue(
-      agent[0].discord_channel_id,
+      mainCh,
       "⚠️ PR #" + prNum + " (" + title + ") has merge conflicts with main. Please rebase.",
       "announce",
       "merge-automation"

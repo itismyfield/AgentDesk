@@ -36,7 +36,10 @@ pub async fn list_channel_queue(
                      FROM task_dispatches td \
                      JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
                      JOIN agents a ON td.to_agent_id = a.id \
-                     WHERE (a.discord_channel_id = ?1 OR a.discord_channel_alt = ?1) \
+                     WHERE (
+                         a.discord_channel_id = ?1 OR a.discord_channel_alt = ?1 OR
+                         a.discord_channel_cc = ?1 OR a.discord_channel_cdx = ?1
+                     ) \
                      AND td.status IN ('pending', 'dispatched') \
                      ORDER BY td.created_at DESC",
                 )
@@ -245,22 +248,20 @@ pub async fn cancel_turn(
     Path(channel_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Find the active session for this channel
-    let session_info: Option<(String, Option<String>)> = state
-        .db
-        .lock()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT session_key, active_dispatch_id FROM sessions \
+    let session_info: Option<(String, Option<String>)> = state.db.lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT session_key, active_dispatch_id FROM sessions \
                  WHERE status = 'working' \
                  AND (session_key LIKE '%' || ?1 || '%' OR agent_id IN \
-                      (SELECT id FROM agents WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1)) \
+                      (SELECT id FROM agents WHERE
+                          discord_channel_id = ?1 OR discord_channel_alt = ?1 OR
+                          discord_channel_cc = ?1 OR discord_channel_cdx = ?1)) \
                  ORDER BY last_heartbeat DESC LIMIT 1",
-                [&channel_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .ok()
-        });
+            [&channel_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .ok()
+    });
 
     let Some((session_key, dispatch_id)) = session_info else {
         return (

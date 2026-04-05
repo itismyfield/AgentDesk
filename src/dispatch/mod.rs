@@ -2,7 +2,9 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::db::Db;
+use crate::db::agents::{load_agent_channel_bindings, resolve_agent_dispatch_channel_on_conn};
 use crate::engine::PolicyEngine;
+use crate::services::provider::ProviderKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DispatchExecutionTarget {
@@ -345,23 +347,30 @@ fn build_review_context(
         // Inject from_provider/target_provider for cross-provider review validation
         if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
             if let Ok(conn) = db.separate_conn() {
-                if let Ok((ch, alt)) = conn.query_row(
-                    "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?1",
-                    [to_agent_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                        ))
-                    },
-                ) {
+                if let Ok(Some(bindings)) = load_agent_channel_bindings(&conn, to_agent_id) {
+                    let primary_provider = bindings
+                        .provider
+                        .as_deref()
+                        .and_then(ProviderKind::from_str);
                     if !obj.contains_key("from_provider") {
-                        if let Some(fp) = ch.as_deref().and_then(provider_from_channel_suffix) {
+                        if let Some(fp) = primary_provider.as_ref().map(ProviderKind::as_str) {
+                            obj.insert("from_provider".to_string(), json!(fp));
+                        } else if let Some(fp) = bindings
+                            .primary_channel()
+                            .as_deref()
+                            .and_then(provider_from_channel_suffix)
+                        {
                             obj.insert("from_provider".to_string(), json!(fp));
                         }
                     }
                     if !obj.contains_key("target_provider") {
-                        if let Some(tp) = alt.as_deref().and_then(provider_from_channel_suffix) {
+                        if let Some(tp) = primary_provider.as_ref().map(|p| p.counterpart()) {
+                            obj.insert("target_provider".to_string(), json!(tp.as_str()));
+                        } else if let Some(tp) = bindings
+                            .counter_model_channel()
+                            .as_deref()
+                            .and_then(provider_from_channel_suffix)
+                        {
                             obj.insert("target_provider".to_string(), json!(tp));
                         }
                     }
@@ -486,27 +495,18 @@ fn validate_dispatch_target_on_conn(
     to_agent_id: &str,
     dispatch_type: &str,
 ) -> Result<()> {
-    let channel_column = if dispatch_uses_alt_channel(dispatch_type) {
-        "discord_channel_alt"
-    } else {
-        "discord_channel_id"
-    };
     let channel_role = if dispatch_uses_alt_channel(dispatch_type) {
-        "alternate"
+        "counter-model"
     } else {
         "primary"
     };
 
-    let channel_value: Option<String> = conn
-        .query_row(
-            &format!("SELECT {channel_column} FROM agents WHERE id = ?1"),
-            [to_agent_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let channel_value: Option<String> =
+        resolve_agent_dispatch_channel_on_conn(conn, to_agent_id, Some(dispatch_type))
+            .ok()
+            .flatten()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
     let channel_value = channel_value.ok_or_else(|| {
         anyhow::anyhow!(

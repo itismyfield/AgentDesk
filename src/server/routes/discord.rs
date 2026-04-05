@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::db::agents::AgentChannelBindings;
 
 // ── Handlers ───────────────────────────────────────────────────
 
@@ -23,9 +24,12 @@ pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<s
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT id, discord_channel_id, discord_channel_alt
+        "SELECT id, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
          FROM agents
          WHERE discord_channel_id IS NOT NULL
+            OR discord_channel_alt IS NOT NULL
+            OR discord_channel_cc IS NOT NULL
+            OR discord_channel_cdx IS NOT NULL
          ORDER BY id",
     ) {
         Ok(s) => s,
@@ -39,10 +43,22 @@ pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<s
 
     let rows = stmt
         .query_map([], |row| {
+            let bindings = AgentChannelBindings {
+                provider: row.get(1)?,
+                discord_channel_id: row.get(2)?,
+                discord_channel_alt: row.get(3)?,
+                discord_channel_cc: row.get(4)?,
+                discord_channel_cdx: row.get(5)?,
+            };
             Ok(json!({
                 "agentId": row.get::<_, String>(0)?,
-                "channelId": row.get::<_, String>(1)?,
-                "channelName": row.get::<_, Option<String>>(2)?,
+                "channelId": bindings.primary_channel(),
+                "counterModelChannelId": bindings.counter_model_channel(),
+                "provider": bindings.provider,
+                "discord_channel_id": bindings.discord_channel_id,
+                "discord_channel_alt": bindings.discord_channel_alt,
+                "discord_channel_cc": bindings.discord_channel_cc,
+                "discord_channel_cdx": bindings.discord_channel_cdx,
                 "source": "config",
             }))
         })

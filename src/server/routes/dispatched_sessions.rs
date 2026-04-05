@@ -8,6 +8,7 @@ use serde_json::json;
 
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
+use crate::db::agents::AgentChannelBindings;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 
 const STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL: &str = "-6 hours";
@@ -41,22 +42,34 @@ fn resolve_agent_id_from_channel_name(
     }
 
     conn.query_row(
-        "SELECT id FROM agents WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1",
+        "SELECT id FROM agents
+         WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1
+            OR discord_channel_cc = ?1 OR discord_channel_cdx = ?1",
         [channel_name],
         |row| row.get(0),
     )
     .ok()
     .or_else(|| {
         let mut stmt = conn
-            .prepare("SELECT id, discord_channel_id, discord_channel_alt FROM agents")
+            .prepare(
+                "SELECT id, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+                 FROM agents",
+            )
             .ok()?;
         let mut rows = stmt.query([]).ok()?;
         while let Ok(Some(row)) = rows.next() {
             let id: String = row.get(0).ok()?;
-            let ch_id: String = row.get::<_, Option<String>>(1).ok()?.unwrap_or_default();
-            let ch_alt: String = row.get::<_, Option<String>>(2).ok()?.unwrap_or_default();
-            if (!ch_id.is_empty() && channel_name.contains(&ch_id))
-                || (!ch_alt.is_empty() && channel_name.contains(&ch_alt))
+            let bindings = AgentChannelBindings {
+                provider: row.get(1).ok()?,
+                discord_channel_id: row.get(2).ok()?,
+                discord_channel_alt: row.get(3).ok()?,
+                discord_channel_cc: row.get(4).ok()?,
+                discord_channel_cdx: row.get(5).ok()?,
+            };
+            if bindings
+                .all_channels()
+                .iter()
+                .any(|channel| channel_name.contains(channel))
             {
                 return Some(id);
             }
@@ -566,7 +579,7 @@ pub async fn hook_session(
                     if let Ok(agent) = conn.query_row(
                         "SELECT a.id, a.name, a.name_ko, s.status, s.session_info, \
                          a.cli_provider, a.avatar_emoji, a.department, \
-                         a.discord_channel_id, a.discord_channel_alt \
+                         a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx \
                          FROM agents a LEFT JOIN sessions s ON s.agent_id = a.id \
                          AND s.session_key = ?2 \
                          WHERE a.id = ?1",
@@ -583,6 +596,9 @@ pub async fn hook_session(
                                 "department": row.get::<_, Option<String>>(7)?,
                                 "discord_channel_id": row.get::<_, Option<String>>(8)?,
                                 "discord_channel_alt": row.get::<_, Option<String>>(9)?,
+                                "discord_channel_cc": row.get::<_, Option<String>>(10)?,
+                                "discord_channel_cdx": row.get::<_, Option<String>>(11)?,
+                                "discord_channel_id_codex": row.get::<_, Option<String>>(11)?,
                             }))
                         },
                     ) {

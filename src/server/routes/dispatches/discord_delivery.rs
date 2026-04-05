@@ -3,6 +3,9 @@ use super::resolve_channel_alias;
 use super::thread_reuse::{
     clear_thread_for_channel, get_thread_for_channel, set_thread_for_channel, try_reuse_thread,
 };
+use crate::db::agents::{
+    resolve_agent_dispatch_channel_on_conn, resolve_agent_primary_channel_on_conn,
+};
 
 /// Send a dispatch notification to the target agent's Discord channel.
 /// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
@@ -136,17 +139,9 @@ async fn send_dispatch_to_discord_inner(
             Ok(c) => c,
             Err(_) => return Err("db lock failed for channel lookup".into()),
         };
-        let col = if use_alt {
-            "discord_channel_alt"
-        } else {
-            "discord_channel_id"
-        };
-        conn.query_row(
-            &format!("SELECT {col} FROM agents WHERE id = ?1"),
-            [agent_id],
-            |row| row.get(0),
-        )
-        .ok()
+        resolve_agent_dispatch_channel_on_conn(&conn, agent_id, dispatch_type.as_deref())
+            .ok()
+            .flatten()
     };
 
     let channel_id = match channel_id {
@@ -699,23 +694,32 @@ pub(super) async fn send_review_result_to_primary(
     verdict: &str,
 ) -> Result<(), String> {
     // Look up card info
-    let (agent_id, title, issue_url, channel_id): (String, String, Option<String>, String) = {
+    let (agent_id, title, issue_url): (String, String, Option<String>) = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for card lookup".into()),
         };
         let result = conn.query_row(
-            "SELECT kc.assigned_agent_id, kc.title, kc.github_issue_url, a.discord_channel_id \
+            "SELECT kc.assigned_agent_id, kc.title, kc.github_issue_url \
              FROM kanban_cards kc \
-             JOIN agents a ON kc.assigned_agent_id = a.id \
              WHERE kc.id = ?1",
             [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         );
         match result {
             Ok(r) => r,
             Err(_) => return Err(format!("card {card_id} not found or missing agent")),
         }
+    };
+    let channel_id = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return Err("db lock failed for primary channel lookup".into()),
+        };
+        resolve_agent_primary_channel_on_conn(&conn, &agent_id)
+            .ok()
+            .flatten()
+            .ok_or_else(|| format!("agent {agent_id} missing primary discord channel"))?
     };
 
     // For improve/rework/reject: create a review-decision dispatch via the

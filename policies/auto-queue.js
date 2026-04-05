@@ -641,15 +641,14 @@ function collectRunMainChannels(runId, runInfo) {
   var channelIds = Object.keys(targets);
   if (channelIds.length > 0) return channelIds;
 
-  var fallback = agentdesk.db.query(
-    "SELECT DISTINCT COALESCE(a.discord_channel_id, '') as channel_id " +
-    "FROM auto_queue_entries e " +
-    "JOIN agents a ON a.id = e.agent_id " +
-    "WHERE e.run_id = ? AND COALESCE(a.discord_channel_id, '') != ''",
+  // #304: resolve primary channel via centralized resolver instead of legacy column
+  var fallbackAgents = agentdesk.db.query(
+    "SELECT DISTINCT e.agent_id FROM auto_queue_entries e WHERE e.run_id = ?",
     [runId]
   );
-  for (var i = 0; i < fallback.length; i++) {
-    if (fallback[i].channel_id) targets[fallback[i].channel_id] = true;
+  for (var i = 0; i < fallbackAgents.length; i++) {
+    var ch = agentdesk.agents.resolvePrimaryChannel(fallbackAgents[i].agent_id);
+    if (ch) targets[ch] = true;
   }
   return Object.keys(targets);
 }

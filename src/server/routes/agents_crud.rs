@@ -29,6 +29,8 @@ pub(super) struct CreateAgentBody {
     avatar_emoji: Option<String>,
     discord_channel_id: Option<String>,
     discord_channel_alt: Option<String>,
+    discord_channel_cc: Option<String>,
+    discord_channel_cdx: Option<String>,
     office_id: Option<String>,
 }
 
@@ -42,10 +44,45 @@ pub(super) struct UpdateAgentBody {
     avatar_emoji: Option<String>,
     discord_channel_id: Option<String>,
     discord_channel_alt: Option<String>,
+    discord_channel_cc: Option<String>,
+    discord_channel_cdx: Option<String>,
     alias: Option<String>,
     cli_provider: Option<String>,
     sprite_number: Option<i64>,
     pipeline_config: Option<serde_json::Value>,
+}
+
+fn normalize_channel_field(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn merged_channel_values(
+    discord_channel_id: Option<String>,
+    discord_channel_alt: Option<String>,
+    discord_channel_cc: Option<String>,
+    discord_channel_cdx: Option<String>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    // New columns (_cc, _cdx) are authoritative; legacy (_id, _alt) are mirrors.
+    // Resolve new columns first (fallback from legacy if absent), then mirror back.
+    let discord_channel_cc = normalize_channel_field(discord_channel_cc)
+        .or_else(|| normalize_channel_field(discord_channel_id));
+    let discord_channel_cdx = normalize_channel_field(discord_channel_cdx)
+        .or_else(|| normalize_channel_field(discord_channel_alt));
+    let discord_channel_id = discord_channel_cc.clone();
+    let discord_channel_alt = discord_channel_cdx.clone();
+    (
+        discord_channel_id,
+        discord_channel_alt,
+        discord_channel_cc,
+        discord_channel_cdx,
+    )
 }
 
 // ── Handlers ─────────────────────────────────────────────────────
@@ -60,8 +97,8 @@ pub(super) async fn list_agents(
             {
                 (
                     "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
-                            a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
-                            a.sprite_number, d.name, d.name, NULL, a.created_at,
+                            a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
+                            a.status, a.xp, a.sprite_number, d.name, d.name, NULL, a.created_at,
                             (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                             (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
                             (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task,
@@ -77,8 +114,8 @@ pub(super) async fn list_agents(
             } else {
                 (
                     "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
-                            a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
-                            a.sprite_number, d.name, d.name, NULL, a.created_at,
+                            a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
+                            a.status, a.xp, a.sprite_number, d.name, d.name, NULL, a.created_at,
                             (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                             (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
                             (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task,
@@ -107,7 +144,8 @@ pub(super) async fn list_agents(
                 .query_map(params_ref.as_slice(), |row| {
                     let provider = row.get::<_, Option<String>>(3)?;
                     let discord_channel_alt = row.get::<_, Option<String>>(7)?;
-                    let xp_val = row.get::<_, f64>(9).unwrap_or(0.0) as i64;
+                    let discord_channel_cdx = row.get::<_, Option<String>>(9)?;
+                    let xp_val = row.get::<_, f64>(11).unwrap_or(0.0) as i64;
                     Ok(json!({
                         "id": row.get::<_, String>(0)?,
                         "name": row.get::<_, String>(1)?,
@@ -119,23 +157,25 @@ pub(super) async fn list_agents(
                         "avatar_emoji": row.get::<_, Option<String>>(5)?,
                         "discord_channel_id": row.get::<_, Option<String>>(6)?,
                         "discord_channel_alt": discord_channel_alt,
-                        "discord_channel_id_codex": discord_channel_alt,
-                        "status": row.get::<_, Option<String>>(8)?,
+                        "discord_channel_cc": row.get::<_, Option<String>>(8)?,
+                        "discord_channel_cdx": discord_channel_cdx,
+                        "discord_channel_id_codex": discord_channel_cdx,
+                        "status": row.get::<_, Option<String>>(10)?,
                         "xp": xp_val,
                         "stats_xp": xp_val,
-                        "stats_tasks_done": row.get::<_, i64>(15).unwrap_or(0),
-                        "stats_tokens": row.get::<_, i64>(16).unwrap_or(0),
-                        "sprite_number": row.get::<_, Option<i64>>(10)?,
-                        "department_name": row.get::<_, Option<String>>(11)?,
-                        "department_name_ko": row.get::<_, Option<String>>(12)?,
-                        "department_color": row.get::<_, Option<String>>(13)?,
-                        "created_at": row.get::<_, Option<String>>(14)?,
+                        "stats_tasks_done": row.get::<_, i64>(17).unwrap_or(0),
+                        "stats_tokens": row.get::<_, i64>(18).unwrap_or(0),
+                        "sprite_number": row.get::<_, Option<i64>>(12)?,
+                        "department_name": row.get::<_, Option<String>>(13)?,
+                        "department_name_ko": row.get::<_, Option<String>>(14)?,
+                        "department_color": row.get::<_, Option<String>>(15)?,
+                        "created_at": row.get::<_, Option<String>>(16)?,
                         "alias": serde_json::Value::Null,
                         "role_id": row.get::<_, Option<String>>(0)?,
                         "personality": serde_json::Value::Null,
-                        "current_task_id": row.get::<_, Option<String>>(17)?,
-                        "current_thread_channel_id": row.get::<_, Option<String>>(18)?,
-                        "pipeline_config": row.get::<_, Option<String>>(19)?
+                        "current_task_id": row.get::<_, Option<String>>(19)?,
+                        "current_thread_channel_id": row.get::<_, Option<String>>(20)?,
+                        "pipeline_config": row.get::<_, Option<String>>(21)?
                             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
                     }))
                 })
@@ -160,8 +200,8 @@ pub(super) async fn get_agent(
         Ok(conn) => {
             let result = conn.query_row(
                 "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
-                        a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
-                        a.sprite_number, d.name, d.name, NULL, a.created_at,
+                        a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx,
+                        a.status, a.xp, a.sprite_number, d.name, d.name, NULL, a.created_at,
                         (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
                         (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
                         (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task,
@@ -174,7 +214,8 @@ pub(super) async fn get_agent(
                 |row| {
                     let provider = row.get::<_, Option<String>>(3)?;
                     let discord_channel_alt = row.get::<_, Option<String>>(7)?;
-                    let xp_val = row.get::<_, f64>(9).unwrap_or(0.0) as i64;
+                    let discord_channel_cdx = row.get::<_, Option<String>>(9)?;
+                    let xp_val = row.get::<_, f64>(11).unwrap_or(0.0) as i64;
                     Ok(json!({
                         "id": row.get::<_, String>(0)?,
                         "name": row.get::<_, String>(1)?,
@@ -186,23 +227,25 @@ pub(super) async fn get_agent(
                         "avatar_emoji": row.get::<_, Option<String>>(5)?,
                         "discord_channel_id": row.get::<_, Option<String>>(6)?,
                         "discord_channel_alt": discord_channel_alt,
-                        "discord_channel_id_codex": discord_channel_alt,
-                        "status": row.get::<_, Option<String>>(8)?,
+                        "discord_channel_cc": row.get::<_, Option<String>>(8)?,
+                        "discord_channel_cdx": discord_channel_cdx,
+                        "discord_channel_id_codex": discord_channel_cdx,
+                        "status": row.get::<_, Option<String>>(10)?,
                         "xp": xp_val,
                         "stats_xp": xp_val,
-                        "stats_tasks_done": row.get::<_, i64>(15).unwrap_or(0),
-                        "stats_tokens": row.get::<_, i64>(16).unwrap_or(0),
-                        "sprite_number": row.get::<_, Option<i64>>(10)?,
-                        "department_name": row.get::<_, Option<String>>(11)?,
-                        "department_name_ko": row.get::<_, Option<String>>(12)?,
-                        "department_color": row.get::<_, Option<String>>(13)?,
-                        "created_at": row.get::<_, Option<String>>(14)?,
+                        "stats_tasks_done": row.get::<_, i64>(17).unwrap_or(0),
+                        "stats_tokens": row.get::<_, i64>(18).unwrap_or(0),
+                        "sprite_number": row.get::<_, Option<i64>>(12)?,
+                        "department_name": row.get::<_, Option<String>>(13)?,
+                        "department_name_ko": row.get::<_, Option<String>>(14)?,
+                        "department_color": row.get::<_, Option<String>>(15)?,
+                        "created_at": row.get::<_, Option<String>>(16)?,
                         "alias": serde_json::Value::Null,
                         "role_id": row.get::<_, Option<String>>(0)?,
                         "personality": serde_json::Value::Null,
-                        "current_task_id": row.get::<_, Option<String>>(17)?,
-                        "current_thread_channel_id": row.get::<_, Option<String>>(18)?,
-                        "pipeline_config": row.get::<_, Option<String>>(19)?
+                        "current_task_id": row.get::<_, Option<String>>(19)?,
+                        "current_thread_channel_id": row.get::<_, Option<String>>(20)?,
+                        "pipeline_config": row.get::<_, Option<String>>(21)?
                             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
                     }))
                 },
@@ -234,9 +277,19 @@ pub(super) async fn create_agent(
         }
     };
 
+    let (discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx) =
+        merged_channel_values(
+            body.discord_channel_id.clone(),
+            body.discord_channel_alt.clone(),
+            body.discord_channel_cc.clone(),
+            body.discord_channel_cdx.clone(),
+        );
+
     if let Err(e) = conn.execute(
-        "INSERT INTO agents (id, name, name_ko, provider, department, avatar_emoji, discord_channel_id, discord_channel_alt)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO agents (
+            id, name, name_ko, provider, department, avatar_emoji,
+            discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             body.id,
             body.name,
@@ -244,8 +297,10 @@ pub(super) async fn create_agent(
             body.provider,
             body.department,
             body.avatar_emoji,
-            body.discord_channel_id,
-            body.discord_channel_alt,
+            discord_channel_id,
+            discord_channel_alt,
+            discord_channel_cc,
+            discord_channel_cdx,
         ],
     ) {
         return (
@@ -268,7 +323,7 @@ pub(super) async fn create_agent(
 
     match conn.query_row(
         "SELECT id, name, name_ko, provider, department, avatar_emoji,
-                discord_channel_id, discord_channel_alt, status, xp
+                discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx, status, xp
          FROM agents WHERE id = ?1",
         [&body.id],
         |row| {
@@ -281,8 +336,11 @@ pub(super) async fn create_agent(
                 "avatar_emoji": row.get::<_, Option<String>>(5)?,
                 "discord_channel_id": row.get::<_, Option<String>>(6)?,
                 "discord_channel_alt": row.get::<_, Option<String>>(7)?,
-                "status": row.get::<_, Option<String>>(8)?,
-                "xp": row.get::<_, f64>(9).unwrap_or(0.0) as i64,
+                "discord_channel_cc": row.get::<_, Option<String>>(8)?,
+                "discord_channel_cdx": row.get::<_, Option<String>>(9)?,
+                "discord_channel_id_codex": row.get::<_, Option<String>>(9)?,
+                "status": row.get::<_, Option<String>>(10)?,
+                "xp": row.get::<_, f64>(11).unwrap_or(0.0) as i64,
             }))
         },
     ) {
@@ -312,6 +370,10 @@ pub(super) async fn update_agent(
     let mut sets: Vec<String> = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let mut idx = 1;
+    let channel_patch_requested = body.discord_channel_id.is_some()
+        || body.discord_channel_alt.is_some()
+        || body.discord_channel_cc.is_some()
+        || body.discord_channel_cdx.is_some();
 
     if let Some(ref name) = body.name {
         sets.push(format!("name = ?{}", idx));
@@ -339,15 +401,49 @@ pub(super) async fn update_agent(
         values.push(Box::new(avatar_emoji.clone()));
         idx += 1;
     }
-    if let Some(ref discord_channel_id) = body.discord_channel_id {
-        sets.push(format!("discord_channel_id = ?{}", idx));
-        values.push(Box::new(discord_channel_id.clone()));
-        idx += 1;
-    }
-    if let Some(ref discord_channel_alt) = body.discord_channel_alt {
-        sets.push(format!("discord_channel_alt = ?{}", idx));
-        values.push(Box::new(discord_channel_alt.clone()));
-        idx += 1;
+    if channel_patch_requested {
+        let existing_channels: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = match conn.query_row(
+            "SELECT discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+             FROM agents WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ) {
+            Ok(channels) => channels,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "agent not found"})),
+                );
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        let (discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx) =
+            merged_channel_values(
+                body.discord_channel_id.clone().or(existing_channels.0),
+                body.discord_channel_alt.clone().or(existing_channels.1),
+                body.discord_channel_cc.clone().or(existing_channels.2),
+                body.discord_channel_cdx.clone().or(existing_channels.3),
+            );
+        for (column, value) in [
+            ("discord_channel_id", discord_channel_id),
+            ("discord_channel_alt", discord_channel_alt),
+            ("discord_channel_cc", discord_channel_cc),
+            ("discord_channel_cdx", discord_channel_cdx),
+        ] {
+            sets.push(format!("{column} = ?{idx}"));
+            values.push(Box::new(value));
+            idx += 1;
+        }
     }
     if let Some(ref pipeline_config) = body.pipeline_config {
         if pipeline_config.is_null() {
@@ -397,7 +493,7 @@ pub(super) async fn update_agent(
 
     match conn.query_row(
         "SELECT id, name, name_ko, provider, department, avatar_emoji,
-                discord_channel_id, discord_channel_alt, status, xp, pipeline_config
+                discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx, status, xp, pipeline_config
          FROM agents WHERE id = ?1",
         [&id],
         |row| {
@@ -410,9 +506,12 @@ pub(super) async fn update_agent(
                 "avatar_emoji": row.get::<_, Option<String>>(5)?,
                 "discord_channel_id": row.get::<_, Option<String>>(6)?,
                 "discord_channel_alt": row.get::<_, Option<String>>(7)?,
-                "status": row.get::<_, Option<String>>(8)?,
-                "xp": row.get::<_, f64>(9).unwrap_or(0.0) as i64,
-                "pipeline_config": row.get::<_, Option<String>>(10)?
+                "discord_channel_cc": row.get::<_, Option<String>>(8)?,
+                "discord_channel_cdx": row.get::<_, Option<String>>(9)?,
+                "discord_channel_id_codex": row.get::<_, Option<String>>(9)?,
+                "status": row.get::<_, Option<String>>(10)?,
+                "xp": row.get::<_, f64>(11).unwrap_or(0.0) as i64,
+                "pipeline_config": row.get::<_, Option<String>>(12)?
                     .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
             }))
         },
