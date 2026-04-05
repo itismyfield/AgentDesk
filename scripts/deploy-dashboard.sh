@@ -41,13 +41,14 @@ elif [[ "$TARGET" == "release" ]]; then
     fi
 
     # Swap: old → dist.old, new → dist (near-atomic on same filesystem)
+    # Keep dist.old so in-flight clients can still load previous chunks
+    rm -rf "$DEST_OLD"
     if [[ -d "$DEST" ]]; then
         mv "$DEST" "$DEST_OLD"
     fi
     mv "$DEST_TMP" "$DEST"
-    rm -rf "$DEST_OLD"
 
-    echo "  ✓ Deployed → $DEST/ (atomic swap)"
+    echo "  ✓ Deployed → $DEST/ (atomic swap, previous build kept in dist.old)"
     echo "  ✓ index.html present"
 else
     echo "Usage: deploy-dashboard.sh [dev|release]" >&2
