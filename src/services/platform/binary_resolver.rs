@@ -617,11 +617,16 @@ mod tests {
             .collect::<Vec<_>>();
 
         #[cfg(unix)]
-        assert!(dirs.iter().any(|entry| entry == "/usr/local/bin"));
-        assert!(dirs.iter().any(|entry| entry.ends_with("/.volta/bin")));
+        {
+            assert!(dirs.iter().any(|entry| entry == "/usr/local/bin"));
+            assert!(dirs.iter().any(|entry| entry.ends_with("/.volta/bin")));
+        }
 
         #[cfg(target_os = "macos")]
         assert!(dirs.iter().any(|entry| entry == "/opt/homebrew/bin"));
+
+        #[cfg(windows)]
+        assert!(dirs.iter().any(|entry| entry == "C:/ProgramData/chocolatey/bin"));
     }
 
     #[cfg(unix)]
