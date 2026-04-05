@@ -122,7 +122,7 @@ pub fn resolve_provider_binary(provider: &str) -> BinaryResolution {
         }),
     }
 
-    let fallback_dirs = standard_fallback_dirs();
+    let fallback_dirs = provider_fallback_dirs(&requested_binary);
     match resolve_in_paths(
         &requested_binary,
         join_paths_lossy(fallback_dirs.clone()),
@@ -313,6 +313,60 @@ fn exec_path_entries(resolved_path: &Path, canonical_path: Option<&Path>) -> Vec
     }
 
     entries
+}
+
+fn provider_fallback_dirs(provider: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for dir in windows_provider_subdirs(provider) {
+        push_unique_path(dir, &mut dirs, &mut seen);
+    }
+    for dir in standard_fallback_dirs() {
+        push_unique_path(dir, &mut dirs, &mut seen);
+    }
+
+    dirs
+}
+
+#[cfg(windows)]
+fn windows_provider_subdirs(provider: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    if let Some(home) = dirs::home_dir() {
+        push_unique_path(
+            home.join("AppData/Local/Programs").join(provider),
+            &mut dirs,
+            &mut seen,
+        );
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        push_unique_path(
+            PathBuf::from(local_app_data)
+                .join("Programs")
+                .join(provider),
+            &mut dirs,
+            &mut seen,
+        );
+    }
+    push_unique_path(
+        PathBuf::from("C:/Program Files").join(provider),
+        &mut dirs,
+        &mut seen,
+    );
+    push_unique_path(
+        PathBuf::from("C:/Program Files (x86)").join(provider),
+        &mut dirs,
+        &mut seen,
+    );
+
+    dirs
+}
+
+#[cfg(not(windows))]
+fn windows_provider_subdirs(_provider: &str) -> Vec<PathBuf> {
+    Vec::new()
 }
 
 fn standard_fallback_dirs() -> Vec<PathBuf> {
@@ -620,6 +674,52 @@ mod tests {
             dirs.iter()
                 .any(|entry| entry == Path::new("/opt/homebrew/bin"))
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provider_resolution_uses_windows_provider_program_subdir() {
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let provider = "agentdesk-test-provider";
+        let provider_dir = temp.path().join("Programs").join(provider);
+        let binary_path = provider_dir.join(format!("{provider}.exe"));
+        let original_local_app_data = std::env::var_os("LOCALAPPDATA");
+        let original_path = std::env::var_os("PATH");
+        let override_var = override_var_name(provider);
+        let original_override = std::env::var_os(&override_var);
+
+        std::fs::create_dir_all(&provider_dir).unwrap();
+        std::fs::write(&binary_path, b"stub").unwrap();
+
+        unsafe {
+            std::env::set_var("LOCALAPPDATA", temp.path());
+            std::env::set_var("PATH", "");
+            std::env::remove_var(&override_var);
+        }
+
+        let resolution = resolve_provider_binary(provider);
+
+        assert_eq!(
+            resolution.resolved_path,
+            Some(binary_path.to_string_lossy().to_string())
+        );
+        assert_eq!(resolution.source.as_deref(), Some("fallback_path"));
+
+        unsafe {
+            match original_local_app_data {
+                Some(value) => std::env::set_var("LOCALAPPDATA", value),
+                None => std::env::remove_var("LOCALAPPDATA"),
+            }
+            match original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match original_override {
+                Some(value) => std::env::set_var(&override_var, value),
+                None => std::env::remove_var(&override_var),
+            }
+        }
     }
 
     #[cfg(unix)]
