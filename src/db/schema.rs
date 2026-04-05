@@ -612,10 +612,24 @@ pub fn seed_builtin_pipeline_stages(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    // #197: dev-deploy and e2e-test stages disabled until #197 is implemented.
-    // Re-enable when deploy-pipeline.js can handle these stages.
-    // ensure_pipeline_stage(conn, AGENTDESK_REPO_ID, "dev-deploy", 100, Some("review_pass"), Some("self"), Some("no_rs_changes"))?;
-    // ensure_pipeline_stage(conn, AGENTDESK_REPO_ID, "e2e-test", 200, None, Some("counter"), Some("no_rs_changes"))?;
+    ensure_pipeline_stage(
+        conn,
+        AGENTDESK_REPO_ID,
+        "dev-deploy",
+        100,
+        Some("review_pass"),
+        Some("self"),
+        Some("no_rs_changes"),
+    )?;
+    ensure_pipeline_stage(
+        conn,
+        AGENTDESK_REPO_ID,
+        "e2e-test",
+        200,
+        None,
+        Some("counter"),
+        Some("no_rs_changes"),
+    )?;
 
     Ok(())
 }
@@ -653,8 +667,32 @@ fn ensure_pipeline_stage(
 mod tests {
     use super::*;
 
+    fn builtin_stage_rows(
+        conn: &Connection,
+    ) -> Vec<(String, i64, Option<String>, Option<String>, Option<String>)> {
+        conn.prepare(
+            "SELECT stage_name, stage_order, trigger_after, provider, skip_condition
+             FROM pipeline_stages
+             WHERE repo_id = ?1
+             ORDER BY stage_order ASC",
+        )
+        .unwrap()
+        .query_map([AGENTDESK_REPO_ID], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
     #[test]
-    fn migrate_does_not_backfill_disabled_agentdesk_pipeline_stages_for_existing_repo() {
+    fn migrate_seeds_builtin_agentdesk_pipeline_stages_for_existing_repo() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE kv_meta (
@@ -678,32 +716,29 @@ mod tests {
 
         migrate(&conn).unwrap();
 
-        let rows: Vec<(String, i64, Option<String>, Option<String>, Option<String>)> = conn
-            .prepare(
-                "SELECT stage_name, stage_order, trigger_after, provider, skip_condition
-                 FROM pipeline_stages
-                 WHERE repo_id = ?1
-                 ORDER BY stage_order ASC",
-            )
-            .unwrap()
-            .query_map([AGENTDESK_REPO_ID], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert!(rows.is_empty());
+        assert_eq!(
+            builtin_stage_rows(&conn),
+            vec![
+                (
+                    "dev-deploy".to_string(),
+                    100,
+                    Some("review_pass".to_string()),
+                    Some("self".to_string()),
+                    Some("no_rs_changes".to_string()),
+                ),
+                (
+                    "e2e-test".to_string(),
+                    200,
+                    None,
+                    Some("counter".to_string()),
+                    Some("no_rs_changes".to_string()),
+                ),
+            ]
+        );
     }
 
     #[test]
-    fn seed_builtin_pipeline_stages_is_noop_while_disabled() {
+    fn seed_builtin_pipeline_stages_is_idempotent_for_agentdesk_repo() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         conn.execute(
@@ -722,6 +757,25 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(count, 2);
+        assert_eq!(
+            builtin_stage_rows(&conn),
+            vec![
+                (
+                    "dev-deploy".to_string(),
+                    100,
+                    Some("review_pass".to_string()),
+                    Some("self".to_string()),
+                    Some("no_rs_changes".to_string()),
+                ),
+                (
+                    "e2e-test".to_string(),
+                    200,
+                    None,
+                    Some("counter".to_string()),
+                    Some("no_rs_changes".to_string()),
+                ),
+            ]
+        );
     }
 }

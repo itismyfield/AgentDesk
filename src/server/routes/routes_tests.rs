@@ -1377,7 +1377,7 @@ fn seed_agent(db: &Db, agent_id: &str) {
 }
 
 #[tokio::test]
-async fn create_repo_does_not_seed_disabled_agentdesk_pipeline_stages() {
+async fn create_repo_seeds_builtin_agentdesk_pipeline_stages_for_new_db() {
     let db = test_db();
     let engine = test_engine(&db);
     let app = test_api_router(db.clone(), engine, None);
@@ -1417,7 +1417,59 @@ async fn create_repo_does_not_seed_disabled_agentdesk_pipeline_stages() {
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
 
-    assert!(rows.is_empty());
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "dev-deploy".to_string(),
+                100,
+                Some("review_pass".to_string()),
+                Some("self".to_string()),
+                Some("no_rs_changes".to_string()),
+            ),
+            (
+                "e2e-test".to_string(),
+                200,
+                None,
+                Some("counter".to_string()),
+                Some("no_rs_changes".to_string()),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn create_repo_does_not_duplicate_builtin_agentdesk_pipeline_stages() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db.clone(), engine, None);
+
+    for _ in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/kanban-repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"repo":"itismyfield/AgentDesk"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    let conn = db.lock().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pipeline_stages WHERE repo_id = 'itismyfield/AgentDesk'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(count, 2);
 }
 
 #[tokio::test]
