@@ -25,9 +25,23 @@ import {
   deriveSubAgents,
 } from "./office-session-overlay";
 
+// ── Per-dataset loading/error state ──
+
+type DatasetKey = "offices" | "agents" | "allAgents" | "departments" | "allDepartments" | "auditLogs";
+
+interface DatasetState {
+  loading: boolean;
+  error: string | null;
+}
+
+type DatasetStates = Record<DatasetKey, DatasetState>;
+
+const INITIAL_DATASET: DatasetState = { loading: false, error: null };
+
 // ── Context value ──
 
 interface OfficeContextValue {
+  // Data
   offices: Office[];
   selectedOfficeId: string | null;
   setSelectedOfficeId: (id: string | null) => void;
@@ -40,12 +54,15 @@ interface OfficeContextValue {
   roundTableMeetings: RoundTableMeeting[];
   setRoundTableMeetings: React.Dispatch<React.SetStateAction<RoundTableMeeting[]>>;
   auditLogs: AuditLogEntry[];
-  /** Sessions visible (not disconnected, not linked) */
+
+  // Derived
   visibleDispatchedSessions: DispatchedSession[];
   subAgents: SubAgent[];
-  /** agents + dispatched-as-agent entries */
   agentsWithDispatched: Agent[];
-  /** True while any context refresh is in flight */
+
+  // Loading/error per dataset
+  datasetStates: DatasetStates;
+  /** True while any refresh is in flight */
   refreshing: boolean;
 
   // Refresh functions
@@ -104,7 +121,6 @@ export function OfficeProvider({
   useEffect(() => { allAgentsRef.current = sessionAwareAllAgents; }, [sessionAwareAllAgents]);
 
   // ── Reload scoped data when office selection changes ──
-  // Skip the first execution — bootstrap already provides correct data.
   const mountedRef = useRef(false);
   useEffect(() => {
     if (!mountedRef.current) {
@@ -116,40 +132,62 @@ export function OfficeProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedOfficeId]);
 
-  // ── Refresh functions with loading tracking ──
+  // ── Per-dataset loading/error tracking ──
 
-  const [refreshCount, setRefreshCount] = useState(0);
-  const tracked = useCallback(
-    <T,>(promise: Promise<T>): Promise<T> => {
-      setRefreshCount((c) => c + 1);
-      return promise.finally(() => setRefreshCount((c) => c - 1));
+  const [datasetStates, setDatasetStates] = useState<DatasetStates>({
+    offices: INITIAL_DATASET,
+    agents: INITIAL_DATASET,
+    allAgents: INITIAL_DATASET,
+    departments: INITIAL_DATASET,
+    allDepartments: INITIAL_DATASET,
+    auditLogs: INITIAL_DATASET,
+  });
+
+  const trackedFor = useCallback(
+    <T,>(key: DatasetKey, promise: Promise<T>): Promise<T> => {
+      setDatasetStates((prev) => ({ ...prev, [key]: { loading: true, error: null } }));
+      return promise
+        .then((result) => {
+          setDatasetStates((prev) => ({ ...prev, [key]: { loading: false, error: null } }));
+          return result;
+        })
+        .catch((e) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          setDatasetStates((prev) => ({ ...prev, [key]: { loading: false, error: msg } }));
+          throw e;
+        });
     },
     [],
   );
 
   const refreshOffices = useCallback(() => {
-    tracked(api.getOffices()).then(setOffices).catch(() => {});
-  }, [tracked]);
+    trackedFor("offices", api.getOffices()).then(setOffices).catch(() => {});
+  }, [trackedFor]);
 
   const refreshAgents = useCallback(() => {
-    tracked(api.getAgents(selectedOfficeId ?? undefined)).then(setAgents).catch(() => {});
-  }, [selectedOfficeId, tracked]);
+    trackedFor("agents", api.getAgents(selectedOfficeId ?? undefined)).then(setAgents).catch(() => {});
+  }, [selectedOfficeId, trackedFor]);
 
   const refreshAllAgents = useCallback(() => {
-    tracked(api.getAgents()).then(setAllAgents).catch(() => {});
-  }, [tracked]);
+    trackedFor("allAgents", api.getAgents()).then(setAllAgents).catch(() => {});
+  }, [trackedFor]);
 
   const refreshDepartments = useCallback(() => {
-    tracked(api.getDepartments(selectedOfficeId ?? undefined)).then(setDepartments).catch(() => {});
-  }, [selectedOfficeId, tracked]);
+    trackedFor("departments", api.getDepartments(selectedOfficeId ?? undefined)).then(setDepartments).catch(() => {});
+  }, [selectedOfficeId, trackedFor]);
 
   const refreshAllDepartments = useCallback(() => {
-    tracked(api.getDepartments()).then(setAllDepartments).catch(() => {});
-  }, [tracked]);
+    trackedFor("allDepartments", api.getDepartments()).then(setAllDepartments).catch(() => {});
+  }, [trackedFor]);
 
   const refreshAuditLogs = useCallback(() => {
-    tracked(api.getAuditLogs(12)).then(setAuditLogs).catch(() => {});
-  }, [tracked]);
+    trackedFor("auditLogs", api.getAuditLogs(12)).then(setAuditLogs).catch(() => {});
+  }, [trackedFor]);
+
+  const refreshing = useMemo(
+    () => Object.values(datasetStates).some((s) => s.loading),
+    [datasetStates],
+  );
 
   // Stable ref for pushNotification to avoid re-registering WS listener
   const pushNotificationRef = useRef(pushNotification);
@@ -167,72 +205,62 @@ export function OfficeProvider({
           const label = a.name_ko || a.name || "agent";
           if (previous?.status !== a.status) {
             if (a.status === "working") {
-              push(`${label}: ${a.session_info || "작업 시작"}`, "info");
-            } else if (previous?.status === "working") {
-              push(`${label}: 작업 상태 ${a.status}`, "warning");
+              push(`${label} 작업 시작`, "info");
+            } else if (a.status === "idle" && previous?.status === "working") {
+              push(`${label} 작업 완료`, "success");
             }
-          } else if (a.status === "working" && a.session_info && previous?.session_info !== a.session_info) {
-            push(`${label}: ${a.session_info}`, "info");
           }
-          setAgents((prev) => prev.map((p) => (p.id === a.id ? { ...p, ...a } : p)));
-          setAllAgents((prev) => prev.map((p) => (p.id === a.id ? { ...p, ...a } : p)));
+          setAgents((prev) => prev.map((ag) => (ag.id === a.id ? { ...ag, ...a } : ag)));
+          setAllAgents((prev) => prev.map((ag) => (ag.id === a.id ? { ...ag, ...a } : ag)));
           break;
         }
-        case "agent_created": {
-          const created = event.payload as Agent;
-          push(`새 에이전트: ${created.name_ko || created.name || "unknown"}`, "success");
-          api.getAgents(selectedOfficeId ?? undefined).then(setAgents).catch(() => {});
-          api.getAgents().then(setAllAgents).catch(() => {});
-          api.getAuditLogs(12).then(setAuditLogs).catch(() => {});
+        case "agent_created":
+          refreshAgents();
+          refreshAllAgents();
           break;
-        }
         case "agent_deleted":
-          setAgents((prev) => prev.filter((a) => a.id !== (event.payload as { id: string }).id));
-          setAllAgents((prev) => prev.filter((a) => a.id !== (event.payload as { id: string }).id));
-          api.getAuditLogs(12).then(setAuditLogs).catch(() => {});
+          refreshAgents();
+          refreshAllAgents();
+          refreshOffices();
           break;
         case "departments_changed":
-          api.getDepartments(selectedOfficeId ?? undefined).then(setDepartments).catch(() => {});
-          api.getAuditLogs(12).then(setAuditLogs).catch(() => {});
+          refreshDepartments();
+          refreshAllDepartments();
           break;
         case "offices_changed":
-          api.getOffices().then(setOffices).catch(() => {});
-          api.getAuditLogs(12).then(setAuditLogs).catch(() => {});
+          refreshOffices();
           break;
         case "dispatched_session_new": {
-          const ns = event.payload as DispatchedSession;
-          setSessions((prev) => [ns, ...prev]);
-          push(`파견 세션 연결: ${ns.name || ns.session_key}`, "info");
+          const s = event.payload as DispatchedSession;
+          setSessions((prev) => [s, ...prev.filter((p) => p.id !== s.id)]);
           break;
         }
-        case "dispatched_session_update":
-          setSessions((prev) => {
-            const s = event.payload as DispatchedSession;
-            return prev.map((p) => (p.id === s.id ? { ...p, ...s } : p));
-          });
+        case "dispatched_session_update": {
+          const s = event.payload as DispatchedSession;
+          setSessions((prev) => prev.map((p) => (p.id === s.id ? s : p)));
           break;
+        }
         case "dispatched_session_disconnect": {
-          const { id } = event.payload as { id: string };
-          setSessions((prev) => prev.map((p) => p.id === id ? { ...p, status: "disconnected" as const } : p));
-          push("파견 세션 종료", "warning");
+          const id = (event.payload as { id: string }).id;
+          setSessions((prev) =>
+            prev.map((p) => (p.id === id ? { ...p, status: "disconnected" as const } : p)),
+          );
           break;
         }
         case "round_table_new": {
           const m = event.payload as RoundTableMeeting;
           setRoundTableMeetings((prev) => [m, ...prev.filter((p) => p.id !== m.id)]);
-          push(`라운드 테이블: ${m.agenda.slice(0, 30)}`, "info");
           break;
         }
         case "round_table_update": {
           const m = event.payload as RoundTableMeeting;
-          setRoundTableMeetings((prev) => prev.map((p) => (p.id === m.id ? { ...p, ...m } : p)));
+          setRoundTableMeetings((prev) => prev.map((p) => (p.id === m.id ? m : p)));
           break;
         }
-        // kanban events that also trigger auditLog refresh
         case "kanban_card_created":
         case "kanban_card_updated":
         case "kanban_card_deleted":
-          api.getAuditLogs(12).then(setAuditLogs).catch(() => {});
+          refreshAuditLogs();
           break;
       }
     }
@@ -268,13 +296,14 @@ export function OfficeProvider({
         visibleDispatchedSessions,
         subAgents,
         agentsWithDispatched,
+        datasetStates,
+        refreshing,
         refreshOffices,
         refreshAgents,
         refreshAllAgents,
         refreshDepartments,
         refreshAllDepartments,
         refreshAuditLogs,
-        refreshing: refreshCount > 0,
       }}
     >
       {children}
