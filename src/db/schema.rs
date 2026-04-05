@@ -45,6 +45,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN sprite_number INTEGER DEFAULT NULL;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN description TEXT;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN system_prompt TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN discord_channel_cc TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN discord_channel_cdx TEXT;");
     // #135: Per-repo and per-agent pipeline override (JSON)
     let _ = conn.execute_batch("ALTER TABLE github_repos ADD COLUMN pipeline_config TEXT;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN pipeline_config TEXT;");
@@ -100,6 +102,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN suggestion_pending_at TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN review_entered_at TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN awaiting_dod_at TEXT;");
+    let _ = conn.execute_batch(
+        "UPDATE agents
+         SET discord_channel_cc = COALESCE(NULLIF(TRIM(discord_channel_cc), ''), NULLIF(TRIM(discord_channel_id), '')),
+             discord_channel_cdx = COALESCE(NULLIF(TRIM(discord_channel_cdx), ''), NULLIF(TRIM(discord_channel_alt), ''));
+         UPDATE agents
+         SET discord_channel_id = COALESCE(NULLIF(TRIM(discord_channel_id), ''), NULLIF(TRIM(discord_channel_cc), '')),
+             discord_channel_alt = COALESCE(NULLIF(TRIM(discord_channel_alt), ''), NULLIF(TRIM(discord_channel_cdx), ''));",
+    );
 
     // Backfill lifecycle timestamps for existing cards that predate these columns.
     // Uses updated_at as best-available approximation; future transitions will use exact timestamps.

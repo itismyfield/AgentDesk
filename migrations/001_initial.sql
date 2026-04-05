@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS agents (
     provider            TEXT DEFAULT 'claude',
     discord_channel_id  TEXT,
     discord_channel_alt TEXT,
+    discord_channel_cc  TEXT,
+    discord_channel_cdx TEXT,
     avatar_emoji        TEXT,
     status              TEXT DEFAULT 'idle',
     xp                  INTEGER DEFAULT 0,

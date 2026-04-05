@@ -2572,12 +2572,8 @@ async fn notify_source_agent(
         let agent_name = source_agent.to_string();
         let ch_opt: Option<String> = tokio::task::spawn_blocking(move || {
             let conn = db.separate_conn().map_err(|e| format!("{e}"))?;
-            conn.query_row(
-                "SELECT discord_channel_id FROM agents WHERE id = ?1",
-                rusqlite::params![agent_name],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .map_err(|e| format!("{e}"))
+            crate::db::agents::resolve_agent_primary_channel_on_conn(&conn, &agent_name)
+                .map_err(|e| format!("{e}"))
         })
         .await
         .map_err(|e| format!("join: {e}"))??;
