@@ -2087,9 +2087,9 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-review-target", "review");
 
-        let repo_dir = crate::services::platform::resolve_repo_dir().unwrap();
-        let completed_commit = crate::services::platform::git_head_commit(&repo_dir).unwrap();
-        let completed_branch = crate::services::platform::shell::git_branch_name(&repo_dir);
+        let repo_dir = "/tmp/test-review-target".to_string();
+        let completed_commit = "deadbeefcafebabe1234567890abcdef12345678".to_string();
+        let completed_branch = Some("wt/review-target".to_string());
 
         let conn = db.separate_conn().unwrap();
         conn.execute(
