@@ -244,10 +244,30 @@ DIST_STAGED="$ADK_REL/dashboard/dist.new"
 rm -rf "$DIST_STAGED"
 cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 
-# Stop release
+# Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
+LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
+OLD_PID=""
+if [ -f "$LOCK_FILE" ]; then
+    OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
+fi
 launchctl bootout "gui/$(id -u)/$PLIST_REL" 2>/dev/null || true
-sleep 2
+if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "  waiting for PID $OLD_PID to exit..."
+    WAIT_SECS=0
+    while kill -0 "$OLD_PID" 2>/dev/null && [ "$WAIT_SECS" -lt 15 ]; do
+        sleep 1
+        WAIT_SECS=$((WAIT_SECS + 1))
+    done
+    if kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "  ⚠ PID $OLD_PID did not exit after 15s — sending SIGKILL"
+        kill -9 "$OLD_PID" 2>/dev/null || true
+        sleep 1
+    fi
+    echo "  ✓ old process terminated (${WAIT_SECS}s)"
+else
+    sleep 2
+fi
 
 # Copy binary from dev — atomic: sign in tmp, then mv to replace inode.
 # In-place codesign can corrupt the OS signing cache if it fails mid-write,
