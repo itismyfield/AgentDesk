@@ -626,7 +626,10 @@ mod tests {
         assert!(dirs.iter().any(|entry| entry == "/opt/homebrew/bin"));
 
         #[cfg(windows)]
-        assert!(dirs.iter().any(|entry| entry == "C:/ProgramData/chocolatey/bin"));
+        assert!(
+            dirs.iter()
+                .any(|entry| entry == "C:/ProgramData/chocolatey/bin")
+        );
     }
 
     #[cfg(unix)]
