@@ -1509,6 +1509,23 @@ pub(crate) fn sync_auto_queue_terminal_on_conn(conn: &rusqlite::Connection, card
     .ok();
 }
 
+/// Skip live auto-queue entries for a card after PMD explicitly backs the card out.
+///
+/// Only active/paused runs are touched. Generated or future runs stay intact so
+/// PMD can intentionally re-queue the card later after fixing prerequisites.
+pub(crate) fn skip_live_auto_queue_entries_for_card_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE auto_queue_entries \
+         SET status = 'skipped', dispatch_id = NULL, dispatched_at = NULL, completed_at = datetime('now') \
+         WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
+         AND run_id IN (SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused'))",
+        [card_id],
+    )
+}
+
 /// Same as `review_state_sync` but operates on an already-acquired connection.
 /// Use this inside transactions or when a lock is already held (#158).
 pub fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &str) -> String {

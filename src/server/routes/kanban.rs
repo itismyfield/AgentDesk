@@ -2689,6 +2689,50 @@ pub async fn reopen_card(
 #[derive(Debug, Deserialize)]
 pub struct ForceTransitionBody {
     pub status: String,
+    pub cancel_dispatches: Option<bool>,
+}
+
+fn force_transition_needs_cleanup(target_status: &str, cancel_dispatches: Option<bool>) -> bool {
+    matches!(target_status, "backlog" | "ready") && cancel_dispatches.unwrap_or(true)
+}
+
+fn cleanup_force_transition_revert_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    target_status: &str,
+) -> anyhow::Result<(usize, usize)> {
+    let reason = format!("force-transition to {target_status}");
+    let cancelled_dispatches =
+        crate::dispatch::cancel_active_dispatches_for_card_on_conn(conn, card_id, Some(&reason))?;
+    let skipped_auto_queue_entries =
+        crate::engine::ops::skip_live_auto_queue_entries_for_card_on_conn(conn, card_id)?;
+
+    crate::engine::transition::execute_intent_on_conn(
+        conn,
+        &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
+            card_id: card_id.to_string(),
+            dispatch_id: None,
+        },
+    )?;
+    crate::engine::transition::execute_intent_on_conn(
+        conn,
+        &crate::engine::transition::TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: None,
+        },
+    )?;
+    conn.execute(
+        "UPDATE kanban_cards \
+         SET suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL, updated_at = datetime('now') \
+         WHERE id = ?1",
+        [card_id],
+    )?;
+    crate::engine::ops::review_state_sync_on_conn(
+        conn,
+        &json!({"card_id": card_id, "state": "idle"}).to_string(),
+    );
+
+    Ok((cancelled_dispatches, skipped_auto_queue_entries))
 }
 
 /// POST /api/kanban-cards/:id/force-transition
@@ -2764,6 +2808,8 @@ pub async fn force_transition(
         );
     }
 
+    let needs_cleanup = force_transition_needs_cleanup(&body.status, body.cancel_dispatches);
+
     match crate::kanban::transition_status_with_opts(
         &state.db,
         &state.engine,
@@ -2773,6 +2819,29 @@ pub async fn force_transition(
         true,
     ) {
         Ok(result) => {
+            let (cancelled_dispatches, skipped_auto_queue_entries) = if needs_cleanup {
+                let conn = match state.db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("{e}")})),
+                        );
+                    }
+                };
+                match cleanup_force_transition_revert_on_conn(&conn, &id, &body.status) {
+                    Ok(counts) => counts,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("force-transition cleanup failed: {e}")})),
+                        );
+                    }
+                }
+            } else {
+                (0, 0)
+            };
+
             let conn = state.db.lock().unwrap();
             let card = conn.query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
                 card_row_to_json(row)
@@ -2787,9 +2856,14 @@ pub async fn force_transition(
                     );
                     (
                         StatusCode::OK,
-                        Json(
-                            json!({"card": c, "forced": true, "from": result.from, "to": result.to}),
-                        ),
+                        Json(json!({
+                            "card": c,
+                            "forced": true,
+                            "from": result.from,
+                            "to": result.to,
+                            "cancelled_dispatches": cancelled_dispatches,
+                            "skipped_auto_queue_entries": skipped_auto_queue_entries
+                        })),
                     )
                 }
                 Err(e) => (

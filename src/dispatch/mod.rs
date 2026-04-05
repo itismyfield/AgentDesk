@@ -462,6 +462,36 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
     Ok(cancelled)
 }
 
+/// Cancel all live dispatches for a card without resetting auto-queue entries.
+///
+/// Used when PMD force-transitions a live card back to backlog/ready. In that
+/// case the current work should be abandoned rather than re-queued into the
+/// same active run.
+pub fn cancel_active_dispatches_for_card_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    reason: Option<&str>,
+) -> rusqlite::Result<usize> {
+    if let Some(reason) = reason {
+        conn.execute(
+            "UPDATE task_dispatches \
+             SET status = 'cancelled', result = ?2, updated_at = datetime('now') \
+             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
+            rusqlite::params![
+                card_id,
+                json!({ "reason": reason, "completion_source": "force_transition" }).to_string()
+            ],
+        )
+    } else {
+        conn.execute(
+            "UPDATE task_dispatches \
+             SET status = 'cancelled', updated_at = datetime('now') \
+             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
+            [card_id],
+        )
+    }
+}
+
 fn dispatch_uses_alt_channel(dispatch_type: &str) -> bool {
     matches!(dispatch_type, "review" | "e2e-test" | "consultation")
 }

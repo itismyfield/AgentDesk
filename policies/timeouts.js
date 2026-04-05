@@ -933,8 +933,43 @@ var timeouts = {
     );
     for (var op = 0; op < orphanedDispatches.length; op++) {
       var od = orphanedDispatches[op];
+      var beforeCard = agentdesk.db.query(
+        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = ?",
+        [od.kanban_card_id]
+      );
+      if (beforeCard.length === 0 ||
+          beforeCard[0].status !== kInProgress ||
+          beforeCard[0].latest_dispatch_id !== od.dispatch_id) {
+        agentdesk.log.warn("[orphan-recovery] Skip stale orphan candidate " + od.dispatch_id +
+          " — card moved to status=" + ((beforeCard.length > 0 && beforeCard[0].status) || "?") +
+          " latest_dispatch_id=" + ((beforeCard.length > 0 && beforeCard[0].latest_dispatch_id) || "null"));
+        continue;
+      }
+
       // 1) Dispatch를 completed로 마크
-      agentdesk.dispatch.markCompleted(od.dispatch_id, '{"auto_completed":true,"completion_source":"orphan_recovery"}');
+      var markCompletedResult = agentdesk.dispatch.markCompleted(
+        od.dispatch_id,
+        '{"auto_completed":true,"completion_source":"orphan_recovery"}'
+      );
+      if (!markCompletedResult || markCompletedResult.rows_affected === 0) {
+        agentdesk.log.warn("[orphan-recovery] Skip " + od.dispatch_id +
+          " — dispatch already terminal or cleanup won the race");
+        continue;
+      }
+
+      var currentCard = agentdesk.db.query(
+        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = ?",
+        [od.kanban_card_id]
+      );
+      if (currentCard.length === 0 ||
+          currentCard[0].status !== kInProgress ||
+          currentCard[0].latest_dispatch_id !== od.dispatch_id) {
+        agentdesk.log.warn("[orphan-recovery] Skip post-complete transition for " + od.dispatch_id +
+          " — card moved to status=" + ((currentCard.length > 0 && currentCard[0].status) || "?") +
+          " latest_dispatch_id=" + ((currentCard.length > 0 && currentCard[0].latest_dispatch_id) || "null"));
+        continue;
+      }
+
       // 2) Card를 review로 전이 → OnReviewEnter 훅이 review dispatch를 생성
       agentdesk.kanban.setStatus(od.kanban_card_id, kReview);
       agentdesk.log.warn("[orphan-recovery] Completed orphaned dispatch " + od.dispatch_id +
