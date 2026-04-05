@@ -55,7 +55,7 @@ export default function AgentCard({
             <span className="font-semibold text-sm truncate" style={{ color: "var(--th-text-heading)" }}>
               {localeName(locale, agent)}
             </span>
-            <span className="text-[10px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
+            <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
               {(() => {
                 const primary = localeName(locale, agent);
                 const sub = locale === "en" ? agent.name_ko || "" : agent.name;
@@ -66,7 +66,7 @@ export default function AgentCard({
           {dept && (
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
               <span
-                className="text-[10px] px-1.5 py-0.5 rounded-md"
+                className="text-xs px-1.5 py-0.5 rounded-md"
                 style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
               >
                 {dept.icon} {localeName(locale, dept)}
@@ -83,7 +83,7 @@ export default function AgentCard({
         <div className="flex items-center gap-2">
           {agent.personality && (
             <span
-              className="text-[10px] truncate max-w-[180px]"
+              className="text-xs truncate max-w-[180px]"
               style={{ color: "var(--th-text-muted)" }}
               title={agent.personality}
             >
@@ -100,13 +100,13 @@ export default function AgentCard({
               <button
                 onClick={onDeleteConfirm}
                 disabled={saving || agent.status === "working"}
-                className="px-2 py-0.5 rounded text-[10px] font-medium bg-red-600 hover:bg-red-500 text-white disabled:opacity-40 transition-colors"
+                className="px-2 py-0.5 rounded text-xs font-medium bg-red-600 hover:bg-red-500 text-white disabled:opacity-40 transition-colors"
               >
                 {tr("해고", "Fire")}
               </button>
               <button
                 onClick={onDeleteCancel}
-                className="px-2 py-0.5 rounded text-[10px] transition-colors"
+                className="px-2 py-0.5 rounded text-xs transition-colors"
                 style={{ color: "var(--th-text-muted)" }}
               >
                 {tr("취소", "No")}

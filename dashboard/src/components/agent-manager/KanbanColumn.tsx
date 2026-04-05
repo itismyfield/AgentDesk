@@ -256,13 +256,13 @@ function BacklogIssueCard({
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="px-2 py-0.5 rounded-full text-[11px] bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
+            <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
               #{issue.number}
             </span>
             {issue.labels.slice(0, 2).map((label) => (
               <span
                 key={label.name}
-                className="px-2 py-0.5 rounded-full text-[11px]"
+                className="px-2 py-0.5 rounded-full text-xs"
                 style={{ backgroundColor: `#${label.color}22`, color: `#${label.color}` }}
               >
                 {label.name}
@@ -402,45 +402,45 @@ function KanbanCardArticle({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
             {isReviewCard(card) && (
-              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold" style={{ backgroundColor: "rgba(139,92,246,0.25)", color: "#a78bfa" }}>
+              <span className="px-1.5 py-0.5 rounded-full text-xs font-semibold" style={{ backgroundColor: "rgba(139,92,246,0.25)", color: "#a78bfa" }}>
                 {card.latest_dispatch_type === "review-decision" ? "Decision" : "Review"}
               </span>
             )}
-            <span className="px-2 py-0.5 rounded-full text-[11px]" style={{ color: "white", backgroundColor: column.accent }}>
+            <span className="px-2 py-0.5 rounded-full text-xs" style={{ color: "white", backgroundColor: column.accent }}>
               {priorityLabel(card.priority, tr)}
             </span>
             {card.github_issue_number && (
-              <span className="px-2 py-0.5 rounded-full text-[11px] bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
+              <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
                 #{card.github_issue_number}
               </span>
             )}
             {card.depth > 0 && (
-              <span className="px-2 py-0.5 rounded-full text-[11px] bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
+              <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
                 {tr("체인", "Chain")} {card.depth}
               </span>
             )}
             {metadata.retry_count ? (
-              <span className="px-2 py-0.5 rounded-full text-[11px] bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
+              <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
                 {tr("재시도", "Retry")} {metadata.retry_count}
               </span>
             ) : null}
             {metadata.failover_count ? (
-              <span className="px-2 py-0.5 rounded-full text-[11px] bg-surface-medium" style={{ color: "#fca5a5" }}>
+              <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "#fca5a5" }}>
                 {tr("Failover", "Failover")} {metadata.failover_count}
               </span>
             ) : null}
             {metadata.redispatch_count ? (
-              <span className="px-2 py-0.5 rounded-full text-[11px] bg-surface-medium" style={{ color: "#fbbf24" }}>
+              <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "#fbbf24" }}>
                 {tr("재디스패치", "Redispatch")} {metadata.redispatch_count}
               </span>
             ) : null}
             {checklistSummary && (
-              <span className="px-2 py-0.5 rounded-full text-[11px] bg-surface-medium" style={{ color: "#99f6e4" }}>
+              <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "#99f6e4" }}>
                 {tr("리뷰", "Review")} {checklistSummary}
               </span>
             )}
             {delayBadge && (
-              <span className="px-2 py-0.5 rounded-full text-[11px]" style={{ color: "white", backgroundColor: delayBadge.tone }}>
+              <span className="px-2 py-0.5 rounded-full text-xs" style={{ color: "white", backgroundColor: delayBadge.tone }}>
                 {delayBadge.label} {delayBadge.detail}
               </span>
             )}
@@ -530,7 +530,7 @@ function KanbanCardArticle({
                   onSetActionError(null);
                   onUpdateCardStatus(card.id, target);
                 }}
-                className="rounded-lg px-2.5 py-1 text-[11px] font-medium border"
+                className="rounded-lg px-2.5 py-1 text-xs font-medium border"
                 style={{
                   backgroundColor: style.bg,
                   borderColor: style.text,

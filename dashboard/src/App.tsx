@@ -483,14 +483,14 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
           <button
             key={item.id}
             onClick={() => { setView(item.id); if (item.id === "dashboard") refreshStats(); }}
-            className={`relative flex flex-col items-center justify-center flex-1 h-full text-[10px] ${
+            className={`relative flex flex-col items-center justify-center flex-1 h-full text-xs ${
               view === item.id ? "text-indigo-400" : "text-th-text-muted"
             }`}
           >
             {item.icon}
             <span className="mt-0.5">{item.label}</span>
             {item.badge !== undefined && item.badge > 0 && (
-              <span className={`absolute top-1 right-1/4 ${item.badgeColor || "bg-emerald-500"} text-white text-[8px] w-3.5 h-3.5 rounded-full flex items-center justify-center`}>
+              <span className={`absolute top-1 right-1/4 ${item.badgeColor || "bg-emerald-500"} text-white text-xs w-3.5 h-3.5 rounded-full flex items-center justify-center`}>
                 {item.badge}
               </span>
             )}
@@ -575,9 +575,9 @@ function NavBtn({
       }`}
     >
       {icon}
-      <span className="text-[10px] leading-tight">{label}</span>
+      <span className="text-xs leading-tight">{label}</span>
       {badge !== undefined && badge > 0 && (
-        <span className={`absolute -top-1 -right-0.5 ${badgeColor || "bg-emerald-500"} text-white text-[10px] w-4 h-4 rounded-full flex items-center justify-center`}>
+        <span className={`absolute -top-1 -right-0.5 ${badgeColor || "bg-emerald-500"} text-white text-xs w-4 h-4 rounded-full flex items-center justify-center`}>
           {badge}
         </span>
       )}

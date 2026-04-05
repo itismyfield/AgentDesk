@@ -855,7 +855,7 @@ export default function KanbanTab({
             {stalledCards.length > 0 && (
               <button
                 onClick={() => { setStalledPopup(true); setStalledSelected(new Set()); }}
-                className="shrink-0 text-[11px] px-3 py-2 rounded-full font-medium animate-pulse"
+                className="shrink-0 text-xs px-3 py-2 rounded-full font-medium animate-pulse"
                 style={{ backgroundColor: "rgba(239,68,68,0.2)", color: "#f87171", border: "1px solid rgba(239,68,68,0.4)", minHeight: 44 }}
               >
                 {tr(`정체 ${stalledCards.length}건`, `${stalledCards.length} stalled`)}
@@ -869,7 +869,7 @@ export default function KanbanTab({
               return deferredCount > 0 ? (
                 <button
                   onClick={() => setDeferredDodPopup(true)}
-                  className="shrink-0 text-[11px] px-3 py-2 rounded-full font-medium"
+                  className="shrink-0 text-xs px-3 py-2 rounded-full font-medium"
                   style={{ backgroundColor: "rgba(245,158,11,0.2)", color: "#fbbf24", border: "1px solid rgba(245,158,11,0.4)", minHeight: 44 }}
                 >
                   {tr(`미검증 DoD ${deferredCount}건`, `${deferredCount} deferred DoD`)}
@@ -1273,14 +1273,14 @@ export default function KanbanTab({
               <div className="flex gap-2">
                 <button
                   onClick={() => setStalledSelected(stalledSelected.size === stalledCards.length ? new Set() : new Set(stalledCards.map((c) => c.id)))}
-                  className="text-[11px] px-2 py-0.5 rounded border"
+                  className="text-xs px-2 py-0.5 rounded border"
                   style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-muted)" }}
                 >
                   {stalledSelected.size === stalledCards.length ? tr("해제", "Deselect") : tr("전체 선택", "Select all")}
                 </button>
                 <button
                   onClick={() => setStalledPopup(false)}
-                  className="text-[11px] px-2 py-0.5 rounded border"
+                  className="text-xs px-2 py-0.5 rounded border"
                   style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-muted)" }}
                 >
                   {tr("닫기", "Close")}
@@ -1303,10 +1303,10 @@ export default function KanbanTab({
                     className="accent-red-400"
                   />
                   <span className="truncate flex-1">{card.title}</span>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "rgba(239,68,68,0.15)", color: "#f87171" }}>
+                  <span className="text-xs px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: "rgba(239,68,68,0.15)", color: "#f87171" }}>
                     {card.review_status}
                   </span>
-                  <span className="text-[10px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
+                  <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
                     {card.github_repo ? card.github_repo.split("/")[1] : ""}
                   </span>
                 </label>
@@ -1317,7 +1317,7 @@ export default function KanbanTab({
                 <button
                   onClick={() => void handleBulkAction("pass")}
                   disabled={bulkBusy}
-                  className="text-[11px] px-3 py-1 rounded-lg border font-medium"
+                  className="text-xs px-3 py-1 rounded-lg border font-medium"
                   style={{ borderColor: "rgba(34,197,94,0.4)", color: "#4ade80", backgroundColor: "rgba(34,197,94,0.12)" }}
                 >
                   {bulkBusy ? "…" : tr(`일괄 Pass (${stalledSelected.size})`, `Pass All (${stalledSelected.size})`)}
@@ -1325,7 +1325,7 @@ export default function KanbanTab({
                 <button
                   onClick={() => void handleBulkAction("reset")}
                   disabled={bulkBusy}
-                  className="text-[11px] px-3 py-1 rounded-lg border font-medium"
+                  className="text-xs px-3 py-1 rounded-lg border font-medium"
                   style={{ borderColor: "rgba(14,165,233,0.4)", color: "#38bdf8", backgroundColor: "rgba(14,165,233,0.12)" }}
                 >
                   {bulkBusy ? "…" : tr(`일괄 Reset (${stalledSelected.size})`, `Reset All (${stalledSelected.size})`)}
@@ -1333,7 +1333,7 @@ export default function KanbanTab({
                 <button
                   onClick={() => void handleBulkAction("cancel")}
                   disabled={bulkBusy}
-                  className="text-[11px] px-3 py-1 rounded-lg border font-medium"
+                  className="text-xs px-3 py-1 rounded-lg border font-medium"
                   style={{ borderColor: "rgba(107,114,128,0.4)", color: "#9ca3af", backgroundColor: "rgba(107,114,128,0.12)" }}
                 >
                   {bulkBusy ? "…" : tr(`일괄 Cancel (${stalledSelected.size})`, `Cancel All (${stalledSelected.size})`)}
@@ -1459,7 +1459,7 @@ export default function KanbanTab({
               <span className="text-xs font-semibold uppercase" style={{ color: "var(--th-text-muted)" }}>
                 {tr("최근 완료", "Recent Completions")}
               </span>
-              <span className="rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ background: "rgba(34,197,94,0.18)", color: "#4ade80" }}>
+              <span className="rounded-full px-1.5 py-0.5 text-xs font-bold" style={{ background: "rgba(34,197,94,0.18)", color: "#4ade80" }}>
                 {recentDoneCards.length}
               </span>
               <span className="ml-auto text-xs" style={{ color: "var(--th-text-muted)" }}>
@@ -1482,7 +1482,7 @@ export default function KanbanTab({
                       style={{ background: "rgba(148,163,184,0.06)" }}
                     >
                       <span
-                        className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+                        className="shrink-0 rounded-full px-1.5 py-0.5 text-xs font-semibold"
                         style={{ background: `${statusDef?.accent ?? "#22c55e"}22`, color: statusDef?.accent ?? "#22c55e" }}
                       >
                         {card.status === "done" ? tr("완료", "Done") : tr("취소", "Cancelled")}
@@ -1491,8 +1491,8 @@ export default function KanbanTab({
                         <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>#{card.github_issue_number}</span>
                       )}
                       <span className="min-w-0 flex-1 truncate" style={{ color: "var(--th-text-primary)" }}>{card.title}</span>
-                      <span className="shrink-0 text-[11px]" style={{ color: "var(--th-text-muted)" }}>{agentName}</span>
-                      <span className="shrink-0 text-[11px]" style={{ color: "var(--th-text-muted)" }}>{completedDate}</span>
+                      <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>{agentName}</span>
+                      <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>{completedDate}</span>
                     </button>
                   );
                 })}
@@ -1506,7 +1506,7 @@ export default function KanbanTab({
                     >
                       ← {tr("이전", "Prev")}
                     </button>
-                    <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                    <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                       {page + 1} / {totalPages}
                     </span>
                     <button
@@ -1812,7 +1812,7 @@ export default function KanbanTab({
             {/* Blocked reason */}
             {selectedCard.status === "blocked" && selectedCard.blocked_reason && (
               <div className="rounded-2xl border p-4" style={{ backgroundColor: "rgba(239,68,68,0.08)", borderColor: "rgba(239,68,68,0.3)" }}>
-                <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "#ef4444" }}>
+                <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "#ef4444" }}>
                   {tr("차단 사유", "Blocked Reason")}
                 </div>
                 <div className="text-sm" style={{ color: "#fca5a5" }}>
@@ -1827,7 +1827,7 @@ export default function KanbanTab({
                 backgroundColor: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "rgba(234,179,8,0.08)" : selectedCard.review_status === "improve_rework" ? "rgba(249,115,22,0.08)" : "rgba(20,184,166,0.08)",
                 borderColor: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "rgba(234,179,8,0.3)" : selectedCard.review_status === "improve_rework" ? "rgba(249,115,22,0.3)" : "rgba(20,184,166,0.3)",
               }}>
-                <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{
+                <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{
                   color: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "#eab308" : selectedCard.review_status === "improve_rework" ? "#f97316" : "#14b8a6",
                 }}>
                   {tr("카운터 모델 리뷰", "Counter-Model Review")}
@@ -1868,7 +1868,7 @@ export default function KanbanTab({
                   backgroundColor: "rgba(234,179,8,0.06)",
                 }}>
                   <div className="flex items-center justify-between gap-2">
-                    <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "#eab308" }}>
+                    <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#eab308" }}>
                       {tr("리뷰 제안 사항", "Review Suggestions")}
                     </div>
                     <span className="text-xs px-2 py-0.5 rounded-full" style={{
@@ -2007,7 +2007,7 @@ export default function KanbanTab({
                   {/* 배경 */}
                   {parsed.background && (
                     <div className="rounded-2xl border p-4 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-                      <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
+                      <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
                         {tr("배경", "Background")}
                       </div>
                       <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
@@ -2019,7 +2019,7 @@ export default function KanbanTab({
                   {/* 내용 */}
                   {parsed.content && (
                     <div className="rounded-2xl border p-4 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-                      <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
+                      <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
                         {tr("내용", "Content")}
                       </div>
                       <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
@@ -2034,10 +2034,10 @@ export default function KanbanTab({
                     return (
                     <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "rgba(20,184,166,0.3)" }}>
                       <div className="flex items-center justify-between gap-3">
-                        <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "#2dd4bf" }}>
+                        <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#2dd4bf" }}>
                           DoD (Definition of Done)
                           {isGitHubLinked && (
-                            <span className="ml-2 text-[9px] font-normal normal-case tracking-normal" style={{ color: "var(--th-text-muted)" }}>
+                            <span className="ml-2 text-xs font-normal normal-case tracking-normal" style={{ color: "var(--th-text-muted)" }}>
                               {tr("(GitHub 정본)", "(synced from GitHub)")}
                             </span>
                           )}
@@ -2083,7 +2083,7 @@ export default function KanbanTab({
                   {/* 의존성 */}
                   {parsed.dependencies && (
                     <div className="rounded-2xl border p-3 bg-surface-subtle" style={{ borderColor: "rgba(96,165,250,0.25)" }}>
-                      <div className="text-[10px] font-semibold uppercase tracking-widest mb-1" style={{ color: "#93c5fd" }}>
+                      <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "#93c5fd" }}>
                         {tr("의존성", "Dependencies")}
                       </div>
                       <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
@@ -2095,7 +2095,7 @@ export default function KanbanTab({
                   {/* 리스크 */}
                   {parsed.risks && (
                     <div className="rounded-2xl border p-3" style={{ borderColor: "rgba(239,68,68,0.25)", backgroundColor: "rgba(127,29,29,0.12)" }}>
-                      <div className="text-[10px] font-semibold uppercase tracking-widest mb-1" style={{ color: "#fca5a5" }}>
+                      <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "#fca5a5" }}>
                         {tr("리스크", "Risks")}
                       </div>
                       <div className="text-sm" style={{ color: "#fecaca" }}>
@@ -2248,13 +2248,13 @@ export default function KanbanTab({
                               #{d.id.slice(0, 8)}
                             </span>
                             <span
-                              className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                              className="px-1.5 py-0.5 rounded text-xs font-medium"
                               style={{ backgroundColor: "rgba(148,163,184,0.12)", color: dispatchStatusColor[d.status] ?? "#94a3b8" }}
                             >
                               {d.status}
                             </span>
                             {d.dispatch_type && (
-                              <span className="px-1.5 py-0.5 rounded text-[10px]" style={{ backgroundColor: "rgba(148,163,184,0.08)", color: "var(--th-text-secondary)" }}>
+                              <span className="px-1.5 py-0.5 rounded text-xs" style={{ backgroundColor: "rgba(148,163,184,0.08)", color: "var(--th-text-secondary)" }}>
                                 {d.dispatch_type}
                               </span>
                             )}
@@ -2308,11 +2308,11 @@ export default function KanbanTab({
                       <span style={{ color: TRANSITION_STYLE[log.to_status ?? ""]?.text ?? "var(--th-text-secondary)" }}>
                         {log.to_status ? labelForStatus(log.to_status as KanbanCardStatus, tr) : "—"}
                       </span>
-                      <span className="ml-auto px-1.5 py-0.5 rounded text-[10px]" style={{ backgroundColor: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}>
+                      <span className="ml-auto px-1.5 py-0.5 rounded text-xs" style={{ backgroundColor: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}>
                         {log.source}
                       </span>
                       {log.result && log.result !== "OK" && (
-                        <span className="text-[10px]" style={{ color: "#f87171" }}>{log.result}</span>
+                        <span className="text-xs" style={{ color: "#f87171" }}>{log.result}</span>
                       )}
                     </div>
                   ))}
@@ -2578,7 +2578,7 @@ export default function KanbanTab({
                 <div className="space-y-3">
                   {parsed.background && (
                     <div className="rounded-2xl border p-4 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-                      <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
+                      <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
                         {tr("배경", "Background")}
                       </div>
                       <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
@@ -2588,7 +2588,7 @@ export default function KanbanTab({
                   )}
                   {parsed.content && (
                     <div className="rounded-2xl border p-4 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-                      <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
+                      <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
                         {tr("내용", "Content")}
                       </div>
                       <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
@@ -2598,13 +2598,13 @@ export default function KanbanTab({
                   )}
                   {parsed.dodItems.length > 0 && (
                     <div className="rounded-2xl border p-4 bg-surface-subtle space-y-2" style={{ borderColor: "rgba(20,184,166,0.3)" }}>
-                      <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "#2dd4bf" }}>
+                      <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#2dd4bf" }}>
                         DoD (Definition of Done)
                       </div>
                       <div className="space-y-1.5">
                         {parsed.dodItems.map((item, idx) => (
                           <div key={idx} className="flex items-center gap-2 text-sm" style={{ color: "var(--th-text-primary)" }}>
-                            <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>☐</span>
+                            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>☐</span>
                             {item}
                           </div>
                         ))}
@@ -2613,7 +2613,7 @@ export default function KanbanTab({
                   )}
                   {parsed.dependencies && (
                     <div className="rounded-2xl border p-3 bg-surface-subtle" style={{ borderColor: "rgba(96,165,250,0.25)" }}>
-                      <div className="text-[10px] font-semibold uppercase tracking-widest mb-1" style={{ color: "#93c5fd" }}>
+                      <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "#93c5fd" }}>
                         {tr("의존성", "Dependencies")}
                       </div>
                       <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
@@ -2623,7 +2623,7 @@ export default function KanbanTab({
                   )}
                   {parsed.risks && (
                     <div className="rounded-2xl border p-3" style={{ borderColor: "rgba(239,68,68,0.25)", backgroundColor: "rgba(127,29,29,0.12)" }}>
-                      <div className="text-[10px] font-semibold uppercase tracking-widest mb-1" style={{ color: "#fca5a5" }}>
+                      <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "#fca5a5" }}>
                         {tr("리스크", "Risks")}
                       </div>
                       <div className="text-sm" style={{ color: "#fecaca" }}>

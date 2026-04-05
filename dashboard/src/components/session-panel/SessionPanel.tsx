@@ -352,7 +352,7 @@ function SessionInfoCard({
             />
             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
               <span
-                className="text-[10px] px-2 py-0.5 rounded-full font-medium"
+                className="text-xs px-2 py-0.5 rounded-full font-medium"
                 style={{
                   background: isDisconnected ? "rgba(100,116,139,0.15)" :
                     s.status === "working" ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.15)",
@@ -364,14 +364,14 @@ function SessionInfoCard({
               </span>
               {dept && (
                 <span
-                  className="text-[10px] px-2 py-0.5 rounded-full text-white"
+                  className="text-xs px-2 py-0.5 rounded-full text-white"
                   style={{ backgroundColor: s.department_color || "#6366f1" }}
                 >
                   {s.department_name_ko || dept.name}
                 </span>
               )}
               {!dept && (
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-th-bg-surface text-th-text-muted">
+                <span className="text-xs px-2 py-0.5 rounded-full bg-th-bg-surface text-th-text-muted">
                   {t({ ko: "미배정", en: "Unassigned" })}
                 </span>
               )}
@@ -418,7 +418,7 @@ function SessionInfoCard({
               XP {s.stats_xp}
             </span>
           </div>
-          <span className="text-[10px] font-mono text-th-text-muted">
+          <span className="text-xs font-mono text-th-text-muted">
             ID: {String(s.id).slice(0, 8)}
           </span>
         </div>
@@ -440,7 +440,7 @@ function SessionInfoCard({
 function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="flex items-start gap-3">
-      <span className="text-[10px] font-semibold uppercase tracking-widest text-th-text-muted w-20 shrink-0 pt-0.5">
+      <span className="text-xs font-semibold uppercase tracking-widest text-th-text-muted w-20 shrink-0 pt-0.5">
         {label}
       </span>
       <span

@@ -237,7 +237,7 @@ export default function PipelineOverrideEditor({
           </div>
 
           <p
-            className="text-[10px]"
+            className="text-xs"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr(

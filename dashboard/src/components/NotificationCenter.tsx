@@ -106,7 +106,7 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
       >
         <Bell size={20} />
         {unread > 0 && (
-          <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] w-4 h-4 rounded-full flex items-center justify-center">
+          <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs w-4 h-4 rounded-full flex items-center justify-center">
             {unread > 9 ? "9+" : unread}
           </span>
         )}
@@ -135,7 +135,7 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
                   />
                   <div className="flex-1 min-w-0">
                     <div className="text-xs text-th-text-primary break-words">{n.message}</div>
-                    <div className="text-[10px] text-th-text-muted mt-0.5">
+                    <div className="text-xs text-th-text-muted mt-0.5">
                       {new Date(n.ts).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
                     </div>
                   </div>

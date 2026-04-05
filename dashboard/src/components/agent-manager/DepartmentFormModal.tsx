@@ -207,6 +207,9 @@ export default function DepartmentFormModal({
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={isEdit ? tr("부서 정보 수정", "Edit Department") : tr("신규 부서 추가", "Add Department")}
         className="w-full max-w-lg rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200 max-h-[85vh] overflow-y-auto"
         style={{
           background: "var(--th-card-bg)",
@@ -353,7 +356,7 @@ export default function DepartmentFormModal({
               className={`${inputCls} resize-none`}
               style={inputStyle}
             />
-            <p className="text-[10px] mt-1" style={{ color: "var(--th-text-muted)" }}>
+            <p className="text-xs mt-1" style={{ color: "var(--th-text-muted)" }}>
               {tr(
                 "소속 에이전트의 작업 실행 시 공통으로 적용되는 시스템 프롬프트",
                 "Applied as shared system prompt when agents in this department execute tasks",

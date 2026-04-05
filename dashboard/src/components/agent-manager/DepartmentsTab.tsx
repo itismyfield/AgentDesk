@@ -144,7 +144,7 @@ export default function DepartmentsTab({
                 )}
               </div>
 
-              <code className="text-[10px] px-2 py-0.5 rounded opacity-50" style={{ background: "var(--th-input-bg)" }}>
+              <code className="text-xs px-2 py-0.5 rounded opacity-50" style={{ background: "var(--th-input-bg)" }}>
                 {dept.id}
               </code>
 

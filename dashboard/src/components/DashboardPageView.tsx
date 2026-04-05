@@ -262,7 +262,7 @@ export default function DashboardPageView({
                   <button
                     key={w}
                     onClick={() => setSkillWindow(w)}
-                    className="text-[11px] px-2 py-1 rounded-md border"
+                    className="text-xs px-2 py-1 rounded-md border"
                     style={{
                       borderColor: skillWindow === w ? "#f59e0b" : "var(--th-border)",
                       color: skillWindow === w ? "#f59e0b" : "var(--th-text-muted)",

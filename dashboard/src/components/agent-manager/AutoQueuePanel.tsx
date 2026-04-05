@@ -123,18 +123,18 @@ function EntryRow({
     >
       {/* Drag handle for pending items */}
       {isPending && dragHandlers?.draggable && (
-        <span className="text-[10px] shrink-0 select-none" style={{ color: "var(--th-text-muted)", cursor: "grab" }}>
+        <span className="text-xs shrink-0 select-none" style={{ color: "var(--th-text-muted)", cursor: "grab" }}>
           ⠿
         </span>
       )}
-      <span className="text-[10px] font-mono shrink-0 w-5 text-center" style={{ color: "var(--th-text-muted)" }}>
+      <span className="text-xs font-mono shrink-0 w-5 text-center" style={{ color: "var(--th-text-muted)" }}>
         {idx + 1}
       </span>
       <div className="flex-1 min-w-0">
         <div className="text-xs truncate" style={{ color: "var(--th-text-primary)" }}>
           {showThreadGroup && entry.thread_group != null && (
             <span
-              className="mr-1 text-[9px] font-mono px-1 py-0.5 rounded"
+              className="mr-1 text-xs font-mono px-1 py-0.5 rounded"
               style={{
                 backgroundColor: `${threadGroupColor(entry.thread_group)}22`,
                 color: threadGroupColor(entry.thread_group),
@@ -149,13 +149,13 @@ function EntryRow({
           {entry.card_title ?? entry.card_id.slice(0, 8)}
         </div>
         {entry.reason && (
-          <div className="text-[10px] truncate" style={{ color: "var(--th-text-muted)" }}>
+          <div className="text-xs truncate" style={{ color: "var(--th-text-muted)" }}>
             {entry.reason}
           </div>
         )}
       </div>
       <span
-        className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+        className="text-xs px-1.5 py-0.5 rounded shrink-0"
         style={{ backgroundColor: sty.bg, color: sty.text }}
       >
         {tr(sty.label, sty.labelEn)}
@@ -168,7 +168,7 @@ function EntryRow({
             disabled={!moveControls.canMoveUp}
             aria-label={tr("위로 이동", "Move up")}
             title={tr("위로 이동", "Move up")}
-            className="px-1.5 py-0.5 text-[10px]"
+            className="px-1.5 py-0.5 text-xs"
             style={{
               color: moveControls.canMoveUp ? "var(--th-text-secondary)" : "var(--th-text-muted)",
               backgroundColor: "var(--th-bg-surface)",
@@ -184,7 +184,7 @@ function EntryRow({
             disabled={!moveControls.canMoveDown}
             aria-label={tr("아래로 이동", "Move down")}
             title={tr("아래로 이동", "Move down")}
-            className="px-1.5 py-0.5 text-[10px] border-l"
+            className="px-1.5 py-0.5 text-xs border-l"
             style={{
               borderColor: "rgba(148,163,184,0.2)",
               color: moveControls.canMoveDown ? "var(--th-text-secondary)" : "var(--th-text-muted)",
@@ -200,14 +200,14 @@ function EntryRow({
       {isPending && (
         <button
           onClick={() => onSkip(entry.id)}
-          className="text-[10px] px-1.5 py-0.5 rounded border shrink-0"
+          className="text-xs px-1.5 py-0.5 rounded border shrink-0"
           style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-muted)" }}
         >
           {tr("건너뛰기", "Skip")}
         </button>
       )}
       {entry.dispatched_at && (
-        <span className="text-[10px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
+        <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
           {formatTs(entry.dispatched_at, locale)}
         </span>
       )}
@@ -512,7 +512,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
           </h3>
           {run && (
             <span
-              className="text-[11px] px-2 py-0.5 rounded-full"
+              className="text-xs px-2 py-0.5 rounded-full"
               style={{
                 backgroundColor: run.status === "pending" ? "rgba(56,189,248,0.2)" : run.status === "active" ? "rgba(139,92,246,0.2)" : run.status === "paused" ? "rgba(245,158,11,0.2)" : "rgba(34,197,94,0.2)",
                 color: run.status === "pending" ? "#38bdf8" : run.status === "active" ? "#a78bfa" : run.status === "paused" ? "#fbbf24" : "#4ade80",
@@ -522,7 +522,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
             </span>
           )}
           {totalCount > 0 && (
-            <span className="text-[11px] px-1.5 py-0.5 rounded bg-surface-medium" style={{ color: "var(--th-text-muted)" }}>
+            <span className="text-xs px-1.5 py-0.5 rounded bg-surface-medium" style={{ color: "var(--th-text-muted)" }}>
               {doneCount}/{totalCount}
             </span>
           )}
@@ -532,7 +532,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
           {run?.status === "active" && pendingCount > 0 && (
             <>
               <label
-                className="flex items-center gap-1 text-[11px] cursor-pointer select-none"
+                className="flex items-center gap-1 text-xs cursor-pointer select-none"
                 style={{ color: unifiedThread ? "#fbbf24" : "var(--th-text-secondary)" }}
               >
                 <input
@@ -552,7 +552,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
               <button
                 onClick={() => void handleActivate()}
                 disabled={activating}
-                className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
+                className="text-xs px-2.5 py-1 rounded-lg border font-medium"
                 style={{
                   borderColor: "rgba(245,158,11,0.4)",
                   color: "#fbbf24",
@@ -568,7 +568,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
               <select
                 value={generateMode}
                 onChange={(e) => setGenerateMode(e.target.value as "priority-sort" | "dependency-aware" | "pm-assisted")}
-                className="text-[11px] px-2 py-1 rounded-lg border bg-transparent"
+                className="text-xs px-2 py-1 rounded-lg border bg-transparent"
                 style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}
               >
                 <option value="priority-sort">{tr("우선순위 정렬", "Priority Sort")}</option>
@@ -578,7 +578,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
               <button
                 onClick={() => void handleGenerate()}
                 disabled={generating || noReadyCards}
-                className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
+                className="text-xs px-2.5 py-1 rounded-lg border font-medium"
                 style={{
                   borderColor: noReadyCards ? "rgba(148,163,184,0.2)" : "rgba(139,92,246,0.4)",
                   color: noReadyCards ? "var(--th-text-muted)" : "#a78bfa",
@@ -599,7 +599,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                   await fetchStatus();
                 } catch { /* ignore */ }
               }}
-              className="text-[11px] px-2 py-1 rounded-lg border"
+              className="text-xs px-2 py-1 rounded-lg border"
               style={{ borderColor: "rgba(248,113,113,0.3)", color: "#f87171", backgroundColor: "rgba(248,113,113,0.08)" }}
             >
               {tr("초기화", "Reset")}
@@ -608,7 +608,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
           {run?.status === "active" && (
             <button
               onClick={() => void handleRunAction(run, "paused")}
-              className="text-[11px] px-2 py-1 rounded-lg border"
+              className="text-xs px-2 py-1 rounded-lg border"
               style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-muted)" }}
             >
               {tr("일시정지", "Pause")}
@@ -617,7 +617,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
           {run?.status === "paused" && (
             <button
               onClick={() => void handleRunAction(run, "active")}
-              className="text-[11px] px-2 py-1 rounded-lg border"
+              className="text-xs px-2 py-1 rounded-lg border"
               style={{ borderColor: "rgba(139,92,246,0.3)", color: "#a78bfa" }}
             >
               {tr("재개", "Resume")}
@@ -657,14 +657,14 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
             <div>{tr("PMD가 순서를 결정하면 자동으로 활성화됩니다.", "Queue will activate automatically when PMD submits the order.")}</div>
           </div>
           {run.ai_rationale && (
-            <div className="text-[11px] italic" style={{ color: "var(--th-text-muted)" }}>
+            <div className="text-xs italic" style={{ color: "var(--th-text-muted)" }}>
               {run.ai_rationale}
             </div>
           )}
           <button
             onClick={() => void handleFallbackActivate(run.id)}
             disabled={activating}
-            className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
+            className="text-xs px-2.5 py-1 rounded-lg border font-medium"
             style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
           >
             {tr("기본 순서로 바로 시작", "Start with default order")}
@@ -706,7 +706,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                 {Object.entries(agentStats).map(([agentId, stats]) => (
                   <div
                     key={agentId}
-                    className="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg border"
+                    className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg border"
                     style={{ borderColor: "rgba(148,163,184,0.18)", backgroundColor: "var(--th-overlay-medium)" }}
                   >
                     <span style={{ color: "var(--th-text-secondary)" }}>{getAgentLabel(agentId)}</span>
@@ -720,7 +720,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
 
               <div className="flex items-center gap-2 flex-wrap justify-end">
                 {pendingCount > 1 && (
-                  <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                  <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                     {tr("순서 변경: 드래그 또는 ↑↓", "Reorder: drag or ↑↓")}
                   </span>
                 )}
@@ -734,7 +734,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                     {hasThreadGroups && (
                       <button
                         onClick={() => setViewMode("thread")}
-                        className="text-[10px] px-2 py-1 transition-colors"
+                        className="text-xs px-2 py-1 transition-colors"
                         style={{
                           backgroundColor: viewMode === "thread" ? "rgba(139,92,246,0.2)" : "transparent",
                           color: viewMode === "thread" ? "#a78bfa" : "var(--th-text-muted)",
@@ -745,7 +745,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                     )}
                     <button
                       onClick={() => setViewMode("all")}
-                      className="text-[10px] px-2 py-1 transition-colors"
+                      className="text-xs px-2 py-1 transition-colors"
                       style={{
                         backgroundColor: viewMode === "all" ? "rgba(139,92,246,0.2)" : "transparent",
                         color: viewMode === "all" ? "#a78bfa" : "var(--th-text-muted)",
@@ -756,7 +756,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                     {Object.keys(agentStats).length > 1 && (
                       <button
                         onClick={() => setViewMode("agent")}
-                        className="text-[10px] px-2 py-1 transition-colors"
+                        className="text-xs px-2 py-1 transition-colors"
                         style={{
                           backgroundColor: viewMode === "agent" ? "rgba(139,92,246,0.2)" : "transparent",
                           color: viewMode === "agent" ? "#a78bfa" : "var(--th-text-muted)",
@@ -777,7 +777,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
               {allEntriesSorted.map((entry, idx) => (
                 <div key={entry.id} className="flex items-center gap-1">
                   <span
-                    className="text-[9px] px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
+                    className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
                     style={{ backgroundColor: "rgba(139,92,246,0.12)", color: "#a78bfa" }}
                   >
                     {getAgentLabel(entry.agent_id)}
@@ -805,7 +805,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
           {viewMode === "thread" && (
             <div className="space-y-3">
               {hasThreadGroups && (
-                <div className="flex items-center gap-2 text-[11px] px-1" style={{ color: "var(--th-text-muted)" }}>
+                <div className="flex items-center gap-2 text-xs px-1" style={{ color: "var(--th-text-muted)" }}>
                   <span>{tr(`동시 ${maxConcurrent}그룹 실행`, `${maxConcurrent} concurrent groups`)}</span>
                   <span style={{ color: "#4ade80" }}>{entriesByThreadGroup.size}{tr("그룹", " groups")}</span>
                 </div>
@@ -833,13 +833,13 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                     >
                       <div className="flex items-center gap-2 px-1 mb-1">
                         <span
-                          className="text-[11px] font-mono font-bold px-2 py-0.5 rounded"
+                          className="text-xs font-mono font-bold px-2 py-0.5 rounded"
                           style={{ backgroundColor: `${color}30`, color }}
                         >
                           G{groupNum}
                         </span>
                         <span
-                          className="text-[10px] px-1.5 py-0.5 rounded"
+                          className="text-xs px-1.5 py-0.5 rounded"
                           style={{
                             backgroundColor: isActive ? "rgba(245,158,11,0.18)" : isDone ? "rgba(34,197,94,0.18)" : "rgba(100,116,139,0.18)",
                             color: isActive ? "#fbbf24" : isDone ? "#4ade80" : "#94a3b8",
@@ -848,7 +848,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                           {groupStatusLabel}
                         </span>
                         <div className="flex-1 h-px" style={{ backgroundColor: `${color}40` }} />
-                        <span className="text-[10px] font-mono" style={{ color: "var(--th-text-muted)" }}>
+                        <span className="text-xs font-mono" style={{ color: "var(--th-text-muted)" }}>
                           {groupEntries.filter((e) => e.status === "done").length}/{groupEntries.length}
                         </span>
                       </div>
@@ -884,7 +884,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
 
           {/* Run metadata */}
           {run && (
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] px-1" style={{ color: "var(--th-text-muted)" }}>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs px-1" style={{ color: "var(--th-text-muted)" }}>
               <span>AI: {run.ai_model ?? "-"}</span>
               <span>{tr("생성", "Created")}: {formatTs(run.created_at, locale)}</span>
               {hasThreadGroups && (
@@ -938,11 +938,11 @@ function AgentSubQueue({
   return (
     <div className="space-y-1">
       <div className="flex items-center gap-2 px-1">
-        <div className="text-[11px] font-medium" style={{ color: "var(--th-text-muted)" }}>
+        <div className="text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
           {getAgentLabel(agentId)}
         </div>
         <div className="flex-1 h-px" style={{ backgroundColor: "rgba(148,163,184,0.15)" }} />
-        <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+        <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
           {agentEntries.filter((e) => e.status === "done").length}/{agentEntries.length}
         </div>
       </div>

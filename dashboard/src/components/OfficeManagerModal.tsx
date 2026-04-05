@@ -143,6 +143,9 @@ export default function OfficeManagerModal({
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={tr("오피스 관리", "Manage Offices")}
         className="rounded-xl w-full max-w-lg mx-4 max-h-[80vh] flex flex-col"
         style={{
           background: "var(--th-card-bg)",

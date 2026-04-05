@@ -97,10 +97,10 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
           onClick={() => setExpanded(!expanded)}
           className="flex items-center gap-1.5 hover:opacity-80 transition-opacity"
         >
-          <span className="text-[10px] sm:text-xs font-bold uppercase tracking-wider" style={{ color: "#f59e0b" }}>
+          <span className="text-xs sm:text-xs font-bold uppercase tracking-wider" style={{ color: "#f59e0b" }}>
             {t({ ko: "토큰 영수증", en: "TOKEN RECEIPT", ja: "トークンレシート", zh: "代币收据" })}
           </span>
-          <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+          <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {expanded ? "▲" : "▼"}
           </span>
         </button>
@@ -110,7 +110,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
             <button
               key={p.id}
               onClick={() => setPeriod(p.id)}
-              className="px-2 py-0.5 text-[9px] sm:text-[10px] font-medium rounded transition-colors"
+              className="px-2 py-0.5 text-xs sm:text-xs font-medium rounded transition-colors"
               style={
                 period === p.id
                   ? { background: "rgba(245,158,11,0.2)", color: "#f59e0b", border: "1px solid rgba(245,158,11,0.3)" }
@@ -130,12 +130,12 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
             {formatCost(data.total)}
           </span>
           {data.cache_discount > 0.001 && (
-            <span className="text-[9px] sm:text-[10px] font-mono" style={{ color: "#059669" }}>
+            <span className="text-xs sm:text-xs font-mono" style={{ color: "#059669" }}>
               (-{formatCost(data.cache_discount)})
             </span>
           )}
         </div>
-        <div className="text-[9px] sm:text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+        <div className="text-xs sm:text-xs" style={{ color: "var(--th-text-muted)" }}>
           {data.stats.total_messages.toLocaleString()} {t({ ko: "메시지", en: "msgs", ja: "メッセージ", zh: "消息" })}
           {" / "}
           {data.stats.total_sessions} {t({ ko: "세션", en: "sessions", ja: "セッション", zh: "会话" })}
@@ -143,7 +143,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
         {data.providers.length > 1 && (
           <div className="hidden sm:flex gap-1.5">
             {data.providers.map((p) => (
-              <span key={p.provider} className="text-[9px] font-mono" style={{ color: "var(--th-text-muted)" }}>
+              <span key={p.provider} className="text-xs font-mono" style={{ color: "var(--th-text-muted)" }}>
                 {p.provider} {p.percentage.toFixed(0)}%
               </span>
             ))}
@@ -154,7 +154,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
       {/* Expanded receipt */}
       {expanded && (
         <div
-          className="mt-3 rounded-lg p-3 sm:p-4 font-mono text-[11px] sm:text-xs"
+          className="mt-3 rounded-lg p-3 sm:p-4 font-mono text-xs sm:text-xs"
           style={{
             background: "#fefdf8",
             color: "#1a1a1a",
@@ -162,13 +162,13 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
           }}
         >
           <div className="text-center font-bold text-[13px] tracking-widest mb-0.5">AI TOKEN RECEIPT</div>
-          <div className="text-center text-[9px]" style={{ color: "#666" }}>
+          <div className="text-center text-xs" style={{ color: "#666" }}>
             {data.period_start} ~ {data.period_end}
           </div>
           <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
 
           {/* Column headers */}
-          <div className="flex justify-between text-[9px] font-bold mb-1" style={{ color: "#888", letterSpacing: 1 }}>
+          <div className="flex justify-between text-xs font-bold mb-1" style={{ color: "#888", letterSpacing: 1 }}>
             <span className="flex-1">MODEL</span>
             <span style={{ width: 60, textAlign: "right" }}>TOKENS</span>
             <span style={{ width: 70, textAlign: "right" }}>COST</span>
@@ -179,7 +179,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
             <div key={m.model} className="flex items-baseline mb-0.5">
               <span className="font-semibold shrink-0">{m.display_name}</span>
               <span className="flex-1 mx-1" style={{ borderBottom: "1px dotted #ccc", height: 10 }} />
-              <span className="shrink-0 text-[10px]" style={{ width: 60, textAlign: "right", color: "#555" }}>
+              <span className="shrink-0 text-xs" style={{ width: 60, textAlign: "right", color: "#555" }}>
                 {formatTokens(m.total_tokens)}
               </span>
               <span className="shrink-0 font-semibold" style={{ width: 70, textAlign: "right" }}>
@@ -213,21 +213,21 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
           <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
 
           {/* Stats */}
-          <div className="text-[10px] font-bold mb-1" style={{ color: "#444" }}>STATISTICS</div>
-          <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+          <div className="text-xs font-bold mb-1" style={{ color: "#444" }}>STATISTICS</div>
+          <div className="flex justify-between text-xs" style={{ color: "#555" }}>
             <span>Messages</span>
             <span>{data.stats.total_messages.toLocaleString()}</span>
           </div>
-          <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+          <div className="flex justify-between text-xs" style={{ color: "#555" }}>
             <span>Sessions</span>
             <span>{data.stats.total_sessions.toLocaleString()}</span>
           </div>
 
           {data.agents && data.agents.length > 0 && (
             <>
-              <div className="text-[9px] font-bold mt-2 mb-0.5" style={{ color: "#666" }}>AGENT USAGE</div>
+              <div className="text-xs font-bold mt-2 mb-0.5" style={{ color: "#666" }}>AGENT USAGE</div>
               {data.agents.filter((a) => a.percentage >= 0.1).map((a) => (
-                <div key={a.agent} className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+                <div key={a.agent} className="flex justify-between text-xs" style={{ color: "#555" }}>
                   <span>{a.agent}</span>
                   <span>{a.percentage.toFixed(0)}%</span>
                 </div>
@@ -237,9 +237,9 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
 
           {data.providers.length > 1 && (
             <>
-              <div className="text-[9px] font-bold mt-2 mb-0.5" style={{ color: "#666" }}>PROVIDER USAGE</div>
+              <div className="text-xs font-bold mt-2 mb-0.5" style={{ color: "#666" }}>PROVIDER USAGE</div>
               {data.providers.map((p) => (
-                <div key={p.provider} className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+                <div key={p.provider} className="flex justify-between text-xs" style={{ color: "#555" }}>
                   <span>{p.provider}</span>
                   <span>{p.percentage.toFixed(0)}%</span>
                 </div>
@@ -248,7 +248,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
           )}
 
           <hr style={{ border: "none", borderTop: "1px dashed #bbb", margin: "8px 0", opacity: 0.6 }} />
-          <div className="text-center text-[9px]" style={{ color: "#888" }}>Thank you for using AgentDesk!</div>
+          <div className="text-center text-xs" style={{ color: "#888" }}>Thank you for using AgentDesk!</div>
           <div className="text-center text-[12px] mt-1" style={{ color: "#1a1a1a", opacity: 0.2, letterSpacing: 1 }}>
             ||||| || ||| || |||| || ||| | |||| ||| ||
           </div>

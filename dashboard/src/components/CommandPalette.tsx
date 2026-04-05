@@ -117,6 +117,9 @@ export default function CommandPalette({
     >
       <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={tr("명령 팔레트", "Command Palette")}
         className="relative w-full max-w-lg mx-4 rounded-2xl overflow-hidden shadow-2xl"
         style={{ background: "var(--th-surface)", border: "1px solid var(--th-border)" }}
         onClick={(e) => e.stopPropagation()}
@@ -134,7 +137,7 @@ export default function CommandPalette({
             className="flex-1 bg-transparent text-sm outline-none"
             style={{ color: "var(--th-text)" }}
           />
-          <kbd className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
+          <kbd className="text-xs px-1.5 py-0.5 rounded" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
             ESC
           </kbd>
         </div>
@@ -164,12 +167,12 @@ export default function CommandPalette({
                     : (item.dept.name_ko || item.dept.name)}
                 </div>
                 {item.type === "agent" && (
-                  <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                  <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                     {item.agent.department_name_ko || ""} · {item.agent.status}
                   </div>
                 )}
               </div>
-              <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+              <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                 {item.type === "agent" ? tr("에이전트", "Agent")
                   : item.type === "nav" ? tr("이동", "Go")
                   : tr("부서", "Dept")}

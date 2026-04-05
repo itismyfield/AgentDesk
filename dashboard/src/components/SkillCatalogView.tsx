@@ -98,7 +98,7 @@ export default function SkillCatalogView({ embedded = false }: { embedded?: bool
             <div className="text-xs leading-relaxed mb-3" style={{ color: "var(--th-text-muted)" }}>
               {isKo ? skill.description_ko : skill.description}
             </div>
-            <div className="flex items-center justify-between text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+            <div className="flex items-center justify-between text-xs" style={{ color: "var(--th-text-muted)" }}>
               <span>
                 {skill.total_calls > 0
                   ? (isKo ? `${skill.total_calls}회 호출` : `${skill.total_calls} calls`)

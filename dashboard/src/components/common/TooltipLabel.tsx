@@ -32,7 +32,7 @@ export default function TooltipLabel({ text, tooltip, className }: TooltipLabelP
         {text}
       </button>
       <span
-        className="text-[10px] shrink-0"
+        className="text-xs shrink-0"
         style={{ color: "var(--th-text-muted)" }}
         title={tooltip}
       >
@@ -41,7 +41,7 @@ export default function TooltipLabel({ text, tooltip, className }: TooltipLabelP
 
       {open && (
         <span
-          className="absolute z-30 left-0 top-full mt-1 px-2 py-1 rounded-md text-[10px] whitespace-nowrap"
+          className="absolute z-30 left-0 top-full mt-1 px-2 py-1 rounded-md text-xs whitespace-nowrap"
           style={{
             background: "var(--th-card-bg)",
             color: "var(--th-text-primary)",

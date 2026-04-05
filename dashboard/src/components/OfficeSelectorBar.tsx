@@ -61,7 +61,7 @@ export default function OfficeSelectorBar({
           <span>{isKo ? o.name_ko || o.name : o.name}</span>
           {o.agent_count !== undefined && o.agent_count > 0 && (
             <span
-              className="ml-0.5 text-[10px] opacity-70"
+              className="ml-0.5 text-xs opacity-70"
               style={
                 selectedOfficeId === o.id
                   ? undefined

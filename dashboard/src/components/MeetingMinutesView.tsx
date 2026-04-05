@@ -308,7 +308,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
     const s = map[status] || map.completed;
     return (
       <span
-        className="text-[10px] px-2 py-0.5 rounded-full font-medium"
+        className="text-xs px-2 py-0.5 rounded-full font-medium"
         style={{ background: s.bg, color: s.color }}
       >
         {s.label}
@@ -416,7 +416,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
           {/* Channel ID row */}
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-            <label className="text-[10px] font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "채널 ID", en: "Channel ID" })}
             </label>
             {showChannelEdit || !channelId ? (
@@ -448,7 +448,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
           {/* Agenda input */}
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label className="text-[10px] font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "안건", en: "Agenda" })}
             </label>
             <input
@@ -463,7 +463,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
           </div>
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-            <label className="text-[10px] font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "진행 모델", en: "Model" })}
             </label>
             <select
@@ -476,7 +476,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 <option key={p} value={p}>{PROVIDER_LABELS[p] ?? p.toUpperCase()}</option>
               ))}
             </select>
-            <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "반대 모델이 자동 교차검증", en: "Counter model auto cross-review" })}
             </span>
           </div>
@@ -541,7 +541,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                   <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                     {statusBadge(m.status)}
                     {(m.primary_provider || m.reviewer_provider) && (
-                      <span className="text-[10px] px-2 py-0.5 rounded-full font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}>
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}>
                         {formatProviderFlow(m.primary_provider, m.reviewer_provider)}
                       </span>
                     )}
@@ -570,7 +570,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 {m.participant_names.map((name) => (
                   <span
                     key={name}
-                    className="text-[10px] px-2 py-0.5 rounded-full font-medium"
+                    className="text-xs px-2 py-0.5 rounded-full font-medium"
                     style={{ background: "rgba(99,102,241,0.15)", color: "#818cf8" }}
                   >
                     {name}
@@ -584,7 +584,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     primaryProvider={m.primary_provider}
                     reviewerProvider={m.reviewer_provider}
                   />
-                  <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                  <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                     {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
                   </div>
                 </div>
@@ -610,9 +610,9 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     }}
                   >
                     <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
-                      <div className="text-[10px] font-semibold" style={{ color: "#818cf8" }}>{t({ ko: "PMD 요약", en: "PMD Summary" })}</div>
+                      <div className="text-xs font-semibold" style={{ color: "#818cf8" }}>{t({ ko: "PMD 요약", en: "PMD Summary" })}</div>
                       {(m.primary_provider || m.reviewer_provider) && (
-                        <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                        <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                           {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
                         </div>
                       )}
@@ -705,7 +705,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                               </div>
                               <div className="flex shrink-0 items-center gap-1.5">
                                 <span
-                                  className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                                  className="rounded-full px-2 py-0.5 text-xs font-semibold"
                                   style={{ background: statusMeta.bg, color: statusMeta.color }}
                                 >
                                   {statusMeta.label}
@@ -714,7 +714,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                                   <button
                                     onClick={() => void handleDiscardIssue(m.id, issue)}
                                     disabled={isDiscardingIssue}
-                                    className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold transition-colors disabled:opacity-50"
+                                    className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
                                     style={{
                                       background: "rgba(148,163,184,0.12)",
                                       color: "#cbd5e1",
@@ -820,7 +820,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 </div>
                 {hasProposedIssues && (
                   <div className="flex flex-col gap-1 min-w-0 sm:min-w-[280px]">
-                    <div className="text-[10px] font-semibold uppercase tracking-widest text-left sm:text-right" style={{ color: "var(--th-text-muted)" }}>
+                    <div className="text-xs font-semibold uppercase tracking-widest text-left sm:text-right" style={{ color: "var(--th-text-muted)" }}>
                       {t({ ko: "이 회의용 Repo", en: "Repo for this meeting" })}
                     </div>
                     <select
@@ -839,7 +839,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                         </option>
                       ))}
                     </select>
-                    <div className="text-[11px] text-left sm:text-right" style={{ color: repoSaveErrors[m.id] ? "#fbbf24" : "var(--th-text-muted)" }}>
+                    <div className="text-xs text-left sm:text-right" style={{ color: repoSaveErrors[m.id] ? "#fbbf24" : "var(--th-text-muted)" }}>
                       {repoSaveErrors[m.id]
                         || (isSavingRepo ? t({ ko: "repo 저장 중...", en: "Saving repo..." }) : null)
                         || repoError

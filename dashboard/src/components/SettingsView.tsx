@@ -262,7 +262,7 @@ export default function SettingsView({
             <h2 className="text-xl font-bold mb-1" style={{ color: "var(--th-text)" }}>
               {tr("런타임 설정", "Runtime Config")}
             </h2>
-            <p className="text-[11px] mb-4" style={{ color: "var(--th-text-muted)" }}>
+            <p className="text-xs mb-4" style={{ color: "var(--th-text-muted)" }}>
               {tr("변경 즉시 반영 (재시작 불필요)", "Changes apply immediately (no restart needed)")}
             </p>
           </div>
@@ -291,7 +291,7 @@ export default function SettingsView({
                           {!isDefault && (
                             <button
                               onClick={() => handleRcReset(f.key)}
-                              className="text-[10px] px-1.5 py-0.5 rounded"
+                              className="text-xs px-1.5 py-0.5 rounded"
                               style={{ color: "var(--th-text-muted)", background: "var(--th-bg-surface)" }}
                               title={`${tr("기본값", "Default")}: ${formatUnit(def, f.unit)}`}
                             >
@@ -328,7 +328,7 @@ export default function SettingsView({
                         />
                       </div>
                       {!isDefault && (
-                        <div className="text-[10px] mt-0.5" style={{ color: "var(--th-text-muted)" }}>
+                        <div className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
                           {tr("기본값", "Default")}: {formatUnit(def, f.unit)}
                         </div>
                       )}
@@ -381,7 +381,7 @@ export default function SettingsView({
                           <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
                             {isKo ? entry.label_ko : entry.label_en}
                           </span>
-                          <span className="text-[10px] shrink-0" style={{ color: "var(--th-text-muted)" }}>{entry.key}</span>
+                          <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>{entry.key}</span>
                         </div>
                         <input
                           type="text"

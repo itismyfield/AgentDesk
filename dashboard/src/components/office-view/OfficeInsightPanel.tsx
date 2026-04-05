@@ -118,14 +118,14 @@ export default function OfficeInsightPanel({
         >
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-1.5">
-              <div className="text-[10px] font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--th-text-muted)" }}>
+              <div className="text-xs font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--th-text-muted)" }}>
                 {isKo ? "상황판" : "Situation"}
               </div>
               {warningCount > 0 && (
                 <button
                   type="button"
                   onClick={() => setShowWarnings((v) => !v)}
-                  className="rounded-full px-1.5 py-0.5 text-[9px] font-bold"
+                  className="rounded-full px-1.5 py-0.5 text-xs font-bold"
                   style={{ color: "#92400e", background: "rgba(251,191,36,0.25)", border: "1px solid rgba(251,191,36,0.4)" }}
                 >
                   ⚠ {warningCount}
@@ -135,7 +135,7 @@ export default function OfficeInsightPanel({
             <button
               type="button"
               onClick={() => setMobileExpanded((value) => !value)}
-              className="rounded-full px-2 py-1 text-[10px] font-medium"
+              className="rounded-full px-2 py-1 text-xs font-medium"
               style={{
                 color: "var(--th-text)",
                 background: "var(--th-bg-surface)",
@@ -233,14 +233,14 @@ export default function OfficeInsightPanel({
           }}
         >
           <div className="flex items-center gap-1.5">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--th-text-muted)" }}>
+            <div className="text-xs font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--th-text-muted)" }}>
               {isKo ? "상황판" : "Situation"}
             </div>
             {warningCount > 0 && (
               <button
                 type="button"
                 onClick={() => setShowWarnings((v) => !v)}
-                className="rounded-full px-1.5 py-0.5 text-[9px] font-bold"
+                className="rounded-full px-1.5 py-0.5 text-xs font-bold"
                 style={{ color: "#92400e", background: "rgba(251,191,36,0.25)", border: "1px solid rgba(251,191,36,0.4)" }}
               >
                 ⚠ {warningCount}
@@ -340,10 +340,10 @@ function InsightCard({
       }}
     >
       <div className="flex items-center justify-between">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--th-text-muted)" }}>
+        <div className="text-xs font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--th-text-muted)" }}>
           {title}
         </div>
-        <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
           {count}
         </span>
       </div>
@@ -378,7 +378,7 @@ function StatChip({
         opacity: interactive ? 1 : 1,
       }}
     >
-      <div className="text-[9px] uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+      <div className="text-xs uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
         {label}
       </div>
       <div className="mt-1 text-sm font-semibold" style={{ color }}>
@@ -405,7 +405,7 @@ function WarningList({
         borderColor: "var(--th-card-border)",
       }}
     >
-      <div className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+      <div className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
         {isKo ? "문제 agent" : "Warning agents"}
       </div>
       {items.length === 0 ? (
@@ -425,7 +425,7 @@ function WarningList({
               <div className="text-xs font-medium" style={{ color: "var(--th-text)" }}>
                 {agent.avatar_emoji} {agent.alias || agent.name_ko || agent.name}
               </div>
-              <div className="mt-0.5 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+              <div className="mt-0.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
                 {(isKo ? warnings.map((warning) => warning.ko) : warnings.map((warning) => warning.en)).join(", ")}
               </div>
             </button>
@@ -461,11 +461,11 @@ function EventRow({
             {title}
           </div>
           {subtitle ? (
-            <div className="mt-0.5 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+            <div className="mt-0.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
               {subtitle}
             </div>
           ) : null}
-          <div className="mt-0.5 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+          <div className="mt-0.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
             {timeAgo(ts, isKo)}
           </div>
         </div>
@@ -493,13 +493,13 @@ function ClosedIssueList({ issues, isKo, onClose }: { issues: ClosedIssueItem[];
       style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-card-border)" }}
     >
       <div className="flex items-center justify-between">
-        <div className="text-[10px] font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+        <div className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
           {isKo ? `오늘 완료 (${issues.length})` : `Closed today (${issues.length})`}
         </div>
         <button
           type="button"
           onClick={onClose}
-          className="text-[10px] px-1 rounded"
+          className="text-xs px-1 rounded"
           style={{ color: "var(--th-text-muted)" }}
         >
           ✕
@@ -521,14 +521,14 @@ function ClosedIssueList({ issues, isKo, onClose }: { issues: ClosedIssueItem[];
               style={{ background: "rgba(148,163,184,0.08)" }}
             >
               <div className="flex items-center gap-1.5">
-                <span className="text-[9px] font-bold shrink-0 rounded px-1 py-0.5" style={{ color: "#34d399", background: "rgba(52,211,153,0.1)" }}>
+                <span className="text-xs font-bold shrink-0 rounded px-1 py-0.5" style={{ color: "#34d399", background: "rgba(52,211,153,0.1)" }}>
                   {repoShort(issue.repo)}
                 </span>
-                <span className="text-[9px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
+                <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
                   #{issue.number}
                 </span>
               </div>
-              <div className="mt-0.5 text-[11px] leading-snug" style={{ color: "var(--th-text)" }}>
+              <div className="mt-0.5 text-xs leading-snug" style={{ color: "var(--th-text)" }}>
                 {issue.title}
               </div>
             </a>
@@ -646,7 +646,7 @@ function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
           <div key={p.provider} className="flex items-center gap-0">
             {/* Fixed-width left: provider + stale placeholder */}
             <div className="flex items-center gap-1 shrink-0" style={{ width: 96 }}>
-              <span className="text-[9px] font-bold uppercase truncate" style={{ color: accent }}>
+              <span className="text-xs font-bold uppercase truncate" style={{ color: accent }}>
                 {(RL_ICONS[p.provider] ?? "•")} {p.provider}
               </span>
               {p.stale ? (
@@ -662,7 +662,7 @@ function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
             <div className="flex-1 grid grid-cols-2 gap-x-2">
               {visible.map((b) => (
                 <div key={b.id} className="flex items-center gap-1">
-                  <span className="text-[8px] font-bold shrink-0 w-[14px]" style={{ color: barColor(p.provider, b.level) }}>
+                  <span className="text-xs font-bold shrink-0 w-[14px]" style={{ color: barColor(p.provider, b.level) }}>
                     {b.label}
                   </span>
                   <div className="flex-1 min-w-0">
@@ -673,7 +673,7 @@ function MiniRateLimitBar({ isKo }: { isKo: boolean }) {
                       />
                     </div>
                   </div>
-                  <span className="text-[8px] font-mono font-bold shrink-0 w-[22px] text-right" style={{ color: barColor(p.provider, b.level) }}>
+                  <span className="text-xs font-mono font-bold shrink-0 w-[22px] text-right" style={{ color: barColor(p.provider, b.level) }}>
                     {b.utilization}%
                   </span>
                 </div>

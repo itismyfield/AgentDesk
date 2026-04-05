@@ -473,7 +473,7 @@ export default function ChatView({
             ))}
           </select>
 
-          <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+          <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {messages.length} {tr("메시지", "messages")}
           </span>
         </div>
@@ -483,7 +483,7 @@ export default function ChatView({
             className="rounded-2xl border px-3 py-3"
             style={{ borderColor: "var(--th-card-border)", background: "var(--th-bg-surface)" }}
           >
-            <div className="text-[11px] font-semibold mb-2" style={{ color: "var(--th-text-muted)" }}>
+            <div className="text-xs font-semibold mb-2" style={{ color: "var(--th-text-muted)" }}>
               {tr("현재 대상", "Current target")}
             </div>
 
@@ -533,7 +533,7 @@ export default function ChatView({
                         {selectedAgentWarnings.map((warning) => (
                           <span
                             key={warning.code}
-                            className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full"
+                            className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full"
                             style={{
                               background: warning.severity === "error" ? "rgba(248,113,113,0.14)" : "rgba(251,191,36,0.14)",
                               color: warning.severity === "error" ? "#f87171" : "#fbbf24",
@@ -592,7 +592,7 @@ export default function ChatView({
             className="rounded-2xl border px-3 py-3"
             style={{ borderColor: "var(--th-card-border)", background: "var(--th-bg-surface)" }}
           >
-            <div className="text-[11px] font-semibold mb-2" style={{ color: "var(--th-text-muted)" }}>
+            <div className="text-xs font-semibold mb-2" style={{ color: "var(--th-text-muted)" }}>
               {tr("최근 이벤트", "Recent events")}
             </div>
             {relevantNotifications.length === 0 ? (
@@ -617,7 +617,7 @@ export default function ChatView({
             className="rounded-2xl border px-3 py-3"
             style={{ borderColor: "var(--th-card-border)", background: "var(--th-bg-surface)" }}
           >
-            <div className="text-[11px] font-semibold mb-2" style={{ color: "var(--th-text-muted)" }}>
+            <div className="text-xs font-semibold mb-2" style={{ color: "var(--th-text-muted)" }}>
               {tr("최근 변경", "Recent changes")}
             </div>
             {relevantAuditLogs.length === 0 ? (
@@ -668,7 +668,7 @@ export default function ChatView({
             return (
               <div key={msg.id} className="text-center">
                 <span
-                  className="inline-block text-[10px] px-2 py-0.5 rounded-full"
+                  className="inline-block text-xs px-2 py-0.5 rounded-full"
                   style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
                 >
                   {msg.content}
@@ -687,7 +687,7 @@ export default function ChatView({
               </div>
 
               <div className={`max-w-[78%] ${isCeo ? "text-right" : ""}`}>
-                <div className="text-[10px] mb-1 flex flex-wrap gap-1 items-center" style={{ color: "var(--th-text-muted)" }}>
+                <div className="text-xs mb-1 flex flex-wrap gap-1 items-center" style={{ color: "var(--th-text-muted)" }}>
                   <span>
                     {isCeo
                       ? "CEO"
@@ -731,7 +731,7 @@ export default function ChatView({
         style={{ borderColor: "var(--th-card-border)", background: "var(--th-surface)" }}
       >
         <div className="flex flex-wrap gap-2 items-center mb-2">
-          <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+          <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {tr("보내는 유형", "Send as")}
           </span>
           <select

@@ -185,7 +185,7 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
               {/* Fixed-width left: provider + stale */}
               <div className="flex items-center gap-1.5 shrink-0" style={{ width: 100 }}>
                 <span
-                  className="text-[10px] sm:text-xs font-bold uppercase tracking-wider"
+                  className="text-xs sm:text-xs font-bold uppercase tracking-wider"
                   style={{ color: accent }}
                 >
                   {(PROVIDER_ICONS[provider.provider] ?? "•")}{" "}
@@ -193,7 +193,7 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                 </span>
                 {provider.stale ? (
                   <span
-                    className="rounded px-1 py-0.5 text-[8px] font-medium shrink-0"
+                    className="rounded px-1 py-0.5 text-xs font-medium shrink-0"
                     style={{ color: "#fbbf24", background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.2)" }}
                   >
                     {t({ ko: "지연", en: "STALE", ja: "遅延", zh: "延迟" })}
@@ -209,7 +209,7 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                     <div key={bucket.id} className="flex flex-col gap-0">
                       <div className="flex items-center gap-1.5 sm:gap-2">
                         <span
-                          className="text-[9px] sm:text-[11px] font-bold shrink-0"
+                          className="text-xs sm:text-xs font-bold shrink-0"
                           style={{ color: colors.text, minWidth: 18 }}
                         >
                           {bucket.label}
@@ -234,7 +234,7 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                           </div>
                         </div>
                         <span
-                          className="text-[10px] sm:text-xs font-mono font-bold shrink-0"
+                          className="text-xs sm:text-xs font-mono font-bold shrink-0"
                           style={{
                             color: colors.text,
                             textShadow: bucket.level === "danger" ? `0 0 6px ${colors.glow}` : "none",
@@ -245,7 +245,7 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                       </div>
                       {remaining && (
                         <span
-                          className="text-[7px] sm:text-[8px] ml-[24px] sm:ml-[26px]"
+                          className="text-[7px] sm:text-xs ml-[24px] sm:ml-[26px]"
                           style={{ color: "var(--th-text-muted)", marginTop: -1 }}
                         >
                           ↻ {remaining}

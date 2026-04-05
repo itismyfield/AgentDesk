@@ -338,7 +338,7 @@ function Tip({ text }: { text: string }) {
   return (
     <span className="relative group inline-block ml-1 cursor-help">
       <span
-        className="inline-flex items-center justify-center w-4 h-4 rounded-full text-[10px] font-bold"
+        className="inline-flex items-center justify-center w-4 h-4 rounded-full text-xs font-bold"
         style={{ backgroundColor: "rgba(148,163,184,0.2)", color: "var(--th-text-muted)" }}
       >
         ?
@@ -847,13 +847,13 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                       href={makeInviteUrl(bot.botInfo.bot_id!, PERMS.command)}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                      className="text-xs px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
                     >
                       {tr("서버에 초대 →", "Invite to server →")}
                     </a>
                   </div>
                 )}
-                <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                   {tr(
                     `자동 설정 권한: Send Messages, Read Message History, Manage Messages, Create Public Threads, Send Messages in Threads`,
                     `Auto-configured: Send Messages, Read Message History, Manage Messages, Create Public Threads, Send Messages in Threads`,
@@ -887,7 +887,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 "에이전트들이 서로 메시지를 보낼 때 사용하는 봇입니다.\n에이전트 A가 에이전트 B에게 작업을 요청하거나\n결과를 회신할 때 이 봇을 통해 전송합니다.\n\n또한 온보딩 시 Discord 채널을 자동 생성하고,\n다른 봇들의 채널 접근 권한을 설정합니다.\n(별도의 봇이어야 메시지 충돌이 방지됩니다)",
                 "Used for agent-to-agent communication.\nAgent A sends tasks to Agent B through this bot.\n\nAlso creates Discord channels during onboarding\nand manages channel permissions for other bots.\n(Must be a separate bot to prevent conflicts)",
               )} />
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 font-medium">
+              <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 font-medium">
                 {tr("필수", "Required")}
               </span>
             </div>
@@ -906,13 +906,13 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   href={makeInviteUrl(announceBotInfo.bot_id!, PERMS.announce)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                  className="text-xs px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
                 >
                   {tr("서버에 초대 (관리자 권한) →", "Invite to server (Admin) →")}
                 </a>
               </div>
             )}
-            <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+            <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
               {tr(
                 "관리자(Administrator) 권한으로 초대됩니다. 채널 생성, 봇 권한 설정 등을 자동으로 처리합니다.",
                 "Invited with Administrator permission. Handles channel creation and bot permission setup automatically.",
@@ -930,7 +930,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 "시스템 상태, 오류, 경고 등 정보 전달에만 사용됩니다.\n이 봇의 메시지에는 에이전트가 반응하지 않습니다.\n없어도 기본 기능에 지장은 없습니다.",
                 "Only for system status and error notifications.\nAgents don't respond to this bot's messages.\nOptional — core features work without it.",
               )} />
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-hover font-medium" style={{ color: "var(--th-text-muted)" }}>
+              <span className="text-xs px-1.5 py-0.5 rounded bg-surface-hover font-medium" style={{ color: "var(--th-text-muted)" }}>
                 {tr("선택", "Optional")}
               </span>
             </div>
@@ -949,13 +949,13 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   href={makeInviteUrl(notifyBotInfo.bot_id!, PERMS.notify)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                  className="text-xs px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
                 >
                   {tr("서버에 초대 →", "Invite to server →")}
                 </a>
               </div>
             )}
-            <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+            <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
               {tr("자동 설정 권한: Send Messages", "Auto-configured: Send Messages")}
             </div>
           </div>
@@ -983,7 +983,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           </div>
           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {tr("토큰은 나중에 설정 파일에서 직접 입력할 수 있습니다: ", "Tokens can be set later in: ")}
-            <code className="text-[11px] px-1 py-0.5 rounded bg-surface-hover">~/.adk/release/agentdesk.yaml</code>
+            <code className="text-xs px-1 py-0.5 rounded bg-surface-hover">~/.adk/release/agentdesk.yaml</code>
           </p>
         </div>
       )}
@@ -1109,7 +1109,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 <div className="text-2xl mb-2">{tpl.icon}</div>
                 <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>{tr(tpl.name, tpl.nameEn)}</div>
                 <div className="text-xs mt-1" style={{ color: "var(--th-text-muted)" }}>{tr(tpl.description, tpl.descriptionEn)}</div>
-                <div className="text-[11px] mt-2" style={{ color: "var(--th-text-muted)" }}>
+                <div className="text-xs mt-2" style={{ color: "var(--th-text-muted)" }}>
                   {tpl.agents.map((a) => tr(a.name, a.nameEn)).join(", ")}
                 </div>
               </button>
