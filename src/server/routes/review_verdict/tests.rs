@@ -1191,4 +1191,75 @@ async fn accept_updates_canonical_review_state() {
         Some("accept"),
         "last_decision should be accept"
     );
+
+    // #266: Verify kanban_cards.review_status is cleared to NULL after accept
+    let review_status: Option<String> = conn
+        .query_row(
+            "SELECT review_status FROM kanban_cards WHERE id = 'card-rs'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        review_status, None,
+        "#266: review_status should be NULL after accept (was suggestion_pending)"
+    );
+}
+
+/// #266: Regression test — suggestion_pending review_status must be cleared
+/// when a review-decision accept triggers rework (non-terminal transition).
+#[tokio::test]
+async fn accept_clears_suggestion_pending_review_status() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
+             review_status, suggestion_pending_at, created_at, updated_at) \
+             VALUES ('card-266', 'Suggestion Pending Bug', 'review', 'agent-1', 'rd-266', \
+             'suggestion_pending', datetime('now', '-10 minutes'), datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('rd-266', 'card-266', 'agent-1', 'review-decision', 'pending', 'RD #266', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+
+    let (status, _) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-266".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            dispatch_id: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "accept should succeed");
+
+    let conn = db.lock().unwrap();
+    let (review_status, suggestion_pending_at): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT review_status, suggestion_pending_at FROM kanban_cards WHERE id = 'card-266'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        review_status, None,
+        "#266: review_status must be NULL after accept, not suggestion_pending"
+    );
+    assert_eq!(
+        suggestion_pending_at, None,
+        "#266: suggestion_pending_at must be NULL after accept"
+    );
 }
