@@ -5,6 +5,8 @@ import { getRankTier } from "../dashboard/model";
 import { useI18n } from "../../i18n";
 import TooltipLabel from "../common/TooltipLabel";
 
+const STALE_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
+
 function sessionSpriteNum(s: DispatchedSession): number {
   if (s.sprite_number != null && s.sprite_number > 0) return s.sprite_number;
   const idStr = String(s.id);
@@ -21,6 +23,35 @@ function sessionDisplayName(s: DispatchedSession): { label: string; full: string
   return { label: `Session ${s.session_key.slice(0, 8)}`, full: s.session_key };
 }
 
+function sessionLastActivityTs(s: DispatchedSession): number {
+  if (typeof s.last_seen_at === "number" && Number.isFinite(s.last_seen_at)) return s.last_seen_at;
+  if (typeof s.connected_at === "number" && Number.isFinite(s.connected_at)) return s.connected_at;
+  return 0;
+}
+
+function isStaleIdleSession(s: DispatchedSession): boolean {
+  return s.status === "idle" && Date.now() - sessionLastActivityTs(s) >= STALE_IDLE_MS;
+}
+
+function compareSessions(a: DispatchedSession, b: DispatchedSession): number {
+  const rank = (session: DispatchedSession): number => {
+    if (session.status === "working") return 0;
+    if (session.status === "idle" && !isStaleIdleSession(session)) return 1;
+    if (session.status === "idle") return 2;
+    return 3;
+  };
+
+  const rankDiff = rank(a) - rank(b);
+  if (rankDiff !== 0) return rankDiff;
+  return sessionLastActivityTs(b) - sessionLastActivityTs(a);
+}
+
+function linkedAgentLabel(s: DispatchedSession, agents: Agent[]): string | null {
+  const linked = agents.find((agent) => agent.id === s.linked_agent_id);
+  if (linked) return linked.name_ko || linked.name;
+  return s.linked_agent_id;
+}
+
 interface Props {
   sessions: DispatchedSession[];
   departments: Department[];
@@ -29,8 +60,11 @@ interface Props {
 }
 
 export function SessionPanel({ sessions, departments, agents, onAssign }: Props) {
-  const active = sessions.filter((s) => s.status !== "disconnected");
-  const disconnected = sessions.filter((s) => s.status === "disconnected");
+  const active = [...sessions.filter((s) => s.status !== "disconnected")].sort(compareSessions);
+  const disconnected = [...sessions.filter((s) => s.status === "disconnected")].sort(compareSessions);
+  const workingCount = active.filter((s) => s.status === "working").length;
+  const staleIdleCount = active.filter((s) => isStaleIdleSession(s)).length;
+  const [showDisconnected, setShowDisconnected] = useState(false);
   const [infoSession, setInfoSession] = useState<DispatchedSession | null>(null);
   const { t, language } = useI18n();
   const isKo = language === "ko";
@@ -43,6 +77,14 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
         <span className="bg-emerald-600 text-white text-xs px-2 py-0.5 rounded-full shrink-0">
           {active.length} {t({ ko: "활성", en: "Active" })}
         </span>
+        <span className="bg-sky-600 text-white text-xs px-2 py-0.5 rounded-full shrink-0">
+          {workingCount} {t({ ko: "작업 중", en: "Working" })}
+        </span>
+        {staleIdleCount > 0 && (
+          <span className="bg-amber-600 text-white text-xs px-2 py-0.5 rounded-full shrink-0">
+            {staleIdleCount} {t({ ko: "stale", en: "stale" })}
+          </span>
+        )}
       </div>
 
       <p className="text-th-text-muted text-sm">
@@ -79,46 +121,64 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
       {/* Disconnected sessions */}
       {disconnected.length > 0 && (
         <>
-          <h2 className="text-sm font-semibold text-th-text-muted mb-3 flex items-center gap-2">
-            <WifiOff size={14} />
-            {t({ ko: "종료된 세션", en: "Disconnected" })} ({disconnected.length})
-          </h2>
-          <div className="space-y-2 opacity-60">
-            {disconnected.slice(0, 10).map((s) => (
-              <div
-                key={s.id}
-                className="bg-th-bg-surface/50 rounded-lg px-3 sm:px-4 py-3 flex items-center gap-2 sm:gap-3 cursor-pointer hover:bg-surface-hover/70 transition-colors min-w-0"
-                onClick={() => setInfoSession(s)}
-              >
-                <div className="w-7 h-7 rounded-lg overflow-hidden bg-th-card-bg shrink-0">
-                  <img
-                    src={`/sprites/${sessionSpriteNum(s)}-D-1.png`}
-                    alt={s.name || ""}
-                    className="w-full h-full object-cover"
-                    style={{ imageRendering: "pixelated" }}
-                  />
-                </div>
-                <TooltipLabel
-                  className="flex-1 text-sm text-th-text-muted min-w-0"
-                  text={sessionDisplayName(s).label}
-                  tooltip={sessionDisplayName(s).full}
-                />
-                <span className="text-xs text-th-text-muted shrink-0">
-                  {s.model || "unknown"}
-                </span>
-                {s.last_seen_at && (
-                  <span className="text-xs text-th-text-muted shrink-0 whitespace-nowrap">
-                    {formatTimeAgo(s.last_seen_at, isKo)}
-                  </span>
-                )}
-              </div>
-            ))}
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-th-text-muted flex items-center gap-2">
+              <WifiOff size={14} />
+              {t({ ko: "종료된 세션", en: "Disconnected" })} ({disconnected.length})
+            </h2>
+            <button
+              type="button"
+              onClick={() => setShowDisconnected((prev) => !prev)}
+              className="text-xs px-2.5 py-1 rounded border border-th-border text-th-text-muted hover:bg-surface-hover transition-colors shrink-0"
+            >
+              {showDisconnected
+                ? t({ ko: "숨기기", en: "Hide" })
+                : t({ ko: "표시", en: "Show" })}
+            </button>
           </div>
+          {showDisconnected && (
+            <div className="space-y-2 opacity-60">
+              {disconnected.slice(0, 10).map((s) => (
+                <div
+                  key={s.id}
+                  className="bg-th-bg-surface/50 rounded-lg px-3 sm:px-4 py-3 flex items-center gap-2 sm:gap-3 cursor-pointer hover:bg-surface-hover/70 transition-colors min-w-0"
+                  onClick={() => setInfoSession(s)}
+                >
+                  <div className="w-7 h-7 rounded-lg overflow-hidden bg-th-card-bg shrink-0">
+                    <img
+                      src={`/sprites/${sessionSpriteNum(s)}-D-1.png`}
+                      alt={s.name || ""}
+                      className="w-full h-full object-cover"
+                      style={{ imageRendering: "pixelated" }}
+                    />
+                  </div>
+                  <TooltipLabel
+                    className="flex-1 text-sm text-th-text-muted min-w-0"
+                    text={sessionDisplayName(s).label}
+                    tooltip={sessionDisplayName(s).full}
+                  />
+                  <span className="text-xs text-th-text-muted shrink-0">
+                    {s.model || "unknown"}
+                  </span>
+                  {s.last_seen_at && (
+                    <span className="text-xs text-th-text-muted shrink-0 whitespace-nowrap">
+                      {formatTimeAgo(s.last_seen_at, isKo)}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </>
       )}
 
       {infoSession && (
-        <SessionInfoCard session={infoSession} departments={departments} onClose={() => setInfoSession(null)} />
+        <SessionInfoCard
+          session={infoSession}
+          departments={departments}
+          agents={agents}
+          onClose={() => setInfoSession(null)}
+        />
       )}
     </div>
   );
@@ -127,6 +187,7 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
 function SessionCard({
   session: s,
   departments,
+  agents,
   onAssign,
   onSelect,
 }: {
@@ -140,6 +201,8 @@ function SessionCard({
   const [selectedDept, setSelectedDept] = useState(s.department_id || "");
   const { t, language } = useI18n();
   const isKo = language === "ko";
+  const staleIdle = isStaleIdleSession(s);
+  const linkedAgent = linkedAgentLabel(s, agents);
 
   const handleAssign = async () => {
     setAssigning(true);
@@ -152,7 +215,7 @@ function SessionCard({
     }
   };
 
-  const statusColor = s.status === "working" ? "bg-emerald-500" : "bg-amber-500";
+  const statusColor = s.status === "working" ? "bg-emerald-500" : staleIdle ? "bg-slate-500" : "bg-amber-500";
 
   return (
     <div className="bg-th-bg-surface rounded-lg p-3 sm:p-4 border border-th-border">
@@ -206,6 +269,16 @@ function SessionCard({
             >
               {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : s.provider === "qwen" ? "Qwen" : "Claude"}
             </span>
+            {linkedAgent && (
+              <span className="bg-th-card-bg px-1.5 py-0.5 rounded shrink-0">
+                {t({ ko: "연결", en: "Linked" })}: {linkedAgent}
+              </span>
+            )}
+            {staleIdle && (
+              <span className="bg-amber-500/15 text-amber-300 px-1.5 py-0.5 rounded shrink-0">
+                {t({ ko: "7일+ stale", en: "7d+ stale" })}
+              </span>
+            )}
             {s.stats_xp > 0 && (
               <span className="px-1.5 py-0.5 rounded shrink-0" style={{ background: "var(--th-badge-amber-bg)", color: "var(--th-badge-amber-text)" }}>
                 ⭐ {s.stats_xp} XP
@@ -233,7 +306,7 @@ function SessionCard({
           onChange={(e) => setSelectedDept(e.target.value)}
           className="bg-th-card-bg text-sm rounded px-2 py-1 border border-th-border text-th-text-primary flex-1 min-w-[120px]"
         >
-          <option value="">{t({ ko: "미배정", en: "Unassigned" })}</option>
+          <option value="">{t({ ko: "부서 미배정", en: "Dept Unassigned" })}</option>
           {departments.map((d) => (
             <option key={d.id} value={d.id}>
               {d.icon} {d.name_ko || d.name}
@@ -257,6 +330,13 @@ function SessionCard({
             style={{ backgroundColor: s.department_color || "#6366f1" }}
           >
             {t({ ko: `${s.department_name_ko}에 배치됨`, en: `Assigned to ${s.department_name_ko}` })}
+          </span>
+        </div>
+      )}
+      {!s.department_id && (
+        <div className="mt-2 sm:ml-11">
+          <span className="text-xs px-2 py-0.5 rounded-full bg-th-card-bg text-th-text-muted">
+            {t({ ko: "부서 미배정", en: "Dept Unassigned" })}
           </span>
         </div>
       )}
@@ -288,10 +368,12 @@ function formatDuration(ms: number, isKo = true): string {
 function SessionInfoCard({
   session: s,
   departments,
+  agents,
   onClose,
 }: {
   session: DispatchedSession;
   departments: Department[];
+  agents: Agent[];
   onClose: () => void;
 }) {
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -300,6 +382,8 @@ function SessionInfoCard({
   const tier = getRankTier(s.stats_xp);
   const isDisconnected = s.status === "disconnected";
   const uptime = s.connected_at ? Date.now() - s.connected_at : 0;
+  const staleIdle = isStaleIdleSession(s);
+  const linkedAgent = linkedAgentLabel(s, agents);
   const { t, language } = useI18n();
   const isKo = language === "ko";
 
@@ -372,7 +456,12 @@ function SessionInfoCard({
               )}
               {!dept && (
                 <span className="text-xs px-2 py-0.5 rounded-full bg-th-bg-surface text-th-text-muted">
-                  {t({ ko: "미배정", en: "Unassigned" })}
+                  {t({ ko: "부서 미배정", en: "Dept Unassigned" })}
+                </span>
+              )}
+              {staleIdle && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300">
+                  {t({ ko: "7일+ stale", en: "7d+ stale" })}
                 </span>
               )}
             </div>
@@ -393,6 +482,9 @@ function SessionInfoCard({
           )}
           {s.session_info && (
             <InfoRow label={t({ ko: "최근 도구", en: "Recent Tool" })} value={s.session_info} />
+          )}
+          {linkedAgent && (
+            <InfoRow label={t({ ko: "연결 에이전트", en: "Linked Agent" })} value={linkedAgent} />
           )}
           <InfoRow label={t({ ko: "세션 키", en: "Session Key" })} value={s.session_key} mono />
           {s.connected_at > 0 && (
