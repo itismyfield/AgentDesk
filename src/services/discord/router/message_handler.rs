@@ -950,7 +950,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     };
 
-    let inflight_state = InflightTurnState::new(
+    let mut inflight_state = InflightTurnState::new(
         provider.clone(),
         channel_id.get(),
         channel_name.clone(),
@@ -964,6 +964,9 @@ pub(in crate::services::discord) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    // Persist identifiers for long-turn diagnostics (#130)
+    inflight_state.session_key = adk_session_key.clone();
+    inflight_state.dispatch_id = dispatch_id.clone();
     if let Err(e) = save_inflight_state(&inflight_state) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}]   ⚠ inflight state save failed: {e}");

@@ -16,6 +16,7 @@
  * [J] Failed 디스패치 자동 재시도 (30초 쿨다운, ~60초 cadence, 최대 10회 + 즉시 Discord 알림)
  * [I] 턴 데드락 감지 + 자동 복구 (15분 주기, 최대 3회 연장 후 강제 중단 + 재디스패치)
  * [K] 고아 디스패치 복구 (5분) — in_progress 카드 + pending 디스패치 + 활성 세션 없음 → review 전이
+ * [L] Inflight 장시간 턴 감지 (#130) — heartbeat와 독립, started_at 기반 15/30/60/120분 단계별 알림
  * [M] Workspace branch 보호 (5분) — 메인 repo가 wt/* 브랜치로 이탈하면 자동 복구 (#181)
  */
 
@@ -950,6 +951,8 @@ var timeouts = {
   },
 
   _section_L: function() {
+    // ─── [L] Inflight 장시간 턴 감지 (#130) ──────────────────
+    // heartbeat와 독립 — inflight 파일의 started_at 기반 단계별 알림.
     // Prevents alarm fatigue while still notifying at key thresholds.
     var ALERT_THRESHOLDS = [15, 30, 60, 120]; // minutes
     try {
@@ -973,8 +976,27 @@ var timeouts = {
         var lastTier = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [tierKey]);
         var lastAlertedTier = lastTier.length > 0 ? parseInt(lastTier[0].value, 10) : -1;
         if (currentTier <= lastAlertedTier) continue; // already alerted at this tier or higher
+        // Resolve agent_id: prefer dispatch target, fallback to channel owner (#130)
+        var agentId = "?";
+        if (inf.dispatch_id) {
+          var dispRow = agentdesk.db.query(
+            "SELECT to_agent_id FROM task_dispatches WHERE id = ? LIMIT 1",
+            [inf.dispatch_id]
+          );
+          if (dispRow.length > 0 && dispRow[0].to_agent_id) {
+            agentId = dispRow[0].to_agent_id;
+          }
+        }
+        if (agentId === "?") {
+          var agentRows = agentdesk.db.query(
+            "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? LIMIT 1",
+            [inf.channel_id, inf.channel_id]
+          );
+          if (agentRows.length > 0) agentId = agentRows[0].id;
+        }
         sendDeadlockAlert(
           "⚠️ [장시간 턴] " + (inf.channel_name || inf.channel_id) + "\n" +
+          "agent_id: " + agentId + "\n" +
           "session_key: " + (inf.session_key || "?") + "\n" +
           "dispatch_id: " + (inf.dispatch_id || "?") + "\n" +
           "tmux: " + (inf.tmux_session_name || "?") + "\n" +
