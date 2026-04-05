@@ -24,7 +24,6 @@ pub(crate) use cli::agentdesk_runtime_root;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 // ── Clap CLI definition ──────────────────────────────────────
@@ -229,11 +228,6 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Migration helpers
-    Migrate {
-        #[command(subcommand)]
-        action: MigrateAction,
-    },
     /// Call any API endpoint (curl replacement)
     Api {
         /// HTTP method (GET, POST, PATCH, PUT, DELETE)
@@ -293,19 +287,6 @@ enum ConfigAction {
     Set {
         /// JSON value to set
         json: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum MigrateAction {
-    /// Export OpenClaw env files and runtime secrets into the AgentDesk release root
-    Openclaw {
-        /// Source path (`openclaw.json`, OpenClaw config dir, or OpenClaw repo root)
-        #[arg(long)]
-        source: Option<PathBuf>,
-        /// Override AgentDesk runtime root (defaults to `~/.adk/release`)
-        #[arg(long)]
-        runtime_root: Option<PathBuf>,
     },
 }
 
@@ -522,14 +503,6 @@ fn main() -> Result<()> {
                 return exit_for_cli(match action {
                     ConfigAction::Get => cli::client::cmd_config_get(),
                     ConfigAction::Set { json } => cli::client::cmd_config_set(&json),
-                });
-            }
-            Some(Commands::Migrate { action }) => {
-                return exit_for_cli(match action {
-                    MigrateAction::Openclaw {
-                        source,
-                        runtime_root,
-                    } => cli::handle_migrate_openclaw(source, runtime_root),
                 });
             }
             Some(Commands::Api { method, path, body }) => {
