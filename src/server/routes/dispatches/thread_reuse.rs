@@ -488,9 +488,10 @@ pub async fn get_card_thread(
 
 /// GET /api/internal/pending-dispatch-for-thread?thread_id=xxx
 ///
-/// #222: Look up a pending implementation/rework dispatch whose kanban card
-/// is linked to the given thread channel. Used by turn_bridge as fallback
-/// when parse_dispatch_id(user_text) fails in unified threads.
+/// #222: Look up the latest pending/dispatched dispatch whose kanban card is
+/// linked to the given thread channel. Used by turn_bridge as fallback when
+/// parse_dispatch_id(user_text) fails in unified/reused threads, including
+/// review and review-decision flows.
 pub async fn get_pending_dispatch_for_thread(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -515,14 +516,15 @@ pub async fn get_pending_dispatch_for_thread(
         }
     };
 
-    // Find a pending dispatch whose card is linked to this thread via
-    // channel_thread_map (JSON contains the thread_id) or active_thread_id.
+    // Find the latest pending/dispatched dispatch whose card is linked to this
+    // thread via channel_thread_map (JSON contains the thread_id) or
+    // active_thread_id. This must cover review/review-decision as well as work
+    // dispatches because reused threads often omit a fresh DISPATCH: prefix.
     let dispatch_id: Option<String> = conn
         .query_row(
             "SELECT td.id FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.status IN ('pending', 'dispatched') \
-             AND td.dispatch_type IN ('implementation', 'rework') \
              AND (kc.active_thread_id = ?1 \
                   OR INSTR(COALESCE(kc.channel_thread_map, ''), ?1) > 0) \
              ORDER BY td.created_at DESC LIMIT 1",
@@ -531,7 +533,9 @@ pub async fn get_pending_dispatch_for_thread(
         )
         .ok();
 
-    // Fallback: check unified_thread_id / unified_thread_channel_id in auto_queue_runs
+    // Fallback: check unified_thread_id / unified_thread_channel_id in
+    // auto_queue_runs. These runs only own work dispatches, so keep the
+    // explicit implementation/rework filter here.
     let dispatch_id = dispatch_id.or_else(|| {
         conn.query_row(
             "SELECT td.id FROM task_dispatches td \

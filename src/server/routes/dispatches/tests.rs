@@ -3,12 +3,21 @@ use super::outbox::{
     prefix_dispatch_message, use_counter_model_channel,
 };
 use crate::db::Db;
+use crate::engine::PolicyEngine;
+use crate::server::routes::AppState;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 
 fn test_db() -> Db {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
     crate::db::schema::migrate(&conn).unwrap();
     crate::db::wrap_conn(conn)
+}
+
+fn test_engine(db: &Db) -> PolicyEngine {
+    let config = crate::config::Config::default();
+    PolicyEngine::new(&config, db.clone()).unwrap()
 }
 
 #[test]
@@ -743,4 +752,76 @@ fn unified_thread_parallel_format_parsed_correctly() {
         Some("aaa"),
         "parallel nested format must resolve to group 0 thread"
     );
+}
+
+#[tokio::test]
+async fn pending_dispatch_lookup_finds_review_thread_dispatch() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, active_thread_id, created_at, updated_at)
+             VALUES ('card-review', 'Review card', 'review', '999888777', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-review', 'review', 'pending', '[Review R1] card-review', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let (status, body) = super::get_pending_dispatch_for_thread(
+        State(state),
+        Query(std::collections::HashMap::from([(
+            "thread_id".to_string(),
+            "999888777".to_string(),
+        )])),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.0["dispatch_id"], "dispatch-review");
+}
+
+#[tokio::test]
+async fn pending_dispatch_lookup_finds_review_decision_thread_dispatch() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, channel_thread_map, active_thread_id, created_at, updated_at)
+             VALUES ('card-decision', 'Decision card', 'review', '{\"123456789\":\"999888777\"}', '999888777', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-decision', 'review', 'completed', '[Review R1] card-decision', datetime('now', '-1 minute'), datetime('now', '-1 minute'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-review-decision', 'card-decision', 'review-decision', 'pending', '[리뷰 검토] card-decision', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let (status, body) = super::get_pending_dispatch_for_thread(
+        State(state),
+        Query(std::collections::HashMap::from([(
+            "thread_id".to_string(),
+            "999888777".to_string(),
+        )])),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.0["dispatch_id"], "dispatch-review-decision");
 }
