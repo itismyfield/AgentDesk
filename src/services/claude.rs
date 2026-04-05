@@ -11,7 +11,7 @@ use crate::services::discord::restart_report::{
 };
 use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
 use crate::services::provider::{
-    CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
+    CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
     fold_read_output_result, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
@@ -1018,6 +1018,46 @@ impl StreamLineState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaudeFollowupResult {
+    Delivered,
+    RecreateSession { error: String },
+    FinalizeWithNotice { error: String, notice: String },
+}
+
+const FOLLOWUP_PARTIAL_OUTPUT_NOTICE: &str = "⚠ 세션이 응답 도중 중단되었습니다. 일부 출력이 이미 전송되어 자동 재시작하지 않았습니다. 이어서 계속하려면 같은 요청을 다시 보내며 계속해 달라고 적어 주세요.";
+
+fn classify_followup_result(
+    read_result: ReadOutputResult,
+    start_offset: u64,
+    session_died_error: &str,
+) -> ClaudeFollowupResult {
+    match read_result {
+        ReadOutputResult::Completed { .. } | ReadOutputResult::Cancelled { .. } => {
+            ClaudeFollowupResult::Delivered
+        }
+        ReadOutputResult::SessionDied { offset } if offset > start_offset => {
+            ClaudeFollowupResult::FinalizeWithNotice {
+                error: session_died_error.to_string(),
+                notice: FOLLOWUP_PARTIAL_OUTPUT_NOTICE.to_string(),
+            }
+        }
+        ReadOutputResult::SessionDied { .. } => ClaudeFollowupResult::RecreateSession {
+            error: session_died_error.to_string(),
+        },
+    }
+}
+
+fn emit_followup_restart_suppressed_notice(sender: &Sender<StreamMessage>, notice: &str) {
+    let _ = sender.send(StreamMessage::Text {
+        content: format!("\n\n{}", notice),
+    });
+    let _ = sender.send(StreamMessage::Done {
+        result: String::new(),
+        session_id: None,
+    });
+}
+
 /// Process a single stream-json line. Returns false if the sender channel is disconnected.
 /// Sets `stdout_error` in state for error messages (these are deferred until process exit).
 pub(crate) fn process_stream_line(
@@ -1454,8 +1494,8 @@ fn execute_streaming_local_tmux(
             cancel_token.clone(),
             tmux_session_name,
         )? {
-            FollowupResult::Delivered => return Ok(()),
-            FollowupResult::RecreateSession { error } => {
+            ClaudeFollowupResult::Delivered => return Ok(()),
+            ClaudeFollowupResult::RecreateSession { error } => {
                 debug_log(&format!("Follow-up failed, recreating session: {}", error));
                 crate::services::termination_audit::record_termination_for_tmux(
                     tmux_session_name,
@@ -1471,6 +1511,30 @@ fn execute_streaming_local_tmux(
                 );
                 crate::services::platform::tmux::kill_session(tmux_session_name);
                 // Fall through to new session creation below
+            }
+            ClaudeFollowupResult::FinalizeWithNotice { error, notice } => {
+                debug_log(&format!(
+                    "Follow-up streamed partial output before session death — suppressing replay: {}",
+                    error
+                ));
+                crate::services::termination_audit::record_termination_for_tmux(
+                    tmux_session_name,
+                    None,
+                    "claude_provider",
+                    "followup_partial_output_no_replay",
+                    Some(&format!(
+                        "partial follow-up output already delivered: {}",
+                        error
+                    )),
+                    None,
+                );
+                record_tmux_exit_reason(
+                    tmux_session_name,
+                    &format!("partial follow-up output already delivered: {}", error),
+                );
+                crate::services::platform::tmux::kill_session(tmux_session_name);
+                emit_followup_restart_suppressed_notice(&sender, &notice);
+                return Ok(());
             }
         }
     } else if session_exists {
@@ -1711,9 +1775,10 @@ fn execute_streaming_local_tmux(
 
 /// Send a follow-up message to an existing tmux Claude session.
 ///
-/// Returns [`FollowupResult::RecreateSession`] when the FIFO is broken or the
-/// session dies mid-output, signalling the caller to kill the session and
-/// replay the prompt in a freshly created one.
+/// Returns `RecreateSession` only when the follow-up failed before any new
+/// output was delivered. If partial output already streamed and the session
+/// then dies, the caller is asked to finalize the turn with an explicit notice
+/// instead of replaying the prompt from scratch.
 #[cfg(unix)]
 fn send_followup_to_tmux(
     prompt: &str,
@@ -1722,7 +1787,7 @@ fn send_followup_to_tmux(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     tmux_session_name: &str,
-) -> Result<FollowupResult, String> {
+) -> Result<ClaudeFollowupResult, String> {
     use std::io::Write;
 
     debug_log(&format!(
@@ -1760,7 +1825,7 @@ fn send_followup_to_tmux(
     if let Err(e) = write_result {
         if should_recreate_session_after_followup_fifo_error(&e) {
             debug_log(&format!("FIFO error triggers session recreation: {}", e));
-            return Ok(FollowupResult::RecreateSession { error: e });
+            return Ok(ClaudeFollowupResult::RecreateSession { error: e });
         }
         return Err(e);
     }
@@ -1781,24 +1846,27 @@ fn send_followup_to_tmux(
         SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
-    Ok(fold_read_output_result(
+    let outcome = classify_followup_result(
         read_result,
-        |offset| {
-            let _ = sender.send(StreamMessage::TmuxReady {
-                output_path: output_path.to_string(),
-                input_fifo_path: input_fifo_path.to_string(),
-                tmux_session_name: tmux_session_name.to_string(),
-                last_offset: offset,
-            });
-            FollowupResult::Delivered
-        },
-        |_| {
-            debug_log("tmux session died during follow-up — requesting recreation");
-            FollowupResult::RecreateSession {
-                error: "session died during follow-up output reading".to_string(),
-            }
-        },
-    ))
+        start_offset,
+        "session died during follow-up output reading",
+    );
+    if matches!(outcome, ClaudeFollowupResult::Delivered) {
+        let current_offset = std::fs::metadata(output_path)
+            .map(|meta| meta.len())
+            .unwrap_or(start_offset);
+        let _ = sender.send(StreamMessage::TmuxReady {
+            output_path: output_path.to_string(),
+            input_fifo_path: input_fifo_path.to_string(),
+            tmux_session_name: tmux_session_name.to_string(),
+            last_offset: current_offset,
+        });
+    } else if matches!(outcome, ClaudeFollowupResult::RecreateSession { .. }) {
+        debug_log("tmux session died during follow-up before new output — requesting recreation");
+    } else {
+        debug_log("tmux session died after streaming partial follow-up output — suppress replay");
+    }
+    Ok(outcome)
 }
 
 /// Poll-read the output file from a given offset until a "result" event is received.
@@ -1916,27 +1984,44 @@ pub(crate) fn execute_streaming_local_process(
                     sender.clone(),
                     cancel_token.clone(),
                 )? {
-                    FollowupResult::Delivered => return Ok(()),
-                    FollowupResult::RecreateSession { error } => {
+                    ClaudeFollowupResult::Delivered => return Ok(()),
+                    ClaudeFollowupResult::RecreateSession { error } => {
                         debug_log(&format!(
                             "Process follow-up failed, recreating session: {}",
                             error
                         ));
                         // Kill existing process and clean up handle
                         if let Some(handle) = PROCESS_HANDLES.lock().unwrap().remove(session_name) {
-                            if let crate::services::session_backend::SessionHandle::Process {
+                            let crate::services::session_backend::SessionHandle::Process {
                                 child,
                                 ..
-                            } = handle
-                            {
-                                let mut child_guard = child.lock().unwrap();
-                                if let Some(ref mut c) = *child_guard {
-                                    let _ = c.kill();
-                                    let _ = c.wait();
-                                }
+                            } = handle;
+                            let mut child_guard = child.lock().unwrap();
+                            if let Some(ref mut c) = *child_guard {
+                                let _ = c.kill();
+                                let _ = c.wait();
                             }
                         }
                         // Fall through to new session creation below
+                    }
+                    ClaudeFollowupResult::FinalizeWithNotice { error, notice } => {
+                        debug_log(&format!(
+                            "Process follow-up streamed partial output before session death — suppressing replay: {}",
+                            error
+                        ));
+                        if let Some(handle) = PROCESS_HANDLES.lock().unwrap().remove(session_name) {
+                            let crate::services::session_backend::SessionHandle::Process {
+                                child,
+                                ..
+                            } = handle;
+                            let mut child_guard = child.lock().unwrap();
+                            if let Some(ref mut c) = *child_guard {
+                                let _ = c.kill();
+                                let _ = c.wait();
+                            }
+                        }
+                        emit_followup_restart_suppressed_notice(&sender, &notice);
+                        return Ok(());
                     }
                 }
             }
@@ -2051,7 +2136,7 @@ fn send_followup_to_process(
     session_name: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
-) -> Result<FollowupResult, String> {
+) -> Result<ClaudeFollowupResult, String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend};
     use crate::services::tmux_diagnostics::should_recreate_session_after_stdin_error;
 
@@ -2081,7 +2166,7 @@ fn send_followup_to_process(
                     "stdin pipe error triggers session recreation: {}",
                     e
                 ));
-                return Ok(FollowupResult::RecreateSession { error: e });
+                return Ok(ClaudeFollowupResult::RecreateSession { error: e });
             }
             return Err(e);
         }
@@ -2119,24 +2204,32 @@ fn send_followup_to_process(
         }),
     )?;
 
-    Ok(fold_read_output_result(
+    let outcome = classify_followup_result(
         read_result,
-        |offset| {
-            let _ = sender.send(StreamMessage::ProcessReady {
-                output_path: output_path.to_string(),
-                session_name: session_name.to_string(),
-                last_offset: offset,
-            });
-            FollowupResult::Delivered
-        },
-        |_| {
-            debug_log("process session died during follow-up — requesting recreation");
-            PROCESS_HANDLES.lock().unwrap().remove(session_name);
-            FollowupResult::RecreateSession {
-                error: "process died during follow-up output reading".to_string(),
-            }
-        },
-    ))
+        start_offset,
+        "process died during follow-up output reading",
+    );
+    if matches!(outcome, ClaudeFollowupResult::Delivered) {
+        let current_offset = std::fs::metadata(output_path)
+            .map(|meta| meta.len())
+            .unwrap_or(start_offset);
+        let _ = sender.send(StreamMessage::ProcessReady {
+            output_path: output_path.to_string(),
+            session_name: session_name.to_string(),
+            last_offset: current_offset,
+        });
+    } else if matches!(outcome, ClaudeFollowupResult::RecreateSession { .. }) {
+        debug_log(
+            "process session died during follow-up before new output — requesting recreation",
+        );
+        PROCESS_HANDLES.lock().unwrap().remove(session_name);
+    } else {
+        debug_log(
+            "process session died after streaming partial follow-up output — suppress replay",
+        );
+        PROCESS_HANDLES.lock().unwrap().remove(session_name);
+    }
+    Ok(outcome)
 }
 
 /// Global storage for ProcessBackend session handles.
@@ -2571,28 +2664,68 @@ mod tests {
         assert!(extras.is_empty());
     }
 
-    // ========== FollowupResult tests ==========
+    // ========== Follow-up recovery tests ==========
 
     #[test]
-    fn test_followup_result_maps_completed_to_delivered() {
+    fn test_classify_followup_result_maps_completed_to_delivered() {
         let read_result = ReadOutputResult::Completed { offset: 100 };
-        let followup =
-            crate::services::provider::followup_result_from_read_output_result(read_result, "died");
-        assert!(matches!(followup, FollowupResult::Delivered));
+        let followup = classify_followup_result(read_result, 100, "died");
+        assert!(matches!(followup, ClaudeFollowupResult::Delivered));
     }
 
     #[test]
-    fn test_followup_result_maps_session_died_to_recreate() {
+    fn test_classify_followup_result_recreates_when_no_new_output_was_streamed() {
         let read_result = ReadOutputResult::SessionDied { offset: 42 };
-        let followup = crate::services::provider::followup_result_from_read_output_result(
+        let followup = classify_followup_result(
             read_result,
+            42,
             "session died during follow-up output reading",
         );
         match followup {
-            FollowupResult::RecreateSession { error } => {
+            ClaudeFollowupResult::RecreateSession { error } => {
                 assert!(error.contains("session died"));
             }
             _ => panic!("Expected RecreateSession"),
+        }
+    }
+
+    #[test]
+    fn test_classify_followup_result_suppresses_replay_after_partial_output() {
+        let read_result = ReadOutputResult::SessionDied { offset: 84 };
+        let followup = classify_followup_result(
+            read_result,
+            42,
+            "session died during follow-up output reading",
+        );
+        match followup {
+            ClaudeFollowupResult::FinalizeWithNotice { error, notice } => {
+                assert!(error.contains("session died"));
+                assert_eq!(notice, FOLLOWUP_PARTIAL_OUTPUT_NOTICE);
+            }
+            _ => panic!("Expected FinalizeWithNotice"),
+        }
+    }
+
+    #[test]
+    fn test_emit_followup_restart_suppressed_notice_sends_text_then_done() {
+        use std::sync::mpsc;
+
+        let (sender, receiver) = mpsc::channel();
+        emit_followup_restart_suppressed_notice(&sender, FOLLOWUP_PARTIAL_OUTPUT_NOTICE);
+
+        match receiver.recv().unwrap() {
+            StreamMessage::Text { content } => {
+                assert!(content.contains(FOLLOWUP_PARTIAL_OUTPUT_NOTICE));
+            }
+            other => panic!("Expected Text notice, got {:?}", other),
+        }
+
+        match receiver.recv().unwrap() {
+            StreamMessage::Done { result, session_id } => {
+                assert!(result.is_empty());
+                assert!(session_id.is_none());
+            }
+            other => panic!("Expected Done after notice, got {:?}", other),
         }
     }
 
@@ -2621,7 +2754,7 @@ mod tests {
         let _ = std::fs::remove_file(&output_path);
 
         match result {
-            Ok(FollowupResult::RecreateSession { error }) => {
+            Ok(ClaudeFollowupResult::RecreateSession { error }) => {
                 assert!(error.contains("Failed to open input FIFO"));
             }
             other => panic!("Expected Ok(RecreateSession), got {:?}", other),
