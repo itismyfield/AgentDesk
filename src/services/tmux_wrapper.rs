@@ -92,7 +92,9 @@ pub fn run(
     };
 
     // Spawn Claude with piped stdin (kept open for multi-turn)
-    let mut child = match Command::new(claude_bin)
+    let mut claude_command = Command::new(claude_bin);
+    crate::services::platform::augment_exec_path(&mut claude_command, claude_bin);
+    let mut child = match claude_command
         .args(claude_args)
         .current_dir(&expanded_dir)
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")

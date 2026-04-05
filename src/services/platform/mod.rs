@@ -9,8 +9,10 @@ pub mod shell;
 pub mod tmux;
 
 pub use binary_resolver::{
-    apply_runtime_path, async_resolve_binary_with_login_shell, merged_runtime_path, resolve_binary,
-    resolve_binary_with_login_shell, resolve_login_shell_path,
+    BinaryResolution, apply_binary_resolution, apply_runtime_path,
+    async_resolve_binary_with_login_shell, augment_exec_path, merged_runtime_path,
+    prepare_provider_command, probe_resolved_binary_version, resolve_binary,
+    resolve_binary_with_login_shell, resolve_login_shell_path, resolve_provider_binary,
 };
 pub use dump_tool::capture_process_dump;
 pub use shell::{

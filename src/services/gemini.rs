@@ -3,52 +3,35 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
 use crate::services::claude::{self, CancelToken, StreamMessage};
 use crate::services::provider::ProviderKind;
 use crate::services::remote::RemoteProfile;
 
-static GEMINI_PATH: OnceLock<Option<String>> = OnceLock::new();
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
 
 pub fn resolve_gemini_path() -> Option<String> {
-    if let Some(path) = crate::services::platform::resolve_binary_with_login_shell("gemini") {
-        return Some(path);
-    }
-
-    let home = dirs::home_dir().unwrap_or_default();
-    let mut known_paths = vec![home.join(".local/bin/gemini"), home.join("bin/gemini")];
-    #[cfg(unix)]
-    {
-        known_paths.push(PathBuf::from("/usr/local/bin/gemini"));
-        known_paths.push(PathBuf::from("/opt/homebrew/bin/gemini"));
-    }
-    #[cfg(windows)]
-    {
-        known_paths.push(home.join("AppData/Local/Programs/gemini/gemini.exe"));
-        known_paths.push(PathBuf::from("C:/Program Files/gemini/gemini.exe"));
-    }
-
-    for path in &known_paths {
-        if path.is_file() {
-            return Some(path.display().to_string());
-        }
-    }
-
-    None
+    crate::services::platform::resolve_provider_binary("gemini").resolved_path
 }
 
-fn get_gemini_path() -> Option<&'static str> {
-    GEMINI_PATH.get_or_init(resolve_gemini_path).as_deref()
+fn resolve_gemini_binary() -> crate::services::platform::BinaryResolution {
+    crate::services::platform::resolve_provider_binary("gemini")
+}
+
+fn get_gemini_path() -> Option<String> {
+    resolve_gemini_path()
 }
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    let gemini_bin = get_gemini_path().ok_or_else(|| "Gemini CLI not found".to_string())?;
+    let resolution = resolve_gemini_binary();
+    let gemini_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Gemini CLI not found".to_string())?;
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut command = Command::new(gemini_bin);
-    crate::services::platform::apply_runtime_path(&mut command);
+    let mut command = Command::new(&gemini_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     let output = command
         .args(build_exec_args(prompt, None, None))
         .current_dir(working_dir)
@@ -96,11 +79,15 @@ pub fn execute_command_streaming(
         return Err("Gemini provider does not support remote execution yet".to_string());
     }
 
-    let gemini_bin = get_gemini_path().ok_or_else(|| "Gemini CLI not found".to_string())?;
+    let resolution = resolve_gemini_binary();
+    let gemini_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Gemini CLI not found".to_string())?;
     let prompt = compose_gemini_prompt(prompt, system_prompt, allowed_tools);
 
-    let mut command = Command::new(gemini_bin);
-    crate::services::platform::apply_runtime_path(&mut command);
+    let mut command = Command::new(&gemini_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     let mut child = command
         .args(build_exec_args(&prompt, model, session_id))
         .current_dir(working_dir)

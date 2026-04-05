@@ -24,6 +24,7 @@ pub(crate) use cli::agentdesk_runtime_root;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 // ── Clap CLI definition ──────────────────────────────────────
@@ -51,7 +52,7 @@ enum Commands {
         /// Discord channel ID for restart completion report
         #[arg(long)]
         report_channel_id: Option<u64>,
-        /// Provider for restart report (claude, codex, or gemini)
+        /// Provider for restart report (claude, codex, gemini, or qwen)
         #[arg(long, value_enum)]
         report_provider: Option<ReportProvider>,
         /// Existing message ID to edit for restart report
@@ -228,6 +229,11 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Migration helpers
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateAction,
+    },
     /// Call any API endpoint (curl replacement)
     Api {
         /// HTTP method (GET, POST, PATCH, PUT, DELETE)
@@ -290,10 +296,25 @@ enum ConfigAction {
     },
 }
 
+#[derive(Subcommand)]
+enum MigrateAction {
+    /// Export OpenClaw env files and runtime secrets into the AgentDesk release root
+    Openclaw {
+        /// Source path (`openclaw.json`, OpenClaw config dir, or OpenClaw repo root)
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// Override AgentDesk runtime root (defaults to `~/.adk/release`)
+        #[arg(long)]
+        runtime_root: Option<PathBuf>,
+    },
+}
+
 #[derive(Clone, ValueEnum)]
 enum ReportProvider {
     Claude,
     Codex,
+    Gemini,
+    Qwen,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -503,6 +524,14 @@ fn main() -> Result<()> {
                     ConfigAction::Set { json } => cli::client::cmd_config_set(&json),
                 });
             }
+            Some(Commands::Migrate { action }) => {
+                return exit_for_cli(match action {
+                    MigrateAction::Openclaw {
+                        source,
+                        runtime_root,
+                    } => cli::handle_migrate_openclaw(source, runtime_root),
+                });
+            }
             Some(Commands::Api { method, path, body }) => {
                 return exit_for_cli(cli::client::cmd_api(&method, &path, body.as_deref()));
             }
@@ -610,6 +639,8 @@ fn build_restart_report_context(
             let provider = match provider_arg {
                 ReportProvider::Claude => ProviderKind::Claude,
                 ReportProvider::Codex => ProviderKind::Codex,
+                ReportProvider::Gemini => ProviderKind::Gemini,
+                ReportProvider::Qwen => ProviderKind::Qwen,
             };
             Ok(Some(RestartReportContext {
                 provider,

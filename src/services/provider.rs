@@ -1,5 +1,6 @@
 use crate::utils::format::safe_prefix;
-use std::process::Command;
+
+use crate::services::platform::BinaryResolution;
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -36,8 +37,9 @@ pub struct ProviderCapabilities {
 pub struct ProviderRuntimeProbe {
     pub provider: ProviderKind,
     pub capabilities: ProviderCapabilities,
-    pub binary_path: Option<String>,
+    pub resolution: BinaryResolution,
     pub version: Option<String>,
+    pub probe_failure_kind: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,29 +141,18 @@ impl ProviderKind {
 
     pub fn probe_runtime(&self) -> Option<ProviderRuntimeProbe> {
         let capabilities = self.capabilities()?;
-        let binary_path = self.resolve_runtime_path();
-        let version = binary_path.as_ref().and_then(|path| {
-            let mut command = Command::new(path);
-            crate::services::platform::apply_runtime_path(&mut command);
-            command
-                .arg("--version")
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| {
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if stdout.is_empty() {
-                        None
-                    } else {
-                        Some(stdout)
-                    }
-                })
-        });
+        let resolution = crate::services::platform::resolve_provider_binary(self.as_str());
+        let (version, probe_failure_kind) = resolution
+            .resolved_path
+            .as_ref()
+            .map(|path| crate::services::platform::probe_resolved_binary_version(path, &resolution))
+            .unwrap_or((None, None));
         Some(ProviderRuntimeProbe {
             provider: self.clone(),
             capabilities,
-            binary_path,
+            resolution,
             version,
+            probe_failure_kind,
         })
     }
 
