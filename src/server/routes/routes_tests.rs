@@ -4382,3 +4382,264 @@ async fn auto_queue_reset_completes_generated_and_pending_runs() {
     assert_eq!(pending_run_status, "completed");
     assert_eq!(remaining_entries, 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_reset_with_agent_id_only_clears_matching_agent_scope() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-reset-a");
+    seed_agent(&db, "agent-reset-b");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-reset-a-generated",
+        1713,
+        "ready",
+        "agent-reset-a",
+    );
+    seed_auto_queue_card(&db, "card-reset-a-active", 1714, "ready", "agent-reset-a");
+    seed_auto_queue_card(&db, "card-reset-b-active", 1715, "ready", "agent-reset-b");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-reset-a-generated', 'test-repo', 'agent-reset-a', 'generated', datetime('now', '-3 minutes'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-reset-a-active', 'test-repo', 'agent-reset-a', 'active', datetime('now', '-2 minutes'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-reset-b-active', 'test-repo', 'agent-reset-b', 'active', datetime('now', '-1 minutes'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-reset-a-generated', 'run-reset-a-generated', 'card-reset-a-generated', 'agent-reset-a', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-reset-a-active', 'run-reset-a-active', 'card-reset-a-active', 'agent-reset-a', 'dispatched', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-reset-b-active', 'run-reset-b-active', 'card-reset-b-active', 'agent-reset-b', 'dispatched', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/reset")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"agent_id":"agent-reset-a"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["deleted_entries"], 2);
+    assert_eq!(json["completed_runs"], 2);
+    assert_eq!(json["protected_active_runs"], 0);
+
+    let conn = db.lock().unwrap();
+    let run_a_generated: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-reset-a-generated'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let run_a_active: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-reset-a-active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let run_b_active: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-reset-b-active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let remaining_agent_b_entries: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_entries WHERE agent_id = 'agent-reset-b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let remaining_entries: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auto_queue_entries", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    drop(conn);
+
+    assert_eq!(run_a_generated, "completed");
+    assert_eq!(run_a_active, "completed");
+    assert_eq!(run_b_active, "active");
+    assert_eq!(remaining_agent_b_entries, 1);
+    assert_eq!(remaining_entries, 1);
+
+    let status_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auto-queue/status?agent_id=agent-reset-b")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let status_body = axum::body::to_bytes(status_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+    assert_eq!(status_json["run"]["id"], "run-reset-b-active");
+    assert_eq!(status_json["run"]["status"], "active");
+    assert_eq!(
+        status_json["entries"]
+            .as_array()
+            .map(|entries| entries.len()),
+        Some(1)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_reset_without_agent_id_preserves_active_runs() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-reset-global-active");
+    seed_agent(&db, "agent-reset-global-pending");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-reset-global-active",
+        1716,
+        "ready",
+        "agent-reset-global-active",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-reset-global-pending",
+        1717,
+        "ready",
+        "agent-reset-global-pending",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-reset-global-active', 'test-repo', 'agent-reset-global-active', 'active', datetime('now', '-2 minutes'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+             VALUES ('run-reset-global-pending', 'test-repo', 'agent-reset-global-pending', 'pending', datetime('now', '-1 minutes'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-reset-global-active', 'run-reset-global-active', 'card-reset-global-active', 'agent-reset-global-active', 'dispatched', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-reset-global-pending', 'run-reset-global-pending', 'card-reset-global-pending', 'agent-reset-global-pending', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/reset")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["deleted_entries"], 1);
+    assert_eq!(json["completed_runs"], 1);
+    assert_eq!(json["protected_active_runs"], 1);
+    assert_eq!(
+        json["warning"],
+        "global reset preserved 1 active run(s); use agent_id to reset a specific queue"
+    );
+
+    let conn = db.lock().unwrap();
+    let active_run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-reset-global-active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let pending_run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-reset-global-pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let active_entries: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = 'run-reset-global-active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let remaining_entries: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auto_queue_entries", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    drop(conn);
+
+    assert_eq!(active_run_status, "active");
+    assert_eq!(pending_run_status, "completed");
+    assert_eq!(active_entries, 1);
+    assert_eq!(remaining_entries, 1);
+}
