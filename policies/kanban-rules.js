@@ -483,51 +483,9 @@ var rules = {
       agentdesk.log.info("[kanban] card " + payload.card_id + " entered blocked state");
     }
 
-    // → pendingState: create pm-decision dispatch + notify PMD
+    // → pendingState: log only (pm-decision dispatch removed — not effective in practice)
     if (payload.to === pendingState) {
-      var blockInfo = agentdesk.db.query(
-        "SELECT blocked_reason, assigned_agent_id, title FROM kanban_cards WHERE id = ?",
-        [payload.card_id]
-      );
-      var reason = "PM 결정 필요";
-      var agentId = "";
-      var title = payload.card_id;
-      if (blockInfo.length > 0) {
-        reason = blockInfo[0].blocked_reason || reason;
-        agentId = blockInfo[0].assigned_agent_id || "";
-        title = blockInfo[0].title || title;
-      }
-
-      // #267: Create pm-decision dispatch to PMD — the dispatch itself
-      // sends a notification via dispatch outbox, so only fall back to
-      // the canonical pm_pending buffer when dispatch creation fails.
-      var dispatchSent = false;
-      var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
-      if (pmdChannel) {
-        var pmdAgent = agentdesk.db.query(
-          "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? LIMIT 1",
-          [pmdChannel, pmdChannel]
-        );
-        if (pmdAgent.length > 0) {
-          try {
-            agentdesk.dispatch.create(
-              payload.card_id,
-              pmdAgent[0].id,
-              "pm-decision",
-              "[PM Decision] " + title
-            );
-            dispatchSent = true;
-          } catch (e) {
-            agentdesk.log.warn("[kanban] pm-decision dispatch failed: " + e);
-          }
-        } else {
-          agentdesk.log.warn("[kanban] PMD agent not found for channel " + pmdChannel + " — skipping pm-decision dispatch");
-        }
-      }
-
-      if (!dispatchSent) {
-        notifyPMD(payload.card_id, reason);
-      }
+      agentdesk.log.info("[kanban] card " + payload.card_id + " entered pendingState via force-transition");
     }
   },
 
