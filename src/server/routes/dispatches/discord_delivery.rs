@@ -813,7 +813,7 @@ pub(super) async fn send_review_result_to_primary(
                 "SELECT r.unified_thread_id, COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
                  FROM auto_queue_runs r \
                  JOIN auto_queue_entries e ON e.run_id = r.id \
-                 WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
+                 WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status IN ('active', 'paused') \
                  AND r.unified_thread_id IS NOT NULL",
                 [card_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
