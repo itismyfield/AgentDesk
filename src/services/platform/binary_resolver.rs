@@ -604,17 +604,22 @@ mod tests {
 
     #[test]
     fn standard_fallback_dirs_include_common_entries() {
-        let dirs = standard_fallback_dirs()
-            .into_iter()
-            .map(|entry| entry.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+        let dirs = standard_fallback_dirs();
 
         #[cfg(unix)]
-        assert!(dirs.iter().any(|entry| entry == "/usr/local/bin"));
-        assert!(dirs.iter().any(|entry| entry.ends_with("/.volta/bin")));
+        assert!(
+            dirs.iter()
+                .any(|entry| entry == Path::new("/usr/local/bin"))
+        );
+
+        let volta_suffix = Path::new(".volta").join("bin");
+        assert!(dirs.iter().any(|entry| entry.ends_with(&volta_suffix)));
 
         #[cfg(target_os = "macos")]
-        assert!(dirs.iter().any(|entry| entry == "/opt/homebrew/bin"));
+        assert!(
+            dirs.iter()
+                .any(|entry| entry == Path::new("/opt/homebrew/bin"))
+        );
     }
 
     #[cfg(unix)]
