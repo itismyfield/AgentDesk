@@ -613,7 +613,11 @@ fn github_sync_on_transition(
     }
 }
 
+/// Cooldown period for violation alerts (30 minutes).
+const VIOLATION_COOLDOWN_SECS: i64 = 1800;
+
 /// Send a violation alert to the PMD/kanban-manager channel via announce bot.
+/// Applies dedup cooldown (30 min per card+from+to) and suppresses API-source alerts.
 fn notify_pmd_violation(
     conn: &rusqlite::Connection,
     card_id: &str,
@@ -622,6 +626,37 @@ fn notify_pmd_violation(
     source: &str,
     reason: &str,
 ) {
+    // #200: API callers already receive error responses — no need to alert PMD.
+    if source == "api" {
+        tracing::debug!(
+            "[kanban] Suppressing violation alert for api source: {from} → {to} card {card_id}"
+        );
+        return;
+    }
+
+    // #200: Dedup cooldown — skip if same card+from+to was alerted within 30 min.
+    let cooldown_key = format!("violation_sent:{card_id}:{from}:{to}");
+    let recently_sent: bool = conn
+        .query_row(
+            "SELECT 1 FROM kv_meta WHERE key = ?1 \
+             AND (expires_at IS NULL OR expires_at > datetime('now'))",
+            [&cooldown_key],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if recently_sent {
+        tracing::debug!(
+            "[kanban] Violation alert cooldown active for {from} → {to} card {card_id}"
+        );
+        return;
+    }
+    // Record cooldown with TTL
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) \
+         VALUES (?1, ?2, datetime('now', '+' || ?3 || ' seconds'))",
+        rusqlite::params![cooldown_key, "1", VIOLATION_COOLDOWN_SECS.to_string()],
+    );
+
     // Look up card title for the notification
     let title: String = conn
         .query_row(
