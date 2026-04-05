@@ -39,6 +39,8 @@ import {
   LayoutDashboard,
   Users,
   FileText,
+  MessageSquare,
+  Puzzle,
   Wifi,
   WifiOff,
   Settings,
@@ -307,6 +309,8 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
     kanban: <KanbanSquare size={20} />,
     agents: <Users size={20} />,
     meetings: <FileText size={20} />,
+    chat: <MessageSquare size={20} />,
+    skills: <Puzzle size={20} />,
     settings: <Settings size={20} />,
   };
   const navBadges: Record<string, { badge?: number; badgeColor?: string }> = {
