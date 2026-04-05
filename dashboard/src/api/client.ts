@@ -674,7 +674,8 @@ export async function getAgentTimeline(agentId: string, limit = 30): Promise<Tim
 export interface DiscordBinding {
   agentId: string;
   channelId: string;
-  channelName?: string;
+  counterModelChannelId?: string;
+  provider?: string;
   source?: string;
 }
 

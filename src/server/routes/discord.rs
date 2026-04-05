@@ -53,7 +53,8 @@ pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<s
             Ok(json!({
                 "agentId": row.get::<_, String>(0)?,
                 "channelId": bindings.primary_channel(),
-                "channelName": bindings.counter_model_channel(),
+                "counterModelChannelId": bindings.counter_model_channel(),
+                "provider": bindings.provider,
                 "discord_channel_id": bindings.discord_channel_id,
                 "discord_channel_alt": bindings.discord_channel_alt,
                 "discord_channel_cc": bindings.discord_channel_cc,

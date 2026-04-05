@@ -988,9 +988,10 @@ var timeouts = {
           }
         }
         if (agentId === "?") {
+          // #304: search all channel columns for reverse lookup
           var agentRows = agentdesk.db.query(
-            "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? LIMIT 1",
-            [inf.channel_id, inf.channel_id]
+            "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? OR discord_channel_cc = ? OR discord_channel_cdx = ? LIMIT 1",
+            [inf.channel_id, inf.channel_id, inf.channel_id, inf.channel_id]
           );
           if (agentRows.length > 0) agentId = agentRows[0].id;
         }
@@ -1192,10 +1193,11 @@ var timeouts = {
             [cooldownKey, "" + now]
           );
           // Discord notification
-          var agent = agentdesk.db.query("SELECT discord_channel_id FROM agents WHERE id = ?", [s.agent_id]);
-          if (agent.length > 0 && agent[0].discord_channel_id) {
+          // #304: resolve primary channel via centralized resolver
+          var compactCh = agentdesk.agents.resolvePrimaryChannel(s.agent_id);
+          if (compactCh) {
             sendNotifyAlert(
-              "channel:" + agent[0].discord_channel_id,
+              "channel:" + compactCh,
               "⚡ 컨텍스트 자동 compact 실행 (" + Math.round(pct) + "% → " + s.session_key + ")"
             );
           }
@@ -1217,10 +1219,11 @@ var timeouts = {
               "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
               [cooldownKey, "" + now]
             );
-            var agent2 = agentdesk.db.query("SELECT discord_channel_id FROM agents WHERE id = ?", [s.agent_id]);
-            if (agent2.length > 0 && agent2[0].discord_channel_id) {
+            // #304: resolve primary channel via centralized resolver
+            var clearCh = agentdesk.agents.resolvePrimaryChannel(s.agent_id);
+            if (clearCh) {
               sendNotifyAlert(
-                "channel:" + agent2[0].discord_channel_id,
+                "channel:" + clearCh,
                 "🧹 컨텍스트 자동 clear 실행 (" + Math.round(pct) + "%, idle " + Math.round(idleMin) + "분 → " + s.session_key + ")"
               );
             }

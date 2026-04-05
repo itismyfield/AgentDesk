@@ -85,7 +85,7 @@ function getBindingSourceLabel(source: string | undefined, isKo: boolean): strin
 
 function getBindingOptionLabel(binding: DiscordBinding, isKo: boolean): string {
   const source = getBindingSourceLabel(binding.source, isKo);
-  const channel = binding.channelName ? `#${binding.channelName}` : binding.channelId;
+  const channel = binding.channelId;
   return `${source} · ${channel}`;
 }
 

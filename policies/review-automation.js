@@ -117,27 +117,22 @@ var reviewAutomation = {
 
     if (!card.assigned_agent_id) return;
 
-    // Get agent's alternate channel (CDX for Claude agents, CC for Codex)
-    var agentRow = agentdesk.db.query(
-      "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?",
-      [card.assigned_agent_id]
-    );
-    if (agentRow.length === 0 || !agentRow[0].discord_channel_alt) {
-      // No alt channel → PM decision (not silent done skip)
+    // Get agent's counter-model channel via centralized resolver (#304)
+    var counterChannelId = agentdesk.agents.resolveCounterModelChannel(card.assigned_agent_id);
+    if (!counterChannelId) {
+      // No counter-model channel → PM decision (not silent done skip)
       agentdesk.kanban.setStatus(card.id, pendingState);
       agentdesk.db.execute(
-        "UPDATE kanban_cards SET blocked_reason = 'No alt channel for counter-model review — PM decision needed' WHERE id = ?",
+        "UPDATE kanban_cards SET blocked_reason = 'No counter-model channel for review — PM decision needed' WHERE id = ?",
         [card.id]
       );
       agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
       // #117: sync canonical review state
       agentdesk.reviewState.sync(card.id, "idle");
       agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + " → " + pendingState);
-      notifyPmdPendingDecision(card.id, "카운터모델 alt 채널 없음 — PM 판단 필요");
+      notifyPmdPendingDecision(card.id, "카운터모델 채널 없음 — PM 판단 필요");
       return;
     }
-
-    var counterChannelId = agentRow[0].discord_channel_alt;
 
     // Create review dispatch (targets same agent — counter channel picks it up)
     // #245: Log agent_id for diagnostics — "project-agentdesk-cdx" phantom agent was traced here

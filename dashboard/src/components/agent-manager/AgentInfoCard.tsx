@@ -80,17 +80,9 @@ const ACTIVITY_SOURCE_COLORS: Record<string, string> = {
   idle: "#64748b",
 };
 
-const GENERIC_BINDING_NAMES = new Set(["RoleMap", "Primary", "Alt", "Codex"]);
-
-
 function inferBindingSource(binding: DiscordBinding): string {
   if (binding.channelId.startsWith("dm:")) return "dm";
   if (binding.source) return binding.source;
-  const normalized = (binding.channelName || "").trim().toLowerCase();
-  if (normalized === "rolemap") return "role-map";
-  if (normalized === "primary") return "primary";
-  if (normalized === "alt") return "alt";
-  if (normalized === "codex") return "codex";
   return "channel";
 }
 
@@ -757,11 +749,10 @@ export default function AgentInfoCard({
               {discordBindings.map((b) => {
                 const source = inferBindingSource(b);
                 const sourceLabel = bindingSourceLabel(source);
-                const title =
-                  b.channelName && !GENERIC_BINDING_NAMES.has(b.channelName)
-                    ? b.channelName
-                    : b.channelId;
-                const subtitle = title === b.channelId ? null : b.channelId;
+                const title = b.channelId;
+                const subtitle = b.counterModelChannelId && b.counterModelChannelId !== b.channelId
+                  ? `counter: ${b.counterModelChannelId}`
+                  : null;
 
                 return (
                   <div
