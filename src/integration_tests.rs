@@ -4,7 +4,11 @@
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
 
     use crate::db;
     use crate::dispatch;
@@ -59,6 +63,162 @@ mod tests {
             rusqlite::params![dispatch_id, card_id],
         )
         .unwrap();
+    }
+
+    fn seed_repo(db: &db::Db, repo_id: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO github_repos (id, display_name, sync_enabled) VALUES (?1, ?1, 1)",
+            [repo_id],
+        )
+        .unwrap();
+    }
+
+    fn seed_card_with_repo(
+        db: &db::Db,
+        card_id: &str,
+        status: &str,
+        repo_id: &str,
+        issue_number: i64,
+        active_thread_id: Option<&str>,
+    ) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards \
+             (id, title, status, assigned_agent_id, repo_id, github_issue_number, github_issue_url, active_thread_id, created_at, updated_at) \
+             VALUES (?1, 'Codex Card', ?2, 'agent-1', ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))",
+            rusqlite::params![
+                card_id,
+                status,
+                repo_id,
+                issue_number,
+                format!("https://github.com/{repo_id}/issues/{issue_number}"),
+                active_thread_id
+            ],
+        )
+        .unwrap();
+    }
+
+    fn seed_thread_session(db: &db::Db, session_key: &str, thread_channel_id: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_key, agent_id, provider, status, thread_channel_id, last_heartbeat) \
+             VALUES (?1, 'agent-1', 'codex', 'idle', ?2, datetime('now'))",
+            rusqlite::params![session_key, thread_channel_id],
+        )
+        .unwrap();
+    }
+
+    fn set_kv(db: &db::Db, key: &str, value: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .unwrap();
+    }
+
+    fn count_dispatches_by_type(db: &db::Db, card_id: &str, dispatch_type: &str) -> i64 {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = ?1 AND dispatch_type = ?2",
+            rusqlite::params![card_id, dispatch_type],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn latest_dispatch_title(db: &db::Db, card_id: &str, dispatch_type: &str) -> Option<String> {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT title FROM task_dispatches WHERE kanban_card_id = ?1 AND dispatch_type = ?2 ORDER BY created_at DESC, id DESC LIMIT 1",
+            rusqlite::params![card_id, dispatch_type],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    fn review_state_value(db: &db::Db, card_id: &str) -> Option<String> {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT state FROM card_review_state WHERE card_id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    fn message_outbox_rows(db: &db::Db) -> Vec<(String, String)> {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT target, content FROM message_outbox ORDER BY id ASC")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn gh_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct MockGhEnv {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        old_path: Option<OsString>,
+        log_path: PathBuf,
+    }
+
+    impl Drop for MockGhEnv {
+        fn drop(&mut self) {
+            if let Some(old_path) = &self.old_path {
+                unsafe {
+                    std::env::set_var("PATH", old_path);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var("PATH");
+                }
+            }
+        }
+    }
+
+    fn install_mock_gh(script_body: &str) -> MockGhEnv {
+        let lock = gh_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let gh_path = dir.path().join("gh");
+        let log_path = dir.path().join("gh.log");
+
+        let script = format!(
+            "#!/bin/sh\nset -eu\nlog_file=\"$(dirname \"$0\")/gh.log\"\nprintf '%s\\n' \"$*\" >> \"$log_file\"\n{}\n",
+            script_body
+        );
+        fs::write(&gh_path, script).unwrap();
+        let mut perms = fs::metadata(&gh_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&gh_path, perms).unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let new_path = match &old_path {
+            Some(existing) => format!("{}:{}", dir.path().display(), existing.to_string_lossy()),
+            None => dir.path().display().to_string(),
+        };
+        unsafe {
+            std::env::set_var("PATH", new_path);
+        }
+
+        MockGhEnv {
+            _lock: lock,
+            _dir: dir,
+            old_path,
+            log_path,
+        }
+    }
+
+    fn gh_log(env: &MockGhEnv) -> String {
+        fs::read_to_string(&env.log_path).unwrap_or_default()
     }
 
     fn ensure_auto_queue_tables(db: &db::Db) {
@@ -1936,6 +2096,225 @@ mod tests {
             review_count, 1,
             "#195: rework completion must trigger OnReviewEnter → review dispatch"
         );
+    }
+
+    #[test]
+    fn scenario_208_on_tick_creates_codex_rework_and_dedups_review() {
+        let _gh = install_mock_gh(
+            r#"
+case "$1:$2" in
+  pr:list)
+    if printf '%s\n' "$*" | grep -q -- "--state merged"; then
+      echo '[]'
+    else
+      echo '[{"number":323,"headRefName":"wt/card-208","title":"fix: close review gap (#208)","mergeable":"MERGEABLE"}]'
+    fi
+    ;;
+  api:repos/test/repo/pulls/323/reviews)
+    cat <<'JSON'
+[{"id":9001,"state":"COMMENTED","body":"P1/P2 findings","submitted_at":"2026-04-06T00:00:00Z","user":{"login":"chatgpt-codex-connector"}}]
+JSON
+    ;;
+  api:graphql)
+    cat <<'JSON'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread-1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"id":"comment-1","body":"P1 force-transition leaves dispatch alive","path":"src/server/routes/github.rs","line":77,"url":"https://example.com/comment-1","author":{"login":"chatgpt-codex-connector"},"pullRequestReview":{"id":"PRR_9001","state":"COMMENTED","author":{"login":"chatgpt-codex-connector"}}}]}}]}}}}}
+JSON
+    ;;
+  *)
+    echo '[]'
+    ;;
+esac
+"#,
+        );
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-208", "done", "test/repo", 208, None);
+        seed_thread_session(&db, "s-208", "thread-208");
+        set_kv(&db, "merge_automation_enabled", "true");
+        set_kv(
+            &db,
+            "pr:card-208",
+            r#"{"number":323,"repo":"test/repo","branch":"wt/card-208"}"#,
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(get_card_status(&db, "card-208"), "in_progress");
+        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 1);
+        let title = latest_dispatch_title(&db, "card-208", "rework").unwrap();
+        assert!(title.contains("src/server/routes/github.rs:77"));
+        assert!(title.contains("P1 force-transition leaves dispatch alive"));
+        assert_eq!(
+            review_state_value(&db, "card-208").as_deref(),
+            Some("rework_pending")
+        );
+
+        let messages = message_outbox_rows(&db);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "thread-208");
+        assert!(messages[0].1.contains("PR #323"));
+        assert!(messages[0].1.contains("rework dispatch"));
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(count_dispatches_by_type(&db, "card-208", "rework"), 1);
+        assert_eq!(message_outbox_rows(&db).len(), 1);
+    }
+
+    #[test]
+    fn scenario_208_on_tick_notifies_clean_codex_pass() {
+        let _gh = install_mock_gh(
+            r#"
+case "$1:$2" in
+  pr:list)
+    if printf '%s\n' "$*" | grep -q -- "--state merged"; then
+      echo '[]'
+    else
+      echo '[{"number":324,"headRefName":"wt/card-208-pass","title":"fix: no inline findings (#209)","mergeable":"MERGEABLE"}]'
+    fi
+    ;;
+  api:repos/test/repo/pulls/324/reviews)
+    cat <<'JSON'
+[{"id":9002,"state":"APPROVED","body":"LGTM","submitted_at":"2026-04-06T00:05:00Z","user":{"login":"chatgpt-codex-connector"}}]
+JSON
+    ;;
+  api:graphql)
+    cat <<'JSON'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}
+JSON
+    ;;
+  *)
+    echo '[]'
+    ;;
+esac
+"#,
+        );
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-208-pass",
+            "review",
+            "test/repo",
+            209,
+            Some("thread-pass"),
+        );
+        set_kv(&db, "merge_automation_enabled", "true");
+        set_kv(
+            &db,
+            "pr:card-208-pass",
+            r#"{"number":324,"repo":"test/repo","branch":"wt/card-208-pass"}"#,
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(count_dispatches_by_type(&db, "card-208-pass", "rework"), 0);
+
+        let messages = message_outbox_rows(&db);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "thread-pass");
+        assert!(messages[0].1.contains("Codex 리뷰 통과"));
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(message_outbox_rows(&db).len(), 1);
+    }
+
+    #[test]
+    fn scenario_208_merge_guard_blocks_unresolved_codex_comments() {
+        let gh = install_mock_gh(
+            r#"
+case "$1:$2" in
+  pr:view)
+    echo 'itismyfield'
+    ;;
+  api:repos/test/repo/pulls/325/reviews)
+    cat <<'JSON'
+[{"id":9003,"state":"COMMENTED","body":"P2 findings","submitted_at":"2026-04-06T00:10:00Z","user":{"login":"chatgpt-codex-connector"}}]
+JSON
+    ;;
+  api:graphql)
+    cat <<'JSON'
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread-2","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"id":"comment-2","body":"P2 orphan recovery revives reverted card","path":"src/kanban.rs","line":212,"url":"https://example.com/comment-2","author":{"login":"chatgpt-codex-connector"},"pullRequestReview":{"id":"PRR_9003","state":"COMMENTED","author":{"login":"chatgpt-codex-connector"}}}]}}]}}}}}
+JSON
+    ;;
+  pr:merge)
+    echo 'merged'
+    ;;
+  *)
+    echo '[]'
+    ;;
+esac
+"#,
+        );
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-208-guard", "review", "test/repo", 210, None);
+        seed_thread_session(&db, "s-208-guard", "thread-guard");
+        set_kv(&db, "merge_automation_enabled", "true");
+        set_kv(&db, "merge_allowed_authors", "itismyfield");
+        set_kv(
+            &db,
+            "pr:card-208-guard",
+            r#"{"number":325,"repo":"test/repo","branch":"wt/card-208-guard"}"#,
+        );
+
+        assert!(
+            kanban::transition_status_with_opts(
+                &db,
+                &engine,
+                "card-208-guard",
+                "done",
+                "test",
+                true,
+            )
+            .is_ok()
+        );
+
+        assert_eq!(get_card_status(&db, "card-208-guard"), "done");
+
+        let log = gh_log(&gh);
+        assert!(log.contains("pr view 325"));
+        assert!(
+            !log.contains("pr merge 325"),
+            "merge guard must prevent gh pr merge when unresolved Codex comments exist"
+        );
+
+        let messages = message_outbox_rows(&db);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "thread-guard");
+        assert!(messages[0].1.contains("merge를 차단했습니다"));
+
+        let conn = db.lock().unwrap();
+        let blocked: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kv_meta WHERE key = 'merge_blocked:card-208-guard'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocked, 1);
     }
 
     // ── #256: Consultation dispatch does not advance card from requested ────

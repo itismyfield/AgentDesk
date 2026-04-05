@@ -1151,6 +1151,111 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         })?,
     )?;
 
+    let db_reopen = db.clone();
+    kanban_obj.set(
+        "__reopenRaw",
+        Function::new(ctx.clone(), move |card_id: String, new_status: String| -> String {
+            let conn = match db_reopen.separate_conn() {
+                Ok(c) => c,
+                Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
+            };
+
+            let old_status: String = match conn.query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [&card_id],
+                |row| row.get(0),
+            ) {
+                Ok(s) => s,
+                Err(_) => return r#"{"error":"card not found"}"#.to_string(),
+            };
+
+            crate::pipeline::ensure_loaded();
+            let repo_id: Option<String> = conn
+                .query_row(
+                    "SELECT repo_id FROM kanban_cards WHERE id = ?1",
+                    [&card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            let agent_id: Option<String> = conn
+                .query_row(
+                    "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                    [&card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            let effective =
+                crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref());
+            let pipeline = &effective;
+
+            if !pipeline.is_terminal(&old_status) {
+                return format!(
+                    r#"{{"error":"reopen requires terminal card (current: {})"}}"#,
+                    old_status
+                );
+            }
+            if pipeline.is_terminal(&new_status) {
+                return format!(
+                    r#"{{"error":"reopen target must be non-terminal (target: {})"}}"#,
+                    new_status
+                );
+            }
+            if old_status == new_status {
+                return format!(r#"{{"ok":true,"changed":false,"status":"{}"}}"#, new_status);
+            }
+
+            let clock_extra = match pipeline.clock_for_state(&new_status) {
+                Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
+                    format!(", {} = COALESCE({}, datetime('now'))", clock.set, clock.set)
+                }
+                Some(clock) => format!(", {} = datetime('now')", clock.set),
+                None => String::new(),
+            };
+
+            let sql = format!(
+                "UPDATE kanban_cards SET status = ?1, completed_at = NULL, updated_at = datetime('now'){} WHERE id = ?2",
+                clock_extra
+            );
+            if let Err(e) = conn.execute(&sql, rusqlite::params![new_status, card_id]) {
+                return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
+            }
+
+            conn.execute(
+                "UPDATE auto_queue_entries SET status = 'dispatched', completed_at = NULL \
+                 WHERE kanban_card_id = ?1 AND status = 'done'",
+                [&card_id],
+            )
+            .ok();
+
+            crate::kanban::correct_tn_to_fn_on_reopen(&db_reopen, &card_id);
+
+            let has_hooks = pipeline
+                .hooks_for_state(&new_status)
+                .map_or(false, |h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
+            let is_review_enter = pipeline.hooks_for_state(&new_status).map_or(false, |h| {
+                h.on_enter.iter().any(|n| n == "OnReviewEnter")
+            });
+            if !has_hooks {
+                review_state_sync_on_conn(
+                    &conn,
+                    &serde_json::json!({"card_id": card_id, "state": "idle"}).to_string(),
+                );
+            } else if is_review_enter {
+                review_state_sync_on_conn(
+                    &conn,
+                    &serde_json::json!({"card_id": card_id, "state": "reviewing"}).to_string(),
+                );
+            }
+
+            format!(
+                r#"{{"ok":true,"changed":true,"from":"{}","to":"{}","card_id":"{}","reopened":true}}"#,
+                old_status, new_status, card_id
+            )
+        })?,
+    )?;
+
     let db_get = db.clone();
     kanban_obj.set(
         "__getCardRaw",
@@ -1300,6 +1405,7 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         r#"
         (function() {
             var raw = agentdesk.kanban.__setStatusRaw;
+            var reopenRaw = agentdesk.kanban.__reopenRaw;
             var getRaw = agentdesk.kanban.__getCardRaw;
             agentdesk.kanban.__pendingTransitions = [];
             agentdesk.kanban.setStatus = function(cardId, newStatus) {
@@ -1314,6 +1420,21 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     agentdesk.log.info("[setStatus] " + result.card_id + " " + result.from + " -> " + result.to + " (pendingLen=" + agentdesk.kanban.__pendingTransitions.length + ")");
                 } else {
                     agentdesk.log.info("[setStatus] " + cardId + " -> " + newStatus + " (no-change)");
+                }
+                return result;
+            };
+            agentdesk.kanban.reopen = function(cardId, newStatus) {
+                var result = JSON.parse(reopenRaw(cardId, newStatus));
+                if (result.error) throw new Error(result.error);
+                if (result.changed) {
+                    agentdesk.kanban.__pendingTransitions.push({
+                        card_id: result.card_id,
+                        from: result.from,
+                        to: result.to
+                    });
+                    agentdesk.log.info("[reopen] " + result.card_id + " " + result.from + " -> " + result.to + " (pendingLen=" + agentdesk.kanban.__pendingTransitions.length + ")");
+                } else {
+                    agentdesk.log.info("[reopen] " + cardId + " -> " + newStatus + " (no-change)");
                 }
                 return result;
             };
