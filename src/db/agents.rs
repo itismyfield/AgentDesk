@@ -40,7 +40,6 @@ impl AgentChannelBindings {
             .unwrap_or(ProviderKind::Claude)
             .counterpart();
         self.channel_for_provider(Some(target.as_str()))
-            .or_else(|| self.primary_channel())
     }
 
     pub fn channel_for_provider(&self, provider: Option<&str>) -> Option<String> {
@@ -435,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn single_channel_claude_agent_counter_model_falls_back_to_primary() {
+    fn single_channel_claude_agent_counter_model_returns_none() {
         let db = test_db();
         let conn = db.lock().unwrap();
         // Claude agent with only cc channel — no codex channel at all
@@ -453,12 +452,13 @@ mod tests {
             .unwrap()
             .expect("bindings");
         assert_eq!(bindings.primary_channel(), Some("cc-only".into()));
-        // counter_model tries codex (None) then falls back to primary
-        assert_eq!(bindings.counter_model_channel(), Some("cc-only".into()));
-        // Review dispatch also falls back to the only available channel
+        // counter_model returns None — no codex channel exists.
+        // This triggers PM-decision in onReviewEnter instead of routing
+        // to the same channel (which would strand the review).
+        assert_eq!(bindings.counter_model_channel(), None);
         assert_eq!(
             resolve_agent_dispatch_channel_on_conn(&conn, "ag-05", Some("review")).unwrap(),
-            Some("cc-only".into())
+            None
         );
     }
 }
