@@ -47,7 +47,7 @@ import {
 const ChatView = lazy(() => import("./components/ChatView"));
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
 
-type ViewMode = "office" | "dashboard" | "agents" | "meetings" | "chat" | "skills" | "kanban" | "settings";
+import { VIEW_REGISTRY, NAV_ROUTES, type ViewMode } from "./app/routes";
 
 function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {
   const totalIssues = meeting.proposed_issues?.length ?? 0;
@@ -297,25 +297,27 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
   }, [refreshOffices, refreshAgents, refreshAllAgents, refreshDepartments, refreshAllDepartments, refreshAuditLogs]);
 
   const newMeetingsCount = roundTableMeetings.filter(hasUnresolvedMeetingIssues).length;
-  const viewFallbackLabel = useMemo(() => ({
-    office: isKo ? "오피스 로딩 중..." : "Loading Office...",
-    dashboard: isKo ? "대시보드 로딩 중..." : "Loading Dashboard...",
-    agents: isKo ? "직원 로딩 중..." : "Loading Agents...",
-    kanban: isKo ? "칸반 로딩 중..." : "Loading Kanban...",
-    meetings: isKo ? "회의 로딩 중..." : "Loading Meetings...",
-    chat: isKo ? "채팅 로딩 중..." : "Loading Chat...",
-    skills: isKo ? "스킬 로딩 중..." : "Loading Skills...",
-    settings: isKo ? "설정 로딩 중..." : "Loading Settings...",
-  } satisfies Record<ViewMode, string>), [isKo]);
+  const viewFallbackLabel = useMemo(() =>
+    Object.fromEntries(VIEW_REGISTRY.map((r) => [r.id, isKo ? r.loadingKo : r.loadingEn])) as Record<ViewMode, string>,
+  [isKo]);
 
-  const navItems: Array<{ id: ViewMode; icon: React.ReactNode; label: string; badge?: number; badgeColor?: string }> = [
-    { id: "office", icon: <Building2 size={20} />, label: isKo ? "오피스" : "Office" },
-    { id: "dashboard", icon: <LayoutDashboard size={20} />, label: isKo ? "대시보드" : "Dashboard" },
-    { id: "kanban", icon: <KanbanSquare size={20} />, label: isKo ? "칸반" : "Kanban" },
-    { id: "agents", icon: <Users size={20} />, label: isKo ? "직원" : "Staff" },
-    { id: "meetings", icon: <FileText size={20} />, label: isKo ? "회의" : "Meetings", badge: newMeetingsCount || undefined, badgeColor: "bg-amber-500" },
-    { id: "settings", icon: <Settings size={20} />, label: isKo ? "설정" : "Settings" },
-  ];
+  const navIconMap: Record<string, React.ReactNode> = {
+    office: <Building2 size={20} />,
+    dashboard: <LayoutDashboard size={20} />,
+    kanban: <KanbanSquare size={20} />,
+    agents: <Users size={20} />,
+    meetings: <FileText size={20} />,
+    settings: <Settings size={20} />,
+  };
+  const navBadges: Record<string, { badge?: number; badgeColor?: string }> = {
+    meetings: { badge: newMeetingsCount || undefined, badgeColor: "bg-amber-500" },
+  };
+  const navItems = NAV_ROUTES.map((r) => ({
+    id: r.id,
+    icon: navIconMap[r.id] ?? <span>{r.icon}</span>,
+    label: isKo ? r.labelKo : r.labelEn,
+    ...navBadges[r.id],
+  }));
 
   return (
     <div className="flex sm:fixed sm:inset-0 min-h-dvh bg-th-bg-primary">

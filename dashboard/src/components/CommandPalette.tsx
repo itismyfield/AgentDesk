@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { Search } from "lucide-react";
 import type { Agent, Department } from "../types";
+import { PALETTE_ROUTES } from "../app/routes";
 
 interface CommandPaletteProps {
   agents: Agent[];
@@ -35,15 +36,12 @@ export default function CommandPalette({
     const items: ResultItem[] = [];
     const q = query.toLowerCase().trim();
 
-    // Navigation items
-    const navs = [
-      { id: "office", label: tr("오피스 뷰", "Office View"), icon: "🏢" },
-      { id: "dashboard", label: tr("대시보드", "Dashboard"), icon: "📊" },
-      { id: "agents", label: tr("직원 관리", "Agent Manager"), icon: "👥" },
-      { id: "chat", label: tr("채팅", "Chat"), icon: "💬" },
-      { id: "sessions", label: tr("파견 세션", "Sessions"), icon: "⚡" },
-      { id: "settings", label: tr("설정", "Settings"), icon: "⚙️" },
-    ];
+    // Navigation items from route registry
+    const navs = PALETTE_ROUTES.map((r) => ({
+      id: r.id,
+      label: tr(r.labelKo, r.labelEn),
+      icon: r.icon,
+    }));
 
     if (!q) {
       items.push(...navs.map((n) => ({ type: "nav" as const, ...n })));
