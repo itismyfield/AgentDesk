@@ -440,7 +440,7 @@ export default function SettingsView({
       </div>
 
       {showOnboarding && (
-        <div className="fixed inset-0 z-50 bg-[#0a0e1a] overflow-y-auto">
+        <div className="fixed inset-0 z-50 bg-[#0a0e1a] overflow-y-auto" role="dialog" aria-modal="true" aria-label="Onboarding wizard">
           <div className="min-h-screen flex items-start justify-center pt-8 pb-16">
             <div className="w-full max-w-2xl">
               <div className="flex justify-end px-4 mb-2">

@@ -326,7 +326,7 @@ function SessionInfoCard({
         if (e.target === overlayRef.current) onClose();
       }}
     >
-      <div className="w-full max-w-md rounded-2xl bg-th-bg-primary border border-th-border shadow-2xl overflow-hidden">
+      <div className="w-full max-w-md rounded-2xl bg-th-bg-primary border border-th-border shadow-2xl overflow-hidden" role="dialog" aria-modal="true" aria-label="Session details">
         {/* Header */}
         <div className="flex items-center gap-4 p-5 border-b border-th-border">
           <div className="relative shrink-0">
@@ -379,7 +379,8 @@ function SessionInfoCard({
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-surface-hover transition-colors self-start text-th-text-muted"
+            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-surface-hover transition-colors self-start text-th-text-muted"
+            aria-label="Close"
           >
             ✕
           </button>

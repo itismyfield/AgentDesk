@@ -481,8 +481,9 @@ export default function AgentInfoCard({
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors self-start"
+            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors self-start"
             style={{ color: "var(--th-text-muted)" }}
+            aria-label="Close"
           >
             ✕
           </button>

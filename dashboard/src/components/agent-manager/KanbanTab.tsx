@@ -1188,7 +1188,7 @@ export default function KanbanTab({
         {/* Assignee selection modal: shown when moving to "ready" without an assignee */}
         {assignBeforeReady && (
           <div className="fixed inset-0 z-50 backdrop-blur-sm flex items-center justify-center p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={() => setAssignBeforeReady(null)}>
-            <div onClick={(e) => e.stopPropagation()} className="w-full max-w-sm rounded-2xl border p-5 space-y-4" style={{ backgroundColor: "var(--th-bg-surface)", borderColor: "rgba(148,163,184,0.24)" }}>
+            <div onClick={(e) => e.stopPropagation()} className="w-full max-w-sm rounded-2xl border p-5 space-y-4" style={{ backgroundColor: "var(--th-bg-surface)", borderColor: "rgba(148,163,184,0.24)" }} role="dialog" aria-modal="true" aria-label="Assign agent">
               <h3 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>{tr("담당자 할당", "Assign Agent")}</h3>
               <p className="text-sm" style={{ color: "var(--th-text-secondary)" }}>{tr("준비됨 상태로 이동하려면 담당자를 지정해야 합니다.", "Assign an agent before moving to ready.")}</p>
               <select
@@ -1355,6 +1355,7 @@ export default function KanbanTab({
               onClick={(e) => e.stopPropagation()}
               className="w-full max-w-md rounded-2xl border p-5 space-y-4"
               style={{ backgroundColor: "var(--th-bg-surface)", borderColor: "rgba(148,163,184,0.24)" }}
+              role="dialog" aria-modal="true" aria-label="Cancel cards confirmation"
             >
               <h3 className="text-base font-semibold" style={{ color: "var(--th-text-heading)" }}>
                 {tr("카드 취소 확인", "Cancel cards")}
@@ -1611,6 +1612,7 @@ export default function KanbanTab({
               borderColor: "rgba(148,163,184,0.24)",
               paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
             }}
+            role="dialog" aria-modal="true" aria-label="Assign issue"
           >
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -1676,6 +1678,7 @@ export default function KanbanTab({
               borderColor: "rgba(148,163,184,0.24)",
               paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
             }}
+            role="dialog" aria-modal="true" aria-label="Card details"
           >
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -2503,6 +2506,7 @@ export default function KanbanTab({
               borderColor: "rgba(148,163,184,0.24)",
               paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
             }}
+            role="dialog" aria-modal="true" aria-label="Backlog issue details"
           >
             <div className="flex items-start justify-between gap-3">
               <div>

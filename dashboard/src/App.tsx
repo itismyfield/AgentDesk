@@ -318,7 +318,7 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
   ];
 
   return (
-    <div className="flex fixed inset-0 bg-th-bg-primary">
+    <div className="flex sm:fixed sm:inset-0 min-h-dvh bg-th-bg-primary">
       {/* Sidebar (hidden on mobile) */}
       <nav className="hidden sm:flex w-[4.5rem] bg-th-nav-bg border-r border-th-card-border flex-col items-center py-4 gap-1">
         <div className="text-2xl mb-4">🐾</div>

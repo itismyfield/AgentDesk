@@ -101,7 +101,7 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="relative w-10 h-10 rounded-lg flex items-center justify-center text-th-text-muted hover:text-th-text-primary hover:bg-surface-hover transition-colors"
+        className="relative w-11 h-11 rounded-lg flex items-center justify-center text-th-text-muted hover:text-th-text-primary hover:bg-surface-hover transition-colors"
         title={t({ ko: "알림", en: "Notifications" })}
       >
         <Bell size={20} />

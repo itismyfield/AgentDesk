@@ -105,6 +105,10 @@ body {
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
+@media (max-width: 639px) {
+  body { overflow: auto; }
+}
+
 #root {
   height: 100dvh;
   display: flex;
