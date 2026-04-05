@@ -60,6 +60,9 @@ function manualChunks(id: string) {
 }
 
 export default defineConfig({
+  test: {
+    exclude: ["e2e/**", "node_modules/**"],
+  },
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },
