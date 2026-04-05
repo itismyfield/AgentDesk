@@ -69,14 +69,14 @@ fn merged_channel_values(
     Option<String>,
     Option<String>,
 ) {
+    // New columns (_cc, _cdx) are authoritative; legacy (_id, _alt) are mirrors.
+    // Resolve new columns first (fallback from legacy if absent), then mirror back.
     let discord_channel_cc = normalize_channel_field(discord_channel_cc)
-        .or_else(|| normalize_channel_field(discord_channel_id.clone()));
+        .or_else(|| normalize_channel_field(discord_channel_id));
     let discord_channel_cdx = normalize_channel_field(discord_channel_cdx)
-        .or_else(|| normalize_channel_field(discord_channel_alt.clone()));
-    let discord_channel_id =
-        normalize_channel_field(discord_channel_id).or_else(|| discord_channel_cc.clone());
-    let discord_channel_alt =
-        normalize_channel_field(discord_channel_alt).or_else(|| discord_channel_cdx.clone());
+        .or_else(|| normalize_channel_field(discord_channel_alt));
+    let discord_channel_id = discord_channel_cc.clone();
+    let discord_channel_alt = discord_channel_cdx.clone();
     (
         discord_channel_id,
         discord_channel_alt,

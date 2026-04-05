@@ -40,6 +40,7 @@ impl AgentChannelBindings {
             .unwrap_or(ProviderKind::Claude)
             .counterpart();
         self.channel_for_provider(Some(target.as_str()))
+            .or_else(|| self.primary_channel())
     }
 
     pub fn channel_for_provider(&self, provider: Option<&str>) -> Option<String> {
@@ -431,5 +432,33 @@ mod tests {
             .expect("bindings");
         // Gemini hits Some(_) branch — should fall back to codex channel
         assert_eq!(bindings.primary_channel(), Some("cdx-chan".into()));
+    }
+
+    #[test]
+    fn single_channel_claude_agent_counter_model_falls_back_to_primary() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        // Claude agent with only cc channel — no codex channel at all
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider,
+                discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx
+            ) VALUES ('ag-05', 'SingleCC', 'claude', 'cc-only', NULL, 'cc-only', NULL)",
+            [],
+        )
+        .unwrap();
+
+        let bindings = load_agent_channel_bindings(&conn, "ag-05")
+            .unwrap()
+            .expect("bindings");
+        assert_eq!(bindings.primary_channel(), Some("cc-only".into()));
+        // counter_model tries codex (None) then falls back to primary
+        assert_eq!(bindings.counter_model_channel(), Some("cc-only".into()));
+        // Review dispatch also falls back to the only available channel
+        assert_eq!(
+            resolve_agent_dispatch_channel_on_conn(&conn, "ag-05", Some("review")).unwrap(),
+            Some("cc-only".into())
+        );
     }
 }
