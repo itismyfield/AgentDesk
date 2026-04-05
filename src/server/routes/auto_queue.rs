@@ -326,10 +326,10 @@ fn similarity_paths(card: &GenerateCandidate) -> HashSet<String> {
 }
 
 fn similarity_edge_allowed(left: &GenerateCandidate, right: &GenerateCandidate) -> bool {
-    if left.agent_id.is_empty() || right.agent_id.is_empty() {
-        return false;
-    }
-    left.agent_id == right.agent_id
+    // Allow cross-agent similarity edges — file overlap determines conflict,
+    // not agent assignment. Cards touching the same files should be grouped
+    // regardless of which agent they're assigned to.
+    !left.agent_id.is_empty() && !right.agent_id.is_empty()
 }
 
 /// Compute file-path-based similarity between two sets of extracted paths.

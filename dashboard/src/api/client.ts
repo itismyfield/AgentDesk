@@ -1068,7 +1068,12 @@ export async function generateAutoQueue(
 }> {
   return request("/api/auto-queue/generate", {
     method: "POST",
-    body: JSON.stringify({ repo: repo ?? null, agent_id: agentId ?? null, mode: mode ?? "priority-sort" }),
+    body: JSON.stringify({
+      repo: repo ?? null,
+      agent_id: agentId ?? null,
+      mode: mode ?? "priority-sort",
+      parallel: mode === "similarity-aware" || undefined,
+    }),
   });
 }
 
