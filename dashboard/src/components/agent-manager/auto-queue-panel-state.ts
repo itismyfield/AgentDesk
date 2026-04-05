@@ -22,6 +22,15 @@ export function normalizeAutoQueueStatus(
   return status;
 }
 
+export function shouldClearSuppressedAutoQueueRun(
+  status: AutoQueueStatus,
+  suppressedRunId: string | null,
+): boolean {
+  if (!suppressedRunId) return false;
+  if (!status.run) return true;
+  return status.run.id !== suppressedRunId;
+}
+
 export function getAutoQueuePrimaryAction(
   run: AutoQueueRun | null,
   pendingCount: number,

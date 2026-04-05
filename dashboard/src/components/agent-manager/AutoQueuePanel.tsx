@@ -8,6 +8,7 @@ import {
   createEmptyAutoQueueStatus,
   getAutoQueuePrimaryAction,
   normalizeAutoQueueStatus,
+  shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
 
 interface Props {
@@ -365,7 +366,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     try {
       const s = await api.getAutoQueueStatus(selectedRepo || null, selectedAgentId);
       const normalized = normalizeAutoQueueStatus(s, suppressedRunIdRef.current);
-      if (suppressedRunIdRef.current && normalized.run?.id !== suppressedRunIdRef.current) {
+      if (shouldClearSuppressedAutoQueueRun(s, suppressedRunIdRef.current)) {
         suppressedRunIdRef.current = null;
       }
       setStatus(normalized);
@@ -424,6 +425,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
 
   const handleReset = async () => {
     setError(null);
+    setNoReadyCards(false);
     suppressedRunIdRef.current = status?.run?.id ?? null;
     try {
       await api.resetAutoQueue();

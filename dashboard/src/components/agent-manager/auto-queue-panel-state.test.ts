@@ -5,6 +5,7 @@ import {
   createEmptyAutoQueueStatus,
   getAutoQueuePrimaryAction,
   normalizeAutoQueueStatus,
+  shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
 
 function makeRun(
@@ -56,6 +57,17 @@ describe("auto-queue-panel-state", () => {
     const status = makeStatus(makeRun("pending", "run-pmd"), 0);
 
     expect(normalizeAutoQueueStatus(status, null)).toEqual(status);
+  });
+
+  it("keeps suppression while the server still returns the reset-cleared run", () => {
+    const status = makeStatus(makeRun("generated", "run-reset"), 0);
+
+    expect(shouldClearSuppressedAutoQueueRun(status, "run-reset")).toBe(false);
+  });
+
+  it("clears suppression when the server returns a different run or no run", () => {
+    expect(shouldClearSuppressedAutoQueueRun(makeStatus(makeRun("generated", "run-next"), 2), "run-reset")).toBe(true);
+    expect(shouldClearSuppressedAutoQueueRun(createEmptyAutoQueueStatus(), "run-reset")).toBe(true);
   });
 
   it("returns the correct primary action per run state", () => {
