@@ -272,6 +272,7 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
     refreshAllDepartments,
     refreshAuditLogs,
     refreshing,
+    datasetStates,
   } = useOffice();
   const { kanbanCards, taskDispatches, upsertKanbanCard, setKanbanCards } = useKanban();
 
@@ -364,6 +365,16 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
             onManageOffices={() => setShowOfficeManager(true)}
             isKo={isKo}
           />
+        )}
+
+        {/* Dataset error banners */}
+        {Object.entries(datasetStates).some(([, s]) => s.error) && (
+          <div className="px-3 py-1.5 text-xs bg-red-500/10 text-red-400 border-b border-red-500/20 flex items-center gap-2">
+            <span>{isKo ? "데이터 로드 실패:" : "Failed to load:"}</span>
+            {Object.entries(datasetStates)
+              .filter(([, s]) => s.error)
+              .map(([key]) => <span key={key} className="px-1.5 py-0.5 rounded bg-red-500/20">{key}</span>)}
+          </div>
         )}
 
         <main className="flex-1 min-h-0 flex flex-col overflow-hidden mb-14 sm:mb-0">
