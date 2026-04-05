@@ -2,6 +2,13 @@ use super::super::*;
 #[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
 
+fn session_path_is_usable(current_path: &str, remote_profile_name: Option<&str>) -> bool {
+    remote_profile_name
+        .map(|name| !name.is_empty())
+        .unwrap_or(false)
+        || std::path::Path::new(current_path).is_dir()
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -19,13 +26,19 @@ pub(in crate::services::discord) async fn handle_text_message(
     // Get session info, allowed tools, and pending uploads
     let (session_info, provider, allowed_tools, pending_uploads) = {
         let mut data = shared.core.lock().await;
-        let info = data.sessions.get(&channel_id).and_then(|session| {
-            session.current_path.as_ref().map(|_| {
-                (
-                    session.session_id.clone(),
-                    session.current_path.clone().unwrap_or_default(),
-                )
-            })
+        let info = data.sessions.get_mut(&channel_id).and_then(|session| {
+            let current_path = session.current_path.clone()?;
+            if !session_path_is_usable(&current_path, session.remote_profile_name.as_deref()) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ⚠ Ignoring stale local session path for channel {}: {}",
+                    channel_id, current_path
+                );
+                session.current_path = None;
+                session.worktree = None;
+                return None;
+            }
+            Some((session.session_id.clone(), current_path))
         });
         let uploads = data
             .sessions
@@ -2418,5 +2431,32 @@ async fn reset_provider_session_if_pending(
 
     if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
         super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_path_is_usable;
+
+    #[test]
+    fn session_path_is_usable_for_existing_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(session_path_is_usable(dir.path().to_str().unwrap(), None,));
+    }
+
+    #[test]
+    fn session_path_is_not_usable_for_missing_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().to_str().unwrap().to_string();
+        drop(dir);
+        assert!(!session_path_is_usable(&missing_path, None));
+    }
+
+    #[test]
+    fn session_path_is_usable_for_remote_session_even_if_local_path_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().to_str().unwrap().to_string();
+        drop(dir);
+        assert!(session_path_is_usable(&missing_path, Some("mac-mini")));
     }
 }
