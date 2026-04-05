@@ -1086,9 +1086,91 @@ mod tests {
         assert_eq!(count, 1, "tick hook dispatch intent should be persisted");
     }
 
-    /// #202: Verify that try_fire_hook alone (without explicit drain_hook_side_effects)
-    /// persists dispatch intents created by tick hooks. This catches the scenario where
-    /// dispatch.create() defers an INSERT intent but the intent drain is skipped.
+    /// Regression test for #274: transition_status() fires custom state hooks
+    /// through try_fire_hook_by_name(), and dispatch.create() in that path must
+    /// return with the dispatch row + notify outbox already materialized.
+    #[test]
+    fn transition_status_custom_on_enter_hook_materializes_dispatch_outbox() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("ready-enter-hook.js"),
+            r#"
+            var policy = {
+                name: "ready-enter-hook",
+                priority: 1,
+                onCustomReadyEnter: function(payload) {
+                    agentdesk.dispatch.create(
+                        payload.card_id,
+                        "agent-1",
+                        "implementation",
+                        "Ready Hook Dispatch"
+                    );
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, dir.path());
+        seed_card(&db, "card-ready-hook", "backlog");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE agents SET pipeline_config = ?1 WHERE id = 'agent-1'",
+                [json!({
+                    "hooks": {
+                        "ready": {
+                            "on_enter": ["onCustomReadyEnter"],
+                            "on_exit": []
+                        }
+                    }
+                })
+                .to_string()],
+            )
+            .unwrap();
+        }
+
+        transition_status(&db, &engine, "card-ready-hook", "ready").unwrap();
+
+        let conn = db.lock().unwrap();
+        let (dispatch_id, title): (String, String) = conn
+            .query_row(
+                "SELECT id, title FROM task_dispatches WHERE kanban_card_id = 'card-ready-hook'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("custom ready on_enter hook should create a dispatch");
+        assert_eq!(title, "Ready Hook Dispatch");
+
+        let notify_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
+                [&dispatch_id],
+                |row| row.get(0),
+            )
+            .expect("dispatch outbox query should succeed");
+        assert_eq!(
+            notify_count, 1,
+            "custom transition hook dispatch must enqueue exactly one notify outbox row"
+        );
+
+        let (card_status, latest_dispatch_id): (String, String) = conn
+            .query_row(
+                "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-ready-hook'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("card should be updated by dispatch.create()");
+        assert_eq!(card_status, "in_progress");
+        assert_eq!(latest_dispatch_id, dispatch_id);
+    }
+
+    /// Regression guard for the known-hook path: try_fire_hook_by_name() must
+    /// return with dispatch.create() side-effects already visible, even without
+    /// an extra drain_hook_side_effects() call at the caller.
     #[test]
     fn try_fire_hook_drains_dispatch_intents_without_explicit_drain() {
         let dir = TempDir::new().unwrap();

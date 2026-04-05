@@ -286,9 +286,9 @@ impl PolicyEngine {
         // Drop engine lock before draining intents — intent execution needs
         // a fresh lock acquisition via drain_pending_intents (#248).
         drop(inner);
-        // Drain __createdDispatches outbox so custom pipeline hooks (on_enter/
-        // on_exit) that call dispatch.create() get their follow-up handling
-        // (notification, kickoff) materialized on this same path.
+        // Drain any deferred intents so custom pipeline hooks (on_enter/on_exit)
+        // materialize follow-up work on the same call path. dispatch.create()
+        // inserts its notify outbox row synchronously inside create_dispatch_core.
         {
             let result = self.drain_pending_intents();
             if !result.created_dispatches.is_empty() || result.errors > 0 {
@@ -334,7 +334,7 @@ impl PolicyEngine {
         Self::fire_dynamic_hook_with_guard(&inner, hook_name, payload)?;
         Self::drain_deferred_with_guard(&self.db, &inner);
         drop(inner);
-        // Drain __createdDispatches outbox — same pattern as try_fire_hook_by_name (#248).
+        // Drain any deferred intents — same pattern as try_fire_hook_by_name (#248).
         self.drain_pending_intents();
         Ok(())
     }
@@ -1039,10 +1039,8 @@ mod tests {
         assert_eq!(val, "low", "low-priority policy runs last (priority=100)");
     }
 
-    /// #248: Regression test — dispatch.create() called from a dynamic hook
-    /// (custom on_enter/on_exit) must produce a real task_dispatches row.
-    /// Before the fix, try_fire_hook_by_name() returned without draining,
-    /// so follow-up handling could be stranded.
+    /// Regression test — dispatch.create() called from a dynamic hook
+    /// must materialize both the dispatch row and notify outbox before return.
     #[test]
     fn test_dynamic_hook_dispatch_create_produces_db_row() {
         let dir = tempfile::tempdir().unwrap();
@@ -1075,7 +1073,8 @@ mod tests {
         {
             let conn = db.lock().unwrap();
             conn.execute(
-                "INSERT INTO agents (id, name, provider, status, xp, discord_channel_id) VALUES ('bot1', 'Bot', 'claude', 'idle', 0, '1234567890')",
+                "INSERT INTO agents (id, name, provider, status, xp, discord_channel_id, discord_channel_alt) \
+                 VALUES ('bot1', 'Bot', 'claude', 'idle', 0, '1234567890', '1234567891')",
                 [],
             ).unwrap();
             conn.execute(
@@ -1113,5 +1112,17 @@ mod tests {
             )
             .expect("dispatch row should exist in task_dispatches");
         assert_eq!(title, "Dynamic hook dispatch");
+
+        let notify_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_outbox WHERE dispatch_id = ?1 AND action = 'notify'",
+                [&dispatch_id],
+                |r| r.get(0),
+            )
+            .expect("notify outbox row should exist for dynamic-hook dispatch");
+        assert_eq!(
+            notify_count, 1,
+            "dynamic hook dispatch must enqueue exactly one notify outbox row"
+        );
     }
 }
