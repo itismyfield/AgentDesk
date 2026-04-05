@@ -190,15 +190,15 @@ pub(in crate::services::discord) async fn cmd_down(
         file_path.to_string()
     } else {
         let current_path = {
-            let data = ctx.data().shared.core.lock().await;
+            let mut data = ctx.data().shared.core.lock().await;
             data.sessions
-                .get(&ctx.channel_id())
-                .and_then(|s| s.current_path.clone())
+                .get_mut(&ctx.channel_id())
+                .and_then(|s| s.validated_path(ctx.channel_id()))
         };
         match current_path {
             Some(base) => format!("{}/{}", base.trim_end_matches('/'), file_path),
             None => {
-                ctx.say("No active session. Use absolute path or `/start <path>` first.")
+                ctx.say("No active session or session path is stale. Use absolute path or `/start <path>` first.")
                     .await?;
                 return Ok(());
             }
@@ -244,10 +244,10 @@ pub(in crate::services::discord) async fn cmd_shell(
     ctx.defer().await?;
 
     let working_dir = {
-        let data = ctx.data().shared.core.lock().await;
+        let mut data = ctx.data().shared.core.lock().await;
         data.sessions
-            .get(&ctx.channel_id())
-            .and_then(|s| s.current_path.clone())
+            .get_mut(&ctx.channel_id())
+            .and_then(|s| s.validated_path(ctx.channel_id()))
             .unwrap_or_else(|| {
                 dirs::home_dir()
                     .map(|h| h.display().to_string())

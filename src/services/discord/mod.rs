@@ -223,6 +223,25 @@ pub(super) struct DiscordSession {
     pub(super) born_generation: u64,
 }
 
+impl DiscordSession {
+    /// Validate `current_path` and return it if it exists on disk.
+    /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
+    pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
+        let current_path = self.current_path.as_ref()?;
+        if std::path::Path::new(current_path).is_dir() {
+            return Some(current_path.clone());
+        }
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] ⚠ Ignoring stale local session path for channel {}: {}",
+            channel_id, current_path
+        );
+        self.current_path = None;
+        self.worktree = None;
+        None
+    }
+}
+
 /// Worktree info for sessions that were auto-redirected to avoid conflicts
 #[derive(Clone, Debug)]
 pub(super) struct WorktreeInfo {

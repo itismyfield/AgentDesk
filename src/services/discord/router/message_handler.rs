@@ -2,13 +2,6 @@ use super::super::*;
 #[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
 
-fn session_path_is_usable(current_path: &str, remote_profile_name: Option<&str>) -> bool {
-    remote_profile_name
-        .map(|name| !name.is_empty())
-        .unwrap_or(false)
-        || std::path::Path::new(current_path).is_dir()
-}
-
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -27,17 +20,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     let (session_info, provider, allowed_tools, pending_uploads) = {
         let mut data = shared.core.lock().await;
         let info = data.sessions.get_mut(&channel_id).and_then(|session| {
-            let current_path = session.current_path.clone()?;
-            if !session_path_is_usable(&current_path, session.remote_profile_name.as_deref()) {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ⚠ Ignoring stale local session path for channel {}: {}",
-                    channel_id, current_path
-                );
-                session.current_path = None;
-                session.worktree = None;
-                return None;
-            }
+            let current_path = session.validated_path(channel_id)?;
             Some((session.session_id.clone(), current_path))
         });
         let uploads = data
@@ -2439,12 +2422,33 @@ async fn reset_provider_session_if_pending(
 
 #[cfg(test)]
 mod tests {
-    use super::session_path_is_usable;
+    use super::super::super::DiscordSession;
+
+    fn make_session(
+        current_path: Option<String>,
+        remote_profile_name: Option<String>,
+    ) -> DiscordSession {
+        DiscordSession {
+            session_id: None,
+            current_path,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name,
+            channel_id: None,
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+        }
+    }
 
     #[test]
     fn session_path_is_usable_for_existing_local_path() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(session_path_is_usable(dir.path().to_str().unwrap(), None,));
+        let mut session = make_session(Some(dir.path().to_str().unwrap().to_string()), None);
+        assert!(session.validated_path("test-channel").is_some());
     }
 
     #[test]
@@ -2452,14 +2456,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing_path = dir.path().to_str().unwrap().to_string();
         drop(dir);
-        assert!(!session_path_is_usable(&missing_path, None));
+        let mut session = make_session(Some(missing_path), None);
+        assert!(session.validated_path("test-channel").is_none());
+        // Verify current_path and worktree were cleared
+        assert!(session.current_path.is_none());
+        assert!(session.worktree.is_none());
     }
 
     #[test]
-    fn session_path_is_usable_for_remote_session_even_if_local_path_is_missing() {
+    fn session_path_is_stale_for_remote_session_with_missing_local_path() {
         let dir = tempfile::tempdir().unwrap();
         let missing_path = dir.path().to_str().unwrap().to_string();
         drop(dir);
-        assert!(session_path_is_usable(&missing_path, Some("mac-mini")));
+        let mut session = make_session(Some(missing_path), Some("mac-mini".to_string()));
+        // Remote sessions should also validate local paths (no bypass)
+        assert!(session.validated_path("test-channel").is_none());
     }
 }
