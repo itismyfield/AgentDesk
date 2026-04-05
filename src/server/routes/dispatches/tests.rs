@@ -601,3 +601,146 @@ async fn review_followup_does_not_create_dispatch_for_done_card() {
         "no review-decision dispatch should be created for done card"
     );
 }
+
+/// #218 R2: card_id fallback finds unified_thread_id for review/rework dispatches
+/// that aren't directly linked to auto_queue_entries by dispatch_id.
+#[test]
+fn unified_thread_card_id_fallback_finds_thread() {
+    let db = test_db();
+    let conn = db.lock().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+            id TEXT PRIMARY KEY, repo TEXT, agent_id TEXT, status TEXT DEFAULT 'active',
+            unified_thread INTEGER DEFAULT 0, unified_thread_id TEXT,
+            unified_thread_channel_id TEXT, thread_group_count INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP, completed_at DATETIME);
+         CREATE TABLE IF NOT EXISTS auto_queue_entries (
+            id TEXT PRIMARY KEY, run_id TEXT REFERENCES auto_queue_runs(id),
+            kanban_card_id TEXT, agent_id TEXT, dispatch_id TEXT,
+            status TEXT DEFAULT 'pending', thread_group INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP);",
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '111222333')",
+        [],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+         VALUES ('card-uf', 'Unified test', 'in_progress', 'agent-1', 'dispatch-impl', datetime('now'), datetime('now'))",
+        [],
+    ).unwrap();
+    // Create a unified run with a stored unified_thread_id (flat format)
+    conn.execute(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status, unified_thread, unified_thread_id)
+         VALUES ('run-1', 'test/repo', 'agent-1', 'active', 1, '{\"111222333\":\"999888777\"}')",
+        [],
+    ).unwrap();
+    // The entry is linked by card_id but dispatch_id points to the implementation dispatch
+    conn.execute(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, dispatch_id, status)
+         VALUES ('entry-1', 'run-1', 'card-uf', 'agent-1', 'dispatch-impl', 'completed')",
+        [],
+    )
+    .unwrap();
+
+    // A review dispatch NOT in auto_queue_entries — simulates card_id fallback path
+    // Query using card_id should still find the unified_thread_id
+    let thread_id: Option<String> = conn
+        .query_row(
+            "SELECT r.unified_thread_id FROM auto_queue_runs r \
+             JOIN auto_queue_entries e ON e.run_id = r.id \
+             WHERE e.kanban_card_id = 'card-uf' AND r.unified_thread = 1 AND r.status = 'active' \
+             AND r.unified_thread_id IS NOT NULL",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|json_str| {
+            let map: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+            map.get("111222333")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+    assert_eq!(
+        thread_id.as_deref(),
+        Some("999888777"),
+        "flat format card_id fallback must resolve thread"
+    );
+}
+
+/// #218 R2: parallel run nested unified_thread_id format is parsed correctly
+/// in the send_review_result_to_primary path.
+#[test]
+fn unified_thread_parallel_format_parsed_correctly() {
+    let db = test_db();
+    let conn = db.lock().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+            id TEXT PRIMARY KEY, repo TEXT, agent_id TEXT, status TEXT DEFAULT 'active',
+            unified_thread INTEGER DEFAULT 0, unified_thread_id TEXT,
+            unified_thread_channel_id TEXT, thread_group_count INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP, completed_at DATETIME);
+         CREATE TABLE IF NOT EXISTS auto_queue_entries (
+            id TEXT PRIMARY KEY, run_id TEXT REFERENCES auto_queue_runs(id),
+            kanban_card_id TEXT, agent_id TEXT, dispatch_id TEXT,
+            status TEXT DEFAULT 'pending', thread_group INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP);",
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '111222333')",
+        [],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+         VALUES ('card-par', 'Parallel test', 'in_progress', 'agent-1', 'dispatch-impl', datetime('now'), datetime('now'))",
+        [],
+    ).unwrap();
+    // Parallel run: nested format with thread_group_count > 1
+    conn.execute(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status, unified_thread, unified_thread_id, thread_group_count)
+         VALUES ('run-par', 'test/repo', 'agent-1', 'active', 1, \
+         '{\"0\":{\"111222333\":\"aaa\"},\"1\":{\"111222333\":\"bbb\"}}', 2)",
+        [],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, dispatch_id, status, thread_group)
+         VALUES ('entry-par-0', 'run-par', 'card-par', 'agent-1', 'dispatch-impl', 'completed', 0)",
+        [],
+    ).unwrap();
+
+    // Query mimics send_review_result_to_primary with R2 fix: group-aware parsing
+    let result: Option<String> = conn
+        .query_row(
+            "SELECT r.unified_thread_id, COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
+             FROM auto_queue_runs r \
+             JOIN auto_queue_entries e ON e.run_id = r.id \
+             WHERE e.kanban_card_id = 'card-par' AND r.unified_thread = 1 AND r.status = 'active' \
+             AND r.unified_thread_id IS NOT NULL",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        )
+        .ok()
+        .and_then(|(json_str, thread_group, group_count)| {
+            let map: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+            let ch_key = "111222333";
+            if group_count > 1 {
+                map.get(&thread_group.to_string())
+                    .and_then(|group_map| group_map.get(ch_key))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                map.get(ch_key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }
+        });
+    assert_eq!(
+        result.as_deref(),
+        Some("aaa"),
+        "parallel nested format must resolve to group 0 thread"
+    );
+}

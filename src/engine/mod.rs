@@ -281,7 +281,31 @@ impl PolicyEngine {
                 return Err(anyhow::anyhow!("engine lock poisoned: {e}"));
             }
         };
-        Self::fire_dynamic_hook_with_guard(&inner, hook_name, payload)
+        Self::fire_dynamic_hook_with_guard(&inner, hook_name, payload)?;
+        let had_deferred = Self::drain_deferred_with_guard(&self.db, &inner);
+        // Drop engine lock before draining intents — intent execution needs
+        // a fresh lock acquisition via drain_pending_intents (#248).
+        drop(inner);
+        // Drain __createdDispatches outbox so custom pipeline hooks (on_enter/
+        // on_exit) that call dispatch.create() get their follow-up handling
+        // (notification, kickoff) materialized on this same path.
+        {
+            let result = self.drain_pending_intents();
+            if !result.created_dispatches.is_empty() || result.errors > 0 {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                let source = if had_deferred {
+                    "deferred+direct"
+                } else {
+                    "direct"
+                };
+                eprintln!(
+                    "  [{ts}] 🔄 dynamic hook intent drain ({source}): {} dispatches created, {} errors",
+                    result.created_dispatches.len(),
+                    result.errors
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Blocking variant of `try_fire_hook_by_name` — waits for the engine lock
@@ -298,8 +322,9 @@ impl PolicyEngine {
                 .lock()
                 .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
             Self::fire_hook_with_guard(&inner, h, payload)?;
-            // Drain deferred hooks while holding the guard (same as try_fire_hook)
             Self::drain_deferred_with_guard(&self.db, &inner);
+            drop(inner);
+            self.drain_pending_intents();
             return Ok(());
         }
         let inner = self
@@ -308,6 +333,9 @@ impl PolicyEngine {
             .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
         Self::fire_dynamic_hook_with_guard(&inner, hook_name, payload)?;
         Self::drain_deferred_with_guard(&self.db, &inner);
+        drop(inner);
+        // Drain __createdDispatches outbox — same pattern as try_fire_hook_by_name (#248).
+        self.drain_pending_intents();
         Ok(())
     }
 
@@ -1009,5 +1037,81 @@ mod tests {
             })
             .unwrap();
         assert_eq!(val, "low", "low-priority policy runs last (priority=100)");
+    }
+
+    /// #248: Regression test — dispatch.create() called from a dynamic hook
+    /// (custom on_enter/on_exit) must produce a real task_dispatches row.
+    /// Before the fix, try_fire_hook_by_name() returned without draining,
+    /// so follow-up handling could be stranded.
+    #[test]
+    fn test_dynamic_hook_dispatch_create_produces_db_row() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("dispatch-hook.js"),
+            r#"
+            var policy = {
+                name: "dispatch-hook",
+                priority: 1,
+                onCustomEnter: function(payload) {
+                    var id = agentdesk.dispatch.create(
+                        payload.card_id,
+                        payload.agent_id,
+                        "implementation",
+                        "Dynamic hook dispatch"
+                    );
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('dyn_dispatch_id', '" + id + "')",
+                        []
+                    );
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        // Seed: agent + kanban card
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('bot1', 'Bot', 'claude', 'idle', 0)",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, priority) VALUES ('card1', 'Test', 'ready', 'medium')",
+                [],
+            ).unwrap();
+        }
+
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+
+        engine
+            .try_fire_hook_by_name(
+                "onCustomEnter",
+                serde_json::json!({"card_id": "card1", "agent_id": "bot1"}),
+            )
+            .unwrap();
+
+        let conn = db.lock().unwrap();
+        // The dispatch ID was stashed in kv_meta by the hook
+        let dispatch_id: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'dyn_dispatch_id'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("hook should have written dispatch_id to kv_meta");
+
+        // Verify the dispatch row actually exists in task_dispatches
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM task_dispatches WHERE id = ?1",
+                [&dispatch_id],
+                |r| r.get(0),
+            )
+            .expect("dispatch row should exist in task_dispatches");
+        assert_eq!(title, "Dynamic hook dispatch");
     }
 }

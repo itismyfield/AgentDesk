@@ -807,22 +807,33 @@ pub(super) async fn send_review_result_to_primary(
             Err(_) => return Err("db lock failed for thread lookup".into()),
         };
         // Try unified thread first: find active auto-queue run for this card
+        // #218 R2: Handle both flat and nested (parallel) unified_thread_id formats
         let unified: Option<String> = conn
             .query_row(
-                "SELECT r.unified_thread_id FROM auto_queue_runs r \
+                "SELECT r.unified_thread_id, COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
+                 FROM auto_queue_runs r \
                  JOIN auto_queue_entries e ON e.run_id = r.id \
                  WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active' \
                  AND r.unified_thread_id IS NOT NULL",
                 [card_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
             .ok()
-            .and_then(|json_str| {
+            .and_then(|(json_str, thread_group, group_count)| {
                 let map: serde_json::Value = serde_json::from_str(&json_str).ok()?;
                 let ch_key = channel_id_num.to_string();
-                map.get(&ch_key)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
+                if group_count > 1 {
+                    // Parallel: nested format {"group_num": {"channel_id": "thread_id"}}
+                    map.get(&thread_group.to_string())
+                        .and_then(|group_map| group_map.get(&ch_key))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    // Non-parallel: flat format {"channel_id": "thread_id"}
+                    map.get(&ch_key)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                }
             });
         // Fall back to card's channel_thread_map
         unified.or_else(|| get_thread_for_channel(&conn, card_id, channel_id_num))
