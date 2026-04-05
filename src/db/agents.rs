@@ -25,7 +25,10 @@ impl AgentChannelBindings {
                 .codex_channel()
                 .or_else(|| self.claude_channel())
                 .or_else(|| self.legacy_primary_channel()),
-            Some(_) | None => self.legacy_primary_channel(),
+            Some(_) | None => self
+                .legacy_primary_channel()
+                .or_else(|| self.codex_channel())
+                .or_else(|| self.claude_channel()),
         }
     }
 
@@ -406,5 +409,27 @@ mod tests {
             resolve_agent_dispatch_channel_on_conn(&conn, "ag-03", Some("implementation")).unwrap(),
             Some("cc-only".into())
         );
+    }
+
+    #[test]
+    fn non_claude_codex_provider_falls_back_to_any_channel() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        // Gemini agent with only discord_channel_cdx populated
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider,
+                discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx
+            ) VALUES ('ag-04', 'GeminiAgent', 'gemini', NULL, NULL, NULL, 'cdx-chan')",
+            [],
+        )
+        .unwrap();
+
+        let bindings = load_agent_channel_bindings(&conn, "ag-04")
+            .unwrap()
+            .expect("bindings");
+        // Gemini hits Some(_) branch — should fall back to codex channel
+        assert_eq!(bindings.primary_channel(), Some("cdx-chan".into()));
     }
 }
