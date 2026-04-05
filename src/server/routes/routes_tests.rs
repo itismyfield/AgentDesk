@@ -3656,6 +3656,145 @@ async fn rereview_clears_stale_review_fields() {
 }
 
 #[tokio::test]
+async fn rereview_resets_approach_change_round() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-acr-reset");
+    set_pmd_channel(&db, "pmd-chan-123");
+    ensure_auto_queue_tables(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, created_at, updated_at
+            ) VALUES (
+                'card-acr', 'Issue #272', 'review', 'medium', 'agent-acr-reset', 'test-repo',
+                272, datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                created_at, updated_at
+            ) VALUES (
+                'impl-acr', 'card-acr', 'agent-acr-reset', 'implementation', 'completed',
+                'impl', datetime('now', '-30 minutes'), datetime('now', '-30 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        // Seed card_review_state with a non-null approach_change_round from a previous cycle
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, review_round, approach_change_round, updated_at)
+             VALUES ('card-acr', 'reviewing', 3, 2, datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Verify approach_change_round is set before rereview
+    {
+        let conn = db.lock().unwrap();
+        let acr: Option<i64> = conn
+            .query_row(
+                "SELECT approach_change_round FROM card_review_state WHERE card_id = 'card-acr'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            acr,
+            Some(2),
+            "approach_change_round should be 2 before rereview"
+        );
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-acr/rereview")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(
+                    r#"{"reason":"approach_change_round reset test"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // approach_change_round should be NULL after rereview
+    let conn = db.lock().unwrap();
+    let acr: Option<i64> = conn
+        .query_row(
+            "SELECT approach_change_round FROM card_review_state WHERE card_id = 'card-acr'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        acr.is_none(),
+        "approach_change_round should be NULL after rereview, got {:?}",
+        acr
+    );
+}
+
+#[tokio::test]
+async fn idle_sync_preserves_approach_change_round() {
+    // Regression test for #272: generic idle sync (timeout, gate-failure, pass)
+    // must NOT clear approach_change_round — only the explicit rereview path does.
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at)
+             VALUES ('card-preserve', 'preserve test', 'review', 'medium', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, review_round, approach_change_round, updated_at)
+             VALUES ('card-preserve', 'reviewing', 3, 2, datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        // Simulate a non-rereview idle sync (e.g. pass/approved, timeout fallback)
+        let payload = serde_json::json!({
+            "card_id": "card-preserve",
+            "state": "idle",
+            "last_verdict": "pass",
+        })
+        .to_string();
+        let result = crate::engine::ops::review_state_sync_on_conn(&conn, &payload);
+        assert!(result.contains("\"ok\""), "sync should succeed: {result}");
+
+        let acr: Option<i64> = conn
+            .query_row(
+                "SELECT approach_change_round FROM card_review_state WHERE card_id = 'card-preserve'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            acr,
+            Some(2),
+            "approach_change_round must be preserved on generic idle sync, got {:?}",
+            acr
+        );
+    }
+}
+
+#[tokio::test]
 async fn rereview_backlog_card_transitions_to_review_with_dispatch() {
     crate::pipeline::ensure_loaded();
     let db = test_db();

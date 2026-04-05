@@ -2160,6 +2160,18 @@ pub async fn rereview_card(
         if sync_result.contains("\"error\"") {
             tracing::warn!("[kanban] rereview review_state_sync cleanup failed: {sync_result}");
         }
+
+        // #272: Explicitly clear approach_change_round so a new re-review cycle
+        // starts with clean state.  The generic sync uses COALESCE (preserves old
+        // value when NULL is passed), so we do a targeted UPDATE here instead of
+        // widening the idle-sync semantics which would affect timeout / gate-failure
+        // paths that also sync to "idle".
+        if let Err(e) = conn.execute(
+            "UPDATE card_review_state SET approach_change_round = NULL WHERE card_id = ?1",
+            [&id],
+        ) {
+            tracing::warn!("[kanban] rereview approach_change_round reset failed: {e}");
+        }
     }
 
     if current_status != "review" {
