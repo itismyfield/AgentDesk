@@ -1,7 +1,7 @@
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import type { Application, AnimatedSprite, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 import type { Agent, Department, RoundTableMeeting, SubAgent, Task } from "../../types";
-import type { ThemeMode } from "../../ThemeContext";
+type ThemeMode = "dark" | "light";
 import type { Delivery, RoomRect, SubCloneBurstParticle, WallClockVisual } from "./model";
 import type { SupportedLocale } from "./themes-locale";
 

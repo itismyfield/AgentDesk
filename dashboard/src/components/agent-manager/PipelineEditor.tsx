@@ -191,7 +191,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
       className="rounded-2xl border p-3 sm:p-4 space-y-3"
       style={{
         borderColor: savedStages.length > 0 ? "rgba(14,165,233,0.35)" : "rgba(148,163,184,0.22)",
-        backgroundColor: "rgba(15,23,42,0.65)",
+        backgroundColor: "var(--th-bg-surface)",
       }}
     >
       <div className="flex items-center justify-between gap-2">
@@ -222,7 +222,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
 
           {stages.map((stage, idx) => (
             <div key={idx} className="rounded-xl border p-3 space-y-2"
-              style={{ borderColor: "rgba(148,163,184,0.18)", backgroundColor: "rgba(2,6,23,0.5)" }}>
+              style={{ borderColor: "rgba(148,163,184,0.18)", backgroundColor: "var(--th-overlay-medium)" }}>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] font-mono w-5 text-center shrink-0"
                   style={{ color: "var(--th-text-muted)" }}>{idx + 1}</span>

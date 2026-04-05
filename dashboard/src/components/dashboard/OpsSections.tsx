@@ -72,7 +72,7 @@ export function DashboardDeptAndSquad({
             {deptData.map((dept) => (
               <article
                 key={dept.id}
-                className="group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:bg-white/[0.04] hover:translate-x-1"
+                className="group relative overflow-hidden rounded-xl border border-surface-light bg-surface-subtle p-3 transition-all duration-200 hover:bg-surface-subtle hover:translate-x-1"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2.5">
@@ -91,7 +91,7 @@ export function DashboardDeptAndSquad({
                   </span>
                 </div>
 
-                <div className="mt-2.5 relative h-2 overflow-hidden rounded-full border border-white/[0.06] bg-white/[0.04]">
+                <div className="mt-2.5 relative h-2 overflow-hidden rounded-full border border-surface-light bg-surface-subtle">
                   <div
                     className={`xp-bar-fill h-full rounded-full bg-gradient-to-r ${dept.color.bar} transition-all duration-700`}
                     style={{ width: `${dept.ratio}%` }}
@@ -273,7 +273,7 @@ export function DashboardMissionLog({
             return (
               <article
                 key={task.id}
-                className={`group grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-xl border border-white/[0.06] border-l-[3px] ${leftBorder} bg-white/[0.02] p-3 transition-all duration-200 hover:bg-white/[0.04] hover:translate-x-1`}
+                className={`group grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-xl border border-surface-light border-l-[3px] ${leftBorder} bg-surface-subtle p-3 transition-all duration-200 hover:bg-surface-subtle hover:translate-x-1`}
               >
                 {assignedAgent ? (
                   <AgentAvatar agent={assignedAgent} agents={agents} size={36} rounded="xl" />

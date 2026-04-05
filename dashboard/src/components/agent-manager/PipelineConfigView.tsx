@@ -68,7 +68,7 @@ export default function PipelineConfigView({
       className="rounded-2xl border p-3 sm:p-4 space-y-3"
       style={{
         borderColor: "rgba(99,102,241,0.35)",
-        backgroundColor: "rgba(15,23,42,0.65)",
+        backgroundColor: "var(--th-bg-surface)",
       }}
     >
       <div className="flex items-center justify-between gap-2">
@@ -141,7 +141,7 @@ export default function PipelineConfigView({
                         : "rgba(148,163,184,0.25)",
                       backgroundColor: s.terminal
                         ? "rgba(34,197,94,0.08)"
-                        : "rgba(2,6,23,0.5)",
+                        : "var(--th-overlay-medium)",
                       color: s.terminal ? "#4ade80" : "var(--th-text-primary)",
                     }}
                   >
@@ -167,7 +167,7 @@ export default function PipelineConfigView({
                     {(hasHooks || timeout) && (
                       <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block z-50">
                         <div
-                          className="bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-[10px] whitespace-nowrap space-y-0.5"
+                          className="bg-th-bg-primary border border-th-border rounded px-2 py-1.5 text-[10px] whitespace-nowrap space-y-0.5"
                           style={{ color: "var(--th-text-secondary)" }}
                         >
                           {hasHooks && (
@@ -209,7 +209,7 @@ export default function PipelineConfigView({
                 <div
                   key={i}
                   className="flex items-center gap-1.5 text-[10px] px-2 py-1 rounded"
-                  style={{ backgroundColor: "rgba(2,6,23,0.4)" }}
+                  style={{ backgroundColor: "var(--th-overlay-subtle)" }}
                 >
                   <span className="font-mono" style={{ color: "var(--th-text-primary)" }}>
                     {t.from}

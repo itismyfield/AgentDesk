@@ -66,7 +66,7 @@ export function DashboardHeroHeader({
 
         <div className="hidden sm:flex items-center gap-3">
           <div className="flex flex-col gap-1">
-            <span className="rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-0.5 text-[10px] text-slate-400">
+            <span className="rounded-md border border-surface-light bg-surface-subtle px-2 py-0.5 text-[10px] text-slate-400">
               {date}
             </span>
             <span className="rounded-md border border-cyan-400/20 bg-cyan-500/[0.06] px-2 py-0.5 text-[10px] text-cyan-300">
@@ -173,7 +173,7 @@ export function DashboardRankingBoard({
             </p>
           </div>
         </div>
-        <span className="rounded-md border border-white/[0.06] bg-white/[0.03] px-2.5 py-1 text-[10px] font-bold text-slate-400">
+        <span className="rounded-md border border-surface-light bg-surface-subtle px-2.5 py-1 text-[10px] font-bold text-slate-400">
           TOP {topAgents.length}
         </span>
       </div>
@@ -315,7 +315,7 @@ export function DashboardRankingBoard({
           )}
 
           {topAgents.length > 3 && (
-            <div className="space-y-2 border-t border-white/[0.06] pt-4">
+            <div className="space-y-2 border-t border-surface-light pt-4">
               {topAgents.slice(3).map((agent, idx) => {
                 const rank = idx + 4;
                 const tier = getRankTier(agent.xp);
@@ -323,7 +323,7 @@ export function DashboardRankingBoard({
                 return (
                   <div
                     key={agent.id}
-                    className="group flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:bg-white/[0.05] hover:translate-x-1"
+                    className="group flex items-center gap-3 rounded-xl border border-surface-light bg-surface-subtle p-3 transition-all duration-200 hover:bg-surface-subtle hover:translate-x-1"
                     style={{ borderLeftWidth: "3px", borderLeftColor: `${tier.color}60` }}
                   >
                     <span className="w-8 text-center font-mono text-sm font-black" style={{ color: `${tier.color}80` }}>

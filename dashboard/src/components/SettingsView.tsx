@@ -385,7 +385,7 @@ export default function SettingsView({
                         </div>
                         <input
                           type="text"
-                          className="w-full rounded-lg px-3 py-2 text-sm bg-white/5 border"
+                          className="w-full rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
                           style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
                           defaultValue={entry.value ?? ""}
                           onChange={(e) => setConfigEdits((prev) => ({ ...prev, [entry.key]: e.target.value }))}
@@ -429,7 +429,7 @@ export default function SettingsView({
       <div className="mt-8 pt-6 border-t" style={{ borderColor: "rgba(148,163,184,0.15)" }}>
         <button
           onClick={() => setShowOnboarding(true)}
-          className="px-6 py-2.5 rounded-xl text-sm font-medium border hover:bg-white/5 transition-colors"
+          className="px-6 py-2.5 rounded-xl text-sm font-medium border hover:bg-surface-subtle transition-colors"
           style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
         >
           {tr("온보딩 재수행", "Re-run Onboarding")}

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { Application, Container, Graphics, Text, Texture } from "pixi.js";
 import type { Agent, AuditLogEntry, Department, KanbanCard, RoundTableMeeting, Task, SubAgent } from "../types";
-import type { ThemeMode } from "../ThemeContext";
+type ThemeMode = "dark" | "light";
 import type { UiLanguage } from "../i18n";
 import { buildSpriteMap } from "./AgentAvatar";
 import { buildOfficeScene } from "./office-view/buildScene";

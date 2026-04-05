@@ -45,6 +45,8 @@ interface OfficeContextValue {
   subAgents: SubAgent[];
   /** agents + dispatched-as-agent entries */
   agentsWithDispatched: Agent[];
+  /** True while any context refresh is in flight */
+  refreshing: boolean;
 
   // Refresh functions
   refreshOffices: () => void;
@@ -109,45 +111,45 @@ export function OfficeProvider({
       mountedRef.current = true;
       return;
     }
-    (async () => {
-      try {
-        const [ag, dep] = await Promise.all([
-          api.getAgents(selectedOfficeId ?? undefined),
-          api.getDepartments(selectedOfficeId ?? undefined),
-        ]);
-        setAgents(ag);
-        setDepartments(dep);
-      } catch (e) {
-        console.error("Office scope reload failed:", e);
-      }
-    })();
+    refreshAgents();
+    refreshDepartments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedOfficeId]);
 
-  // ── Refresh functions ──
+  // ── Refresh functions with loading tracking ──
+
+  const [refreshCount, setRefreshCount] = useState(0);
+  const tracked = useCallback(
+    <T,>(promise: Promise<T>): Promise<T> => {
+      setRefreshCount((c) => c + 1);
+      return promise.finally(() => setRefreshCount((c) => c - 1));
+    },
+    [],
+  );
 
   const refreshOffices = useCallback(() => {
-    api.getOffices().then(setOffices).catch(() => {});
-  }, []);
+    tracked(api.getOffices()).then(setOffices).catch(() => {});
+  }, [tracked]);
 
   const refreshAgents = useCallback(() => {
-    api.getAgents(selectedOfficeId ?? undefined).then(setAgents).catch(() => {});
-  }, [selectedOfficeId]);
+    tracked(api.getAgents(selectedOfficeId ?? undefined)).then(setAgents).catch(() => {});
+  }, [selectedOfficeId, tracked]);
 
   const refreshAllAgents = useCallback(() => {
-    api.getAgents().then(setAllAgents).catch(() => {});
-  }, []);
+    tracked(api.getAgents()).then(setAllAgents).catch(() => {});
+  }, [tracked]);
 
   const refreshDepartments = useCallback(() => {
-    api.getDepartments(selectedOfficeId ?? undefined).then(setDepartments).catch(() => {});
-  }, [selectedOfficeId]);
+    tracked(api.getDepartments(selectedOfficeId ?? undefined)).then(setDepartments).catch(() => {});
+  }, [selectedOfficeId, tracked]);
 
   const refreshAllDepartments = useCallback(() => {
-    api.getDepartments().then(setAllDepartments).catch(() => {});
-  }, []);
+    tracked(api.getDepartments()).then(setAllDepartments).catch(() => {});
+  }, [tracked]);
 
   const refreshAuditLogs = useCallback(() => {
-    api.getAuditLogs(12).then(setAuditLogs).catch(() => {});
-  }, []);
+    tracked(api.getAuditLogs(12)).then(setAuditLogs).catch(() => {});
+  }, [tracked]);
 
   // Stable ref for pushNotification to avoid re-registering WS listener
   const pushNotificationRef = useRef(pushNotification);
@@ -272,6 +274,7 @@ export function OfficeProvider({
         refreshDepartments,
         refreshAllDepartments,
         refreshAuditLogs,
+        refreshing: refreshCount > 0,
       }}
     >
       {children}

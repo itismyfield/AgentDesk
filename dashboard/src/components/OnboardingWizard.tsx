@@ -685,7 +685,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   // ── Styles ──────────────────────────────────────────
 
   const stepBox = "rounded-2xl border p-6 space-y-5";
-  const inputStyle = "w-full rounded-xl px-4 py-3 text-sm bg-white/5 border";
+  const inputStyle = "w-full rounded-xl px-4 py-3 text-sm bg-surface-subtle border";
   const btnPrimary =
     "px-6 py-3 rounded-xl text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors";
   const btnSecondary =
@@ -930,7 +930,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 "시스템 상태, 오류, 경고 등 정보 전달에만 사용됩니다.\n이 봇의 메시지에는 에이전트가 반응하지 않습니다.\n없어도 기본 기능에 지장은 없습니다.",
                 "Only for system status and error notifications.\nAgents don't respond to this bot's messages.\nOptional — core features work without it.",
               )} />
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 font-medium" style={{ color: "var(--th-text-muted)" }}>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-hover font-medium" style={{ color: "var(--th-text-muted)" }}>
                 {tr("선택", "Optional")}
               </span>
             </div>
@@ -983,7 +983,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           </div>
           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {tr("토큰은 나중에 설정 파일에서 직접 입력할 수 있습니다: ", "Tokens can be set later in: ")}
-            <code className="text-[11px] px-1 py-0.5 rounded bg-white/10">~/.adk/release/agentdesk.yaml</code>
+            <code className="text-[11px] px-1 py-0.5 rounded bg-surface-hover">~/.adk/release/agentdesk.yaml</code>
           </p>
         </div>
       )}
@@ -1056,7 +1056,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                     <div className="rounded-lg p-3 text-xs" style={{ backgroundColor: "rgba(251,191,36,0.08)" }}>
                       <div style={{ color: "#fde68a" }}>
                         {tr("터미널에서 로그인하세요:", "Login in terminal:")}
-                        <code className="ml-2 px-1.5 py-0.5 rounded bg-white/10">{providerLoginCommand(provider)}</code>
+                        <code className="ml-2 px-1.5 py-0.5 rounded bg-surface-hover">{providerLoginCommand(provider)}</code>
                       </div>
                     </div>
                   )}
@@ -1125,7 +1125,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               {agents.map((agent) => (
                 <div key={agent.id} className="rounded-xl border overflow-hidden" style={{ borderColor: borderLight }}>
                   <div
-                    className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-white/5"
+                    className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-surface-subtle"
                     onClick={() => setExpandedAgent(expandedAgent === agent.id ? null : agent.id)}
                   >
                     <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
@@ -1171,7 +1171,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                           );
                         }}
                         rows={6}
-                        className="w-full rounded-lg px-3 py-2 text-xs bg-white/5 border resize-y"
+                        className="w-full rounded-lg px-3 py-2 text-xs bg-surface-subtle border resize-y"
                         style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
                         placeholder={tr("에이전트의 역할과 행동 규칙을 정의합니다", "Define the agent's role and behavior")}
                       />
@@ -1189,7 +1189,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               placeholder={tr("에이전트 이름", "Agent name")}
               value={customName}
               onChange={(e) => setCustomName(e.target.value)}
-              className="flex-1 rounded-lg px-3 py-2 text-sm bg-white/5 border"
+              className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
               style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
             />
             <input
@@ -1197,7 +1197,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               placeholder={tr("한줄 설명", "Brief description")}
               value={customDesc}
               onChange={(e) => setCustomDesc(e.target.value)}
-              className="flex-1 rounded-lg px-3 py-2 text-sm bg-white/5 border"
+              className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
               style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
             />
             <button
@@ -1296,7 +1296,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                           return copy;
                         });
                       }}
-                      className="flex-1 rounded-lg px-3 py-2 text-sm bg-white/5 border"
+                      className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
                       style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
                     >
                       <option value="">{tr(`새 채널: #${ca.recommendedName}`, `New: #${ca.recommendedName}`)}</option>
@@ -1315,7 +1315,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                           return copy;
                         });
                       }}
-                      className="flex-1 rounded-lg px-3 py-2 text-sm bg-white/5 border"
+                      className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
                       style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
                       placeholder={ca.recommendedName}
                     />

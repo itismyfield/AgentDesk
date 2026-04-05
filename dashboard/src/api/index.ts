@@ -87,6 +87,7 @@ export {
   getAgentTimeline,
   getCardAuditLog,
   getCardGitHubComments,
+  onApiError,
 } from "./client";
 
 export type {

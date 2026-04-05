@@ -437,7 +437,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 </span>
                 <button
                   onClick={() => setShowChannelEdit(true)}
-                  className="p-1 rounded hover:bg-white/10 transition-colors"
+                  className="p-1 rounded hover:bg-surface-hover transition-colors"
                   title={t({ ko: "채널 ID 변경", en: "Change Channel ID" })}
                 >
                   <Settings2 size={12} style={{ color: "var(--th-text-muted)" }} />
@@ -490,7 +490,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
           <div className="flex items-center gap-2 justify-end">
             <button
               onClick={() => setShowStartForm(false)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-white/5"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-surface-subtle"
               style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
             >
               {t({ ko: "취소", en: "Cancel" })}
@@ -746,7 +746,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 <div className="flex items-center gap-2 flex-wrap min-w-0">
                   <button
                     onClick={() => handleOpenDetail(m)}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-white/5"
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-surface-subtle"
                     style={{ borderColor: "var(--th-border)", color: "var(--th-text-secondary)" }}
                   >
                     {t({ ko: "상세 보기", en: "Details" })}

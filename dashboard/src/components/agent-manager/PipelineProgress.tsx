@@ -70,7 +70,7 @@ export default function PipelineProgress({ tr, cardId, currentStageId }: Props) 
             >
               {/* Tooltip on hover */}
               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block z-50">
-                <div className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[10px] whitespace-nowrap"
+                <div className="bg-th-bg-primary border border-th-border rounded px-2 py-1 text-[10px] whitespace-nowrap"
                   style={{ color: "var(--th-text-secondary)" }}>
                   {stage.stage_name}
                   {hist && (

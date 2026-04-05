@@ -90,7 +90,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/10 transition-colors shrink-0"
+            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-surface-hover transition-colors shrink-0"
             style={{ color: "var(--th-text-muted)" }}
           >
             ✕
@@ -202,7 +202,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
         <div className="flex justify-end p-4 border-t" style={{ borderColor: "var(--th-border)" }}>
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-lg text-sm font-medium border transition-colors hover:bg-white/5"
+            className="px-4 py-2 rounded-lg text-sm font-medium border transition-colors hover:bg-surface-subtle"
             style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
           >
             {t({ ko: "닫기", en: "Close" })}

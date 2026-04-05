@@ -115,7 +115,7 @@ function EntryRow({
             ? "rgba(139,92,246,0.08)"
             : entry.status === "dispatched"
               ? "rgba(245,158,11,0.06)"
-              : "rgba(2,6,23,0.5)",
+              : "var(--th-overlay-medium)",
         opacity: isDragging ? 0.5 : 1,
         cursor: isPending && dragHandlers?.draggable ? "grab" : undefined,
       }}
@@ -171,7 +171,7 @@ function EntryRow({
             className="px-1.5 py-0.5 text-[10px]"
             style={{
               color: moveControls.canMoveUp ? "var(--th-text-secondary)" : "var(--th-text-muted)",
-              backgroundColor: "rgba(15,23,42,0.65)",
+              backgroundColor: "var(--th-bg-surface)",
               opacity: moveControls.canMoveUp ? 1 : 0.45,
               touchAction: "manipulation",
             }}
@@ -188,7 +188,7 @@ function EntryRow({
             style={{
               borderColor: "rgba(148,163,184,0.2)",
               color: moveControls.canMoveDown ? "var(--th-text-secondary)" : "var(--th-text-muted)",
-              backgroundColor: "rgba(15,23,42,0.65)",
+              backgroundColor: "var(--th-bg-surface)",
               opacity: moveControls.canMoveDown ? 1 : 0.45,
               touchAction: "manipulation",
             }}
@@ -495,7 +495,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
       className="rounded-2xl border p-3 sm:p-4 space-y-3"
       style={{
         borderColor: run ? "rgba(139,92,246,0.35)" : "rgba(148,163,184,0.22)",
-        backgroundColor: "rgba(15,23,42,0.65)",
+        backgroundColor: "var(--th-bg-surface)",
       }}
     >
       {/* Header */}
@@ -522,7 +522,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
             </span>
           )}
           {totalCount > 0 && (
-            <span className="text-[11px] px-1.5 py-0.5 rounded bg-white/8" style={{ color: "var(--th-text-muted)" }}>
+            <span className="text-[11px] px-1.5 py-0.5 rounded bg-surface-medium" style={{ color: "var(--th-text-muted)" }}>
               {doneCount}/{totalCount}
             </span>
           )}
@@ -674,7 +674,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
 
       {/* Progress bar */}
       {totalCount > 0 && (
-        <div className="flex gap-0.5 h-1.5 rounded-full overflow-hidden bg-white/5">
+        <div className="flex gap-0.5 h-1.5 rounded-full overflow-hidden bg-surface-subtle">
           {doneCount > 0 && (
             <div
               className="rounded-full"
@@ -707,7 +707,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                   <div
                     key={agentId}
                     className="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg border"
-                    style={{ borderColor: "rgba(148,163,184,0.18)", backgroundColor: "rgba(15,23,42,0.5)" }}
+                    style={{ borderColor: "rgba(148,163,184,0.18)", backgroundColor: "var(--th-overlay-medium)" }}
                   >
                     <span style={{ color: "var(--th-text-secondary)" }}>{getAgentLabel(agentId)}</span>
                     {stats.dispatched > 0 && <span style={{ color: "#fbbf24" }}>{stats.dispatched}</span>}
@@ -948,7 +948,7 @@ function AgentSubQueue({
       </div>
       {/* Per-agent progress bar */}
       {agentEntries.length > 1 && (
-        <div className="flex gap-0.5 h-1 rounded-full overflow-hidden bg-white/5 mx-1">
+        <div className="flex gap-0.5 h-1 rounded-full overflow-hidden bg-surface-subtle mx-1">
           {(() => {
             const ad = agentEntries.filter((e) => e.status === "done").length;
             const aa = agentEntries.filter((e) => e.status === "dispatched").length;

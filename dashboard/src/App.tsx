@@ -14,6 +14,7 @@ import type {
 } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
 import * as api from "./api/client";
+import { onApiError } from "./api/client";
 import { KanbanProvider, useKanban } from "./contexts/KanbanContext";
 import { OfficeProvider, useOffice } from "./contexts/OfficeContext";
 import { SettingsProvider, useSettings } from "./contexts/SettingsContext";
@@ -31,7 +32,7 @@ const OfficeManagerModal = lazy(() => import("./components/OfficeManagerModal"))
 const AgentInfoCard = lazy(() => import("./components/agent-manager/AgentInfoCard"));
 import { useSpriteMap } from "./components/AgentAvatar";
 import { useI18n } from "./i18n";
-import NotificationCenter, { type Notification, useNotifications } from "./components/NotificationCenter";
+import NotificationCenter, { type Notification, useNotifications, ToastOverlay } from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
 import {
   Building2,
@@ -87,10 +88,25 @@ interface BootstrapData {
 
 export default function App() {
   const [data, setData] = useState<BootstrapData | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const { notifications, pushNotification, dismissNotification } = useNotifications();
+
+  // Wire up API error → toast notifications (throttled: max 1 per 3s per endpoint)
+  useEffect(() => {
+    const lastFired = new Map<string, number>();
+    onApiError((url, error) => {
+      const now = Date.now();
+      const last = lastFired.get(url) ?? 0;
+      if (now - last < 3000) return;
+      lastFired.set(url, now);
+      pushNotification(`API error: ${error.message}`, "error");
+    });
+    return () => onApiError(null);
+  }, [pushNotification]);
 
   useEffect(() => {
     (async () => {
+      const partial: string[] = [];
       try {
         await api.getSession();
         const off = await api.getOffices();
@@ -103,11 +119,14 @@ export default function App() {
           api.getDispatchedSessions(true),
           api.getStats(defaultOfficeId),
           api.getSettings(),
-          api.getRoundTableMeetings().catch(() => [] as RoundTableMeeting[]),
-          api.getAuditLogs(12).catch(() => [] as AuditLogEntry[]),
-          api.getKanbanCards().catch(() => [] as KanbanCard[]),
-          api.getTaskDispatches({ limit: 200 }).catch(() => [] as TaskDispatch[]),
+          api.getRoundTableMeetings().catch(() => { partial.push("meetings"); return [] as RoundTableMeeting[]; }),
+          api.getAuditLogs(12).catch(() => { partial.push("audit logs"); return [] as AuditLogEntry[]; }),
+          api.getKanbanCards().catch(() => { partial.push("kanban"); return [] as KanbanCard[]; }),
+          api.getTaskDispatches({ limit: 200 }).catch(() => { partial.push("dispatches"); return [] as TaskDispatch[]; }),
         ]);
+        if (partial.length > 0) {
+          pushNotification(`Failed to load: ${partial.join(", ")}`, "warning");
+        }
         const resolvedSettings = set.companyName
           ? ({ ...DEFAULT_SETTINGS, ...set } as CompanySettings)
           : DEFAULT_SETTINGS;
@@ -127,26 +146,13 @@ export default function App() {
           selectedOfficeId: defaultOfficeId ?? null,
         });
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
         console.error("Bootstrap failed:", e);
-        // Allow rendering even on failure so user sees something
-        setData({
-          offices: [],
-          agents: [],
-          allAgents: [],
-          departments: [],
-          allDepartments: [],
-          sessions: [],
-          stats: null,
-          settings: DEFAULT_SETTINGS,
-          roundTableMeetings: [],
-          auditLogs: [],
-          kanbanCards: [],
-          taskDispatches: [],
-          selectedOfficeId: null,
-        });
+        setBootstrapError(msg);
+        // Do NOT call setData — keep data null so the error UI renders
       }
     })();
-  }, []);
+  }, [pushNotification]);
 
   // WS connection — kept at root so wsRef is available early
   // The handler is a no-op pass-through: each context listens via the
@@ -176,10 +182,21 @@ export default function App() {
 
   if (!data) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-900 text-gray-400">
+      <div className="flex items-center justify-center h-screen bg-th-bg-primary text-th-text-muted">
         <div className="text-center">
           <div className="text-4xl mb-4">🐾</div>
-          <div>{t({ ko: "AgentDesk 대시보드 로딩 중...", en: "Loading AgentDesk Dashboard..." })}</div>
+          <div>{bootstrapError
+            ? t({ ko: `로딩 실패: ${bootstrapError}`, en: `Load failed: ${bootstrapError}` })
+            : t({ ko: "AgentDesk 대시보드 로딩 중...", en: "Loading AgentDesk Dashboard..." })
+          }</div>
+          {bootstrapError && (
+            <button
+              className="mt-4 px-4 py-2 rounded-lg bg-surface-medium text-th-text-primary text-sm"
+              onClick={() => window.location.reload()}
+            >
+              {t({ ko: "새로고침", en: "Reload" })}
+            </button>
+          )}
         </div>
       </div>
     );
@@ -229,7 +246,7 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
   const [officeInfoAgent, setOfficeInfoAgent] = useState<Agent | null>(null);
   const [showCmdPalette, setShowCmdPalette] = useState(false);
 
-  const { settings, setSettings, stats, refreshStats, isKo, locale, tr } = useSettings();
+  const { settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr } = useSettings();
   const {
     offices,
     selectedOfficeId,
@@ -252,6 +269,7 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
     refreshDepartments,
     refreshAllDepartments,
     refreshAuditLogs,
+    refreshing,
   } = useOffice();
   const { kanbanCards, taskDispatches, upsertKanbanCard, setKanbanCards } = useKanban();
 
@@ -300,9 +318,9 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
   ];
 
   return (
-    <div className="flex fixed inset-0 bg-gray-900">
+    <div className="flex fixed inset-0 bg-th-bg-primary">
       {/* Sidebar (hidden on mobile) */}
-      <nav className="hidden sm:flex w-[4.5rem] bg-gray-950 border-r border-gray-800 flex-col items-center py-4 gap-1">
+      <nav className="hidden sm:flex w-[4.5rem] bg-th-nav-bg border-r border-th-card-border flex-col items-center py-4 gap-1">
         <div className="text-2xl mb-4">🐾</div>
         {navItems.map((item) => (
           <NavBtn
@@ -321,9 +339,11 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
           className="w-10 h-10 flex items-center justify-center rounded-lg"
           title={wsConnected ? (isKo ? "서버 연결됨" : "Server connected") : (isKo ? "서버 연결 끊김" : "Server disconnected")}
         >
-          {wsConnected
-            ? <Wifi size={16} className="text-emerald-500" />
-            : <WifiOff size={16} className="text-red-400 animate-pulse" />}
+          {(refreshing || refreshingStats)
+            ? <div className="w-4 h-4 rounded-full border-2 border-th-text-muted border-t-indigo-400 animate-spin" title={isKo ? "데이터 갱신 중..." : "Refreshing..."} />
+            : wsConnected
+              ? <Wifi size={16} className="text-emerald-500" />
+              : <WifiOff size={16} className="text-red-400 animate-pulse" />}
         </div>
       </nav>
 
@@ -453,13 +473,18 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
       </div>
 
       {/* G1: Mobile bottom tab bar */}
-      <nav className="sm:hidden fixed bottom-0 left-0 right-0 bg-gray-950 border-t border-gray-800 flex justify-around items-center h-14 z-50">
+      <nav className="sm:hidden fixed bottom-0 left-0 right-0 bg-th-nav-bg border-t border-th-card-border flex justify-around items-center h-14 z-50">
+        {(refreshing || refreshingStats) && (
+          <div className="absolute top-0 left-0 right-0 h-0.5 overflow-hidden">
+            <div className="h-full bg-indigo-400 animate-[loading-bar_1.5s_ease-in-out_infinite]" />
+          </div>
+        )}
         {navItems.map((item) => (
           <button
             key={item.id}
             onClick={() => { setView(item.id); if (item.id === "dashboard") refreshStats(); }}
             className={`relative flex flex-col items-center justify-center flex-1 h-full text-[10px] ${
-              view === item.id ? "text-indigo-400" : "text-gray-500"
+              view === item.id ? "text-indigo-400" : "text-th-text-muted"
             }`}
           >
             {item.icon}
@@ -515,6 +540,9 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
           />
         )}
       </Suspense>
+
+      {/* Toast overlay for API errors and warnings */}
+      <ToastOverlay notifications={notifications} onDismiss={dismissNotification} />
     </div>
   );
 }
@@ -543,7 +571,7 @@ function NavBtn({
       className={`relative w-14 rounded-lg flex flex-col items-center justify-center gap-0.5 py-1.5 transition-colors ${
         active
           ? "bg-indigo-600 text-white"
-          : "text-gray-500 hover:text-gray-300 hover:bg-gray-800"
+          : "text-th-text-muted hover:text-th-text-primary hover:bg-surface-hover"
       }`}
     >
       {icon}

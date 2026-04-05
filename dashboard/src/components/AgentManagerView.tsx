@@ -256,7 +256,7 @@ export default function AgentManagerView({
         <div className="flex items-center gap-2">
           <button
             onClick={openCreateDept}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-white/10"
+            className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-surface-hover"
             style={{ border: "1px solid var(--th-input-border)", color: "var(--th-text-secondary)" }}
           >
             + {tr("부서 추가", "Add Dept")}

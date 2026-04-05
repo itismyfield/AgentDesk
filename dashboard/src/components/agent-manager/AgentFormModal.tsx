@@ -120,7 +120,7 @@ export default function AgentFormModal({
                   ▲
                 </button>
                 <div
-                  className="w-14 h-14 rounded-xl overflow-hidden bg-gray-700 flex items-center justify-center flex-shrink-0"
+                  className="w-14 h-14 rounded-xl overflow-hidden bg-th-bg-surface flex items-center justify-center flex-shrink-0"
                   style={{ border: "2px solid var(--th-input-border)" }}
                 >
                   {spriteNum > 0 ? (

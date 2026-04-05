@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Bell, X } from "lucide-react";
 import { useI18n } from "../i18n";
 
@@ -25,7 +25,59 @@ export function useNotifications(maxItems = 50) {
     setNotifications((prev) => prev.filter((n) => n.id !== id));
   }, []);
 
-  return { notifications, pushNotification, dismissNotification };
+  return { notifications, pushNotification, dismissNotification } as const;
+}
+
+// ── Toast overlay: auto-dismiss ephemeral notifications ──
+
+const TOAST_TTL_MS = 5000;
+
+interface ToastOverlayProps {
+  notifications: Notification[];
+  onDismiss: (id: string) => void;
+}
+
+export function ToastOverlay({ notifications, onDismiss }: ToastOverlayProps) {
+  const recent = notifications.filter((n) => Date.now() - n.ts < TOAST_TTL_MS);
+
+  // Auto-dismiss timer
+  useEffect(() => {
+    if (recent.length === 0) return;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      for (const n of recent) {
+        if (now - n.ts >= TOAST_TTL_MS) onDismiss(n.id);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [recent, onDismiss]);
+
+  if (recent.length === 0) return null;
+
+  return (
+    <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 max-w-sm">
+      {recent.slice(0, 5).map((n) => (
+        <div
+          key={n.id}
+          className="flex items-start gap-2 rounded-lg px-3 py-2 shadow-lg text-sm animate-[toast-in_0.2s_ease-out]"
+          style={{
+            background: "var(--th-card-bg)",
+            border: `1px solid ${TYPE_COLORS[n.type]}40`,
+            color: "var(--th-text-primary)",
+          }}
+        >
+          <span
+            className="mt-1 w-2 h-2 rounded-full shrink-0"
+            style={{ background: TYPE_COLORS[n.type] }}
+          />
+          <span className="flex-1 min-w-0 break-words text-xs">{n.message}</span>
+          <button onClick={() => onDismiss(n.id)} className="shrink-0 text-th-text-muted hover:text-th-text-primary">
+            <X size={12} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 interface NotificationCenterProps {
@@ -49,7 +101,7 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="relative w-10 h-10 rounded-lg flex items-center justify-center text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+        className="relative w-10 h-10 rounded-lg flex items-center justify-center text-th-text-muted hover:text-th-text-primary hover:bg-surface-hover transition-colors"
         title={t({ ko: "알림", en: "Notifications" })}
       >
         <Bell size={20} />
@@ -62,34 +114,34 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
 
       {open && (
         <div
-          className="absolute left-12 bottom-0 w-80 max-h-96 overflow-auto rounded-xl border border-gray-700 bg-gray-900 shadow-2xl z-50"
+          className="absolute left-12 bottom-0 w-80 max-h-96 overflow-auto rounded-xl border border-th-border bg-th-bg-primary shadow-2xl z-50"
           style={{ minHeight: 100 }}
         >
-          <div className="sticky top-0 bg-gray-900 border-b border-gray-700 px-3 py-2 flex items-center justify-between">
-            <span className="text-sm font-semibold text-gray-300">{t({ ko: "알림 센터", en: "Notification Center" })}</span>
-            <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-gray-300">
+          <div className="sticky top-0 bg-th-bg-primary border-b border-th-border px-3 py-2 flex items-center justify-between">
+            <span className="text-sm font-semibold text-th-text-primary">{t({ ko: "알림 센터", en: "Notification Center" })}</span>
+            <button onClick={() => setOpen(false)} className="text-th-text-muted hover:text-th-text-primary">
               <X size={14} />
             </button>
           </div>
           {notifications.length === 0 ? (
-            <div className="px-3 py-6 text-center text-gray-500 text-sm">{t({ ko: "알림이 없습니다", en: "No notifications" })}</div>
+            <div className="px-3 py-6 text-center text-th-text-muted text-sm">{t({ ko: "알림이 없습니다", en: "No notifications" })}</div>
           ) : (
-            <ul className="divide-y divide-gray-800">
+            <ul className="divide-y divide-th-border">
               {notifications.slice(0, 30).map((n) => (
-                <li key={n.id} className="px-3 py-2 flex items-start gap-2 hover:bg-gray-800/50">
+                <li key={n.id} className="px-3 py-2 flex items-start gap-2 hover:bg-surface-hover/50">
                   <span
                     className="mt-1.5 w-2 h-2 rounded-full shrink-0"
                     style={{ background: TYPE_COLORS[n.type] }}
                   />
                   <div className="flex-1 min-w-0">
-                    <div className="text-xs text-gray-300 break-words">{n.message}</div>
-                    <div className="text-[10px] text-gray-600 mt-0.5">
+                    <div className="text-xs text-th-text-primary break-words">{n.message}</div>
+                    <div className="text-[10px] text-th-text-muted mt-0.5">
                       {new Date(n.ts).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
                     </div>
                   </div>
                   <button
                     onClick={() => onDismiss(n.id)}
-                    className="text-gray-600 hover:text-gray-400 shrink-0"
+                    className="text-th-text-muted hover:text-th-text-muted shrink-0"
                   >
                     <X size={12} />
                   </button>

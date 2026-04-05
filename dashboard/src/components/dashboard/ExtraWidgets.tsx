@@ -210,7 +210,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
             {t({ ko: "병목과 대기 중인 카드", en: "Bottlenecks and waiting cards", ja: "ボトルネックと待機カード", zh: "瓶颈与等待卡片" })}
           </p>
         </div>
-        <span className="text-xs px-2 py-1 rounded-full bg-white/8" style={{ color: "var(--th-text-secondary)" }}>
+        <span className="text-xs px-2 py-1 rounded-full bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
           {kanban.open_total}
         </span>
       </div>

@@ -128,7 +128,7 @@ export const DEPT_COLORS = [
 export function XpBar({ xp, maxXp, color }: { xp: number; maxXp: number; color: string }) {
   const pct = maxXp > 0 ? Math.min(100, Math.round((xp / maxXp) * 100)) : 0;
   return (
-    <div className="relative h-2.5 w-full overflow-hidden rounded-full border border-white/[0.08] bg-white/[0.04]">
+    <div className="relative h-2.5 w-full overflow-hidden rounded-full border border-surface-medium bg-surface-subtle">
       <div
         className="xp-bar-fill h-full rounded-full transition-all duration-1000 ease-out"
         style={{

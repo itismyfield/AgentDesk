@@ -146,7 +146,7 @@ export default function CommandPalette({
               key={item.type === "agent" ? item.agent.id : item.type === "nav" ? item.id : item.dept.id}
               onClick={() => handleSelect(item)}
               className={`w-full flex items-center gap-3 px-4 py-2 text-left text-sm transition-colors ${
-                i === selectedIndex ? "bg-indigo-600/20" : "hover:bg-white/5"
+                i === selectedIndex ? "bg-indigo-600/20" : "hover:bg-surface-subtle"
               }`}
               style={{ color: "var(--th-text)" }}
             >

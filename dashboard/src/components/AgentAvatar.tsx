@@ -75,7 +75,7 @@ export default function AgentAvatar({
   if (spriteNum) {
     return (
       <div
-        className={`${roundedClass} overflow-hidden bg-gray-700 flex-shrink-0 ${className}`}
+        className={`${roundedClass} overflow-hidden bg-th-bg-surface flex-shrink-0 ${className}`}
         style={{ width: size, height: size }}
       >
         <img
@@ -89,7 +89,7 @@ export default function AgentAvatar({
   }
   return (
     <div
-      className={`${roundedClass} bg-gray-700 flex items-center justify-center flex-shrink-0 ${className}`}
+      className={`${roundedClass} bg-th-bg-surface flex items-center justify-center flex-shrink-0 ${className}`}
       style={{ width: size, height: size, fontSize: size * 0.6 }}
     >
       {agent?.avatar_emoji ?? "🤖"}
