@@ -637,6 +637,7 @@ mod tests {
 
     #[test]
     fn resolve_binary_finds_known_tool() {
+        let _guard = env_guard();
         #[cfg(unix)]
         assert!(resolve_binary("ls").is_some());
         #[cfg(windows)]
@@ -650,6 +651,7 @@ mod tests {
 
     #[test]
     fn resolve_with_login_shell_finds_known_tool() {
+        let _guard = env_guard();
         #[cfg(unix)]
         assert!(resolve_binary_with_login_shell("ls").is_some());
         #[cfg(windows)]
