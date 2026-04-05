@@ -2,7 +2,8 @@ import { useState } from "react";
 import * as api from "../../api";
 import type { KanbanReview } from "../../api";
 import PipelineProgress from "./PipelineProgress";
-import MarkdownContent from "../common/MarkdownContent";
+import CardIssueContent from "./CardIssueContent";
+import CardTimeline from "./CardTimeline";
 import { localeName } from "../../i18n";
 import type {
   Agent,
@@ -17,84 +18,13 @@ import {
   PRIORITY_OPTIONS,
   STATUS_TRANSITIONS,
   TRANSITION_STYLE,
-  createChecklistItem,
   formatIso,
   labelForStatus,
   parseCardMetadata,
-  parseGitHubCommentTimeline,
-  parseIssueSections,
   priorityLabel,
   stringifyCardMetadata,
   type EditorState,
 } from "./kanban-utils";
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-export const TIMELINE_KIND_STYLE: Record<string, { bg: string; text: string }> = {
-  review: { bg: "rgba(20,184,166,0.16)", text: "#5eead4" },
-  pm: { bg: "rgba(244,114,182,0.16)", text: "#f9a8d4" },
-  work: { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" },
-  general: { bg: "rgba(148,163,184,0.10)", text: "#94a3b8" },
-};
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function getTimelineKindLabel(
-  kind: "review" | "pm" | "work" | "general",
-  tr: (ko: string, en: string) => string,
-) {
-  switch (kind) {
-    case "review":
-      return tr("리뷰", "Review");
-    case "pm":
-      return tr("PM 결정", "PM Decision");
-    case "work":
-      return tr("작업 이력", "Work Log");
-    case "general":
-      return tr("코멘트", "Comment");
-  }
-}
-
-function getTimelineStatusLabel(
-  status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed" | "comment",
-  tr: (ko: string, en: string) => string,
-) {
-  switch (status) {
-    case "reviewing":
-      return tr("진행 중", "In Progress");
-    case "changes_requested":
-      return tr("수정 필요", "Changes Requested");
-    case "passed":
-      return tr("통과", "Passed");
-    case "decision":
-      return tr("결정", "Decision");
-    case "completed":
-      return tr("완료", "Completed");
-    case "comment":
-      return tr("일반", "General");
-  }
-}
-
-function getTimelineStatusStyle(status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed" | "comment") {
-  switch (status) {
-    case "reviewing":
-      return { bg: "rgba(20,184,166,0.16)", text: "#5eead4" };
-    case "changes_requested":
-      return { bg: "rgba(251,113,133,0.16)", text: "#fda4af" };
-    case "passed":
-      return { bg: "rgba(34,197,94,0.18)", text: "#86efac" };
-    case "decision":
-      return { bg: "rgba(244,114,182,0.16)", text: "#f9a8d4" };
-    case "completed":
-      return { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" };
-    case "comment":
-      return { bg: "rgba(148,163,184,0.12)", text: "#94a3b8" };
-  }
-}
 
 export function canRetryCard(card: KanbanCard | null) {
   return Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
@@ -209,7 +139,6 @@ export default function KanbanCardDetail({
   const [reviewBusy, setReviewBusy] = useState(false);
 
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
-  const parsedGitHubTimeline = parseGitHubCommentTimeline(ghComments);
 
   const getAgentLabel = (agentId: string | null | undefined) => {
     if (!agentId) return tr("미할당", "Unassigned");
@@ -606,134 +535,12 @@ export default function KanbanCardDetail({
         })()}
 
         {/* Description / Issue Sections */}
-        {(() => {
-          const parsed = parseIssueSections(editor.description);
-          if (!parsed) {
-            // Fallback: non-PMD format → show as markdown
-            return (
-              <div className="space-y-1">
-                <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("설명", "Description")}</span>
-                {editor.description ? (
-                  <div
-                    className="rounded-2xl border p-4 bg-surface-subtle text-sm"
-                    style={{ borderColor: "var(--th-border-subtle)", color: "var(--th-text-primary)" }}
-                  >
-                    <MarkdownContent content={editor.description} />
-                  </div>
-                ) : (
-                  <div className="rounded-xl border border-dashed px-3 py-4 text-xs text-center" style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-muted)" }}>
-                    {tr("설명이 없습니다.", "No description.")}
-                  </div>
-                )}
-              </div>
-            );
-          }
-
-          // Structured view for PMD-format issues
-          return (
-            <div className="space-y-3">
-              {/* 배경 */}
-              {parsed.background && (
-                <div className="rounded-2xl border p-4 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-                  <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
-                    {tr("배경", "Background")}
-                  </div>
-                  <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-                    <MarkdownContent content={parsed.background} />
-                  </div>
-                </div>
-              )}
-
-              {/* 내용 */}
-              {parsed.content && (
-                <div className="rounded-2xl border p-4 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-                  <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--th-text-muted)" }}>
-                    {tr("내용", "Content")}
-                  </div>
-                  <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-                    <MarkdownContent content={parsed.content} />
-                  </div>
-                </div>
-              )}
-
-              {/* DoD Checklist */}
-              {editor.review_checklist.length > 0 && (() => {
-                const isGitHubLinked = Boolean(selectedCard.github_issue_number);
-                return (
-                <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "rgba(20,184,166,0.3)" }}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#2dd4bf" }}>
-                      DoD (Definition of Done)
-                      {isGitHubLinked && (
-                        <span className="ml-2 text-xs font-normal normal-case tracking-normal" style={{ color: "var(--th-text-muted)" }}>
-                          {tr("(GitHub 정본)", "(synced from GitHub)")}
-                        </span>
-                      )}
-                    </div>
-                    <span className="text-xs px-2 py-1 rounded-full bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
-                      {editor.review_checklist.filter((item) => item.done).length}/{editor.review_checklist.length}
-                    </span>
-                  </div>
-                  <div className="space-y-2">
-                    {editor.review_checklist.map((item) => (
-                      <label
-                        key={item.id}
-                        className="flex items-center gap-3 rounded-xl px-3 py-2"
-                        style={{ backgroundColor: "rgba(255,255,255,0.04)", opacity: isGitHubLinked ? 0.85 : 1 }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={item.done}
-                          disabled={isGitHubLinked}
-                          onChange={isGitHubLinked ? undefined : (event) => setEditor((prev) => ({
-                            ...prev,
-                            review_checklist: prev.review_checklist.map((current) =>
-                              current.id === item.id ? { ...current, done: event.target.checked } : current,
-                            ),
-                          }))}
-                        />
-                        <span
-                          className="min-w-0 flex-1 text-sm"
-                          style={{
-                            color: item.done ? "var(--th-text-secondary)" : "var(--th-text-primary)",
-                            textDecoration: item.done ? "line-through" : "none",
-                          }}
-                        >
-                          {item.label}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                );
-              })()}
-
-              {/* 의존성 */}
-              {parsed.dependencies && (
-                <div className="rounded-2xl border p-3 bg-surface-subtle" style={{ borderColor: "rgba(96,165,250,0.25)" }}>
-                  <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "#93c5fd" }}>
-                    {tr("의존성", "Dependencies")}
-                  </div>
-                  <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-                    <MarkdownContent content={parsed.dependencies} />
-                  </div>
-                </div>
-              )}
-
-              {/* 리스크 */}
-              {parsed.risks && (
-                <div className="rounded-2xl border p-3" style={{ borderColor: "rgba(239,68,68,0.25)", backgroundColor: "rgba(127,29,29,0.12)" }}>
-                  <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "#fca5a5" }}>
-                    {tr("리스크", "Risks")}
-                  </div>
-                  <div className="text-sm" style={{ color: "#fecaca" }}>
-                    <MarkdownContent content={parsed.risks} />
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })()}
+        <CardIssueContent
+          card={selectedCard}
+          editor={editor}
+          setEditor={setEditor}
+          tr={tr}
+        />
 
         {canRedispatchCard(selectedCard) && (
           <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "var(--th-border-subtle)" }}>
@@ -949,132 +756,14 @@ export default function KanbanCardDetail({
         )}
 
         {/* Unified GitHub comment timeline */}
-        {parsedGitHubTimeline.length > 0 && (
-          <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "var(--th-border-subtle)" }}>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
-                {tr("GitHub 코멘트 타임라인", "GitHub Comment Timeline")}
-                <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
-                  ({parsedGitHubTimeline.length})
-                </span>
-              </h4>
-              <button
-                type="button"
-                onClick={() => invalidateCardActivity(selectedCard.id)}
-                className="rounded-full px-2.5 py-1 text-xs font-medium border transition-opacity hover:opacity-80"
-                style={{
-                  borderColor: "rgba(147,197,253,0.28)",
-                  backgroundColor: "rgba(96,165,250,0.12)",
-                  color: "#93c5fd",
-                }}
-              >
-                {tr("새로고침", "Refresh")}
-              </button>
-            </div>
-            {/* Filter tabs */}
-            {(() => {
-              const kindCounts = parsedGitHubTimeline.reduce<Record<string, number>>((acc, e) => {
-                acc[e.kind] = (acc[e.kind] ?? 0) + 1;
-                return acc;
-              }, {});
-              const hasMultipleKinds = Object.keys(kindCounts).length > 1;
-              return hasMultipleKinds ? (
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    className="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
-                    style={{
-                      backgroundColor: !timelineFilter ? "rgba(96,165,250,0.18)" : "rgba(148,163,184,0.08)",
-                      color: !timelineFilter ? "#93c5fd" : "var(--th-text-muted)",
-                    }}
-                    onClick={() => setTimelineFilter(null)}
-                  >
-                    {tr("전체", "All")} ({parsedGitHubTimeline.length})
-                  </button>
-                  {(["review", "pm", "work", "general"] as const).filter((k) => kindCounts[k]).map((k) => (
-                    <button
-                      key={k}
-                      className="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
-                      style={{
-                        backgroundColor: timelineFilter === k ? TIMELINE_KIND_STYLE[k].bg : "rgba(148,163,184,0.08)",
-                        color: timelineFilter === k ? TIMELINE_KIND_STYLE[k].text : "var(--th-text-muted)",
-                      }}
-                      onClick={() => setTimelineFilter(timelineFilter === k ? null : k)}
-                    >
-                      {getTimelineKindLabel(k, tr)} ({kindCounts[k]})
-                    </button>
-                  ))}
-                </div>
-              ) : null;
-            })()}
-            <div className="space-y-3 max-h-96 overflow-y-auto">
-              {parsedGitHubTimeline
-                .filter((entry) => !timelineFilter || entry.kind === timelineFilter)
-                .map((entry, idx) => {
-                const statusStyle = getTimelineStatusStyle(entry.status);
-                const kindStyle = TIMELINE_KIND_STYLE[entry.kind];
-                const isGeneral = entry.kind === "general";
-                return (
-                  <div
-                    key={`${entry.kind}-${entry.createdAt}-${idx}`}
-                    className="rounded-xl border p-3 space-y-2"
-                    style={{
-                      borderColor: isGeneral ? "rgba(148,163,184,0.08)" : `${kindStyle.text}22`,
-                      backgroundColor: isGeneral ? "rgba(255,255,255,0.02)" : `${kindStyle.text}06`,
-                    }}
-                  >
-                    <div className="flex flex-wrap items-center gap-2 text-xs">
-                      <span
-                        className="px-2 py-0.5 rounded-full font-medium"
-                        style={{ backgroundColor: kindStyle.bg, color: kindStyle.text }}
-                      >
-                        {getTimelineKindLabel(entry.kind, tr)}
-                      </span>
-                      {!isGeneral && (
-                        <span
-                          className="px-2 py-0.5 rounded-full font-medium"
-                          style={{ backgroundColor: statusStyle.bg, color: statusStyle.text }}
-                        >
-                          {getTimelineStatusLabel(entry.status, tr)}
-                        </span>
-                      )}
-                      <span className="font-medium" style={{ color: "#93c5fd" }}>{entry.author}</span>
-                      <span style={{ color: "var(--th-text-muted)" }}>{formatIso(entry.createdAt, locale)}</span>
-                    </div>
-                    <div className="space-y-1">
-                      {!isGeneral && (
-                        <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
-                          {entry.title}
-                        </div>
-                      )}
-                      {!isGeneral && entry.summary && entry.summary !== entry.title && (
-                        <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-                          {entry.summary}
-                        </div>
-                      )}
-                      {entry.details.length > 0 && (
-                        <ul className="space-y-1 pl-4 text-xs list-disc" style={{ color: "var(--th-text-secondary)" }}>
-                          {entry.details.map((detail, detailIdx) => (
-                            <li key={detailIdx}>{detail}</li>
-                          ))}
-                        </ul>
-                      )}
-                      <div
-                        className="rounded-lg border px-3 py-2 text-sm"
-                        style={{
-                          borderColor: "rgba(148,163,184,0.16)",
-                          backgroundColor: "var(--th-overlay-subtle)",
-                          color: "var(--th-text-primary)",
-                        }}
-                      >
-                        <MarkdownContent content={entry.body} />
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+        <CardTimeline
+          ghComments={ghComments}
+          timelineFilter={timelineFilter}
+          setTimelineFilter={setTimelineFilter}
+          tr={tr}
+          locale={locale}
+          onRefresh={() => invalidateCardActivity(selectedCard.id)}
+        />
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex gap-2">
