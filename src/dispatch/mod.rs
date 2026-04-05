@@ -35,6 +35,12 @@ fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a 
 ///
 /// Used to cross-validate dispatch-history commits so a poisoned `reviewed_commit`
 /// from an unrelated issue cannot propagate through review→rework cycles (#269).
+///
+/// Returns `false` (reject → fallback) when verification is impossible (repo dir
+/// missing, git unreachable, commit not locally available). This fail-closed
+/// design ensures the fallback chain always reaches `resolve_card_worktree()` or
+/// `resolve_card_issue_commit_target()` when the dispatch-history commit can't
+/// be confirmed as belonging to this issue.
 fn commit_belongs_to_card_issue(db: &Db, card_id: &str, commit_sha: &str) -> bool {
     let issue_number: Option<i64> = db.separate_conn().ok().and_then(|conn| {
         conn.query_row(
@@ -50,7 +56,10 @@ fn commit_belongs_to_card_issue(db: &Db, card_id: &str, commit_sha: &str) -> boo
         return true;
     };
     let Some(repo_dir) = crate::services::platform::resolve_repo_dir() else {
-        return true;
+        tracing::warn!(
+            "[dispatch] commit_belongs_to_card_issue: repo dir unavailable — rejecting to fallback"
+        );
+        return false;
     };
     // Check commit subject for (#<issue_number>)
     let Ok(output) = std::process::Command::new("git")
@@ -58,10 +67,17 @@ fn commit_belongs_to_card_issue(db: &Db, card_id: &str, commit_sha: &str) -> boo
         .current_dir(&repo_dir)
         .output()
     else {
-        return true;
+        tracing::warn!(
+            "[dispatch] commit_belongs_to_card_issue: git log failed — rejecting to fallback"
+        );
+        return false;
     };
     if !output.status.success() {
-        return true;
+        tracing::warn!(
+            "[dispatch] commit_belongs_to_card_issue: commit {} not reachable — rejecting to fallback",
+            &commit_sha[..8.min(commit_sha.len())]
+        );
+        return false;
     }
     let subject = String::from_utf8_lossy(&output.stdout);
     let pattern = format!("(#{})", issue_number);

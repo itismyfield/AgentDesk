@@ -1974,7 +1974,7 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
         .unwrap();
     assert_eq!(card_status, "review");
 
-    let (dispatch_status, reviewed_commit): (String, String) = conn
+    let (dispatch_status, reviewed_commit): (String, Option<String>) = conn
         .query_row(
             "SELECT status, json_extract(context, '$.reviewed_commit')
              FROM task_dispatches WHERE id = ?1",
@@ -1983,7 +1983,13 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
         )
         .unwrap();
     assert_eq!(dispatch_status, "pending");
-    assert_eq!(reviewed_commit, completed_commit);
+    // The fake SHA from dispatch history is unreachable via git, so
+    // commit_belongs_to_card_issue() rejects it (fail-closed) and the
+    // fallback chain supplies a valid commit instead.
+    assert!(
+        reviewed_commit.as_deref().is_some_and(|c| !c.is_empty()),
+        "reviewed_commit should be populated by fallback chain"
+    );
 
     let (entry_status, entry_dispatch_id): (String, String) = conn
         .query_row(
