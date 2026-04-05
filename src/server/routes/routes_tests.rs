@@ -3697,6 +3697,128 @@ fn auto_queue_recovery_resets_orphan_phantom_and_cancelled_entries() {
     );
 }
 
+/// Regression test for #295: onTick1min must backstop terminal cards that still
+/// have pending auto-queue entries in active/paused runs.
+#[test]
+fn auto_queue_recovery_skips_terminal_pending_entries() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+
+    seed_agent(&db, "agent-terminal-recovery");
+    seed_auto_queue_card(
+        &db,
+        "card-terminal-active",
+        9011,
+        "done",
+        "agent-terminal-recovery",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-terminal-paused",
+        9012,
+        "done",
+        "agent-terminal-recovery",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-terminal-generated",
+        9013,
+        "done",
+        "agent-terminal-recovery",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-nonterminal-active",
+        9014,
+        "requested",
+        "agent-terminal-recovery",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        for (run_id, status) in [
+            ("run-terminal-active", "active"),
+            ("run-terminal-paused", "paused"),
+            ("run-terminal-generated", "generated"),
+        ] {
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+                 VALUES (?1, 'test-repo', 'agent-terminal-recovery', ?2)",
+                rusqlite::params![run_id, status],
+            )
+            .unwrap();
+        }
+
+        for (entry_id, run_id, card_id) in [
+            (
+                "entry-terminal-active",
+                "run-terminal-active",
+                "card-terminal-active",
+            ),
+            (
+                "entry-terminal-paused",
+                "run-terminal-paused",
+                "card-terminal-paused",
+            ),
+            (
+                "entry-terminal-generated",
+                "run-terminal-generated",
+                "card-terminal-generated",
+            ),
+            (
+                "entry-nonterminal-active",
+                "run-terminal-active",
+                "card-nonterminal-active",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status) \
+                 VALUES (?1, ?2, ?3, 'agent-terminal-recovery', 'pending')",
+                rusqlite::params![entry_id, run_id, card_id],
+            )
+            .unwrap();
+        }
+    }
+
+    engine
+        .fire_hook(
+            crate::engine::hooks::Hook::OnTick1min,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let conn = db.lock().unwrap();
+    let statuses: std::collections::HashMap<String, String> = conn
+        .prepare("SELECT id, status FROM auto_queue_entries ORDER BY id ASC")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+
+    assert_eq!(
+        statuses.get("entry-terminal-active").map(String::as_str),
+        Some("skipped")
+    );
+    assert_eq!(
+        statuses.get("entry-terminal-paused").map(String::as_str),
+        Some("skipped")
+    );
+    assert_eq!(
+        statuses.get("entry-terminal-generated").map(String::as_str),
+        Some("pending"),
+        "generated runs are not part of #295 terminal cleanup scope"
+    );
+    assert_eq!(
+        statuses.get("entry-nonterminal-active").map(String::as_str),
+        Some("pending")
+    );
+}
+
 // ── #265: Dispatch status validation ──────────────────────────
 
 /// #265: PATCH /dispatches/:id with an invalid status like "done" must return

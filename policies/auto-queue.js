@@ -40,13 +40,15 @@ var autoQueue = {
 
     var agentId = cards[0].assigned_agent_id;
 
-    // #145: Find the auto-queue entry that was just marked 'done' for this card.
+    // #145/#295: Prefer the just-finished `done` entry for continuation. Sibling
+    // runs may also be auto-skipped for the same card, but they must not steal
+    // continuation from the originating run.
     var doneEntries = agentdesk.db.query(
       "SELECT e.run_id, COALESCE(e.thread_group, 0) as thread_group FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
       "WHERE e.kanban_card_id = ? AND e.status IN ('done', 'skipped') " +
       "AND r.status IN ('active', 'paused') " +
-      "ORDER BY e.completed_at DESC LIMIT 1",
+      "ORDER BY CASE WHEN e.status = 'done' THEN 0 ELSE 1 END ASC, e.completed_at DESC LIMIT 1",
       [payload.card_id]
     );
     if (doneEntries.length === 0) return;
@@ -222,6 +224,27 @@ var autoQueue = {
     var tickReview = agentdesk.pipeline.nextGatedTarget(tickInProgress, tickCfg);
     var tickActiveStates = [tickKickoff, tickInProgress, tickReview].filter(function(s) { return s; });
     var tickPlaceholders = tickActiveStates.map(function() { return "?"; }).join(",");
+
+    // Recovery path 1 (#295): terminal cards should never remain pending in
+    // active/paused runs. Clean them before dispatch recovery so they do not
+    // get re-dispatched or block their groups.
+    var terminalPending = agentdesk.db.query(
+      "SELECT e.id, e.kanban_card_id, kc.status, e.run_id " +
+      "FROM auto_queue_entries e " +
+      "JOIN auto_queue_runs r ON e.run_id = r.id " +
+      "JOIN kanban_cards kc ON kc.id = e.kanban_card_id " +
+      "WHERE e.status = 'pending' AND r.status IN ('active', 'paused')",
+      []
+    );
+    for (var tp = 0; tp < terminalPending.length; tp++) {
+      var pending = terminalPending[tp];
+      if (!agentdesk.pipeline.isTerminal(pending.status, tickCfg)) continue;
+      agentdesk.log.info("[auto-queue] onTick1min: skipping terminal pending entry " + pending.id + " for card " + pending.kanban_card_id + " at " + pending.status);
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'skipped', completed_at = datetime('now') WHERE id = ? AND status = 'pending'",
+        [pending.id]
+      );
+    }
 
     // Find active runs with pending entries
     var activeRuns = agentdesk.db.query(
@@ -459,6 +482,16 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
   if (cardStatus.length > 0) {
     var cur = cardStatus[0].status;
     var walked = false;
+
+    if (agentdesk.pipeline.isTerminal(cur, pCfg)) {
+      agentdesk.log.info("[auto-queue] Skipping " + entry.kanban_card_id + " in run " + runId + " group " + threadGroup + " — card is already terminal at " + cur);
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'skipped', completed_at = datetime('now') WHERE id = ? AND status = 'pending'",
+        [entry.id]
+      );
+      return;
+    }
+
     var walkPath = _freePathToDispatchable(cur, pCfg);
 
     if (walkPath === null && !_isDispatchableState(cur, pCfg)) {

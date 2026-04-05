@@ -1132,10 +1132,7 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
             // Also update auto_queue_entries if terminal
             if pipeline.is_terminal(&new_status) {
-                conn.execute(
-                    "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ?1 AND status = 'dispatched'",
-                    [&card_id],
-                ).ok();
+                sync_auto_queue_terminal_on_conn(&conn, &card_id);
             }
 
             // #117/#158: Sync canonical review state via unified entrypoint
@@ -1489,6 +1486,27 @@ pub fn review_state_sync(db: &Db, json_str: &str) -> String {
         Err(e) => return format!(r#"{{"error":"db error: {}"}}"#, e),
     };
     review_state_sync_on_conn(&conn, json_str)
+}
+
+/// Best-effort auto-queue cleanup for terminal cards.
+///
+/// When a card finishes, its active dispatch entry should become `done` and any
+/// stale pending copies in active or paused runs should be skipped so they do
+/// not block other runs.
+pub(crate) fn sync_auto_queue_terminal_on_conn(conn: &rusqlite::Connection, card_id: &str) {
+    conn.execute(
+        "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') \
+         WHERE kanban_card_id = ?1 AND status = 'dispatched'",
+        [card_id],
+    )
+    .ok();
+    conn.execute(
+        "UPDATE auto_queue_entries SET status = 'skipped', completed_at = datetime('now') \
+         WHERE kanban_card_id = ?1 AND status = 'pending' \
+         AND run_id IN (SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused'))",
+        [card_id],
+    )
+    .ok();
 }
 
 /// Same as `review_state_sync` but operates on an already-acquired connection.

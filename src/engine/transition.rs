@@ -702,12 +702,7 @@ fn execute_intent(conn: &rusqlite::Connection, intent: &TransitionIntent) -> any
             )?;
         }
         TransitionIntent::SyncAutoQueue { card_id } => {
-            conn.execute(
-                "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') \
-                 WHERE kanban_card_id = ?1 AND status = 'dispatched'",
-                [card_id],
-            )
-            .ok();
+            crate::engine::ops::sync_auto_queue_terminal_on_conn(conn, card_id);
         }
         TransitionIntent::SyncReviewState { card_id, state } => {
             // #158: Route all card_review_state mutations through unified entrypoint.
@@ -1148,6 +1143,43 @@ mod tests {
         ).unwrap();
     }
 
+    fn ensure_auto_queue_tables(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+                id          TEXT PRIMARY KEY,
+                repo        TEXT,
+                agent_id    TEXT,
+                status      TEXT DEFAULT 'active',
+                ai_model    TEXT,
+                ai_rationale TEXT,
+                timeout_minutes INTEGER DEFAULT 120,
+                unified_thread  INTEGER DEFAULT 0,
+                unified_thread_id TEXT,
+                unified_thread_channel_id TEXT,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME,
+                max_concurrent_threads INTEGER DEFAULT 1,
+                max_concurrent_per_agent INTEGER DEFAULT 1,
+                thread_group_count INTEGER DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS auto_queue_entries (
+                id              TEXT PRIMARY KEY,
+                run_id          TEXT REFERENCES auto_queue_runs(id),
+                kanban_card_id  TEXT REFERENCES kanban_cards(id),
+                agent_id        TEXT,
+                priority_rank   INTEGER DEFAULT 0,
+                reason          TEXT,
+                status          TEXT DEFAULT 'pending',
+                dispatch_id     TEXT,
+                created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                dispatched_at   DATETIME,
+                completed_at    DATETIME,
+                thread_group    INTEGER DEFAULT 0
+            );",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn execute_sync_review_state_idle() {
         let db = test_db();
@@ -1231,6 +1263,78 @@ mod tests {
         assert!(
             verdict.is_none(),
             "clear_verdict must set last_verdict to NULL"
+        );
+    }
+
+    #[test]
+    fn execute_sync_auto_queue_scopes_pending_cleanup_to_active_and_paused_runs() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        insert_test_card(&conn, "card-exec-aq");
+        ensure_auto_queue_tables(&conn);
+
+        for (run_id, status) in [
+            ("run-own", "active"),
+            ("run-active-sibling", "active"),
+            ("run-paused-sibling", "paused"),
+            ("run-generated", "generated"),
+            ("run-completed", "completed"),
+        ] {
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES (?1, 'test-repo', 'agent-1', ?2)",
+                rusqlite::params![run_id, status],
+            )
+            .unwrap();
+        }
+
+        for (entry_id, run_id, status) in [
+            ("entry-own", "run-own", "dispatched"),
+            ("entry-active", "run-active-sibling", "pending"),
+            ("entry-paused", "run-paused-sibling", "pending"),
+            ("entry-generated", "run-generated", "pending"),
+            ("entry-completed", "run-completed", "pending"),
+        ] {
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status) VALUES (?1, ?2, 'card-exec-aq', 'agent-1', ?3)",
+                rusqlite::params![entry_id, run_id, status],
+            )
+            .unwrap();
+        }
+
+        execute_intent(
+            &conn,
+            &TransitionIntent::SyncAutoQueue {
+                card_id: "card-exec-aq".to_string(),
+            },
+        )
+        .unwrap();
+
+        let statuses: std::collections::HashMap<String, String> = conn
+            .prepare("SELECT id, status FROM auto_queue_entries ORDER BY id ASC")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+
+        assert_eq!(statuses.get("entry-own").map(String::as_str), Some("done"));
+        assert_eq!(
+            statuses.get("entry-active").map(String::as_str),
+            Some("skipped")
+        );
+        assert_eq!(
+            statuses.get("entry-paused").map(String::as_str),
+            Some("skipped")
+        );
+        assert_eq!(
+            statuses.get("entry-generated").map(String::as_str),
+            Some("pending")
+        );
+        assert_eq!(
+            statuses.get("entry-completed").map(String::as_str),
+            Some("pending")
         );
     }
 }
