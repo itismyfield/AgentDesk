@@ -796,6 +796,129 @@ async fn catch_up_missed_messages(
             "  [{ts}] 🔍 CATCH-UP: total {total_recovered} message(s) recovered across channels"
         );
     }
+
+    // Phase 2: Scan for unanswered messages since last bot response.
+    // Catches messages that were queued in-memory but lost on restart.
+    let Ok(entries2) = fs::read_dir(&dir) else {
+        return;
+    };
+    let mut phase2_recovered = 0usize;
+    let bot_user_id_phase2 = {
+        let settings = shared.settings.read().await;
+        settings.owner_user_id
+    };
+    let allowed_bot_ids_phase2: Vec<u64> = {
+        let settings = shared.settings.read().await;
+        settings.allowed_bot_ids.clone()
+    };
+
+    for entry in entries2.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(channel_id_raw) = stem.parse::<u64>() else {
+            continue;
+        };
+        let channel_id = ChannelId::new(channel_id_raw);
+
+        // Fetch last 20 messages (newest first — default Discord order)
+        let recent = match channel_id
+            .messages(http, serenity::builder::GetMessages::new().limit(20))
+            .await
+        {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ catch-up phase2: failed to fetch recent messages for channel {channel_id}: {e}"
+                );
+                continue;
+            }
+        };
+
+        if recent.is_empty() {
+            continue;
+        }
+
+        // Find the newest bot response (first bot message in newest-first order)
+        let last_bot_idx = recent.iter().position(|m| {
+            Some(m.author.id.get()) == bot_user_id_phase2 && !m.content.trim().is_empty()
+        });
+
+        // Messages at indices 0..last_bot_idx are newer than the last bot response
+        let unanswered_slice = match last_bot_idx {
+            Some(0) => continue, // Latest message is from bot — nothing unanswered
+            Some(idx) => &recent[..idx],
+            None => continue, // No bot response found — skip (new/inactive channel)
+        };
+
+        // Collect existing queue IDs for dedup
+        let existing_ids: std::collections::HashSet<u64> = {
+            let data = shared.core.lock().await;
+            data.intervention_queue
+                .get(&channel_id)
+                .map(|q| q.iter().map(|i| i.message_id.get()).collect())
+                .unwrap_or_default()
+        };
+
+        let mut channel_recovered = 0usize;
+        let mut data = shared.core.lock().await;
+        let queue = data.intervention_queue.entry(channel_id).or_default();
+
+        // Iterate in reverse (oldest first) for chronological queue order
+        for msg in unanswered_slice.iter().rev() {
+            if !router::should_process_turn_message(msg.kind) {
+                continue;
+            }
+            if Some(msg.author.id.get()) == bot_user_id_phase2 {
+                continue;
+            }
+            if existing_ids.contains(&msg.id.get()) {
+                continue;
+            }
+            let text = msg.content.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let is_allowed =
+                !msg.author.bot || allowed_bot_ids_phase2.contains(&msg.author.id.get());
+            if !is_allowed {
+                continue;
+            }
+            // Skip messages older than 10 minutes (generous window for restart gap)
+            let msg_age = chrono::Utc::now().signed_duration_since(*msg.id.created_at());
+            if msg_age.num_seconds() > 600 {
+                continue;
+            }
+
+            queue.push(Intervention {
+                author_id: msg.author.id,
+                message_id: msg.id,
+                text: text.to_string(),
+                mode: InterventionMode::Soft,
+                created_at: now,
+            });
+            channel_recovered += 1;
+        }
+        drop(data);
+
+        if channel_recovered > 0 {
+            phase2_recovered += channel_recovered;
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] 🔍 CATCH-UP phase2: recovered {} unanswered message(s) for channel {}",
+                channel_recovered, channel_id
+            );
+        }
+    }
+
+    if phase2_recovered > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] 🔍 CATCH-UP phase2: total {phase2_recovered} unanswered message(s) recovered"
+        );
+    }
 }
 
 /// Execute durable handoff turns saved before a restart.
