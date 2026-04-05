@@ -31,6 +31,43 @@ fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a 
         .filter(|s| !s.is_empty())
 }
 
+/// Check whether a commit message references the given card's GitHub issue number.
+///
+/// Used to cross-validate dispatch-history commits so a poisoned `reviewed_commit`
+/// from an unrelated issue cannot propagate through review→rework cycles (#269).
+fn commit_belongs_to_card_issue(db: &Db, card_id: &str, commit_sha: &str) -> bool {
+    let issue_number: Option<i64> = db.separate_conn().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
+    });
+    let Some(issue_number) = issue_number else {
+        // No issue number on card — can't validate, assume OK
+        return true;
+    };
+    let Some(repo_dir) = crate::services::platform::resolve_repo_dir() else {
+        return true;
+    };
+    // Check commit subject for (#<issue_number>)
+    let Ok(output) = std::process::Command::new("git")
+        .args(["log", "--format=%s", "-n", "1", commit_sha])
+        .current_dir(&repo_dir)
+        .output()
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let subject = String::from_utf8_lossy(&output.stdout);
+    let pattern = format!("(#{})", issue_number);
+    subject.contains(&pattern)
+}
+
 fn latest_completed_work_dispatch_target(
     db: &Db,
     kanban_card_id: &str,
@@ -222,7 +259,24 @@ fn build_review_context(
             // Prefer the actual target used by the latest completed work dispatch
             // for this card. This keeps review aligned even when the card had no
             // dedicated worktree and the agent worked directly in the repo root.
-            if let Some(target) = latest_completed_work_dispatch_target(db, kanban_card_id) {
+            //
+            // #269: Cross-validate the commit against the card's issue number.
+            // A poisoned reviewed_commit (from an unrelated issue) can propagate
+            // through review→rework cycles if we blindly trust dispatch history.
+            let validated_work_target =
+                latest_completed_work_dispatch_target(db, kanban_card_id).filter(|t| {
+                    let valid =
+                        commit_belongs_to_card_issue(db, kanban_card_id, &t.reviewed_commit);
+                    if !valid {
+                        tracing::warn!(
+                            "[dispatch] Review dispatch for card {}: work target commit {} doesn't match card issue — skipping to next fallback",
+                            kanban_card_id,
+                            &t.reviewed_commit[..8.min(t.reviewed_commit.len())]
+                        );
+                    }
+                    valid
+                });
+            if let Some(target) = validated_work_target {
                 apply_review_target_context(&target, obj);
                 tracing::info!(
                     "[dispatch] Review dispatch for card {}: reusing latest work target (commit {}, branch: {:?}, path: {:?})",
