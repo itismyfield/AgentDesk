@@ -367,13 +367,22 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
           />
         )}
 
-        {/* Dataset error banners */}
+        {/* Dataset status banners — loading and error per dataset */}
+        {Object.entries(datasetStates).some(([, s]) => s.loading) && (
+          <div className="px-3 py-1 text-xs bg-indigo-500/10 text-indigo-400 border-b border-indigo-500/20 flex items-center gap-2">
+            <div className="w-3 h-3 rounded-full border-2 border-indigo-400/40 border-t-indigo-400 animate-spin shrink-0" />
+            <span>{isKo ? "갱신 중:" : "Refreshing:"}</span>
+            {Object.entries(datasetStates)
+              .filter(([, s]) => s.loading)
+              .map(([key]) => <span key={key} className="px-1.5 py-0.5 rounded bg-indigo-500/20">{key}</span>)}
+          </div>
+        )}
         {Object.entries(datasetStates).some(([, s]) => s.error) && (
-          <div className="px-3 py-1.5 text-xs bg-red-500/10 text-red-400 border-b border-red-500/20 flex items-center gap-2">
-            <span>{isKo ? "데이터 로드 실패:" : "Failed to load:"}</span>
+          <div className="px-3 py-1 text-xs bg-red-500/10 text-red-400 border-b border-red-500/20 flex items-center gap-2">
+            <span>{isKo ? "로드 실패:" : "Failed:"}</span>
             {Object.entries(datasetStates)
               .filter(([, s]) => s.error)
-              .map(([key]) => <span key={key} className="px-1.5 py-0.5 rounded bg-red-500/20">{key}</span>)}
+              .map(([key, s]) => <span key={key} className="px-1.5 py-0.5 rounded bg-red-500/20" title={s.error ?? undefined}>{key}</span>)}
           </div>
         )}
 

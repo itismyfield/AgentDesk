@@ -27,7 +27,7 @@ import {
 
 // ── Per-dataset loading/error state ──
 
-type DatasetKey = "offices" | "agents" | "allAgents" | "departments" | "allDepartments" | "auditLogs" | "sessions" | "meetings";
+export type DatasetKey = "offices" | "agents" | "allAgents" | "departments" | "allDepartments" | "auditLogs";
 
 interface DatasetState {
   loading: boolean;
@@ -141,8 +141,6 @@ export function OfficeProvider({
     departments: INITIAL_DATASET,
     allDepartments: INITIAL_DATASET,
     auditLogs: INITIAL_DATASET,
-    sessions: INITIAL_DATASET,
-    meetings: INITIAL_DATASET,
   });
 
   const trackedFor = useCallback(
