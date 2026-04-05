@@ -1970,7 +1970,7 @@ pub async fn update_run(
 }
 
 /// POST /api/auto-queue/reset
-/// Clear all entries and complete all active runs.
+/// Clear all entries and complete all non-terminal runs.
 pub async fn reset(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
@@ -1988,7 +1988,8 @@ pub async fn reset(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
         .unwrap_or(0);
     let completed_runs = conn
         .execute(
-            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE status IN ('active', 'paused')",
+            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
+             WHERE status IN ('generated', 'pending', 'active', 'paused')",
             [],
         )
         .unwrap_or(0);
