@@ -26,6 +26,13 @@ fn test_engine(db: &Db) -> PolicyEngine {
     PolicyEngine::new(&config, db.clone()).unwrap()
 }
 
+fn test_engine_with_policy_dir(db: &Db, dir: &std::path::Path) -> PolicyEngine {
+    let mut config = crate::config::Config::default();
+    config.policies.dir = dir.to_path_buf();
+    config.policies.hot_reload = false;
+    PolicyEngine::new(&config, db.clone()).unwrap()
+}
+
 fn test_api_router(
     db: Db,
     engine: PolicyEngine,
@@ -2141,6 +2148,109 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
             .unwrap_or("")
             .contains("orphan_recovery"),
         "true orphan recovery must keep the orphan_recovery completion marker"
+    );
+}
+
+#[test]
+fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    seed_agent(&db, "agent-orphan-race");
+    seed_repo(&db, "test-repo");
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let policy_dir = temp_dir.path();
+    std::fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/timeouts.js"),
+        policy_dir.join("timeouts.js"),
+    )
+    .unwrap();
+    std::fs::write(
+        policy_dir.join("zzz_orphan_race.js"),
+        r#"
+        (function() {
+          var raw = agentdesk.dispatch.markCompleted;
+          agentdesk.dispatch.markCompleted = function(dispatchId, resultJson) {
+            var result = raw(dispatchId, resultJson);
+            if (dispatchId === "dispatch-race-330") {
+              JSON.parse(agentdesk.db.__execute_raw(
+                "UPDATE kanban_cards SET status = 'backlog', updated_at = datetime('now') WHERE id = ?1",
+                JSON.stringify(["card-race-330"])
+              ));
+            }
+            return result;
+          };
+          agentdesk.registerPolicy({ name: "orphan-race-test" });
+        })();
+        "#,
+    )
+    .unwrap();
+
+    let engine = test_engine_with_policy_dir(&db, policy_dir);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, latest_dispatch_id, started_at, created_at, updated_at
+            ) VALUES (
+                'card-race-330', 'Orphan Race #330', 'in_progress', 'medium', 'agent-orphan-race', 'test-repo',
+                330, 'dispatch-race-330', datetime('now', '-20 minutes'), datetime('now', '-20 minutes'), datetime('now', '-20 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-race-330', 'card-race-330', 'agent-orphan-race', 'implementation', 'pending',
+                'race impl', datetime('now', '-10 minutes'), datetime('now', '-10 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let _ = engine.try_fire_hook_by_name("OnTick30s", serde_json::json!({}));
+    drain_pending_transitions(&db, &engine);
+
+    let conn = db.lock().unwrap();
+    let card_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-race-330'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-race-330'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let review_dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches
+             WHERE kanban_card_id = 'card-race-330' AND dispatch_type = 'review'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(
+        card_status, "backlog",
+        "post-complete race guard must keep a backlogged card from reviving into review"
+    );
+    assert_eq!(
+        dispatch_status, "completed",
+        "the orphan implementation dispatch may still complete, but must not resurrect the card"
+    );
+    assert_eq!(
+        review_dispatch_count, 0,
+        "skipped orphan recovery must not create a follow-up review dispatch"
     );
 }
 
