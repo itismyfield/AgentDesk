@@ -299,7 +299,7 @@ var timeouts = {
           [rc.id]
         );
         agentdesk.log.warn("[timeout] Card " + rc.id + " " + aInitial + " timeout → " + aPending + " (" + MAX_DISPATCH_RETRIES + " retries exhausted)");
-        // #231: Queue deduped PM notification
+        // #231: Queue deduped PM notification — PM must decide next action
         var cardInfo = agentdesk.db.query(
           "SELECT title FROM kanban_cards WHERE id = ?",
           [rc.id]
@@ -332,7 +332,7 @@ var timeouts = {
         [staleInProgress[j].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " " + bInProgress + " stale → " + bBlocked);
-      // #231: Queue deduped PM notification
+      // #231: Queue deduped PM notification — PM must unblock
       var stalledInfo = agentdesk.db.query(
         "SELECT title FROM kanban_cards WHERE id = ?",
         [staleInProgress[j].id]
@@ -367,7 +367,7 @@ var timeouts = {
       // #117: sync canonical review state
       agentdesk.reviewState.sync(staleReviews[k].card_id, "idle");
       agentdesk.log.warn("[timeout] Stale review → pending_decision: card " + staleReviews[k].card_id);
-      // #231: Queue deduped PM notification
+      // #231: Queue deduped PM notification — PM must decide
       var staleRevInfo = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [staleReviews[k].card_id]);
       var staleRevTitle = (staleRevInfo.length > 0) ? staleRevInfo[0].title : staleReviews[k].card_id;
       _queuePMDecision(staleReviews[k].card_id, staleRevTitle, "stale review — dispatch 완료 30분+ verdict 없음 → pending_decision");
@@ -1165,7 +1165,7 @@ var timeouts = {
       agentdesk.kanban.setReviewStatus(oc.id, null, {suggestion_pending_at: null});
       agentdesk.reviewState.sync(oc.id, "idle");
 
-      // #231: Queue deduped PM notification
+      // #231: Queue deduped PM notification — PM must decide
       _queuePMDecision(oc.id, (oc.title || oc.id), "orphan review — dispatch 없음 → pending_decision");
     }
   },
