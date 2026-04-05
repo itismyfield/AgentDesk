@@ -71,7 +71,7 @@ export function ToastOverlay({ notifications, onDismiss }: ToastOverlayProps) {
             style={{ background: TYPE_COLORS[n.type] }}
           />
           <span className="flex-1 min-w-0 break-words text-xs">{n.message}</span>
-          <button onClick={() => onDismiss(n.id)} className="shrink-0 text-th-text-muted hover:text-th-text-primary">
+          <button onClick={() => onDismiss(n.id)} className="shrink-0 w-11 h-11 flex items-center justify-center text-th-text-muted hover:text-th-text-primary" aria-label="Dismiss">
             <X size={12} />
           </button>
         </div>
@@ -119,7 +119,7 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
         >
           <div className="sticky top-0 bg-th-bg-primary border-b border-th-border px-3 py-2 flex items-center justify-between">
             <span className="text-sm font-semibold text-th-text-primary">{t({ ko: "알림 센터", en: "Notification Center" })}</span>
-            <button onClick={() => setOpen(false)} className="text-th-text-muted hover:text-th-text-primary">
+            <button onClick={() => setOpen(false)} className="w-11 h-11 flex items-center justify-center text-th-text-muted hover:text-th-text-primary" aria-label="Close">
               <X size={14} />
             </button>
           </div>
@@ -141,7 +141,8 @@ export default function NotificationCenter({ notifications, onDismiss }: Notific
                   </div>
                   <button
                     onClick={() => onDismiss(n.id)}
-                    className="text-th-text-muted hover:text-th-text-muted shrink-0"
+                    className="w-11 h-11 flex items-center justify-center text-th-text-muted hover:text-th-text-primary shrink-0"
+                    aria-label="Dismiss"
                   >
                     <X size={12} />
                   </button>

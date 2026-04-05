@@ -268,7 +268,7 @@ export default function DepartmentFormModal({
                   key={c}
                   type="button"
                   onClick={() => setForm({ ...form, color: c })}
-                  className="w-7 h-7 rounded-full transition-all hover:scale-110"
+                  className="w-11 h-11 rounded-full transition-all hover:scale-110"
                   style={{
                     background: c,
                     outline: form.color === c ? `2px solid ${c}` : "2px solid transparent",

@@ -446,7 +446,7 @@ export default function SettingsView({
               <div className="flex justify-end px-4 mb-2">
                 <button
                   onClick={() => setShowOnboarding(false)}
-                  className="text-sm px-3 py-1 rounded-lg border"
+                  className="text-sm px-4 py-2.5 rounded-lg border min-h-[44px]"
                   style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-muted)" }}
                 >
                   ✕ {tr("닫기", "Close")}
