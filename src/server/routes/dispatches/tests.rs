@@ -1,0 +1,746 @@
+use super::outbox::{
+    extract_review_verdict, format_dispatch_message, handle_completed_dispatch_followups,
+    prefix_dispatch_message, use_counter_model_channel,
+};
+use crate::db::Db;
+
+fn test_db() -> Db {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    crate::db::schema::migrate(&conn).unwrap();
+    crate::db::wrap_conn(conn)
+}
+
+#[test]
+fn review_dispatch_uses_counter_model_channel() {
+    assert!(use_counter_model_channel(Some("review")));
+    // #256: consultation dispatches go to counter-model channel
+    assert!(use_counter_model_channel(Some("consultation")));
+    // review-decision goes to the original agent's primary channel,
+    // not the counter-model channel, to reuse the implementation thread
+    assert!(!use_counter_model_channel(Some("review-decision")));
+    assert!(!use_counter_model_channel(Some("implementation")));
+    assert!(!use_counter_model_channel(Some("rework")));
+    assert!(!use_counter_model_channel(None));
+}
+
+#[test]
+fn review_dispatch_message_includes_review_only_banner() {
+    let message = format_dispatch_message(
+        "dispatch-1",
+        "[Review R1] card-1",
+        Some("https://github.com/itismyfield/AgentDesk/issues/19"),
+        Some(19),
+        true,
+        Some("abc123"),
+        Some("codex"),
+        None,
+        Some("review"),
+        None,
+    );
+
+    assert!(message.starts_with("DISPATCH:dispatch-1 [🔍 리뷰] - [Review R1] card-1"));
+    assert!(message.contains("⚠️ 검토 전용"));
+    assert!(message.contains("코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."));
+    assert!(
+        message.contains(
+            "[Review R1] card-1 #19](<https://github.com/itismyfield/AgentDesk/issues/19>)"
+        )
+    );
+    // Verdict API instructions must be present for counter-model reviewers
+    assert!(message.contains("review-verdict"));
+    assert!(message.contains("VERDICT: pass|improve|reject|rework"));
+    assert!(message.contains("dispatch-1"));
+    assert!(message.contains("abc123"));
+    // Provider must be included in the curl example
+    assert!(message.contains(r#""provider":"codex""#));
+}
+
+#[test]
+fn review_dispatch_message_with_branch() {
+    let message = format_dispatch_message(
+        "dispatch-br",
+        "[Review R1] card-1",
+        Some("https://github.com/itismyfield/AgentDesk/issues/19"),
+        Some(19),
+        true,
+        Some("abc12345deadbeef"),
+        Some("codex"),
+        Some("wt/feature-branch"),
+        Some("review"),
+        None,
+    );
+
+    assert!(message.contains("리뷰 대상 브랜치: `wt/feature-branch`"));
+    assert!(message.contains("commit: `abc12345`"));
+    assert!(message.contains("main 브랜치가 아닙니다"));
+}
+
+#[test]
+fn review_dispatch_message_without_commit() {
+    let message = format_dispatch_message(
+        "dispatch-no-commit",
+        "[Review R1] card-1",
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+        Some("review"),
+        None,
+    );
+
+    assert!(message.contains("review-verdict"));
+    assert!(message.contains("dispatch-no-commit"));
+    // No commit arg in the curl command
+    assert!(!message.contains(r#""commit""#));
+}
+
+#[test]
+fn implementation_dispatch_message_stays_compact() {
+    let message = format_dispatch_message(
+        "dispatch-2",
+        "Implement feature",
+        Some("https://github.com/itismyfield/AgentDesk/issues/24"),
+        Some(24),
+        false,
+        None,
+        None,
+        None,
+        Some("implementation"),
+        None,
+    );
+
+    assert!(message.contains("[📋 구현]"));
+    assert!(
+        message.contains(
+            "[Implement feature #24](<https://github.com/itismyfield/AgentDesk/issues/24>)"
+        )
+    );
+    assert!(!message.contains("검토 전용"));
+    // Implementation dispatches should NOT include verdict instructions
+    assert!(!message.contains("review-verdict"));
+}
+
+#[test]
+fn review_decision_primary_message_includes_action_instructions() {
+    let message = format_dispatch_message(
+        "dispatch-rd",
+        "[리뷰 검토] Test Card",
+        Some("https://github.com/itismyfield/AgentDesk/issues/249"),
+        Some(249),
+        false,
+        None,
+        None,
+        None,
+        Some("review-decision"),
+        Some(r#"{"verdict":"rework"}"#),
+    );
+
+    assert!(message.contains("[⚖️ 리뷰 검토]"));
+    assert!(message.contains("카운터모델 리뷰 결과: **rework**"));
+    assert!(message.contains("review-decision API에 `accept` 호출"));
+    assert!(message.contains("review-decision API에 `dispute` 호출"));
+    assert!(message.contains("review-decision API에 `dismiss` 호출"));
+    assert!(message.contains("#249](<https://github.com/itismyfield/AgentDesk/issues/249>)"));
+    assert!(!message.contains("review-verdict"));
+}
+
+#[test]
+fn prefix_dispatch_message_merges_separator_and_body() {
+    let message = prefix_dispatch_message("review-decision", "DISPATCH:d-1 - Example");
+    assert_eq!(
+        message,
+        "── review-decision dispatch ──\nDISPATCH:d-1 - Example"
+    );
+}
+
+#[test]
+fn review_verdict_extraction_defaults_to_unknown() {
+    // Missing verdict must NOT default to "pass" — that caused false review passes
+    assert_eq!(extract_review_verdict(None), "unknown");
+    assert_eq!(
+        extract_review_verdict(Some(r#"{"auto_completed":true}"#)),
+        "unknown"
+    );
+    assert_eq!(
+        extract_review_verdict(Some(r#"{"decision":"dismiss"}"#)),
+        "dismiss"
+    );
+    assert_eq!(
+        extract_review_verdict(Some(r#"{"verdict":"improve"}"#)),
+        "improve"
+    );
+    assert_eq!(
+        extract_review_verdict(Some(r#"{"verdict":"pass"}"#)),
+        "pass"
+    );
+}
+
+#[tokio::test]
+#[ignore] // CI: send_review_result_to_primary early-returns without local ADK runtime (channel resolution)
+async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
+    // When a review dispatch has an explicit verdict (e.g. "improve"),
+    // Rust creates a review-decision dispatch for the original agent.
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+             VALUES ('card-1', 'Needs follow-up', 'review', 'agent-1', 'dispatch-review', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"improve\"}', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    handle_completed_dispatch_followups(&db, "dispatch-review").await;
+
+    let conn = db.lock().unwrap();
+    let latest_dispatch_id: String = conn
+        .query_row(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(latest_dispatch_id, "dispatch-review");
+    let (dispatch_type, dispatch_status): (String, String) = conn
+        .query_row(
+            "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+            [&latest_dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(dispatch_type, "review-decision");
+    assert_eq!(dispatch_status, "pending");
+}
+
+#[tokio::test]
+async fn auto_completed_review_dispatch_skips_rust_followup() {
+    // When a review dispatch is auto-completed without a verdict,
+    // Rust should NOT create a followup (policy engine handles it).
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+             VALUES ('card-1', 'Auto test', 'review', 'agent-1', 'dispatch-auto', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+             VALUES ('dispatch-auto', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"auto_completed\":true,\"completion_source\":\"session_idle\"}', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    handle_completed_dispatch_followups(&db, "dispatch-auto").await;
+
+    let conn = db.lock().unwrap();
+    let latest_dispatch_id: String = conn
+        .query_row(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // latest_dispatch_id should remain unchanged — auto-complete with "unknown" verdict skips Rust followup
+    assert_eq!(latest_dispatch_id, "dispatch-auto");
+}
+
+/// After an implementation dispatch completes, if hooks created a review dispatch
+/// (latest_dispatch_id changed), handle_completed_dispatch_followups should detect it
+/// and attempt to send it to Discord. This test verifies the detection logic without
+/// actually hitting Discord (send_dispatch_to_discord will no-op without a bot token).
+#[tokio::test]
+async fn impl_dispatch_followup_detects_new_review_dispatch() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+             VALUES ('card-1', 'Impl card', 'review', 'agent-1', 'dispatch-review', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        // The completed implementation dispatch
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+             VALUES ('dispatch-impl', 'card-1', 'agent-1', 'implementation', 'completed', 'Impl card', '{\"auto_completed\":true}', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        // The review dispatch created by hooks after implementation completion
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'pending', '[Review R1] card-1', '{}', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    // handle_completed_dispatch_followups should detect that latest_dispatch_id
+    // ('dispatch-review') differs from the completed dispatch ('dispatch-impl')
+    // and attempt send_dispatch_to_discord (which no-ops without bot token).
+    // The key assertion: no panic, no error, and the review dispatch stays pending.
+    handle_completed_dispatch_followups(&db, "dispatch-impl").await;
+
+    let conn = db.lock().unwrap();
+    // latest_dispatch_id should still point to the review dispatch
+    let latest: String = conn
+        .query_row(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(latest, "dispatch-review");
+
+    // Review dispatch should remain pending (not modified by followup handler)
+    let review_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-review'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(review_status, "pending");
+}
+
+#[tokio::test]
+async fn thread_not_archived_when_card_not_done() {
+    // When an implementation dispatch completes but card is in "review" (not done),
+    // the thread should NOT be archived — it may be reused for rework/review-decision.
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, active_thread_id)
+             VALUES ('card-1', 'In Review', 'review', 'agent-1', 'dispatch-impl', '999888777')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, thread_id, created_at, updated_at)
+             VALUES ('dispatch-impl', 'card-1', 'agent-1', 'implementation', 'completed', 'card-1', '999888777', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    handle_completed_dispatch_followups(&db, "dispatch-impl").await;
+
+    // active_thread_id should still be set (NOT cleared) because card is not done
+    let conn = db.lock().unwrap();
+    let active_thread: Option<String> = conn
+        .query_row(
+            "SELECT active_thread_id FROM kanban_cards WHERE id = 'card-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_thread, Some("999888777".to_string()));
+}
+
+#[tokio::test]
+async fn thread_archived_and_cleared_when_card_done() {
+    // When a card reaches "done", active_thread_id should be cleared.
+    // (Thread archiving requires Discord API call, but we verify the DB cleanup.)
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, active_thread_id)
+             VALUES ('card-1', 'Done Card', 'done', 'agent-1', 'dispatch-final', '999888777')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, thread_id, created_at, updated_at)
+             VALUES ('dispatch-final', 'card-1', 'agent-1', 'implementation', 'completed', 'card-1', '999888777', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    handle_completed_dispatch_followups(&db, "dispatch-final").await;
+
+    // active_thread_id should be cleared when card is done
+    let conn = db.lock().unwrap();
+    let active_thread: Option<String> = conn
+        .query_row(
+            "SELECT active_thread_id FROM kanban_cards WHERE id = 'card-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(active_thread.is_none());
+}
+
+/// When an explicit review verdict (improve/rework/reject) completes,
+/// send_review_result_to_primary creates the review-decision dispatch
+/// and sets review_followup_handled=true, preventing duplicate resend
+/// via the generic latest_dispatch_id check.
+#[tokio::test]
+#[ignore] // CI: send_review_result_to_primary early-returns without local ADK runtime
+async fn review_followup_skips_generic_resend_for_explicit_verdict() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+             VALUES ('card-1', 'Review test', 'review', 'agent-1', 'dispatch-review', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"rework\"}', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    handle_completed_dispatch_followups(&db, "dispatch-review").await;
+
+    let conn = db.lock().unwrap();
+    // A review-decision dispatch should have been created
+    let latest_dispatch_id: String = conn
+        .query_row(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(latest_dispatch_id, "dispatch-review");
+
+    // Count total dispatches — should be exactly 2 (original review + one review-decision).
+    // Before this fix, the generic latest_dispatch_id check would call send_dispatch_to_discord
+    // again, potentially creating duplicate notifications.
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 2,
+        "should have exactly 2 dispatches (review + review-decision), not more"
+    );
+
+    let (dt, ds): (String, String) = conn
+        .query_row(
+            "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+            [&latest_dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(dt, "review-decision");
+    assert_eq!(ds, "pending");
+}
+
+/// When the agent's discord_channel_id points to a non-existent channel,
+/// send_dispatch_to_discord must NOT write the notified marker.
+/// This ensures that Discord send failures leave the dispatch recoverable
+/// by timeouts.js [I-0].
+#[tokio::test]
+#[ignore] // CI: send_dispatch_to_discord early-returns without local ADK runtime
+async fn no_notified_marker_when_discord_send_fails() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        // Use a bogus numeric channel ID that will fail at Discord API
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+             VALUES ('card-1', 'Test card', 'requested', 'agent-1', 'dispatch-1', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-1', 'card-1', 'agent-1', 'implementation', 'pending', 'Test card', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Channel ID "1" is a valid u64 but not a real Discord channel.
+    // Thread creation and fallback will both fail with Discord API errors.
+    // No notified marker should be written.
+    super::discord_delivery::send_dispatch_to_discord(
+        &db,
+        "agent-1",
+        "Test card",
+        "card-1",
+        "dispatch-1",
+    )
+    .await;
+
+    let conn = db.lock().unwrap();
+    let marker_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kv_meta WHERE key = 'dispatch_notified:dispatch-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        marker_count, 0,
+        "notified marker must not be written when Discord send fails"
+    );
+
+    // thread_id should also NOT be saved (rollback on failure)
+    let thread_id: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM task_dispatches WHERE id = 'dispatch-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        thread_id.is_none(),
+        "thread_id must not be saved when thread message POST fails"
+    );
+}
+
+/// send_review_result_to_primary must not create a review-decision dispatch
+/// for done cards — the central create_dispatch_core done guard blocks it.
+#[tokio::test]
+async fn review_followup_does_not_create_dispatch_for_done_card() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+             VALUES ('card-done', 'Done Card', 'done', 'agent-1', 'dispatch-review', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-done', 'agent-1', 'review', 'completed', '[Review R1]', '{\"verdict\":\"rework\"}', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    // This triggers send_review_result_to_primary for a done card
+    handle_completed_dispatch_followups(&db, "dispatch-review").await;
+
+    let conn = db.lock().unwrap();
+    // latest_dispatch_id should NOT have changed (no new dispatch created)
+    let latest: String = conn
+        .query_row(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-done'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        latest, "dispatch-review",
+        "done card latest_dispatch_id must not be overwritten"
+    );
+
+    // Only the original dispatch should exist — no review-decision was created
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-done'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "no review-decision dispatch should be created for done card"
+    );
+}
+
+/// #218 R2: card_id fallback finds unified_thread_id for review/rework dispatches
+/// that aren't directly linked to auto_queue_entries by dispatch_id.
+#[test]
+fn unified_thread_card_id_fallback_finds_thread() {
+    let db = test_db();
+    let conn = db.lock().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+            id TEXT PRIMARY KEY, repo TEXT, agent_id TEXT, status TEXT DEFAULT 'active',
+            unified_thread INTEGER DEFAULT 0, unified_thread_id TEXT,
+            unified_thread_channel_id TEXT, thread_group_count INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP, completed_at DATETIME);
+         CREATE TABLE IF NOT EXISTS auto_queue_entries (
+            id TEXT PRIMARY KEY, run_id TEXT REFERENCES auto_queue_runs(id),
+            kanban_card_id TEXT, agent_id TEXT, dispatch_id TEXT,
+            status TEXT DEFAULT 'pending', thread_group INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP);",
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '111222333')",
+        [],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+         VALUES ('card-uf', 'Unified test', 'in_progress', 'agent-1', 'dispatch-impl', datetime('now'), datetime('now'))",
+        [],
+    ).unwrap();
+    // Create a unified run with a stored unified_thread_id (flat format)
+    conn.execute(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status, unified_thread, unified_thread_id)
+         VALUES ('run-1', 'test/repo', 'agent-1', 'active', 1, '{\"111222333\":\"999888777\"}')",
+        [],
+    ).unwrap();
+    // The entry is linked by card_id but dispatch_id points to the implementation dispatch
+    conn.execute(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, dispatch_id, status)
+         VALUES ('entry-1', 'run-1', 'card-uf', 'agent-1', 'dispatch-impl', 'completed')",
+        [],
+    )
+    .unwrap();
+
+    // A review dispatch NOT in auto_queue_entries — simulates card_id fallback path
+    // Query using card_id should still find the unified_thread_id
+    let thread_id: Option<String> = conn
+        .query_row(
+            "SELECT r.unified_thread_id FROM auto_queue_runs r \
+             JOIN auto_queue_entries e ON e.run_id = r.id \
+             WHERE e.kanban_card_id = 'card-uf' AND r.unified_thread = 1 AND r.status = 'active' \
+             AND r.unified_thread_id IS NOT NULL",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|json_str| {
+            let map: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+            map.get("111222333")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+    assert_eq!(
+        thread_id.as_deref(),
+        Some("999888777"),
+        "flat format card_id fallback must resolve thread"
+    );
+}
+
+/// #218 R2: parallel run nested unified_thread_id format is parsed correctly
+/// in the send_review_result_to_primary path.
+#[test]
+fn unified_thread_parallel_format_parsed_correctly() {
+    let db = test_db();
+    let conn = db.lock().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+            id TEXT PRIMARY KEY, repo TEXT, agent_id TEXT, status TEXT DEFAULT 'active',
+            unified_thread INTEGER DEFAULT 0, unified_thread_id TEXT,
+            unified_thread_channel_id TEXT, thread_group_count INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP, completed_at DATETIME);
+         CREATE TABLE IF NOT EXISTS auto_queue_entries (
+            id TEXT PRIMARY KEY, run_id TEXT REFERENCES auto_queue_runs(id),
+            kanban_card_id TEXT, agent_id TEXT, dispatch_id TEXT,
+            status TEXT DEFAULT 'pending', thread_group INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP);",
+    )
+    .unwrap();
+
+    conn.execute(
+        "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '111222333')",
+        [],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+         VALUES ('card-par', 'Parallel test', 'in_progress', 'agent-1', 'dispatch-impl', datetime('now'), datetime('now'))",
+        [],
+    ).unwrap();
+    // Parallel run: nested format with thread_group_count > 1
+    conn.execute(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status, unified_thread, unified_thread_id, thread_group_count)
+         VALUES ('run-par', 'test/repo', 'agent-1', 'active', 1, \
+         '{\"0\":{\"111222333\":\"aaa\"},\"1\":{\"111222333\":\"bbb\"}}', 2)",
+        [],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, dispatch_id, status, thread_group)
+         VALUES ('entry-par-0', 'run-par', 'card-par', 'agent-1', 'dispatch-impl', 'completed', 0)",
+        [],
+    ).unwrap();
+
+    // Query mimics send_review_result_to_primary with R2 fix: group-aware parsing
+    let result: Option<String> = conn
+        .query_row(
+            "SELECT r.unified_thread_id, COALESCE(e.thread_group, 0), COALESCE(r.thread_group_count, 1) \
+             FROM auto_queue_runs r \
+             JOIN auto_queue_entries e ON e.run_id = r.id \
+             WHERE e.kanban_card_id = 'card-par' AND r.unified_thread = 1 AND r.status = 'active' \
+             AND r.unified_thread_id IS NOT NULL",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        )
+        .ok()
+        .and_then(|(json_str, thread_group, group_count)| {
+            let map: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+            let ch_key = "111222333";
+            if group_count > 1 {
+                map.get(&thread_group.to_string())
+                    .and_then(|group_map| group_map.get(ch_key))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                map.get(ch_key)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }
+        });
+    assert_eq!(
+        result.as_deref(),
+        Some("aaa"),
+        "parallel nested format must resolve to group 0 thread"
+    );
+}

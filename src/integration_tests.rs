@@ -61,6 +61,44 @@ mod tests {
         .unwrap();
     }
 
+    fn ensure_auto_queue_tables(db: &db::Db) {
+        let conn = db.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+                id          TEXT PRIMARY KEY,
+                repo        TEXT,
+                agent_id    TEXT,
+                status      TEXT DEFAULT 'active',
+                ai_model    TEXT,
+                ai_rationale TEXT,
+                timeout_minutes INTEGER DEFAULT 120,
+                unified_thread  INTEGER DEFAULT 0,
+                unified_thread_id TEXT,
+                unified_thread_channel_id TEXT,
+                max_concurrent_threads INTEGER DEFAULT 1,
+                max_concurrent_per_agent INTEGER DEFAULT 1,
+                thread_group_count INTEGER DEFAULT 1,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME
+            );
+            CREATE TABLE IF NOT EXISTS auto_queue_entries (
+                id              TEXT PRIMARY KEY,
+                run_id          TEXT REFERENCES auto_queue_runs(id),
+                kanban_card_id  TEXT REFERENCES kanban_cards(id),
+                agent_id        TEXT,
+                priority_rank   INTEGER DEFAULT 0,
+                reason          TEXT,
+                status          TEXT DEFAULT 'pending',
+                dispatch_id     TEXT,
+                thread_group    INTEGER DEFAULT 0,
+                created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                dispatched_at   DATETIME,
+                completed_at    DATETIME
+            );",
+        )
+        .unwrap();
+    }
+
     fn get_card_status(db: &db::Db, card_id: &str) -> String {
         let conn = db.lock().unwrap();
         conn.query_row(
@@ -285,12 +323,12 @@ mod tests {
         assert!(kanban::transition_status(&db, &engine, "card-s4", "ready").is_ok());
         assert_eq!(get_card_status(&db, "card-s4"), "ready");
 
-        // ready → requested (needs dispatch)
-        seed_dispatch(&db, "d-s4-impl", "card-s4", "implementation", "pending");
+        // ready → requested (free transition, no dispatch needed — #255 preflight state)
         assert!(kanban::transition_status(&db, &engine, "card-s4", "requested").is_ok());
         assert_eq!(get_card_status(&db, "card-s4"), "requested");
 
-        // requested → in_progress
+        // requested → in_progress (needs dispatch — gated transition)
+        seed_dispatch(&db, "d-s4-impl", "card-s4", "implementation", "pending");
         assert!(kanban::transition_status(&db, &engine, "card-s4", "in_progress").is_ok());
         assert_eq!(get_card_status(&db, "card-s4"), "in_progress");
 
@@ -389,6 +427,73 @@ mod tests {
         assert_eq!(
             status, "pending_decision",
             "stale requested card with exhausted retries → pending_decision"
+        );
+    }
+
+    #[test]
+    fn auto_queue_on_tick_dispatches_ready_card_via_requested_preflight() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        ensure_auto_queue_tables(&db);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+                 VALUES ('card-aq-ready', 'AQ Ready', 'ready', 'agent-1', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-aq-ready', 'repo-1', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at) \
+                 VALUES ('entry-aq-ready', 'run-aq-ready', 'card-aq-ready', 'agent-1', 'pending', 0, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let _ = engine.try_fire_hook_by_name("OnTick1min", serde_json::json!({}));
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        let conn = db.lock().unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-aq-ready'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            entry_status, "dispatched",
+            "ready card must be dispatched by auto-queue tick"
+        );
+
+        let dispatch_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-aq-ready'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_count, 1, "exactly one dispatch must be created");
+
+        let card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-aq-ready'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            card_status, "in_progress",
+            "ready card must advance through requested preflight to in_progress"
         );
     }
 
@@ -551,7 +656,8 @@ mod tests {
             ).unwrap();
         }
 
-        // Default pipeline kickoff is "requested", but simple pipeline kickoff is "in_progress"
+        // #255: Default pipeline kickoff is "in_progress" (requested is now a free preflight state,
+        // so the dispatchable state is "requested" with gated target "in_progress").
         let default_kickoff = crate::pipeline::get()
             .transitions
             .iter()
@@ -564,8 +670,8 @@ mod tests {
             .map(|t| t.to.as_str())
             .unwrap();
         assert_eq!(
-            default_kickoff, "requested",
-            "default pipeline kickoff must be 'requested'"
+            default_kickoff, "in_progress",
+            "default pipeline kickoff must be 'in_progress' (#255: requested is preflight)"
         );
 
         // Create dispatch via create_dispatch_core_with_id — should use card's effective pipeline
@@ -584,11 +690,11 @@ mod tests {
             result.err()
         );
 
-        // Card status must be "in_progress" (override kickoff), NOT "requested" (default kickoff)
+        // Card status must be "in_progress" (both override and default kickoff target the same)
         let status = get_card_status(&db, "card-s7");
         assert_eq!(
             status, "in_progress",
-            "dispatch must use card's effective pipeline kickoff, not global default"
+            "dispatch must use card's effective pipeline kickoff"
         );
 
         // Also test create_dispatch_core (the non-ID path)
@@ -1630,7 +1736,7 @@ mod tests {
             "MockNotifier receives both calls (production dedup is in send_dispatch_to_discord)"
         );
 
-        // Both entries should transition to done
+        // Both entries should transition to done (second via idempotent reservation check)
         assert_eq!(outbox_status(&db, "d-160d"), vec!["done", "done"]);
     }
 
@@ -1830,5 +1936,198 @@ mod tests {
             review_count, 1,
             "#195: rework completion must trigger OnReviewEnter → review dispatch"
         );
+    }
+
+    // ── #256: Consultation dispatch does not advance card from requested ────
+
+    #[test]
+    fn consultation_dispatch_stays_in_requested() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-consult", "requested");
+
+        // Create consultation dispatch — should NOT move card from requested
+        let result = dispatch::create_dispatch(
+            &db,
+            &engine,
+            "card-consult",
+            "agent-1",
+            "consultation",
+            "[Consultation] Test",
+            &serde_json::json!({}),
+        );
+        assert!(
+            result.is_ok(),
+            "consultation dispatch creation must succeed"
+        );
+
+        let card_status = get_card_status(&db, "card-consult");
+        assert_eq!(
+            card_status, "requested",
+            "#256: consultation dispatch must NOT advance card from requested"
+        );
+    }
+
+    #[test]
+    fn consultation_dispatch_uses_alt_channel() {
+        // Verified via unit test in dispatches.rs — this is a smoke test
+        assert!(
+            crate::server::routes::dispatches::use_counter_model_channel(Some("consultation")),
+            "#256: consultation must route to counter-model channel"
+        );
+    }
+
+    #[test]
+    fn requested_preflight_preserves_existing_metadata_keys() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-preflight-meta", "ready");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET description = ?1, metadata = ?2 WHERE id = ?3",
+                rusqlite::params![
+                    "too short",
+                    serde_json::json!({
+                        "deps": "#42",
+                        "triage_label": "needs-spec"
+                    })
+                    .to_string(),
+                    "card-preflight-meta"
+                ],
+            )
+            .unwrap();
+        }
+
+        let result = kanban::transition_status(&db, &engine, "card-preflight-meta", "requested");
+        assert!(
+            result.is_ok(),
+            "ready -> requested preflight should succeed"
+        );
+
+        let metadata_json: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT metadata FROM kanban_cards WHERE id = 'card-preflight-meta'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+
+        assert_eq!(metadata["deps"], "#42");
+        assert_eq!(metadata["triage_label"], "needs-spec");
+        assert_eq!(metadata["preflight_status"], "consult_required");
+        assert!(metadata["preflight_summary"].is_string());
+        assert!(metadata["preflight_checked_at"].is_string());
+    }
+
+    #[test]
+    fn consultation_clear_redispatches_linked_auto_queue_entry() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-consult-clear", "requested");
+        ensure_auto_queue_tables(&db);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    serde_json::json!({
+                        "preflight_status": "consult_required",
+                        "deps": "#42"
+                    })
+                    .to_string(),
+                    "card-consult-clear"
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-consult-clear', 'repo-1', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let consultation = dispatch::create_dispatch(
+            &db,
+            &engine,
+            "card-consult-clear",
+            "agent-1",
+            "consultation",
+            "[Consultation] Clarify",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let consultation_id = consultation["id"].as_str().unwrap().to_string();
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatch_id, dispatched_at) \
+                 VALUES ('entry-consult-clear', 'run-consult-clear', 'card-consult-clear', 'agent-1', 'dispatched', 1, ?1, datetime('now'))",
+                rusqlite::params![consultation_id],
+            )
+            .unwrap();
+        }
+
+        let completed = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            &consultation_id,
+            &serde_json::json!({
+                "verdict": "clear",
+                "summary": "clarified"
+            }),
+        )
+        .unwrap();
+        assert_eq!(completed["status"], "completed");
+
+        let (card_status, latest_dispatch_id, metadata_json): (String, String, String) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status, latest_dispatch_id, metadata FROM kanban_cards WHERE id = 'card-consult-clear'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(card_status, "in_progress");
+        assert_eq!(metadata["consultation_status"], "completed");
+        assert_eq!(metadata["consultation_result"]["verdict"], "clear");
+        assert_eq!(metadata["preflight_status"], "clear");
+        assert_eq!(metadata["deps"], "#42");
+
+        let (dispatch_type, dispatch_status): (String, String) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+                rusqlite::params![latest_dispatch_id.clone()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(dispatch_type, "implementation");
+        assert_eq!(dispatch_status, "pending");
+
+        let (entry_status, entry_dispatch_id): (String, String) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status, dispatch_id FROM auto_queue_entries WHERE id = 'entry-consult-clear'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(entry_status, "dispatched");
+        assert_eq!(entry_dispatch_id, latest_dispatch_id);
     }
 }

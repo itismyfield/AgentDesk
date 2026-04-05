@@ -189,7 +189,10 @@ pub(super) fn extract_skill_description(content: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_tool_name, convert_markdown_tables, normalize_allowed_tools};
+    use super::{
+        canonical_tool_name, convert_markdown_tables, filter_codex_tool_logs,
+        normalize_allowed_tools,
+    };
 
     #[test]
     fn test_canonical_tool_name_is_case_insensitive() {
@@ -326,6 +329,94 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.len() <= DISCORD_MSG_LIMIT + 50);
         }
+    }
+
+    // ── filter_codex_tool_logs tests ─────────────────────────────────────
+
+    #[test]
+    fn test_filter_codex_tool_logs_basic() {
+        let input = "[Bash] /bin/zsh -lc \"ls -la\"\nHere is the result.\n[Read] /path/to/file\nThe file contains...";
+        let output = filter_codex_tool_logs(input);
+        assert!(output.contains("⚙\u{fe0f} Bash"));
+        assert!(output.contains("Here is the result."));
+        assert!(output.contains("⚙\u{fe0f} Read"));
+        assert!(output.contains("The file contains..."));
+        assert!(!output.contains("/bin/zsh"));
+        assert!(!output.contains("/path/to/file"));
+    }
+
+    #[test]
+    fn test_filter_codex_tool_logs_preserves_code_blocks() {
+        let input = "```\n[Bash] should not be filtered\n```\n[Bash] should be filtered";
+        let output = filter_codex_tool_logs(input);
+        assert!(output.contains("[Bash] should not be filtered"));
+        assert!(output.contains("⚙\u{fe0f} Bash"));
+    }
+
+    #[test]
+    fn test_filter_codex_tool_logs_no_tool_lines() {
+        let input = "Hello world\nNo tools here";
+        let output = filter_codex_tool_logs(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_filter_codex_tool_logs_consecutive_same_tool() {
+        let input = "[Bash] ls\n[Bash] pwd\n[Bash] cat foo\nDone";
+        let output = filter_codex_tool_logs(input);
+        assert_eq!(output.matches("⚙\u{fe0f} Bash").count(), 3);
+        assert!(output.contains("Done"));
+    }
+
+    #[test]
+    fn test_filter_codex_tool_logs_tool_name_only() {
+        let input = "[Glob]\nResults here";
+        let output = filter_codex_tool_logs(input);
+        assert!(output.contains("⚙\u{fe0f} Glob"));
+        assert!(output.contains("Results here"));
+    }
+
+    #[test]
+    fn test_filter_codex_tool_logs_leading_whitespace() {
+        let input = "  [Edit] some/file.rs\nDone";
+        let output = filter_codex_tool_logs(input);
+        assert!(output.contains("⚙\u{fe0f} Edit"));
+        assert!(output.contains("Done"));
+    }
+
+    #[test]
+    fn test_filter_codex_tool_logs_ignores_non_tool_brackets() {
+        let input = "[Summary] final answer\n[Stopped]\n[HTTP2] note\n[Note] something";
+        let output = filter_codex_tool_logs(input);
+        assert_eq!(
+            output, input,
+            "Non-tool bracketed lines must not be filtered"
+        );
+    }
+
+    #[test]
+    fn test_filter_codex_tool_logs_task_family() {
+        let input =
+            "[Task] worker\n[TaskCreate] issue\n[TaskGet] 123\n[TaskUpdate] 123\n[TaskList]\nDone";
+        let output = filter_codex_tool_logs(input);
+        assert!(output.contains("⚙\u{fe0f} Task\n"), "Task must be filtered");
+        assert!(
+            output.contains("⚙\u{fe0f} TaskCreate"),
+            "TaskCreate must be filtered"
+        );
+        assert!(
+            output.contains("⚙\u{fe0f} TaskGet"),
+            "TaskGet must be filtered"
+        );
+        assert!(
+            output.contains("⚙\u{fe0f} TaskUpdate"),
+            "TaskUpdate must be filtered"
+        );
+        assert!(
+            output.contains("⚙\u{fe0f} TaskList"),
+            "TaskList must be filtered"
+        );
+        assert!(output.contains("Done"));
     }
 }
 
@@ -644,6 +735,71 @@ fn parse_table_cells(line: &str) -> Vec<String> {
         .split('|')
         .map(|cell| cell.trim().to_string())
         .collect()
+}
+
+/// Build tool-name regex alternation from ALL_TOOLS plus extra names
+/// that appear in logs but aren't in the interactive tool list.
+fn tool_name_pattern() -> String {
+    let mut names: Vec<&str> = ALL_TOOLS.iter().map(|(name, _, _)| *name).collect();
+    for extra in &["Agent", "LSP"] {
+        if !names.contains(extra) {
+            names.push(extra);
+        }
+    }
+    names.join("|")
+}
+
+/// Filter Codex CLI tool-call log lines from response text.
+/// Replaces `[Bash] command...` -> `⚙️ Bash`, etc.
+/// Only lines matching known tool names are replaced; all other text is
+/// preserved verbatim. Lines inside code blocks (``` ... ```) are NOT filtered.
+pub(super) fn filter_codex_tool_logs(s: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static TOOL_RE: LazyLock<Regex> = LazyLock::new(|| {
+        let names = tool_name_pattern();
+        Regex::new(&format!(r"^\s*\[({names})\](\s.*)?$")).unwrap()
+    });
+
+    let mut result = Vec::new();
+    let mut in_code_block = false;
+
+    for line in s.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            result.push(line.to_string());
+            continue;
+        }
+        if in_code_block {
+            result.push(line.to_string());
+            continue;
+        }
+
+        if let Some(caps) = TOOL_RE.captures(line) {
+            let tool_name = &caps[1];
+            result.push(format!("⚙\u{fe0f} {tool_name}"));
+        } else {
+            result.push(line.to_string());
+        }
+    }
+
+    result.join("\n")
+}
+
+/// Apply Codex tool-log filter (if provider is Codex) then format for Discord.
+pub(super) fn format_for_discord_with_provider(
+    s: &str,
+    provider: &crate::services::provider::ProviderKind,
+) -> String {
+    let filtered;
+    let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
+        filtered = filter_codex_tool_logs(s);
+        &filtered
+    } else {
+        s
+    };
+    format_for_discord(input)
 }
 
 /// Mechanical formatting for Discord readability.

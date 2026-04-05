@@ -1,7 +1,8 @@
-use super::*;
+use super::super::*;
 #[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
 
+<<<<<<< HEAD:src/services/discord/router.rs
 pub(super) fn should_process_turn_message(kind: serenity::model::channel::MessageType) -> bool {
     matches!(
         kind,
@@ -743,6 +744,9 @@ pub(super) async fn handle_event(
 use super::model_picker_interaction::handle_model_picker_interaction;
 
 pub(super) async fn handle_text_message(
+=======
+pub(in crate::services::discord) async fn handle_text_message(
+>>>>>>> upstream/main:src/services/discord/router/message_handler.rs
     ctx: &serenity::Context,
     channel_id: ChannelId,
     user_msg_id: MessageId,
@@ -799,7 +803,7 @@ pub(super) async fn handle_text_message(
             // Fallback: if this is a thread, try resolving workspace from parent channel
             if workspace.is_none() {
                 if let Some((parent_id, parent_name)) =
-                    super::resolve_thread_parent(&ctx.http, channel_id).await
+                    super::super::resolve_thread_parent(&ctx.http, channel_id).await
                 {
                     // Use parent name from Discord API first, fall back to session map
                     let parent_ch_name = parent_name.or_else(|| {
@@ -866,6 +870,20 @@ pub(super) async fn handle_text_message(
                         .unwrap_or_else(|| canonical.clone());
                     let (ch_name_resolved, cat_name) =
                         resolve_channel_category(ctx, channel_id).await;
+                    // For thread channels, build a stable channel_name from the
+                    // parent channel name so resolve_agent_id_from_channel_name
+                    // can match it (same logic as bootstrap_thread_session).
+                    let ch_name = match super::super::resolve_thread_parent(&ctx.http, channel_id)
+                        .await
+                    {
+                        Some((_parent_id, parent_name)) => {
+                            let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
+                            Some(super::super::synthetic_thread_channel_name(
+                                &parent, channel_id,
+                            ))
+                        }
+                        None => ch_name_resolved,
+                    };
                     {
                         let mut data = shared.core.lock().await;
                         let session =
@@ -884,10 +902,10 @@ pub(super) async fn handle_text_message(
                                     last_active: tokio::time::Instant::now(),
                                     worktree: None,
 
-                                    born_generation: super::runtime_store::load_generation(),
+                                    born_generation: super::super::runtime_store::load_generation(),
                                 });
                         session.current_path = Some(eff_path.clone());
-                        session.channel_name = ch_name_resolved;
+                        session.channel_name = ch_name;
                         session.category_name = cat_name;
                         session.channel_id = Some(channel_id.get());
                         session.last_active = tokio::time::Instant::now();
@@ -928,19 +946,54 @@ pub(super) async fn handle_text_message(
     // Skip if already inside a thread (threads cannot nest).
     // Thread reuse: if the card already has an active_thread_id, redirect
     // to the existing thread instead of creating a new one.
-    let is_already_thread = super::resolve_thread_parent(&ctx.http, channel_id)
+    let is_already_thread = super::super::resolve_thread_parent(&ctx.http, channel_id)
         .await
         .is_some();
-    let dispatch_id_for_thread = super::adk_session::parse_dispatch_id(user_text);
+    let dispatch_id_for_thread = super::super::adk_session::parse_dispatch_id(user_text);
     let mut dispatch_type_str: Option<String> = None;
+    // #259: Fetch dispatch metadata once before thread creation so we can extract
+    // worktree_path for both thread bootstrap and the subsequent session CWD override.
+    let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
+        super::lookup_dispatch_info(shared.api_port, did).await
+    } else {
+        None
+    };
+    // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
+    // All dispatch types now inject worktree_path into context via resolve_card_worktree().
+    let dispatch_worktree_path = dispatch_info_cached
+        .as_ref()
+        .and_then(|info| {
+            info.context
+                .as_ref()
+                .and_then(|ctx_str| serde_json::from_str::<serde_json::Value>(ctx_str).ok())
+                .and_then(|v| v.get("worktree_path")?.as_str().map(String::from))
+        })
+        .filter(|p| std::path::Path::new(p).exists());
+    if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
+    }
+    let dispatch_default_path = crate::services::platform::resolve_repo_dir()
+        .filter(|p| std::path::Path::new(p).is_dir())
+        .unwrap_or_else(|| current_path.clone());
+    let dispatch_effective_path = dispatch_worktree_path
+        .clone()
+        .unwrap_or_else(|| dispatch_default_path.clone());
+    if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] 🌱 Dispatch fallback CWD: using repo root instead of inherited session path: {}",
+            dispatch_effective_path
+        );
+    }
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
-        // Fetch dispatch metadata for thread reuse and cross-channel role override
-        let dispatch_info = lookup_dispatch_info(shared.api_port, did).await;
+        // Use cached dispatch metadata for thread reuse and cross-channel role override
+        let dispatch_info = &dispatch_info_cached;
         dispatch_type_str = dispatch_info.as_ref().and_then(|i| i.dispatch_type.clone());
-        let is_review_dispatch = dispatch_type_str
-            .as_deref()
-            .map(|t| t == "review")
-            .unwrap_or(false);
+        let is_counter_model_dispatch =
+            crate::server::routes::dispatches::use_counter_model_channel(
+                dispatch_type_str.as_deref(),
+            );
         let alt_channel_id = dispatch_info
             .as_ref()
             .and_then(|i| i.discord_channel_alt.as_deref())
@@ -954,7 +1007,7 @@ pub(super) async fn handle_text_message(
             );
             // For review dispatches in reused threads, set role override
             // so this turn uses the counter-model channel's role/model.
-            if is_review_dispatch {
+            if is_counter_model_dispatch {
                 if let Some(alt_ch) = alt_channel_id {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
@@ -980,17 +1033,23 @@ pub(super) async fn handle_text_message(
             });
 
             let reused = if let Some(tid) = reuse_tid {
-                if verify_thread_accessible(ctx, tid).await {
+                if super::verify_thread_accessible(ctx, tid).await {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
                         "  [{ts}] 🧵 Reusing existing thread {} for dispatch {}",
                         tid, did
                     );
-                    super::bootstrap_thread_session(shared, tid, &current_path, ctx).await;
+                    super::super::bootstrap_thread_session(
+                        shared,
+                        tid,
+                        &dispatch_effective_path,
+                        ctx,
+                    )
+                    .await;
                     shared.dispatch_thread_parents.insert(channel_id, tid);
                     // For review dispatches reusing an implementation thread,
                     // override role/model to use the counter-model channel.
-                    if is_review_dispatch {
+                    if is_counter_model_dispatch {
                         if let Some(alt_ch) = alt_channel_id {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             println!(
@@ -1042,10 +1101,15 @@ pub(super) async fn handle_text_message(
                             "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
                             thread.id, did
                         );
-                        super::bootstrap_thread_session(shared, thread.id, &current_path, ctx)
-                            .await;
+                        super::super::bootstrap_thread_session(
+                            shared,
+                            thread.id,
+                            &dispatch_effective_path,
+                            ctx,
+                        )
+                        .await;
                         shared.dispatch_thread_parents.insert(channel_id, thread.id);
-                        link_dispatch_thread(
+                        super::link_dispatch_thread(
                             shared.api_port,
                             did,
                             thread.id.get(),
@@ -1064,6 +1128,18 @@ pub(super) async fn handle_text_message(
         }
     } else {
         channel_id
+    };
+
+    // #259: Override current_path with the pre-computed dispatch worktree path.
+    // Also update the in-memory session so the worktree sticks for subsequent turns.
+    let current_path = if dispatch_worktree_path.is_some() {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.current_path = Some(dispatch_effective_path.clone());
+        }
+        dispatch_effective_path.clone()
+    } else {
+        current_path
     };
 
     // Send placeholder message
@@ -1192,6 +1268,10 @@ pub(super) async fn handle_text_message(
                     "\n\nAvailable local Gemini skills (use them by name when relevant):\n{}",
                     list.join("\n")
                 ),
+                ProviderKind::Qwen => format!(
+                    "\n\nAvailable local Qwen skills (use them by name when relevant):\n{}",
+                    list.join("\n")
+                ),
                 ProviderKind::Unsupported(_) => String::new(),
             }
         }
@@ -1239,6 +1319,7 @@ pub(super) async fn handle_text_message(
     } else {
         None
     };
+
     let system_prompt_owned = build_system_prompt(
         &discord_context,
         &current_path,
@@ -1272,26 +1353,27 @@ pub(super) async fn handle_text_message(
             // Race lost — another message already started a turn.
             // Queue this message as an intervention instead.
             let queue = data.intervention_queue.entry(channel_id).or_default();
-            super::enqueue_intervention(
+            super::super::enqueue_intervention(
                 queue,
-                super::Intervention {
+                super::super::Intervention {
                     author_id: request_owner,
                     message_id: user_msg_id,
                     text: user_text.to_string(),
-                    mode: super::InterventionMode::Soft,
+                    mode: super::super::InterventionMode::Soft,
                     created_at: std::time::Instant::now(),
                 },
             );
             // Write-through: persist this channel's queue to disk
             if let Some(q) = data.intervention_queue.get(&channel_id) {
-                super::save_channel_queue(&provider, channel_id, q);
+                super::super::save_channel_queue(&provider, channel_id, q);
             }
             drop(data);
             // Clean up: remove placeholder and reaction created before this check
             let _ = channel_id
                 .delete_message(&ctx.http, placeholder_msg_id)
                 .await;
-            super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳').await;
+            super::super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳')
+                .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
@@ -1316,7 +1398,7 @@ pub(super) async fn handle_text_message(
         let watchdog_token = cancel_token.clone();
         let watchdog_shared = shared.clone();
         let watchdog_http = ctx.http.clone();
-        let timeout = super::turn_watchdog_timeout();
+        let timeout = super::super::turn_watchdog_timeout();
 
         // Set initial deadline and max ceiling (initial + 3h)
         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1330,6 +1412,7 @@ pub(super) async fn handle_text_message(
             .store(max_deadline_ms, std::sync::atomic::Ordering::Relaxed);
 
         let watchdog_channel_id_num = channel_id.get();
+        let watchdog_provider = provider.clone();
         tokio::spawn(async move {
             const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -1341,13 +1424,13 @@ pub(super) async fn handle_text_message(
                     .cancelled
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    super::clear_watchdog_deadline_override(watchdog_channel_id_num);
+                    super::super::clear_watchdog_deadline_override(watchdog_channel_id_num);
                     return;
                 }
 
                 // Check for API-based deadline extension
                 if let Some(new_deadline) =
-                    super::take_watchdog_deadline_override(watchdog_channel_id_num)
+                    super::super::take_watchdog_deadline_override(watchdog_channel_id_num)
                 {
                     let max_dl = watchdog_token
                         .watchdog_max_deadline_ms
@@ -1374,8 +1457,8 @@ pub(super) async fn handle_text_message(
                     let now_ms_check = chrono::Utc::now().timestamp_millis();
                     // Only auto-extend when close to deadline (within 2 minutes)
                     if now_ms_check > current_dl - 120_000 {
-                        if let Some(inflight) = super::inflight::load_inflight_state(
-                            &crate::services::provider::ProviderKind::Claude,
+                        if let Some(inflight) = super::super::inflight::load_inflight_state(
+                            &watchdog_provider,
                             watchdog_channel_id_num,
                         ) {
                             if let Ok(updated) = chrono::NaiveDateTime::parse_from_str(
@@ -1437,7 +1520,7 @@ pub(super) async fn handle_text_message(
                         "  [{ts}] ⏰ WATCHDOG: turn timeout (~{elapsed_mins}m) for channel {}, cancelling",
                         channel_id
                     );
-                    super::turn_bridge::cancel_active_token(
+                    super::super::turn_bridge::cancel_active_token(
                         &watchdog_token,
                         true,
                         "watchdog timeout",
@@ -1448,7 +1531,7 @@ pub(super) async fn handle_text_message(
                         let mut data = watchdog_shared.core.lock().await;
                         data.intervention_queue
                             .get_mut(&channel_id)
-                            .map_or(false, |q| super::has_soft_intervention(q))
+                            .map_or(false, |q| super::super::has_soft_intervention(q))
                     };
                     let msg = if has_queued {
                         format!(
@@ -1500,9 +1583,12 @@ pub(super) async fn handle_text_message(
     // try to restore it from the DB's persisted provider session_id.
     let session_id = if session_id.is_none() {
         if let Some(ref key) = adk_session_key {
-            let restored =
-                super::adk_session::fetch_provider_session_id(key, &provider, shared.api_port)
-                    .await;
+            let restored = super::super::adk_session::fetch_provider_session_id(
+                key,
+                &provider,
+                shared.api_port,
+            )
+            .await;
             if restored.is_some() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!(
@@ -1538,7 +1624,16 @@ pub(super) async fn handle_text_message(
         channel_name.as_deref(),
         Some(&current_path),
     );
-    let dispatch_id = parse_dispatch_id(user_text);
+    // #222: DB-based dispatch lookup takes priority over text parsing.
+    // In unified threads, user_text may contain a stale DISPATCH: prefix
+    // from a previous dispatch in the same thread. DB lookup uses the
+    // thread→card→dispatch link which is always current.
+    let dispatch_id = super::super::adk_session::lookup_pending_dispatch_for_thread(
+        shared.api_port,
+        channel_id.get(),
+    )
+    .await
+    .or_else(|| super::super::adk_session::parse_dispatch_id(user_text));
     post_adk_session_status(
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
@@ -1556,7 +1651,10 @@ pub(super) async fn handle_text_message(
     let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, inflight_offset) = {
         #[cfg(unix)]
         {
-            if remote_profile.is_none() && claude::is_tmux_available() {
+            if remote_profile.is_none()
+                && provider.uses_managed_tmux_backend()
+                && claude::is_tmux_available()
+            {
                 if let Some(ref tmux_name) = tmux_session_name {
                     let (output_path, input_fifo_path) = tmux_runtime_paths(tmux_name);
                     let session_exists =
@@ -1627,7 +1725,7 @@ pub(super) async fn handle_text_message(
 
     // Auto-sync worktree before sending message to session
     {
-        let script = super::runtime_store::agentdesk_root()
+        let script = super::super::runtime_store::agentdesk_root()
             .unwrap_or_default()
             .join("scripts/worktree-autosync.sh");
         if script.exists() {
@@ -1654,7 +1752,23 @@ pub(super) async fn handle_text_message(
     }
 
     let model_for_turn =
-        super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
+        super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
+
+    // Fetch context compact percent from ADK settings (provider-specific)
+    let ctx_thresholds = super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
+    let compact_percent = ctx_thresholds.compact_pct_for(&provider);
+    // Use model-specific context window (reads Codex models cache), falling
+    // back to the provider default if the model isn't found.
+    let model_context_window = provider.resolve_context_window(model_for_turn.as_deref());
+
+    // Pre-compute provider-specific compact config
+    let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
+    let compact_token_limit_for_codex = {
+        let cli_config = provider.compact_cli_config(compact_percent, model_context_window);
+        cli_config
+            .first()
+            .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
+    };
 
     // Run the provider in a blocking thread
     let provider_for_blocking = provider.clone();
@@ -1675,6 +1789,7 @@ pub(super) async fn handle_text_message(
                         Some(channel_id.get()),
                         Some(provider_for_blocking.clone()),
                         model_for_turn.as_deref(),
+                        compact_percent_for_claude,
                     ),
                     ProviderKind::Codex => codex::execute_command_streaming(
                         &context_prompt,
@@ -1689,6 +1804,7 @@ pub(super) async fn handle_text_message(
                         Some(channel_id.get()),
                         Some(provider_for_blocking.clone()),
                         model_for_turn.as_deref(),
+                        compact_token_limit_for_codex,
                     ),
                     ProviderKind::Gemini => gemini::execute_command_streaming(
                         &context_prompt,
@@ -1703,6 +1819,22 @@ pub(super) async fn handle_text_message(
                         Some(channel_id.get()),
                         Some(provider_for_blocking.clone()),
                         model_for_turn.as_deref(),
+                        None, // Gemini: compact not supported
+                    ),
+                    ProviderKind::Qwen => qwen::execute_command_streaming(
+                        &context_prompt,
+                        session_id_clone.as_deref(),
+                        &current_path_clone,
+                        tx.clone(),
+                        Some(&system_prompt_owned),
+                        Some(&allowed_tools),
+                        Some(cancel_token_clone),
+                        remote_profile.as_ref(),
+                        tmux_session_name.as_deref(),
+                        Some(channel_id.get()),
+                        Some(provider_for_blocking.clone()),
+                        model_for_turn.as_deref(),
+                        None, // Qwen: compact not supported
                     ),
                     ProviderKind::Unsupported(name) => {
                         let _ = tx.send(StreamMessage::Error {
@@ -1786,7 +1918,7 @@ pub(super) async fn handle_text_message(
 }
 
 /// Handle file uploads from Discord messages
-async fn handle_file_upload(
+pub(super) async fn handle_file_upload(
     ctx: &serenity::Context,
     msg: &serenity::Message,
     shared: &Arc<SharedData>,
@@ -1884,7 +2016,7 @@ async fn handle_file_upload(
 }
 
 /// Handle shell commands from raw text messages (! prefix)
-async fn handle_shell_command_raw(
+pub(super) async fn handle_shell_command_raw(
     ctx: &serenity::Context,
     channel_id: ChannelId,
     text: &str,
@@ -1957,7 +2089,7 @@ async fn handle_shell_command_raw(
 
 /// Handle text-based commands (!start, !meeting, !stop, !clear, etc.).
 /// Returns true if the command was handled, false otherwise.
-async fn handle_text_command(
+pub(super) async fn handle_text_command(
     ctx: &serenity::Context,
     msg: &serenity::Message,
     data: &Data,
@@ -2215,23 +2347,29 @@ async fn handle_text_command(
             }
             d.intervention_queue.remove(&channel_id);
             drop(d);
-            // Clear stored claude_session_id from DB
-            if let Some(key) =
-                super::adk_session::build_adk_session_key(&data.shared, channel_id, &data.provider)
-                    .await
+            // Clear stored provider session_id from DB
+            if let Some(key) = super::super::adk_session::build_adk_session_key(
+                &data.shared,
+                channel_id,
+                &data.provider,
+            )
+            .await
             {
-                super::adk_session::clear_claude_session_id(&key, data.shared.api_port).await;
+                super::super::adk_session::clear_provider_session_id(&key, data.shared.api_port)
+                    .await;
             }
             // Send /clear to the actual Claude Code session via tmux
             #[cfg(unix)]
-            if let Some(ref name) = tmux_name {
-                let exact_target = tmux_exact_target(name);
-                let _ = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("tmux")
-                        .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
-                        .output()
-                })
-                .await;
+            if data.provider == crate::services::provider::ProviderKind::Claude {
+                if let Some(ref name) = tmux_name {
+                    let exact_target = tmux_exact_target(name);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        std::process::Command::new("tmux")
+                            .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
+                            .output()
+                    })
+                    .await;
+                }
             }
             let _ = msg.reply(&ctx.http, "Session cleared.").await;
             return Ok(true);
@@ -2380,6 +2518,7 @@ Any other message is sent to {p}.
 `!queue [all]` — Show pending queue
 
 **User Management** (owner only)
+`!allowall on|off|status` — Allow everyone or restrict to authorized users
 `!adduser <user_id>` — Allow a user to use the bot
 `!removeuser <user_id>` — Remove a user's access
 `!help` — Show this help",
@@ -2400,8 +2539,8 @@ Any other message is sent to {p}.
 
             let mut reply = String::from("**Allowed Tools**\n\n");
             for tool in &tools {
-                let (desc, destructive) = super::formatting::tool_info(tool);
-                let badge = super::formatting::risk_badge(destructive);
+                let (desc, destructive) = super::super::formatting::tool_info(tool);
+                let badge = super::super::formatting::risk_badge(destructive);
                 if badge.is_empty() {
                     reply.push_str(&format!("`{}` — {}\n", tool, desc));
                 } else {
@@ -2410,7 +2549,7 @@ Any other message is sent to {p}.
             }
             reply.push_str(&format!(
                 "\n{} = destructive\nTotal: {}",
-                super::formatting::risk_badge(true),
+                super::super::formatting::risk_badge(true),
                 tools.len()
             ));
             send_long_message_raw(&ctx.http, channel_id, &reply, &data.shared).await?;
@@ -2450,7 +2589,7 @@ Any other message is sent to {p}.
             }
 
             let Some(tool_name) =
-                super::formatting::canonical_tool_name(raw_name).map(str::to_string)
+                super::super::formatting::canonical_tool_name(raw_name).map(str::to_string)
             else {
                 let _ = msg
                     .reply(
@@ -2536,6 +2675,62 @@ Any other message is sent to {p}.
                 )
                 .await;
             println!("  [{ts}] ▶ Added user: {target_id}");
+            return Ok(true);
+        }
+
+        "!allowall" => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ◀ [{}] !allowall {}", msg.author.name, arg1);
+
+            if !check_owner(msg.author.id, &data.shared).await {
+                let _ = msg
+                    .reply(&ctx.http, "Only the owner can change public access.")
+                    .await;
+                return Ok(true);
+            }
+
+            let action = arg1.trim().to_ascii_lowercase();
+            if action.is_empty() || action == "status" {
+                let enabled = {
+                    let settings = data.shared.settings.read().await;
+                    settings.allow_all_users
+                };
+                let message = if enabled {
+                    "Public access is enabled. Any Discord user can talk to this bot in allowed channels."
+                } else {
+                    "Public access is disabled. Only the owner and authorized users can talk to this bot."
+                };
+                let _ = msg.reply(&ctx.http, message).await;
+                return Ok(true);
+            }
+
+            let enabled = match action.as_str() {
+                "on" | "true" | "enable" | "enabled" => true,
+                "off" | "false" | "disable" | "disabled" => false,
+                _ => {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            "Usage: `!allowall on`, `!allowall off`, or `!allowall status`",
+                        )
+                        .await;
+                    return Ok(true);
+                }
+            };
+
+            let response = {
+                let mut settings = data.shared.settings.write().await;
+                settings.allow_all_users = enabled;
+                save_bot_settings(&data.token, &settings);
+                if enabled {
+                    "Public access enabled. Any Discord user can talk to this bot in allowed channels."
+                } else {
+                    "Public access disabled. Only the owner and authorized users can talk to this bot."
+                }
+            };
+
+            let _ = msg.reply(&ctx.http, response).await;
+            println!("  [{ts}] ▶ {response}");
             return Ok(true);
         }
 
@@ -2879,6 +3074,19 @@ Any other message is sent to {p}.
                         )
                     }
                 }
+                ProviderKind::Qwen => {
+                    if args_str.is_empty() {
+                        format!(
+                            "Use the local Qwen skill `/{skill}` now. \
+                             Follow its SKILL.md instructions exactly and complete the task."
+                        )
+                    } else {
+                        format!(
+                            "Use the local Qwen skill `/{skill}` now with this user request: {args_str}\n\
+                             Follow its SKILL.md instructions exactly and adapt them to the request."
+                        )
+                    }
+                }
                 ProviderKind::Unsupported(name) => {
                     let _ = msg
                         .reply(&ctx.http, format!("Provider '{}' is not installed.", name))
@@ -2920,85 +3128,31 @@ Any other message is sent to {p}.
     Ok(false)
 }
 
-/// Look up the active_thread_id for a dispatch's kanban card via internal API.
-/// Dispatch info returned by the card-thread internal API.
-struct DispatchInfo {
-    active_thread_id: Option<String>,
-    dispatch_type: Option<String>,
-    discord_channel_alt: Option<String>,
-}
-
-#[allow(dead_code)]
-async fn lookup_card_thread(api_port: u16, dispatch_id: &str) -> Option<String> {
-    let info = lookup_dispatch_info(api_port, dispatch_id).await?;
-    info.active_thread_id
-}
-
-async fn lookup_dispatch_info(api_port: u16, dispatch_id: &str) -> Option<DispatchInfo> {
-    let url = crate::config::local_api_url(
-        api_port,
-        &format!("/api/internal/card-thread?dispatch_id={dispatch_id}"),
-    );
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
+/// Private helper: reset provider session if a model change is pending.
+async fn reset_provider_session_if_pending(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) {
+    if shared
+        .model_session_reset_pending
+        .remove(&channel_id)
+        .is_none()
+    {
+        return;
     }
-    let body: serde_json::Value = resp.json().await.ok()?;
-    Some(DispatchInfo {
-        active_thread_id: body
-            .get("active_thread_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        dispatch_type: body
-            .get("dispatch_type")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        discord_channel_alt: body
-            .get("discord_channel_alt")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    })
-}
 
-/// Verify a thread is accessible and not locked via Discord API.
-/// Returns true if the thread exists and is not locked.
-async fn verify_thread_accessible(
-    ctx: &poise::serenity_prelude::Context,
-    thread_id: ChannelId,
-) -> bool {
-    match ctx.http.get_channel(thread_id).await {
-        Ok(channel) => {
-            if let Some(guild_channel) = channel.guild() {
-                // Check if thread is locked
-                if let Some(ref metadata) = guild_channel.thread_metadata {
-                    if metadata.locked {
-                        return false;
-                    }
-                    // Unarchive if needed — send will fail on archived threads via gateway
-                    if metadata.archived {
-                        let edit =
-                            poise::serenity_prelude::builder::EditThread::new().archived(false);
-                        if let Err(e) = thread_id.edit_thread(&ctx.http, edit).await {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!("  [{ts}] ⚠️ Failed to unarchive thread {thread_id}: {e}");
-                            return false;
-                        }
-                    }
-                }
-                true
-            } else {
-                false
-            }
+    let channel_name = {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.session_id = None;
+            session.channel_name.clone()
+        } else {
+            None
         }
-        Err(_) => false,
-    }
-}
+    };
 
+<<<<<<< HEAD:src/services/discord/router.rs
 /// Link a newly created dispatch thread to the card's active_thread_id via internal API.
 async fn link_dispatch_thread(api_port: u16, dispatch_id: &str, thread_id: u64, channel_id: u64) {
     let url = crate::config::local_api_url(api_port, "/api/internal/link-dispatch-thread");
@@ -3191,21 +3345,17 @@ mod tests {
             assert!(
                 is_model_picker_component_custom_id(&custom_id, channel_id),
                 "expected model picker dispatch for {custom_id}"
+=======
+    if provider.uses_managed_tmux_backend() {
+        if let Some(name) = channel_name.as_deref() {
+            crate::services::claude::terminate_local_session(
+                &provider.build_tmux_session_name(name),
+>>>>>>> upstream/main:src/services/discord/router/message_handler.rs
             );
         }
-
-        assert!(!is_model_picker_component_custom_id(
-            "agentdesk:other:42",
-            channel_id
-        ));
     }
 
-    #[test]
-    fn model_picker_close_response_acknowledges_component_close() {
-        let payload = serde_json::to_value(build_model_picker_close_response())
-            .expect("close response should serialize");
-
-        assert_eq!(payload["type"], json!(6));
-        assert_eq!(payload["data"], json!(null));
+    if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
+        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
     }
 }

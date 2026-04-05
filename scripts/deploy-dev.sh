@@ -51,6 +51,83 @@ _tail_for_summary() {
     tail -n 12 "$log_path" 2>/dev/null || true
 }
 
+# ── Credential Sync ──────────────────────────────────────────────────
+# Dev and release runtimes share a single credential directory so that
+# bot tokens, OAuth secrets, etc. stay in sync across environments.
+#
+# Source-of-truth resolution chain (_resolve_shared_credential_dir):
+#   1. $AGENTDESK_SHARED_CREDENTIAL_DIR env var  (explicit override)
+#   2. Release credential symlink target          (~/.adk/release/credential -> …)
+#   3. Hardcoded fallback                         (~/ObsidianVault/…/adk-config/credential)
+#
+# _sync_dev_credentials creates (or updates) a symlink at
+# ~/.adk/dev/credential -> <shared dir>, so every dev deploy
+# guarantees the dev bot uses the same credentials as release.
+#
+# Why here: the sync is idempotent and fast, consistent with the
+# existing policy sync (step 3.7) and dashboard symlink (step 3.6).
+#
+# Release credential is manually maintained (symlink created once by
+# the operator). deploy.sh does NOT auto-sync credentials.
+# ─────────────────────────────────────────────────────────────────────
+_resolve_shared_credential_dir() {
+    local configured="${AGENTDESK_SHARED_CREDENTIAL_DIR:-}"
+    if [ -n "$configured" ] && [ -d "$configured" ]; then
+        printf '%s\n' "$configured"
+        return 0
+    fi
+
+    local release_credential="$HOME/.adk/release/credential"
+    if [ -L "$release_credential" ]; then
+        local target
+        target=$(readlink "$release_credential" 2>/dev/null || true)
+        if [ -n "$target" ]; then
+            # Resolve relative symlinks against the symlink's parent directory
+            if [[ "$target" != /* ]]; then
+                target="$(cd "$(dirname "$release_credential")" && cd "$(dirname "$target")" && pwd)/$(basename "$target")"
+            fi
+            if [ -d "$target" ]; then
+                printf '%s\n' "$target"
+                return 0
+            fi
+        fi
+    fi
+
+    local fallback="$HOME/ObsidianVault/RemoteVault/adk-config/credential"
+    if [ -d "$fallback" ]; then
+        printf '%s\n' "$fallback"
+        return 0
+    fi
+
+    return 1
+}
+
+_sync_dev_credentials() {
+    local shared_credential_dir
+    shared_credential_dir=$(_resolve_shared_credential_dir) || {
+        echo "▸ Shared credential dir not found; leaving dev credential as-is"
+        return 0
+    }
+
+    local dev_credential_dir="$ADK_DEV/credential"
+    if [ -L "$dev_credential_dir" ] && [ "$(readlink "$dev_credential_dir" 2>/dev/null || true)" = "$shared_credential_dir" ]; then
+        echo "▸ Dev credential already linked to shared credential"
+        return 0
+    fi
+
+    if [ -e "$dev_credential_dir" ] && [ ! -L "$dev_credential_dir" ]; then
+        local backup_dir
+        backup_dir="${dev_credential_dir}.bak.$(date '+%Y%m%d-%H%M%S')"
+        mv "$dev_credential_dir" "$backup_dir"
+        echo "▸ Backed up stale dev credential dir to $backup_dir"
+    else
+        rm -f "$dev_credential_dir"
+    fi
+
+    ln -sfn "$shared_credential_dir" "$dev_credential_dir"
+    echo "▸ Linked dev credential -> $shared_credential_dir"
+}
+
 _finalize_detached_helper() {
     local status="${1:-0}"
     [ "$DEV_DEPLOY_DETACHED_CHILD" = "1" ] || return 0
@@ -113,6 +190,7 @@ export AGENTDESK_REPO_DIR=$(printf '%q' "$REPO")
 export AGENTDESK_DEPLOY_DEV_DETACHED_CHILD=1
 export AGENTDESK_DEPLOY_DEV_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_DEPLOY_DEV_TEST_MODE=$(printf '%q' "$DEV_DEPLOY_TEST_MODE")
+${AGENTDESK_SHARED_CREDENTIAL_DIR:+export AGENTDESK_SHARED_CREDENTIAL_DIR=$(printf '%q' "$AGENTDESK_SHARED_CREDENTIAL_DIR")}
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/deploy-dev.sh")${quoted_args}
 EOF
@@ -165,16 +243,20 @@ rm -f "$ADK_DEV/runtime/dcserver.lock"
 
 # 3. Copy binary
 echo "▸ Copying binary..."
-# Remove immutable flag if set (only deploy scripts should touch the binary)
+# Atomic binary swap: sign in tmp, then mv to replace inode.
+# Prevents OS signing cache corruption on codesign failure.
 chflags nouchg "$ADK_DEV/bin/agentdesk" 2>/dev/null || true
-cp "$REPO/target/release/agentdesk" "$ADK_DEV/bin/agentdesk"
-chmod +x "$ADK_DEV/bin/agentdesk"
-codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$ADK_DEV/bin/agentdesk"
-# Verify signature
-if ! codesign -v "$ADK_DEV/bin/agentdesk" 2>/dev/null; then
+cp "$REPO/target/release/agentdesk" "$ADK_DEV/bin/agentdesk.new"
+chmod +x "$ADK_DEV/bin/agentdesk.new"
+xattr -d com.apple.provenance "$ADK_DEV/bin/agentdesk.new" 2>/dev/null || true
+codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$ADK_DEV/bin/agentdesk.new"
+# Verify signature before swap
+if ! codesign -v "$ADK_DEV/bin/agentdesk.new" 2>/dev/null; then
     echo "✗ Codesign verification failed — aborting"
+    rm -f "$ADK_DEV/bin/agentdesk.new"
     exit 1
 fi
+mv -f "$ADK_DEV/bin/agentdesk.new" "$ADK_DEV/bin/agentdesk"
 # Lock binary to prevent unsigned overwrites
 chflags uchg "$ADK_DEV/bin/agentdesk"
 
@@ -193,7 +275,11 @@ echo "▸ Syncing policies..."
 mkdir -p "$DEV_POLICY_DIR"
 rsync -a --delete "$REPO/policies/" "$DEV_POLICY_DIR/"
 
-# 3.8. Ensure the user-facing CLI wrapper is reachable via PATH.
+# 3.8. Keep dev bot credentials aligned with the shared runtime credential.
+echo "▸ Syncing credentials..."
+_sync_dev_credentials
+
+# 3.9. Ensure the user-facing CLI wrapper is reachable via PATH.
 echo "▸ Ensuring global agentdesk CLI..."
 "$SCRIPT_DIR/ensure-agentdesk-cli.sh"
 

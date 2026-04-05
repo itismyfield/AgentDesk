@@ -180,14 +180,15 @@ fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<Str
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let initial_state = pipeline.initial_state().to_string();
-    if !states.iter().any(|s| s == &initial_state) {
-        states.push(initial_state);
-    }
     // Requested is a pre-execution staging state in the default pipeline. Allow
-    // enqueueing it directly so callers do not need force-transition -> ready.
+    // enqueueing it directly so callers can queue already-requested work.
     if pipeline.is_valid_state("requested") && !states.iter().any(|s| s == "requested") {
         states.push("requested".to_string());
+    }
+    // Ready is an explicit preparation state. Backlog is intentionally excluded:
+    // auto-queue should only accept work that has already been prepared.
+    if pipeline.is_valid_state("ready") && !states.iter().any(|s| s == "ready") {
+        states.push("ready".to_string());
     }
     states
 }
@@ -351,18 +352,18 @@ pub async fn generate(
     };
     ensure_tables(&conn);
 
-    // Build filter — pipeline-driven dispatchable states
+    // Build filter — pipeline-driven enqueueable states (dispatchable + prepared staging states)
     crate::pipeline::ensure_loaded();
-    let dispatchable = crate::pipeline::try_get()
+    let enqueueable = crate::pipeline::try_get()
         .map(|p| {
-            p.dispatchable_states()
+            enqueueable_states_for(p)
                 .iter()
                 .map(|s| format!("'{}'", s))
                 .collect::<Vec<_>>()
                 .join(",")
         })
-        .unwrap_or_else(|| "'ready'".to_string());
-    let mut conditions = vec![format!("kc.status IN ({})", dispatchable)];
+        .unwrap_or_else(|| "'ready','requested'".to_string());
+    let mut conditions = vec![format!("kc.status IN ({})", enqueueable)];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref repo) = body.repo {
         conditions.push(format!("kc.repo_id = ?{}", params.len() + 1));
@@ -1291,14 +1292,6 @@ pub async fn activate(
         .ok();
         drop(conn);
 
-        super::dispatches::queue_dispatch_notify(
-            &state.db,
-            &dispatch_id,
-            &agent_id,
-            &card_id,
-            &title,
-        );
-
         // #140: Update local per-agent count so subsequent iterations respect max_concurrent_per_agent
         *agent_dispatch_counts.entry(agent_id.clone()).or_insert(0) += 1;
 
@@ -1911,10 +1904,46 @@ pub async fn enqueue(
         )
         .unwrap_or_default();
 
-    // Find existing active/pending run (do NOT create yet — preserves idempotent retry)
+    // Complete stale active/pending runs that no longer have actionable entries.
+    // A finished run must not silently absorb new work just because its status
+    // was left behind as active/pending.
+    conn.execute(
+        "UPDATE auto_queue_runs
+         SET status = 'completed',
+             completed_at = COALESCE(completed_at, datetime('now'))
+         WHERE id IN (
+             SELECT r.id
+             FROM auto_queue_runs r
+             WHERE r.status IN ('active', 'pending')
+               AND (r.repo = ?1 OR r.repo IS NULL)
+               AND (r.agent_id = ?2 OR r.agent_id IS NULL)
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   WHERE e.run_id = r.id
+                     AND e.status IN ('pending', 'dispatched')
+               )
+         )",
+        rusqlite::params![body.repo, agent_id],
+    )
+    .ok();
+
+    // Find existing live active/pending run (do NOT create yet — preserves idempotent retry)
     let existing_run_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM auto_queue_runs WHERE status IN ('active', 'pending') AND (repo = ?1 OR repo IS NULL) AND (agent_id = ?2 OR agent_id IS NULL) ORDER BY created_at DESC LIMIT 1",
+            "SELECT r.id
+             FROM auto_queue_runs r
+             WHERE r.status IN ('active', 'pending')
+               AND (r.repo = ?1 OR r.repo IS NULL)
+               AND (r.agent_id = ?2 OR r.agent_id IS NULL)
+               AND EXISTS (
+                   SELECT 1
+                   FROM auto_queue_entries e
+                   WHERE e.run_id = r.id
+                     AND e.status IN ('pending', 'dispatched')
+               )
+             ORDER BY r.created_at DESC
+             LIMIT 1",
             rusqlite::params![body.repo, agent_id],
             |row| row.get(0),
         )
@@ -1963,8 +1992,8 @@ pub async fn enqueue(
         );
     }
 
-    // Accept the queue's initial staging states directly so PMD does not need
-    // force-transition -> ready (which would fire kanban hooks and side-dispatches).
+    // Accept only prepared staging states directly so PMD does not need
+    // redundant state nudges before enqueueing work.
     crate::pipeline::ensure_loaded();
     let effective_pipeline = crate::pipeline::resolve_for_card(
         &conn,
@@ -1976,7 +2005,7 @@ pub async fn enqueue(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": format!("card status is '{}', only initial/dispatchable/requested states can be enqueued", card_status),
+                "error": format!("card status is '{}', only ready/requested/dispatchable states can be enqueued", card_status),
                 "card_id": card_id,
                 "status": card_status,
                 "allowed_states": enqueueable_states,
@@ -1984,16 +2013,36 @@ pub async fn enqueue(
         );
     }
 
-    // Use existing run or create new one (pending — requires activate to dispatch).
-    let run_id = existing_run_id.unwrap_or_else(|| {
-        let id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES (?1, ?2, ?3, 'pending')",
-            rusqlite::params![id, body.repo, agent_id],
-        )
-        .ok();
-        id
-    });
+    // Enqueue only appends to an already-live run. Creating a brand-new pending
+    // run here is confusing because nothing dispatches until a separate activate.
+    // Reject instead so callers explicitly generate/activate a queue first.
+    let run_id = match existing_run_id {
+        Some(id) => id,
+        None => {
+            let last_run: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT id, status
+                     FROM auto_queue_runs
+                     WHERE (repo = ?1 OR repo IS NULL)
+                       AND (agent_id = ?2 OR agent_id IS NULL)
+                     ORDER BY created_at DESC
+                     LIMIT 1",
+                    rusqlite::params![body.repo, agent_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok();
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "no live active/pending auto-queue run available; completed runs cannot accept enqueue. Generate or activate a queue first",
+                    "card_id": card_id,
+                    "agent_id": agent_id,
+                    "last_run_id": last_run.as_ref().map(|(id, _)| id.clone()),
+                    "last_run_status": last_run.as_ref().map(|(_, status)| status.clone()),
+                })),
+            );
+        }
+    };
 
     let entry_id = uuid::Uuid::new_v4().to_string();
     let max_rank: i64 = conn

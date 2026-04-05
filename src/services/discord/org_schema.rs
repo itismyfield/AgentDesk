@@ -516,6 +516,7 @@ agents: {}
 suffix_map:
   "-cc": claude
   "-cdx": codex
+  "-qw": qwen
 "#,
             );
 
@@ -527,6 +528,7 @@ suffix_map:
                 lookup_suffix_provider("test-cdx"),
                 Some(ProviderKind::Codex)
             );
+            assert_eq!(lookup_suffix_provider("test-qw"), Some(ProviderKind::Qwen));
             assert_eq!(lookup_suffix_provider("test-other"), None);
         });
     }

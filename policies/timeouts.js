@@ -57,12 +57,71 @@ function getTimeoutInterval(key, fallbackMinutes) {
   return "-" + val + " minutes";
 }
 
+// #231: PM Decision notification dedup — durable kv_meta buffer.
+// Reasons are persisted to kv_meta (survives restart) and flushed
+// in onTick (legacy, 5min) AFTER all tiered handlers to combine
+// cross-tier reasons into one notification per card.
+var PM_DECISION_COOLDOWN_SEC = 300;  // 5-min cross-tick cooldown
+var PM_PENDING_TTL_SEC = 600;  // 10-min TTL for pending entries (auto-cleanup)
+
+function _queuePMDecision(cardId, title, reason) {
+  var pendingKey = "pm_pending:" + cardId;
+  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
+  var entry;
+  if (existing.length > 0) {
+    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
+  }
+  if (!entry) {
+    entry = { title: title, reasons: [] };
+  }
+  // Deduplicate identical reasons
+  if (entry.reasons.indexOf(reason) === -1) {
+    entry.reasons.push(reason);
+  }
+  agentdesk.db.execute(
+    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
+    [pendingKey, JSON.stringify(entry), String(PM_PENDING_TTL_SEC)]
+  );
+}
+
+function _flushPMDecisions() {
+  var pmdCh = getPMDChannel();
+  var rows = agentdesk.db.query("SELECT key, value FROM kv_meta WHERE key LIKE 'pm_pending:%'");
+  for (var i = 0; i < rows.length; i++) {
+    var cardId = rows[i].key.substring("pm_pending:".length);
+    var entry;
+    try { entry = JSON.parse(rows[i].value); } catch(e) { continue; }
+    // Delete the pending entry first (consumed regardless of cooldown)
+    agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [rows[i].key]);
+    // Cross-tick cooldown: skip send if notified recently
+    var cooldownKey = "pm_decision_sent:" + cardId;
+    var cooldownRow = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]);
+    if (cooldownRow.length > 0) {
+      var sentAt = parseInt(cooldownRow[0].value, 10) || 0;
+      var now = Math.floor(Date.now() / 1000);
+      if (now - sentAt < PM_DECISION_COOLDOWN_SEC) {
+        agentdesk.log.info("[PM dedup] Skipped notification for card " + cardId +
+          " (" + entry.reasons.length + " reasons, cooldown " + (now - sentAt) + "s)");
+        continue;
+      }
+    }
+    // Send combined notification with all accumulated reasons
+    if (!pmdCh) continue;
+    var msg = "⚠️ [PM 결정 요청] " + entry.title + "\n카드가 pending_decision 상태입니다. PMD가 다음 조치를 결정해주세요.\n사유: " + entry.reasons.join("; ");
+    agentdesk.message.queue(pmdCh, msg, "announce", "system");
+    // Set cooldown with TTL
+    agentdesk.db.execute(
+      "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
+      [cooldownKey, String(Math.floor(Date.now() / 1000)), String(PM_DECISION_COOLDOWN_SEC)]
+    );
+  }
+}
+
 var timeouts = {
   name: "timeouts",
   priority: 100,
 
-  // Legacy onTick: no-op, replaced by tiered tick handlers (#127)
-  onTick: function() {},
+  // onTick: assigned after object literal (line ~1282) to flush PM decisions (#231)
 
   // ── Section methods (extracted from onTick for tiered execution) ──
 
@@ -145,21 +204,10 @@ var timeouts = {
             }
           } catch (e) {}
         }
-        // Check 2: Minimum work duration (2 min)
-        var MIN_WORK_SEC = 120;
-        var sessions = agentdesk.db.query(
-          "SELECT td.created_at as first_work, MAX(s.last_heartbeat) as last_seen " +
-          "FROM task_dispatches td " +
-          "JOIN sessions s ON s.active_dispatch_id = td.id AND s.status = 'working' " +
-          "WHERE td.id = ?",
-          [di.id]
-        );
-        if (sessions.length > 0 && sessions[0].first_work && sessions[0].last_seen) {
-          var durationSec = (new Date(sessions[0].last_seen) - new Date(sessions[0].first_work)) / 1000;
-          if (durationSec < MIN_WORK_SEC) {
-            reasons.push("작업 시간 부족: " + Math.round(durationSec) + "초 (최소 " + MIN_WORK_SEC + "초)");
-          }
-        }
+        // Minimum work duration heuristic intentionally removed to keep PM
+        // escalation aligned with objective failure states only. Replay logic
+        // must match kanban-rules.js and avoid false positives from unified
+        // thread / turn-bridge completions.
         if (reasons.length > 0) {
           var dodOnly = reasons.length === 1 && reasons[0].indexOf("DoD 미완료") === 0;
           if (dodOnly) {
@@ -175,13 +223,11 @@ var timeouts = {
           // #117: sync canonical review state
           agentdesk.reviewState.sync(card.id, "idle");
           agentdesk.log.warn("[reconcile] Card " + card.id + " → " + rPending + ": " + reasons.join("; "));
-          // PMD notification via async outbox (#120)
-          var pmdCh = agentdesk.config.get("kanban_manager_channel_id");
-          if (pmdCh) {
-            var cardTitle2 = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [card.id]);
-            var t2 = cardTitle2.length > 0 ? cardTitle2[0].title : card.id;
-            var pmdMsg = "[PM Decision] " + t2 + "\n사유: " + reasons.join("; ");
-            agentdesk.message.queue("channel:" + pmdCh, pmdMsg, "announce", "system");
+          // #231: Queue deduped PM notification (flushed at tick end)
+          var cardTitle2 = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [card.id]);
+          var t2 = cardTitle2.length > 0 ? cardTitle2[0].title : card.id;
+          for (var ri = 0; ri < reasons.length; ri++) {
+            _queuePMDecision(card.id, t2, reasons[ri]);
           }
           continue;
         }
@@ -202,7 +248,7 @@ var timeouts = {
     var requestedInterval = getTimeoutInterval("requested_timeout_min", 45);
     var staleRequested = agentdesk.db.query(
       "SELECT kc.id, kc.assigned_agent_id, kc.latest_dispatch_id, " +
-      "COALESCE(td.retry_count, 0) as retry_count " +
+      "COALESCE(td.retry_count, 0) as retry_count, td.dispatch_type " +
       "FROM kanban_cards kc " +
       "LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id " +
       "WHERE kc.status = ? AND kc.requested_at IS NOT NULL AND kc.requested_at < datetime('now', '" + requestedInterval + "')",
@@ -210,6 +256,18 @@ var timeouts = {
     );
     for (var i = 0; i < staleRequested.length; i++) {
       var rc = staleRequested[i];
+      // #255: Skip cards without a dispatch — they are in preflight state,
+      // waiting for auto-queue or tick to create a dispatch.
+      if (!rc.latest_dispatch_id) {
+        agentdesk.log.info("[timeout] Card " + rc.id + " in " + aInitial + " without dispatch — preflight, skipping timeout");
+        continue;
+      }
+      // #256: Skip cards with consultation dispatch — consultation has its own
+      // lifecycle via onDispatchCompleted; let it resolve naturally.
+      if (rc.dispatch_type === "consultation") {
+        agentdesk.log.info("[timeout] Card " + rc.id + " in " + aInitial + " with consultation dispatch — skipping timeout");
+        continue;
+      }
       // Dispatch를 failed로 — skip state changes if dispatch was already terminal
       if (rc.latest_dispatch_id) {
         var failResult = agentdesk.dispatch.markFailed(rc.latest_dispatch_id, "Timed out waiting for agent");
@@ -236,23 +294,13 @@ var timeouts = {
           [rc.id]
         );
         agentdesk.log.warn("[timeout] Card " + rc.id + " " + aInitial + " timeout → " + aPending + " (" + MAX_DISPATCH_RETRIES + " retries exhausted)");
-        // PMD에게 결정 요청
+        // #231: Queue deduped PM notification
         var cardInfo = agentdesk.db.query(
-          "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
+          "SELECT title FROM kanban_cards WHERE id = ?",
           [rc.id]
         );
         var cardTitle = (cardInfo.length > 0) ? cardInfo[0].title : rc.id;
-        var cardUrl = (cardInfo.length > 0 && cardInfo[0].github_issue_url) ? "\n" + cardInfo[0].github_issue_url : "";
-        var assignee = (cardInfo.length > 0 && cardInfo[0].assigned_agent_id) ? cardInfo[0].assigned_agent_id : "미배정";
-        var kmChannel = getPMDChannel();
-        if (kmChannel) {
-          agentdesk.message.queue(
-            kmChannel,
-            "[PM Decision] " + cardTitle + "\n사유: " + MAX_DISPATCH_RETRIES + " retries exhausted",
-            "announce",
-            "system"
-          );
-        }
+        _queuePMDecision(rc.id, cardTitle, MAX_DISPATCH_RETRIES + " retries exhausted");
       }
     }
   },
@@ -277,23 +325,13 @@ var timeouts = {
         [staleInProgress[j].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " " + bInProgress + " stale → " + bBlocked);
-      // PMD에게 결정 요청 (announce bot)
+      // #231: Queue deduped PM notification
       var stalledInfo = agentdesk.db.query(
-        "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
+        "SELECT title FROM kanban_cards WHERE id = ?",
         [staleInProgress[j].id]
       );
       var stalledTitle = (stalledInfo.length > 0) ? stalledInfo[0].title : staleInProgress[j].id;
-      var stalledUrl = (stalledInfo.length > 0 && stalledInfo[0].github_issue_url) ? "\n" + stalledInfo[0].github_issue_url : "";
-      var stalledAssignee = (stalledInfo.length > 0 && stalledInfo[0].assigned_agent_id) ? stalledInfo[0].assigned_agent_id : "미배정";
-      var kmChannel2 = getPMDChannel();
-      if (kmChannel2) {
-        agentdesk.message.queue(
-          kmChannel2,
-          "[Stalled] " + stalledTitle + " (담당: " + stalledAssignee + ")" + stalledUrl + "\n" + staleMin + "분+ 활동 없음 → blocked",
-          "announce",
-          "system"
-        );
-      }
+      _queuePMDecision(staleInProgress[j].id, stalledTitle, staleMin + "분+ 활동 없음 → blocked");
     }
   },
 
@@ -322,6 +360,10 @@ var timeouts = {
       // #117: sync canonical review state
       agentdesk.reviewState.sync(staleReviews[k].card_id, "idle");
       agentdesk.log.warn("[timeout] Stale review → pending_decision: card " + staleReviews[k].card_id);
+      // #231: Queue deduped PM notification
+      var staleRevInfo = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [staleReviews[k].card_id]);
+      var staleRevTitle = (staleRevInfo.length > 0) ? staleRevInfo[0].title : staleReviews[k].card_id;
+      _queuePMDecision(staleReviews[k].card_id, staleRevTitle, "stale review — dispatch 완료 30분+ verdict 없음 → pending_decision");
     }
   },
 
@@ -345,6 +387,10 @@ var timeouts = {
       // #117: sync canonical review state
       agentdesk.reviewState.sync(stuckDod[d].id, "idle");
       agentdesk.log.warn("[timeout] DoD await timeout → pending_decision: card " + stuckDod[d].id);
+      // #231: Queue deduped PM notification
+      var dodInfo = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [stuckDod[d].id]);
+      var dodTitle = (dodInfo.length > 0) ? dodInfo[0].title : stuckDod[d].id;
+      _queuePMDecision(stuckDod[d].id, dodTitle, "DoD 대기 15분 초과 → pending_decision");
     }
   },
 
@@ -567,6 +613,21 @@ var timeouts = {
     }
   },
 
+  // #219: Check if a tmux session has at least one live (non-dead) pane.
+  // Mirrors Rust's has_live_pane() — uses #{pane_dead} format instead of
+  // has-session (which returns true for zombie sessions with dead panes).
+  _tmuxHasLivePane: function(tmuxName) {
+    try {
+      // "=" prefix prevents tmux prefix-matching (exact_target convention)
+      var out = agentdesk.exec("tmux", ["list-panes", "-t", "=" + tmuxName, "-F", "#{pane_dead}"]);
+      // Success: lines of "0" (alive) or "1" (dead). Any "0" = live pane exists.
+      // Failure: "ERROR: ..." (session gone)
+      return typeof out === "string" && out.indexOf("ERROR") === -1 && out.indexOf("0") !== -1;
+    } catch(e) {
+      return false;
+    }
+  },
+
   _section_I: function() {
     // ─── [I] 턴 데드락 감지 + 자동 복구 (15분 주기) ─────────
     // 판별: sessions.last_heartbeat 기반 (연속 스톨만 카운트)
@@ -601,30 +662,33 @@ var timeouts = {
     for (var sw = 0; sw < staleWorkingSessions.length; sw++) {
       var swKey = staleWorkingSessions[sw].session_key;
       var tmuxName = (swKey || "").split(":").pop();
-      // Check if tmux session is still alive and has a running process
-      var tmuxAlive = false;
-      try {
-        var checkOut = agentdesk.exec("tmux", JSON.stringify(["list-panes", "-t", tmuxName, "-F", "#{pane_current_command}"]));
-        tmuxAlive = checkOut && checkOut.indexOf("agentdesk") !== -1;
-      } catch(e) { tmuxAlive = false; }
-      // #219: Also check tmux output file activity — if output was modified recently,
-      // the session is alive even without heartbeat updates
+      // #219: Check if tmux session has a live pane (not just session existence).
+      // has-session returns true for zombie sessions with dead panes;
+      // list-panes #{pane_dead} distinguishes live vs dead workers.
+      var tmuxAlive = timeouts._tmuxHasLivePane(tmuxName);
       if (!tmuxAlive) {
+        // #219: Fail any pending dispatch before transitioning to idle.
+        // Without this, the dispatch stays "pending" as an orphan and gets
+        // re-delivered or auto-completed, causing the failure loop.
         try {
-          var outputPath = "/tmp/adk-output-" + tmuxName + ".txt";
-          var stat = agentdesk.exec("stat", JSON.stringify(["-f", "%m", outputPath]));
-          if (stat) {
-            var mtime = parseInt(stat.trim(), 10);
-            var now = Math.floor(Date.now() / 1000);
-            if (now - mtime < 300) { // output modified within 5 minutes
-              tmuxAlive = true;
+          var swSessInfo = agentdesk.db.query(
+            "SELECT active_dispatch_id FROM sessions WHERE session_key = ?", [swKey]
+          );
+          if (swSessInfo.length > 0 && swSessInfo[0].active_dispatch_id) {
+            var swDispId = swSessInfo[0].active_dispatch_id;
+            var swDispStatus = agentdesk.db.query(
+              "SELECT status FROM task_dispatches WHERE id = ?", [swDispId]
+            );
+            if (swDispStatus.length > 0 && (swDispStatus[0].status === "pending" || swDispStatus[0].status === "dispatched")) {
+              agentdesk.dispatch.markFailed(swDispId, "Stale working session recovery — no active tmux session after 10min");
+              agentdesk.log.warn("[deadlock] Failed stale dispatch " + swDispId + " for session " + swKey);
             }
           }
-        } catch(e2) { /* stat failed — file may not exist */ }
-      }
-      if (!tmuxAlive) {
+        } catch(dispErr) {
+          agentdesk.log.warn("[deadlock] Failed to mark dispatch for " + swKey + ": " + dispErr);
+        }
         agentdesk.db.execute(
-          "UPDATE sessions SET status = 'idle' WHERE session_key = ? AND status = 'working'",
+          "UPDATE sessions SET status = 'idle', active_dispatch_id = NULL WHERE session_key = ? AND status = 'working'",
           [swKey]
         );
         agentdesk.log.info("[deadlock] Fixed stale working session → idle: " + swKey);
@@ -640,6 +704,15 @@ var timeouts = {
     for (var dl = 0; dl < staleSessions.length; dl++) {
       var sess = staleSessions[dl];
       var deadlockKey = "deadlock_check:" + sess.session_key;
+
+      // #219: If tmux session has a live pane, the agent is actively working
+      // despite stale heartbeat (long tool calls, subagents). Reset counter
+      // and skip — heartbeat staleness alone is not sufficient for deadlock.
+      var dlTmuxName = (sess.session_key || "").split(":").pop();
+      if (timeouts._tmuxHasLivePane(dlTmuxName)) {
+        agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
+        continue;
+      }
 
       // Check extension count + last check timestamp
       var extRecord = agentdesk.db.query(
@@ -752,7 +825,18 @@ var timeouts = {
           totalMin + "분 무응답 → 강제 중단" +
           (redispatched ? " + 재디스패치 완료" : ""));
 
-        // 5) 이력 기록
+        // 5) Termination audit
+        try {
+          var probeInfo = "agent=" + sess.agent_id + " extensions=" + extensions + "/" + MAX_EXTENSIONS +
+            " last_heartbeat=" + sess.last_heartbeat + " kill_ok=" + (killResult.ok || false);
+          agentdesk.db.execute(
+            "INSERT INTO session_termination_events (session_key, dispatch_id, killer_component, reason_code, reason_text, probe_snapshot, tmux_alive) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [sess.session_key, sess.active_dispatch_id || null, "deadlock_policy", "deadlock_timeout",
+             totalMin + "min timeout — " + (redispatched ? "redispatched" : "cancelled"), probeInfo, 0]
+          );
+        } catch (e) { /* fire-and-forget */ }
+
+        // 6) 이력 기록 (legacy)
         agentdesk.db.execute(
           "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
           ["deadlock_history:" + sess.session_key + ":" + Date.now(),
@@ -1033,16 +1117,8 @@ var timeouts = {
       agentdesk.kanban.setReviewStatus(oc.id, null, {suggestion_pending_at: null});
       agentdesk.reviewState.sync(oc.id, "idle");
 
-      var kmChannel = getPMDChannel();
-      if (kmChannel) {
-        agentdesk.message.queue(
-          kmChannel,
-          "⚠️ [orphan-review] #" + (oc.github_issue_number || "?") + " " +
-          (oc.title || oc.id) + "\nreview 상태인데 dispatch 없음 → pending_decision 전환 (PMD 결정 필요)",
-          "announce",
-          "system"
-        );
-      }
+      // #231: Queue deduped PM notification
+      _queuePMDecision(oc.id, (oc.title || oc.id), "orphan review — dispatch 없음 → pending_decision");
     }
   },
 
@@ -1196,14 +1272,17 @@ timeouts.onTick5min = function(ev) {
   agentdesk.log.debug("[tick5min][H] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_M(); } catch(e) { agentdesk.log.warn("[tick5min] M error: " + e); }
   agentdesk.log.debug("[tick5min][M] " + (Date.now() - t) + "ms");
-  if (timeouts.onContextCheck) {
-    t = Date.now(); try { timeouts.onContextCheck(); } catch(e) { agentdesk.log.warn("[tick5min] ctx error: " + e); }
-    agentdesk.log.debug("[tick5min][ctx] " + (Date.now() - t) + "ms");
-  }
+  // DISABLED — token counting unreliable (double-count, stale after /clear). Re-enable after fix.
+  // if (timeouts.onContextCheck) {
+  //   t = Date.now(); try { timeouts.onContextCheck(); } catch(e) { agentdesk.log.warn("[tick5min] ctx error: " + e); }
+  //   agentdesk.log.debug("[tick5min][ctx] " + (Date.now() - t) + "ms");
+  // }
   agentdesk.log.debug("[tick5min] total " + (Date.now() - start) + "ms");
 };
 
-// Legacy onTick: no-op (tiered hooks handle everything)
-timeouts.onTick = function() {};
+// Legacy onTick: flush PM decision buffer after all tiered handlers (#231)
+timeouts.onTick = function() {
+  _flushPMDecisions();
+};
 
 agentdesk.registerPolicy(timeouts);

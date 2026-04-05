@@ -9,6 +9,7 @@ mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
 mod org_schema;
+pub(crate) mod org_writer;
 mod prompt_builder;
 mod recovery;
 pub(crate) mod restart_report;
@@ -24,7 +25,6 @@ mod turn_bridge;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -35,16 +35,17 @@ use tokio::sync::Mutex;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateAttachment, CreateMessage, EditMessage, MessageId, UserId};
 
-use crate::services::claude::{
-    self, CancelToken, DEFAULT_ALLOWED_TOOLS, ReadOutputResult, StreamMessage,
-};
+use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
+use crate::services::claude;
 use crate::services::codex;
 use crate::services::gemini;
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
+use crate::services::qwen;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
 
 use adk_session::{
-    build_adk_session_key, derive_adk_session_info, parse_dispatch_id, post_adk_session_status,
+    build_adk_session_key, derive_adk_session_info, lookup_pending_dispatch_for_thread,
+    parse_dispatch_id, post_adk_session_status,
 };
 use formatting::{
     BUILTIN_SKILLS, add_reaction_raw, extract_skill_description, format_for_discord,
@@ -267,6 +268,8 @@ pub(super) struct DiscordBotSettings {
     pub(super) owner_user_id: Option<u64>,
     /// Additional authorized user IDs (added by owner via /adduser)
     pub(super) allowed_user_ids: Vec<u64>,
+    /// When true, any Discord user may talk to this bot in allowed channels.
+    pub(super) allow_all_users: bool,
     /// Bot IDs whose messages are NOT ignored (e.g. announce bot for CEO directives)
     pub(super) allowed_bot_ids: Vec<u64>,
 }
@@ -286,6 +289,7 @@ impl Default for DiscordBotSettings {
             channel_model_overrides: std::collections::HashMap::new(),
             owner_user_id: None,
             allowed_user_ids: Vec::new(),
+            allow_all_users: false,
             allowed_bot_ids: Vec::new(),
         }
     }
@@ -308,6 +312,35 @@ pub(super) struct TmuxWatcherHandle {
     pub(super) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
 }
 
+pub(super) fn synthetic_thread_channel_name(parent_name: &str, channel_id: ChannelId) -> String {
+    format!("{parent_name}-t{}", channel_id.get())
+}
+
+fn is_synthetic_thread_channel_name(channel_name: &str, channel_id: ChannelId) -> bool {
+    channel_name.ends_with(&format!("-t{}", channel_id.get()))
+}
+
+fn choose_restore_channel_name(
+    existing_channel_name: Option<&str>,
+    live_channel_name: Option<&str>,
+    thread_parent: Option<(ChannelId, Option<String>)>,
+    channel_id: ChannelId,
+) -> Option<String> {
+    if let Some(existing_name) = existing_channel_name {
+        if is_synthetic_thread_channel_name(existing_name, channel_id) {
+            return Some(existing_name.to_string());
+        }
+    }
+
+    if let Some((parent_id, parent_name)) = thread_parent {
+        let parent_name = parent_name.unwrap_or_else(|| parent_id.get().to_string());
+        return Some(synthetic_thread_channel_name(&parent_name, channel_id));
+    }
+
+    live_channel_name
+        .or(existing_channel_name)
+        .map(ToOwned::to_owned)
+}
 #[derive(Clone)]
 pub(super) struct ModelPickerPendingState {
     pub(super) owner_user_id: UserId,
@@ -761,6 +794,129 @@ async fn catch_up_missed_messages(
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!(
             "  [{ts}] 🔍 CATCH-UP: total {total_recovered} message(s) recovered across channels"
+        );
+    }
+
+    // Phase 2: Scan for unanswered messages since last bot response.
+    // Catches messages that were queued in-memory but lost on restart.
+    let Ok(entries2) = fs::read_dir(&dir) else {
+        return;
+    };
+    let mut phase2_recovered = 0usize;
+    let bot_user_id_phase2 = {
+        let settings = shared.settings.read().await;
+        settings.owner_user_id
+    };
+    let allowed_bot_ids_phase2: Vec<u64> = {
+        let settings = shared.settings.read().await;
+        settings.allowed_bot_ids.clone()
+    };
+
+    for entry in entries2.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(channel_id_raw) = stem.parse::<u64>() else {
+            continue;
+        };
+        let channel_id = ChannelId::new(channel_id_raw);
+
+        // Fetch last 20 messages (newest first — default Discord order)
+        let recent = match channel_id
+            .messages(http, serenity::builder::GetMessages::new().limit(20))
+            .await
+        {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ catch-up phase2: failed to fetch recent messages for channel {channel_id}: {e}"
+                );
+                continue;
+            }
+        };
+
+        if recent.is_empty() {
+            continue;
+        }
+
+        // Find the newest bot response (first bot message in newest-first order)
+        let last_bot_idx = recent.iter().position(|m| {
+            Some(m.author.id.get()) == bot_user_id_phase2 && !m.content.trim().is_empty()
+        });
+
+        // Messages at indices 0..last_bot_idx are newer than the last bot response
+        let unanswered_slice = match last_bot_idx {
+            Some(0) => continue, // Latest message is from bot — nothing unanswered
+            Some(idx) => &recent[..idx],
+            None => continue, // No bot response found — skip (new/inactive channel)
+        };
+
+        // Collect existing queue IDs for dedup
+        let existing_ids: std::collections::HashSet<u64> = {
+            let data = shared.core.lock().await;
+            data.intervention_queue
+                .get(&channel_id)
+                .map(|q| q.iter().map(|i| i.message_id.get()).collect())
+                .unwrap_or_default()
+        };
+
+        let mut channel_recovered = 0usize;
+        let mut data = shared.core.lock().await;
+        let queue = data.intervention_queue.entry(channel_id).or_default();
+
+        // Iterate in reverse (oldest first) for chronological queue order
+        for msg in unanswered_slice.iter().rev() {
+            if !router::should_process_turn_message(msg.kind) {
+                continue;
+            }
+            if Some(msg.author.id.get()) == bot_user_id_phase2 {
+                continue;
+            }
+            if existing_ids.contains(&msg.id.get()) {
+                continue;
+            }
+            let text = msg.content.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let is_allowed =
+                !msg.author.bot || allowed_bot_ids_phase2.contains(&msg.author.id.get());
+            if !is_allowed {
+                continue;
+            }
+            // Skip messages older than 10 minutes (generous window for restart gap)
+            let msg_age = chrono::Utc::now().signed_duration_since(*msg.id.created_at());
+            if msg_age.num_seconds() > 600 {
+                continue;
+            }
+
+            queue.push(Intervention {
+                author_id: msg.author.id,
+                message_id: msg.id,
+                text: text.to_string(),
+                mode: InterventionMode::Soft,
+                created_at: now,
+            });
+            channel_recovered += 1;
+        }
+        drop(data);
+
+        if channel_recovered > 0 {
+            phase2_recovered += channel_recovered;
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] 🔍 CATCH-UP phase2: recovered {} unanswered message(s) for channel {}",
+                channel_recovered, channel_id
+            );
+        }
+    }
+
+    if phase2_recovered > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] 🔍 CATCH-UP phase2: total {phase2_recovered} unanswered message(s) recovered"
         );
     }
 }
@@ -1352,6 +1508,71 @@ pub(super) fn scan_skills(
                 }
             }
         }
+        ProviderKind::Qwen => {
+            let mut roots = Vec::new();
+            if let Some(home) = dirs::home_dir() {
+                roots.push(home.join(".qwen").join("skills"));
+            }
+            if let Some(proj) = project_path {
+                roots.push(Path::new(proj).join(".qwen").join("skills"));
+            }
+
+            for root in roots {
+                if !root.is_dir() {
+                    continue;
+                }
+                let Ok(entries) = fs::read_dir(&root) else {
+                    continue;
+                };
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if let Some(skill_path) = resolve_codex_skill_file(&path) {
+                        if let Some(name) = skill_path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|s| s.to_str())
+                        {
+                            let name = name.to_string();
+                            if seen.insert(name.clone()) {
+                                let desc = fs::read_to_string(&skill_path)
+                                    .ok()
+                                    .map(|content| extract_skill_description(&content))
+                                    .unwrap_or_else(|| format!("Skill: {}", name));
+                                skills.push((name, desc));
+                            }
+                        }
+                        continue;
+                    }
+
+                    if path.is_dir() {
+                        let Ok(nested) = fs::read_dir(&path) else {
+                            continue;
+                        };
+                        for child in nested.filter_map(|e| e.ok()) {
+                            let child_path = child.path();
+                            let Some(skill_path) = resolve_codex_skill_file(&child_path) else {
+                                continue;
+                            };
+                            let Some(name) = skill_path
+                                .parent()
+                                .and_then(|p| p.file_name())
+                                .and_then(|s| s.to_str())
+                            else {
+                                continue;
+                            };
+                            let name = name.to_string();
+                            if seen.insert(name.clone()) {
+                                let desc = fs::read_to_string(&skill_path)
+                                    .ok()
+                                    .map(|content| extract_skill_description(&content))
+                                    .unwrap_or_else(|| format!("Skill: {}", name));
+                                skills.push((name, desc));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         ProviderKind::Unsupported(_) => {}
     }
 
@@ -1384,6 +1605,13 @@ fn skill_dir_fingerprint(provider: &ProviderKind) -> (usize, u64) {
             let mut v = Vec::new();
             if let Some(home) = dirs::home_dir() {
                 v.push(home.join(".gemini").join("skills"));
+            }
+            v
+        }
+        ProviderKind::Qwen => {
+            let mut v = Vec::new();
+            if let Some(home) = dirs::home_dir() {
+                v.push(home.join(".qwen").join("skills"));
             }
             v
         }
@@ -1459,6 +1687,7 @@ fn skill_dir_fingerprint_with_projects(
             ProviderKind::Claude => Path::new(path).join(".claude").join("commands"),
             ProviderKind::Codex => Path::new(path).join(".codex").join("skills"),
             ProviderKind::Gemini => Path::new(path).join(".gemini").join("skills"),
+            ProviderKind::Qwen => Path::new(path).join(".qwen").join("skills"),
             _ => continue,
         };
         if proj_dir.is_dir() {
@@ -1620,6 +1849,7 @@ pub async fn run_bot(
                 commands::cmd_allowedtools(),
                 commands::cmd_allowed(),
                 commands::cmd_debug(),
+                commands::cmd_allowall(),
                 commands::cmd_adduser(),
                 commands::cmd_removeuser(),
                 commands::cmd_receipt(),
@@ -1816,10 +2046,48 @@ pub async fn run_bot(
                         &provider_for_restore,
                     ).await;
 
+                    // #226: Collect channels that recovery already handled (spawned + ended watchers).
+                    // restore_tmux_watchers must skip these to prevent duplicate watcher creation.
+                    // The issue: recovery watcher starts → session ends quickly → watcher removes
+                    // itself from DashMap → restore_tmux_watchers sees empty slot → creates second watcher.
                     #[cfg(unix)]
                     {
+                        // Mark all channels that recovery touched as "recently handled"
+                        // by inserting a recovery_handled marker in kv_meta.
+                        // restore_tmux_watchers checks this and skips those channels.
+                        if let Some(ref db) = shared_for_tmux2.db {
+                            if let Ok(conn) = db.lock() {
+                                let recovery_channels: Vec<u64> = shared_for_tmux2
+                                    .recovering_channels
+                                    .iter()
+                                    .map(|entry| entry.key().get())
+                                    .collect();
+                                for ch in &recovery_channels {
+                                    conn.execute(
+                                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                                        rusqlite::params![
+                                            format!("recovery_handled_channel:{ch}"),
+                                            chrono::Utc::now().timestamp().to_string(),
+                                        ],
+                                    )
+                                    .ok();
+                                }
+                            }
+                        }
+
                         restore_tmux_watchers(&http_for_tmux, &shared_for_tmux2).await;
                         cleanup_orphan_tmux_sessions(&shared_for_tmux2).await;
+
+                        // Clean up recovery markers
+                        if let Some(ref db) = shared_for_tmux2.db {
+                            if let Ok(conn) = db.lock() {
+                                conn.execute(
+                                    "DELETE FROM kv_meta WHERE key LIKE 'recovery_handled_channel:%'",
+                                    [],
+                                )
+                                .ok();
+                            }
+                        }
                     }
 
                     // Execute durable handoffs (post-restart follow-up work)
@@ -2050,8 +2318,10 @@ pub async fn run_bot(
                         let restart_notice = if state.full_response.trim().is_empty() {
                             "⚠️ dcserver 재시작으로 중단됨 — 곧 복원됩니다".to_string()
                         } else {
-                            let partial =
-                                formatting::format_for_discord(state.full_response.trim());
+                            let partial = formatting::format_for_discord_with_provider(
+                                state.full_response.trim(),
+                                &provider_for_shutdown,
+                            );
                             format!("{partial}\n\n⚠️ dcserver 재시작으로 중단됨 — 곧 복원됩니다")
                         };
                         let edit_fut = channel.edit_message(
@@ -2164,9 +2434,9 @@ pub(super) async fn check_auth(
             );
             true
         }
-        Some(owner_id) => {
+        Some(_) => {
             let uid = user_id.get();
-            if uid == owner_id || settings.allowed_user_ids.contains(&uid) {
+            if user_is_authorized(&settings, uid) {
                 true
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2177,329 +2447,269 @@ pub(super) async fn check_auth(
     }
 }
 
+fn user_is_authorized(settings: &DiscordBotSettings, user_id: u64) -> bool {
+    settings.allow_all_users
+        || settings.owner_user_id == Some(user_id)
+        || settings.allowed_user_ids.contains(&user_id)
+}
+
 /// Check if a user is the owner (not just allowed)
 pub(super) async fn check_owner(user_id: UserId, shared: &Arc<SharedData>) -> bool {
     let settings = shared.settings.read().await;
     settings.owner_user_id == Some(user_id.get())
 }
 
-fn family_profile_probe_script_path() -> Option<std::path::PathBuf> {
-    // Try org.yaml skills_root first, fallback to $AGENTDESK_ROOT_DIR/skills/
-    let skills_root = org_schema::load_skills_root()
-        .map(std::path::PathBuf::from)
-        .or_else(|| runtime_store::agentdesk_root().map(|r| r.join("skills")));
-    skills_root.map(|root| {
-        root.join("family-profile-probe")
-            .join("scripts")
-            .join("select_profile_probe.py")
+/// Check for pending DM replies and consume them. The answer text is stored
+/// in the consumed row's context (as `_answer`), and a notification is sent
+/// to the source agent's Discord channel so its session can process the reply.
+pub(super) async fn try_handle_pending_dm_reply(
+    db: &crate::db::Db,
+    msg: &serenity::Message,
+) -> bool {
+    if msg.author.bot || msg.guild_id.is_some() {
+        return false;
+    }
+    let answer = msg.content.trim();
+    if answer.is_empty() {
+        return false;
+    }
+    let user_id_str = msg.author.id.get().to_string();
+    let username = msg.author.name.clone();
+    let db = db.clone();
+    let answer_owned = answer.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        consume_pending_dm_reply(&db, &user_id_str, &answer_owned)
+    })
+    .await;
+    match result {
+        Ok(Some(info)) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] ✉️ DM reply consumed: user={} agent={} id={}",
+                msg.author.id.get(),
+                info.source_agent,
+                info.id
+            );
+
+            // Notify the source agent's Discord channel (inline, not fire-and-forget)
+            if let Err(e) = notify_source_agent(
+                &info.db,
+                &info.source_agent,
+                info.id,
+                info.channel_id.as_deref(),
+                &username,
+                &info.answer,
+            )
+            .await
+            {
+                eprintln!("  [dm-reply] notify source agent failed: {e}");
+                // Record failure in context so readConsumed can detect it
+                let db3 = info.db.clone();
+                let reply_id = info.id;
+                let err_msg = format!("{e}");
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = db3.separate_conn() {
+                        let _ = conn.execute(
+                            "UPDATE pending_dm_replies SET context = \
+                             json_set(context, '$._notify_failed', json('true'), '$._notify_error', ?1) \
+                             WHERE id = ?2",
+                            rusqlite::params![err_msg, reply_id],
+                        );
+                    }
+                })
+                .await;
+            }
+
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            eprintln!("  [dm-reply] consume task error: {e}");
+            false
+        }
+    }
+}
+
+/// Send a notification to the source agent's Discord channel about the DM reply.
+/// Prefers the stored `channel_id` from the pending row (alt/thread channels);
+/// falls back to `agents.discord_channel_id` only if none was stored.
+async fn notify_source_agent(
+    db: &crate::db::Db,
+    source_agent: &str,
+    reply_id: i64,
+    stored_channel_id: Option<&str>,
+    username: &str,
+    answer: &str,
+) -> Result<(), String> {
+    let token =
+        crate::credential::read_bot_token("announce").ok_or("no announce bot token configured")?;
+
+    // Prefer the stored channel_id from the pending row (supports alt/thread channels)
+    let channel_id: u64 = if let Some(ch) = stored_channel_id {
+        resolve_channel_to_u64(ch)?
+    } else {
+        // Fall back to the agent's primary discord_channel_id
+        let db = db.clone();
+        let agent_name = source_agent.to_string();
+        let ch_opt: Option<String> = tokio::task::spawn_blocking(move || {
+            let conn = db.separate_conn().map_err(|e| format!("{e}"))?;
+            conn.query_row(
+                "SELECT discord_channel_id FROM agents WHERE id = ?1",
+                rusqlite::params![agent_name],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|e| format!("{e}"))
+        })
+        .await
+        .map_err(|e| format!("join: {e}"))??;
+        let raw = ch_opt.ok_or("agent has no discord_channel_id")?;
+        resolve_channel_to_u64(&raw)?
+    };
+
+    let message = format!("DM_REPLY:{reply_id} from {username}: {answer}");
+    send_message_to_channel(&token, channel_id, &message)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
+/// Parse a channel identifier — numeric ID or name alias (e.g. "윤호네비서") → u64.
+fn resolve_channel_to_u64(raw: &str) -> Result<u64, String> {
+    raw.parse::<u64>().or_else(|_| {
+        crate::server::routes::dispatches::resolve_channel_alias_pub(raw)
+            .ok_or_else(|| format!("cannot resolve channel '{raw}'"))
     })
 }
 
-fn family_profile_probe_state_paths() -> Vec<std::path::PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-    vec![
-        home.join(".local")
-            .join("state")
-            .join("family-profile-probe")
-            .join("profile_probe_state.json"),
-        home.join(".openclaw")
-            .join("workspace")
-            .join("state")
-            .join("profile_probe_state.json"),
-    ]
-}
-
-fn profile_probe_target_user_id(target: &str) -> Option<u64> {
-    let trimmed = target.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    for prefix in ["user:", "dm:"] {
-        if let Some(raw) = trimmed.strip_prefix(prefix) {
-            return raw.trim().parse::<u64>().ok();
-        }
-    }
-
-    trimmed.parse::<u64>().ok()
-}
-
-fn profile_probe_target_key_for_user(user_id: u64) -> Option<&'static str> {
-    match user_id {
-        343742347365974026 => Some("obujang"),
-        429955158974136340 => Some("yohoejang"),
-        _ => None,
-    }
-}
-
-fn profile_probe_target_for_key(target_key: &str) -> Option<String> {
-    match target_key {
-        "obujang" => Some("user:343742347365974026".to_string()),
-        "yohoejang" => Some("user:429955158974136340".to_string()),
-        _ => None,
-    }
-}
-
-fn pending_family_profile_probe_from_state_value(
-    json: &serde_json::Value,
-    user_id: u64,
-) -> Option<(String, String)> {
-    if let Some(pending) = json.get("pending").and_then(|v| v.as_object()) {
-        for (target, entry) in pending {
-            if profile_probe_target_user_id(target) != Some(user_id) {
-                continue;
-            }
-            let Some(topic_key) = entry.get("topicKey").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            return Some((topic_key.to_string(), target.to_string()));
-        }
-    }
-
-    let target_key = profile_probe_target_key_for_user(user_id)?;
-    let topic_key = json
-        .get("perTarget")
-        .and_then(|v| v.as_object())
-        .and_then(|per| per.get(target_key))
-        .and_then(|v| v.as_object())
-        .and_then(|bucket| bucket.get("pendingProbe"))
-        .and_then(|v| v.as_object())
-        .and_then(|pending| pending.get("topicKey"))
-        .and_then(|v| v.as_str())?;
-    let target = profile_probe_target_for_key(target_key)?;
-    Some((topic_key.to_string(), target))
-}
-
-fn pending_family_profile_probe_for_user(user_id: u64) -> Option<(String, String)> {
-    for path in family_profile_probe_state_paths() {
-        let Ok(content) = fs::read_to_string(path) else {
-            continue;
-        };
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-            continue;
-        };
-        if let Some(pending) = pending_family_profile_probe_from_state_value(&json, user_id) {
-            return Some(pending);
-        }
-    }
-
-    None
-}
-
-fn clear_family_profile_probe_pending_from_state_value(
-    json: &mut serde_json::Value,
-    target: &str,
-) -> bool {
-    let Some(root) = json.as_object_mut() else {
-        return false;
-    };
-
-    let mut changed = false;
-    let target_user_id = profile_probe_target_user_id(target);
-
-    if let Some(pending) = root.get_mut("pending").and_then(|v| v.as_object_mut()) {
-        let remove_targets: Vec<String> = pending
-            .keys()
-            .filter(|entry_target| {
-                if entry_target.as_str() == target {
-                    return true;
-                }
-                target_user_id
-                    .map(|uid| profile_probe_target_user_id(entry_target) == Some(uid))
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect();
-        for entry_target in remove_targets {
-            if pending.remove(&entry_target).is_some() {
-                changed = true;
-            }
-        }
-    }
-
-    if let Some(target_key) = target_user_id.and_then(profile_probe_target_key_for_user) {
-        if let Some(bucket) = root
-            .get_mut("perTarget")
-            .and_then(|v| v.as_object_mut())
-            .and_then(|per| per.get_mut(target_key))
-            .and_then(|v| v.as_object_mut())
+/// Retry DM reply notifications that previously failed (`_notify_failed` in context).
+/// Called from the 5-min tick loop.
+pub async fn retry_failed_dm_notifications(db: &crate::db::Db) {
+    let db2 = db.clone();
+    let entries: Vec<(i64, String, String, Option<String>)> =
+        match tokio::task::spawn_blocking(move || {
+            let conn = db2.separate_conn().map_err(|e| format!("{e}"))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
+                     WHERE status = 'consumed' AND json_extract(context, '$._notify_failed') IS NOT NULL \
+                     LIMIT 10",
+                )
+                .map_err(|e| format!("{e}"))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .map_err(|e| format!("{e}"))?
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            Ok::<_, String>(rows)
+        })
+        .await
         {
-            if bucket.remove("pendingProbe").is_some() {
-                changed = true;
-            }
-        }
+            Ok(Ok(v)) => v,
+            _ => return,
+        };
+
+    if entries.is_empty() {
+        return;
     }
 
-    changed
-}
-
-fn clear_family_profile_probe_pending(target: &str) -> Result<bool, String> {
-    let mut changed_any = false;
-    for path in family_profile_probe_state_paths() {
-        if !path.exists() {
+    for (id, source_agent, context_str, channel_id) in entries {
+        let ctx: serde_json::Value =
+            serde_json::from_str(&context_str).unwrap_or(serde_json::json!({}));
+        let answer = ctx
+            .get("_answer")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if answer.is_empty() {
             continue;
         }
 
-        let content = fs::read_to_string(&path).map_err(|err| err.to_string())?;
-        let mut json = serde_json::from_str::<serde_json::Value>(&content)
-            .map_err(|err| format!("clear_pending_parse_failed:{err}: {}", path.display()))?;
-
-        if clear_family_profile_probe_pending_from_state_value(&mut json, target) {
-            let pretty = serde_json::to_string_pretty(&json)
-                .map_err(|err| format!("clear_pending_serialize_failed:{err}"))?;
-            fs::write(&path, pretty + "\n").map_err(|err| err.to_string())?;
-            changed_any = true;
+        match notify_source_agent(
+            db,
+            &source_agent,
+            id,
+            channel_id.as_deref(),
+            "(retry)",
+            &answer,
+        )
+        .await
+        {
+            Ok(()) => {
+                // Clear _notify_failed on success
+                let db3 = db.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Ok(conn) = db3.separate_conn() {
+                        let _ = conn.execute(
+                            "UPDATE pending_dm_replies SET context = \
+                             json_remove(context, '$._notify_failed', '$._notify_error') \
+                             WHERE id = ?1",
+                            rusqlite::params![id],
+                        );
+                    }
+                })
+                .await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ✉️ DM reply retry OK: id={id} agent={source_agent}");
+            }
+            Err(e) => {
+                eprintln!("  [dm-reply] retry still failing id={id}: {e}");
+            }
         }
     }
-
-    Ok(changed_any)
 }
 
-fn record_family_profile_probe_answer(
-    topic_key: &str,
-    target: &str,
+struct ConsumedDmReply {
+    id: i64,
+    source_agent: String,
+    answer: String,
+    channel_id: Option<String>,
+    db: crate::db::Db,
+}
+
+fn consume_pending_dm_reply(
+    db: &crate::db::Db,
+    user_id: &str,
     answer: &str,
-) -> Result<bool, String> {
-    let Some(script_path) = family_profile_probe_script_path() else {
-        return Err("family_profile_probe_script_missing".to_string());
-    };
-    if !script_path.exists() {
-        return Err(format!(
-            "family_profile_probe_script_not_found:{}",
-            script_path.display()
-        ));
-    }
+) -> Option<ConsumedDmReply> {
+    let conn = db.separate_conn().ok()?;
+    // FIFO: consume oldest non-expired pending entry
+    let row: Result<(i64, String, String, Option<String>), _> = conn.query_row(
+        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
+         WHERE user_id = ?1 AND status = 'pending' \
+         AND (expires_at IS NULL OR expires_at > datetime('now')) \
+         ORDER BY created_at ASC LIMIT 1",
+        rusqlite::params![user_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    );
+    let (id, source_agent, context_str, channel_id) = row.ok()?;
 
-    let output = Command::new("/usr/bin/python3")
-        .arg(script_path)
-        .arg("--record-answer")
-        .arg("--topic-key")
-        .arg(topic_key)
-        .arg("--target")
-        .arg(target)
-        .arg("--answer")
-        .arg(answer)
-        .output()
-        .map_err(|err| err.to_string())?;
+    // Merge the answer into the context JSON
+    let mut context: serde_json::Value =
+        serde_json::from_str(&context_str).unwrap_or(serde_json::json!({}));
+    context["_answer"] = serde_json::Value::String(answer.to_string());
+    let updated_context = serde_json::to_string(&context).unwrap_or_default();
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
-        return Err(if stderr.is_empty() { stdout } else { stderr });
-    }
-
-    let payload = serde_json::from_str::<serde_json::Value>(&stdout)
-        .map_err(|err| format!("record_answer_parse_failed:{err}: {stdout}"))?;
-    Ok(payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
-}
-
-fn record_and_clear_family_profile_probe_answer(
-    topic_key: &str,
-    target: &str,
-    answer: &str,
-) -> Result<bool, String> {
-    let recorded = record_family_profile_probe_answer(topic_key, target, answer)?;
-    if recorded {
-        if let Err(err) = clear_family_profile_probe_pending(target) {
-            eprintln!(
-                "  [profile-probe] recorded answer but failed to clear pending target={} topic={} error={}",
-                target, topic_key, err
-            );
-        }
-    }
-    Ok(recorded)
-}
-
-async fn try_handle_family_profile_probe_reply(
-    _ctx: &serenity::Context,
-    msg: &serenity::Message,
-    _shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-) -> Result<bool, Error> {
-    if *provider != ProviderKind::Claude || msg.author.bot || msg.guild_id.is_some() {
-        return Ok(false);
-    }
-
-    let answer = msg.content.trim();
-    if answer.is_empty() {
-        return Ok(false);
-    }
-
-    let Some((topic_key, target)) = pending_family_profile_probe_for_user(msg.author.id.get())
-    else {
-        return Ok(false);
-    };
-
-    // Always clear the pending probe state first, regardless of whether the
-    // record succeeds.  If we only clear on success, the pending entry survives
-    // and the *next* unrelated DM will be re-matched as a probe answer.
-    let target_for_clear = target.clone();
-    let clear_result =
-        tokio::task::spawn_blocking(move || clear_family_profile_probe_pending(&target_for_clear))
-            .await;
-    match clear_result {
-        Ok(Err(err)) => {
-            eprintln!(
-                "  [profile-probe] failed to clear pending state for user={} topic={} error={}",
-                msg.author.id.get(),
-                topic_key,
-                err
-            );
-        }
-        Err(err) => {
-            eprintln!(
-                "  [profile-probe] clear pending task panicked for user={} topic={} error={}",
-                msg.author.id.get(),
-                topic_key,
-                err
-            );
-        }
+    // CAS: only mark consumed if still pending (guards against race)
+    let updated = conn.execute(
+        "UPDATE pending_dm_replies SET status = 'consumed', consumed_at = datetime('now'), \
+         context = ?1 WHERE id = ?2 AND status = 'pending'",
+        rusqlite::params![updated_context, id],
+    );
+    match updated {
+        Ok(0) => return None, // already consumed by another path
+        Err(_) => return None,
         _ => {}
     }
 
-    // Record the answer (best-effort). Return Ok(false) so the message
-    // continues to the normal DM handling path, where the agent responds
-    // directly in the DM channel with contextual follow-up.
-    let topic_key_owned = topic_key.clone();
-    let target_owned = target.clone();
-    let answer_owned = answer.to_string();
-    let recorded = tokio::task::spawn_blocking(move || {
-        record_family_profile_probe_answer(&topic_key_owned, &target_owned, &answer_owned)
+    Some(ConsumedDmReply {
+        id,
+        source_agent,
+        answer: answer.to_string(),
+        channel_id,
+        db: db.clone(),
     })
-    .await
-    .map_err(|err| format!("profile_probe_join_failed:{err}"))?;
-
-    match &recorded {
-        Ok(true) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ✓ Recorded family profile probe answer: user={} topic={}",
-                msg.author.id.get(),
-                topic_key
-            );
-        }
-        Ok(false) => {
-            eprintln!(
-                "  [profile-probe] record_answer returned false for user={} topic={}",
-                msg.author.id.get(),
-                topic_key
-            );
-        }
-        Err(err) => {
-            eprintln!(
-                "  [profile-probe] failed to record answer for user={} topic={} error={}",
-                msg.author.id.get(),
-                topic_key,
-                err
-            );
-        }
-    }
-
-    // Let the message fall through to normal DM handling so the agent
-    // responds directly in the DM conversation.
-    Ok(false)
 }
 
 /// Rate limit helper — ensures minimum 1s gap between API calls per channel
@@ -2611,21 +2821,38 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     *last_guard = tokio::time::Instant::now();
     drop(last_guard);
 
-    let expired: Vec<ChannelId> = {
+    let expired: Vec<(ChannelId, Option<String>)> = {
         let data = shared.core.lock().await;
         let now = tokio::time::Instant::now();
         data.sessions
             .iter()
             .filter(|(_, s)| now.duration_since(s.last_active) > SESSION_MAX_IDLE)
-            .map(|(ch, _)| *ch)
+            .map(|(ch, s)| (*ch, s.session_id.clone()))
             .collect()
     };
     if expired.is_empty() {
         return;
     }
+    // Collect session_keys for audit before removing from memory
+    let expired_keys: Vec<(ChannelId, String)> = {
+        let hostname = crate::services::platform::hostname_short();
+        let provider = shared.settings.read().await.provider.clone();
+        let data = shared.core.lock().await;
+        expired
+            .iter()
+            .filter_map(|(ch, _)| {
+                data.sessions.get(ch).and_then(|s| {
+                    s.channel_name.as_ref().map(|name| {
+                        let tmux_name = provider.build_tmux_session_name(name);
+                        (*ch, format!("{}:{}", hostname, tmux_name))
+                    })
+                })
+            })
+            .collect()
+    };
     {
         let mut data = shared.core.lock().await;
-        for ch in &expired {
+        for (ch, _) in &expired {
             // Clean up worktree if session had one
             if let Some(session) = data.sessions.get(ch) {
                 if let Some(ref wt) = session.worktree {
@@ -2642,9 +2869,22 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             data.intervention_queue.remove(ch);
         }
     }
-    for ch in &expired {
+    for (ch, _) in &expired {
         shared.api_timestamps.remove(ch);
         shared.tmux_watchers.remove(ch);
+    }
+    // Record termination audit for cleaned-up sessions
+    for (_, session_key) in &expired_keys {
+        crate::services::termination_audit::record_termination(
+            session_key,
+            None,
+            "cleanup",
+            "idle_session_expiry",
+            Some("in-memory session expired due to idle timeout"),
+            None,
+            None,
+            None,
+        );
     }
     println!("  [cleanup] Removed {} idle session(s)", expired.len());
 }
@@ -2879,15 +3119,20 @@ pub(super) async fn auto_restore_session(
     channel_id: ChannelId,
     serenity_ctx: &serenity::prelude::Context,
 ) {
-    {
-        let data = shared.core.lock().await;
-        if data.sessions.contains_key(&channel_id) {
-            return;
-        }
-    }
-
     // Resolve channel/category before taking the lock for mutation
-    let (ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
+    let (live_ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
+    let existing_channel_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|session| session.channel_name.clone())
+    };
+    let restore_ch_name = choose_restore_channel_name(
+        existing_channel_name.as_deref(),
+        live_ch_name.as_deref(),
+        resolve_thread_parent(&serenity_ctx.http, channel_id).await,
+        channel_id,
+    );
 
     // Read settings first to get last_sessions/last_remotes info
     // DB cwd takes priority over yaml last_sessions (preserves worktree paths)
@@ -2899,14 +3144,10 @@ pub(super) async fn auto_restore_session(
         let saved_remote = settings.last_remotes.get(&channel_key).cloned();
         let provider = settings.provider.clone();
 
-        // Try DB cwd first — preserves worktree paths from previous session
-        let ch_name = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&channel_id)
-                .and_then(|s| s.channel_name.clone())
-        };
-        let db_cwd: Option<String> = ch_name.as_ref().and_then(|ch| {
+        // Use the effective tmux channel name here so restart recovery keeps
+        // looking up the same session key for thread sessions that intentionally
+        // use a synthetic "{parent}-t{thread_id}" channel name.
+        let db_cwd: Option<String> = restore_ch_name.as_ref().and_then(|ch| {
             let tmux_name = provider.build_tmux_session_name(ch);
             let hostname = crate::services::platform::hostname_short();
             let session_key = format!("{}:{}", hostname, tmux_name);
@@ -2928,8 +3169,17 @@ pub(super) async fn auto_restore_session(
     };
 
     let mut data = shared.core.lock().await;
-    if data.sessions.contains_key(&channel_id) {
-        return; // Double-check after re-acquiring lock
+    if let Some(session) = data.sessions.get_mut(&channel_id) {
+        session.channel_id = Some(channel_id.get());
+        session.last_active = tokio::time::Instant::now();
+        session.channel_name = restore_ch_name.clone();
+        session.category_name = cat_name.clone();
+        if session.remote_profile_name.is_none() {
+            session.remote_profile_name = saved_remote.clone();
+        }
+        if session.current_path.is_some() || last_path.is_none() {
+            return;
+        }
     }
 
     if let Some(last_path) = last_path {
@@ -2946,8 +3196,8 @@ pub(super) async fn auto_restore_session(
                     pending_uploads: Vec::new(),
                     cleared: false,
                     channel_id: Some(channel_id.get()),
-                    channel_name: ch_name,
-                    category_name: cat_name,
+                    channel_name: restore_ch_name.clone(),
+                    category_name: cat_name.clone(),
                     remote_profile_name: saved_remote.clone(),
 
                     last_active: tokio::time::Instant::now(),
@@ -2957,6 +3207,11 @@ pub(super) async fn auto_restore_session(
                 });
             session.channel_id = Some(channel_id.get());
             session.last_active = tokio::time::Instant::now();
+            session.channel_name = restore_ch_name.clone();
+            session.category_name = cat_name.clone();
+            if session.remote_profile_name.is_none() {
+                session.remote_profile_name = saved_remote.clone();
+            }
             session.current_path = Some(last_path.clone());
             drop(data);
 
@@ -2987,7 +3242,7 @@ async fn bootstrap_thread_session(
     let parent_info = resolve_thread_parent(&serenity_ctx.http, thread_channel_id).await;
     let ch_name = if let Some((_parent_id, parent_name)) = parent_info {
         let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
-        Some(format!("{}-t{}", parent, thread_channel_id.get()))
+        Some(synthetic_thread_channel_name(&parent, thread_channel_id))
     } else {
         // Not a thread (shouldn't happen here) — fall back to resolved name
         _thread_title
@@ -3241,92 +3496,77 @@ fn enrich_role_map_with_channel_ids() {
 
 #[cfg(test)]
 mod tests {
+    use super::ChannelId;
     use super::{
-        clear_family_profile_probe_pending_from_state_value,
-        pending_family_profile_probe_from_state_value,
+        DiscordBotSettings, choose_restore_channel_name, is_synthetic_thread_channel_name,
+        synthetic_thread_channel_name, user_is_authorized,
     };
 
     #[test]
-    fn legacy_pending_probe_is_detected() {
-        let json = serde_json::json!({
-            "pending": {
-                "user:343742347365974026": {
-                    "topicKey": "nar.vaccination_history"
-                }
-            }
-        });
+    fn synthetic_thread_channel_name_round_trips() {
+        let channel_id = ChannelId::new(12345);
+        let synthetic = synthetic_thread_channel_name("agentdesk-codex", channel_id);
 
-        let pending = pending_family_profile_probe_from_state_value(&json, 343742347365974026);
-        assert_eq!(
-            pending,
-            Some((
-                "nar.vaccination_history".to_string(),
-                "user:343742347365974026".to_string()
-            ))
-        );
+        assert_eq!(synthetic, "agentdesk-codex-t12345");
+        assert!(is_synthetic_thread_channel_name(&synthetic, channel_id));
+        assert!(!is_synthetic_thread_channel_name(
+            "agentdesk-codex",
+            channel_id
+        ));
     }
 
     #[test]
-    fn per_target_pending_probe_is_detected() {
-        let json = serde_json::json!({
-            "perTarget": {
-                "yohoejang": {
-                    "pendingProbe": {
-                        "topicKey": "yunho.newborn_screening",
-                        "question": "질문",
-                        "sentAt": "2026-03-26T18:45:42.764539+09:00"
-                    }
-                }
-            }
-        });
-
-        let pending = pending_family_profile_probe_from_state_value(&json, 429955158974136340);
-        assert_eq!(
-            pending,
-            Some((
-                "yunho.newborn_screening".to_string(),
-                "user:429955158974136340".to_string()
-            ))
+    fn choose_restore_channel_name_prefers_existing_synthetic_thread_name() {
+        let channel_id = ChannelId::new(12345);
+        let chosen = choose_restore_channel_name(
+            Some("agentdesk-codex-t12345"),
+            Some("새 스레드 제목"),
+            Some((ChannelId::new(777), Some("agentdesk-codex".to_string()))),
+            channel_id,
         );
+
+        assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
     }
 
     #[test]
-    fn clear_pending_probe_removes_legacy_and_per_target_entries() {
-        let mut json = serde_json::json!({
-            "pending": {
-                "user:343742347365974026": {
-                    "topicKey": "nar.vaccination_history"
-                }
-            },
-            "perTarget": {
-                "obujang": {
-                    "pendingProbe": {
-                        "topicKey": "nar.vaccination_history",
-                        "question": "질문",
-                        "sentAt": "2026-03-26T19:00:41.734890+09:00"
-                    }
-                }
-            }
-        });
-
-        let changed = clear_family_profile_probe_pending_from_state_value(
-            &mut json,
-            "user:343742347365974026",
+    fn choose_restore_channel_name_builds_synthetic_name_for_threads() {
+        let channel_id = ChannelId::new(12345);
+        let chosen = choose_restore_channel_name(
+            None,
+            Some("새 스레드 제목"),
+            Some((ChannelId::new(777), Some("agentdesk-codex".to_string()))),
+            channel_id,
         );
 
-        assert!(changed);
-        assert!(
-            json.get("pending")
-                .and_then(|v| v.as_object())
-                .map(|pending| pending.is_empty())
-                .unwrap_or(true)
-        );
-        assert!(
-            json.get("perTarget")
-                .and_then(|v| v.get("obujang"))
-                .and_then(|v| v.as_object())
-                .and_then(|bucket| bucket.get("pendingProbe"))
-                .is_none()
-        );
+        assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
+    }
+
+    #[test]
+    fn choose_restore_channel_name_keeps_existing_name_when_live_metadata_missing() {
+        let channel_id = ChannelId::new(12345);
+        let chosen = choose_restore_channel_name(Some("agentdesk-codex"), None, None, channel_id);
+
+        assert_eq!(chosen.as_deref(), Some("agentdesk-codex"));
+    }
+
+    #[test]
+    fn user_is_authorized_allows_owner_and_explicit_users() {
+        let mut settings = DiscordBotSettings::default();
+        settings.owner_user_id = Some(42);
+        settings.allowed_user_ids = vec![7];
+
+        assert!(user_is_authorized(&settings, 42));
+        assert!(user_is_authorized(&settings, 7));
+        assert!(!user_is_authorized(&settings, 99));
+    }
+
+    #[test]
+    fn user_is_authorized_allows_everyone_when_flag_enabled() {
+        let mut settings = DiscordBotSettings::default();
+        settings.owner_user_id = Some(42);
+        settings.allow_all_users = true;
+
+        assert!(user_is_authorized(&settings, 42));
+        assert!(user_is_authorized(&settings, 99));
     }
 }

@@ -1,0 +1,134 @@
+use super::super::*;
+use crate::services::provider::CancelToken;
+#[cfg(unix)]
+use crate::services::tmux_diagnostics::record_tmux_exit_reason;
+
+pub(in crate::services::discord) fn cancel_active_token(
+    token: &Arc<CancelToken>,
+    cleanup_tmux: bool,
+    reason: &str,
+) {
+    token.cancelled.store(true, Ordering::Relaxed);
+
+    let child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
+    if let Some(pid) = child_pid {
+        crate::services::process::kill_pid_tree(pid);
+    }
+
+    if cleanup_tmux {
+        if child_pid.is_some() {
+            if let Some(name) = token
+                .tmux_session
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+            {
+                #[cfg(unix)]
+                {
+                    // #145: skip kill for unified-thread sessions with active runs
+                    let is_unified =
+                        crate::services::provider::parse_provider_and_channel_from_tmux_name(&name)
+                            .map(|(_, ch)| {
+                                crate::dispatch::is_unified_thread_channel_name_active(&ch)
+                            })
+                            .unwrap_or(false);
+                    if !is_unified {
+                        crate::services::termination_audit::record_termination_for_tmux(
+                            &name,
+                            None,
+                            "turn_bridge",
+                            "explicit_cancel",
+                            Some(&format!("explicit cleanup via {reason}")),
+                            None,
+                        );
+                        record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
+                        crate::services::platform::tmux::kill_session(&name);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = &name;
+                }
+            }
+        } else {
+            #[cfg(unix)]
+            if let Some(name) = token
+                .tmux_session
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+            {
+                record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
+            }
+            token.cancel_with_tmux_cleanup();
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
+    use crate::services::tmux_common::session_temp_path;
+    (
+        session_temp_path(tmux_session_name, "jsonl"),
+        session_temp_path(tmux_session_name, "input"),
+    )
+}
+
+#[cfg(not(unix))]
+pub(crate) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
+    let tmp = std::env::temp_dir();
+    (
+        tmp.join(format!("agentdesk-{}.jsonl", tmux_session_name))
+            .display()
+            .to_string(),
+        tmp.join(format!("agentdesk-{}.input", tmux_session_name))
+            .display()
+            .to_string(),
+    )
+}
+
+pub(in crate::services::discord) fn stale_inflight_message(saved_response: &str) -> String {
+    let trimmed = saved_response.trim();
+    if trimmed.is_empty() {
+        "⚠️ AgentDesk가 재시작되어 진행 중이던 응답을 이어붙이지 못했습니다.".to_string()
+    } else {
+        let formatted = format_for_discord(trimmed);
+        format!("{}\n\n[Interrupted by restart]", formatted)
+    }
+}
+
+pub(super) fn is_dcserver_restart_command(input: &str) -> bool {
+    let lower = input.to_lowercase();
+
+    if lower.contains("restart-dcserver") || lower.contains("restart_agentdesk.sh") {
+        return true;
+    }
+
+    if lower.contains("agentdesk-discord-smoke.sh") && lower.contains("--deploy-live") {
+        return true;
+    }
+
+    lower.contains("launchctl")
+        && lower.contains("com.agentdesk.dcserver")
+        && (lower.contains("kickstart") || lower.contains("bootstrap") || lower.contains("bootout"))
+}
+
+pub(super) fn should_resume_watcher_after_turn(
+    defer_watcher_resume: bool,
+    has_local_queued_turns: bool,
+    can_chain_locally: bool,
+) -> bool {
+    !defer_watcher_resume && !(has_local_queued_turns && can_chain_locally)
+}
+
+pub(super) fn total_context_tokens(input_tokens: u64, _output_tokens: u64) -> u64 {
+    // input_tokens already represents cumulative context window occupancy
+    // (system prompt + conversation history + new message + cache tokens).
+    // Adding output_tokens would double-count and inflate the percentage.
+    input_tokens
+}
+
+pub(super) fn persisted_context_tokens(input_tokens: u64, output_tokens: u64) -> Option<u64> {
+    let total = total_context_tokens(input_tokens, output_tokens);
+    (total > 0).then_some(total)
+}

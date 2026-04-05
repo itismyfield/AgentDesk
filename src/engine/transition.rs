@@ -382,6 +382,7 @@ fn decide_dispatch_attached(
 ) -> TransitionDecision {
     let card = &ctx.card;
     let is_review_type = matches!(dispatch_type, "review" | "review-decision" | "rework");
+    let skip_kickoff = is_review_type || dispatch_type == "consultation";
 
     let mut intents = vec![];
 
@@ -391,8 +392,9 @@ fn decide_dispatch_attached(
         dispatch_id: Some(dispatch_id.to_string()),
     });
 
-    // Non-review dispatches transition to kickoff state
-    if !is_review_type {
+    // Non-review and non-consultation dispatches transition to kickoff state.
+    // Consultation dispatches stay in requested (side-path, not implementation).
+    if !skip_kickoff {
         if let Some(kickoff) = kickoff_state {
             if card.status != kickoff {
                 intents.push(TransitionIntent::UpdateStatus {

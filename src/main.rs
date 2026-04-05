@@ -142,6 +142,40 @@ enum Commands {
         /// Input mode: fifo (default) or pipe
         #[arg(long, value_enum, default_value_t = InputModeArg::Fifo)]
         input_mode: InputModeArg,
+        /// Auto-compact token limit (absolute token count)
+        #[arg(long)]
+        compact_token_limit: Option<u64>,
+    },
+    /// tmux + Qwen CLI integration wrapper (Unix only)
+    #[cfg(unix)]
+    QwenTmuxWrapper {
+        /// Path to the output capture file
+        #[arg(long)]
+        output_file: String,
+        /// Path to the input FIFO
+        #[arg(long)]
+        input_fifo: String,
+        /// Path to the prompt file
+        #[arg(long)]
+        prompt_file: String,
+        /// Path to qwen binary
+        #[arg(long)]
+        qwen_bin: String,
+        /// Optional qwen model override
+        #[arg(long)]
+        qwen_model: Option<String>,
+        /// Qwen built-in core tool allowlist entry
+        #[arg(long = "qwen-core-tool")]
+        qwen_core_tools: Vec<String>,
+        /// Optional resume session id for the first turn
+        #[arg(long)]
+        resume_session_id: Option<String>,
+        /// Working directory (defaults to ".")
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        /// Input mode: fifo (default) or pipe
+        #[arg(long, value_enum, default_value_t = InputModeArg::Fifo)]
+        input_mode: InputModeArg,
     },
     /// Kill all AgentDesk-* tmux sessions and clean temp files
     ResetTmux,
@@ -206,6 +240,21 @@ enum Commands {
         /// Optional JSON body
         body: Option<String>,
     },
+    /// List session termination events
+    Terminations {
+        /// Filter by kanban card ID
+        #[arg(long)]
+        card_id: Option<String>,
+        /// Filter by dispatch ID
+        #[arg(long)]
+        dispatch_id: Option<String>,
+        /// Filter by session key
+        #[arg(long)]
+        session: Option<String>,
+        /// Max number of events to show
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
     /// Environment diagnostics
     Doctor {
         /// Apply safe local repairs before running diagnostics
@@ -214,6 +263,11 @@ enum Commands {
         /// Emit machine-readable JSON output for agent parsing
         #[arg(long)]
         json: bool,
+    },
+    /// Migration helpers
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateAction,
     },
 }
 
@@ -231,6 +285,12 @@ enum DispatchAction {
         /// Kanban card ID
         card_id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum MigrateAction {
+    /// Import OpenClaw durable state into AgentDesk
+    Openclaw(cli::migrate::OpenClawMigrateArgs),
 }
 
 #[derive(Subcommand)]
@@ -358,6 +418,7 @@ fn main() -> Result<()> {
                 reasoning_effort,
                 cwd,
                 input_mode,
+                compact_token_limit,
             }) => {
                 let mode = match input_mode {
                     InputModeArg::Pipe => services::tmux_wrapper::InputMode::Pipe,
@@ -371,6 +432,36 @@ fn main() -> Result<()> {
                     &codex_bin,
                     codex_model.as_deref(),
                     reasoning_effort.as_deref(),
+                    mode,
+                    compact_token_limit,
+                );
+                return Ok(());
+            }
+            #[cfg(unix)]
+            Some(Commands::QwenTmuxWrapper {
+                output_file,
+                input_fifo,
+                prompt_file,
+                qwen_bin,
+                qwen_model,
+                qwen_core_tools,
+                resume_session_id,
+                cwd,
+                input_mode,
+            }) => {
+                let mode = match input_mode {
+                    InputModeArg::Pipe => services::tmux_wrapper::InputMode::Pipe,
+                    InputModeArg::Fifo => services::tmux_wrapper::InputMode::Fifo,
+                };
+                services::qwen_tmux_wrapper::run(
+                    &output_file,
+                    &input_fifo,
+                    &prompt_file,
+                    &cwd,
+                    &qwen_bin,
+                    qwen_model.as_deref(),
+                    &qwen_core_tools,
+                    resume_session_id.as_deref(),
                     mode,
                 );
                 return Ok(());
@@ -431,12 +522,30 @@ fn main() -> Result<()> {
             Some(Commands::Api { method, path, body }) => {
                 return exit_for_cli(cli::client::cmd_api(&method, &path, body.as_deref()));
             }
+            Some(Commands::Terminations {
+                card_id,
+                dispatch_id,
+                session,
+                limit,
+            }) => {
+                return exit_for_cli(cli::client::cmd_terminations(
+                    card_id.as_deref(),
+                    dispatch_id.as_deref(),
+                    session.as_deref(),
+                    limit,
+                ));
+            }
             Some(Commands::Doctor { fix, json }) => {
                 return if json {
                     exit_for_json_cli(cli::doctor::cmd_doctor(fix, json))
                 } else {
                     exit_for_cli(cli::doctor::cmd_doctor(fix, json))
                 };
+            }
+            Some(Commands::Migrate { action }) => {
+                return exit_for_cli(match action {
+                    MigrateAction::Openclaw(args) => cli::migrate::cmd_migrate_openclaw(args),
+                });
             }
             None => {
                 // No subcommand — fall through to server start
@@ -471,6 +580,7 @@ fn main() -> Result<()> {
 
         let config = config::load().context("Failed to load config")?;
         let db = db::init(&config).context("Failed to init DB")?;
+        services::termination_audit::init_audit_db(db.clone());
 
         // Load data-driven pipeline definition (#106)
         let pipeline_path = config.policies.dir.join("default-pipeline.yaml");

@@ -7,7 +7,7 @@ use super::super::model_catalog::provider_supports_model_override;
 use super::super::{Context, Error, SharedData, check_auth};
 use super::config::{
     build_model_picker_components_from_snapshot, build_model_picker_embed_from_snapshot,
-    effective_model_snapshot, remember_model_picker_pending,
+    current_working_dir, effective_model_snapshot, remember_model_picker_pending,
 };
 use crate::services::provider::ProviderKind;
 
@@ -23,6 +23,7 @@ async fn build_model_picker_view(
     provider: &ProviderKind,
 ) -> ModelPickerView {
     let snapshot = effective_model_snapshot(shared, target_channel_id).await;
+    let working_dir = current_working_dir(shared, target_channel_id).await;
     let pending_model = snapshot.override_model.as_deref();
     let embed = build_model_picker_embed_from_snapshot(&snapshot, provider, pending_model, None);
     let components = build_model_picker_components_from_snapshot(
@@ -30,6 +31,7 @@ async fn build_model_picker_view(
         target_channel_id,
         provider,
         pending_model,
+        working_dir.as_deref(),
     );
 
     ModelPickerView {
@@ -121,7 +123,7 @@ async fn run_model_command(ctx: Context<'_>) -> Result<(), Error> {
 
     if !provider_supports_model_override(&ctx.data().provider) {
         println!("  [{ts}] ◀ [{user_name}] /model (unsupported provider)");
-        ctx.say("Model override is only supported for Claude, Codex, and Gemini channels.")
+        ctx.say("Model override is only supported for Claude, Codex, Gemini, and Qwen channels.")
             .await?;
         return Ok(());
     }

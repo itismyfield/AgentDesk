@@ -23,9 +23,58 @@ PROMOTE_DETACHED_CHILD="${AGENTDESK_PROMOTE_DETACHED_CHILD:-0}"
 PROMOTE_LOG_PATH="${AGENTDESK_PROMOTE_LOG_PATH:-}"
 PROMOTE_TEST_MODE="${AGENTDESK_PROMOTE_TEST_MODE:-0}"
 PROMOTE_DELAY_SECS="${AGENTDESK_PROMOTE_DELAY_SECS:-2}"
+CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
+ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 DASHBOARD_SOURCE=""
 
 echo "═══ ADK Promote Dev → Release ═══"
+
+sign_binary_with_fallback() {
+    local target="$1"
+    local identity="${CODESIGN_IDENTITY:--}"
+
+    if [ -z "$identity" ]; then
+        if [ "$ALLOW_ADHOC_RELEASE_SIGN" = "1" ]; then
+            echo "⚠ No signing identity configured; using explicit ad-hoc release signature override"
+            identity="-"
+        else
+            echo "✗ No release signing identity configured"
+            echo "  Set AGENTDESK_CODESIGN_IDENTITY to a valid Developer ID Application certificate"
+            echo "  or set AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=1 for an explicit local override"
+            exit 1
+        fi
+    fi
+
+    if [ "$identity" = "-" ] && [ "$ALLOW_ADHOC_RELEASE_SIGN" != "1" ]; then
+        echo "✗ Refusing ad-hoc release signing without AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=1"
+        exit 1
+    fi
+
+    if [ -n "$identity" ] && [ "$identity" != "-" ] && command -v security >/dev/null 2>&1; then
+        if ! security find-identity -v -p codesigning 2>/dev/null | grep -Fq "$identity"; then
+            if [ "$ALLOW_ADHOC_RELEASE_SIGN" = "1" ]; then
+                echo "⚠ Signing identity not found locally; using explicit ad-hoc release signature override"
+                identity="-"
+            else
+                echo "✗ Signing identity not found locally: $identity"
+                echo "  Refusing release promotion without a valid Developer ID Application certificate"
+                echo "  Set AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=1 only for an explicit local override"
+                exit 1
+            fi
+        fi
+    fi
+
+    if [ "$identity" = "-" ]; then
+        codesign -f -s "$identity" --identifier "com.itismyfield.agentdesk" "$target"
+    else
+        codesign -f -s "$identity" --options runtime --identifier "com.itismyfield.agentdesk" "$target"
+    fi
+
+    if ! codesign -v "$target" 2>/dev/null; then
+        echo "✗ Codesign verification failed — aborting"
+        exit 1
+    fi
+}
 
 _notify_channel() {
     local content="$1"
@@ -118,35 +167,6 @@ _spawn_detached_helper() {
 #!/usr/bin/env bash
 set -euo pipefail
 exec >>$(printf '%q' "$log_path") 2>&1
-# Wait for the invoking agent's turn to finish before restarting release dcserver.
-# Poll the release API for inflight turns on the reporting channel.
-REL_PORT="${AGENTDESK_REL_PORT:-$(printf '%q' "$ADK_DEFAULT_PORT")}"
-WAIT_CHANNEL=$(printf '%q' "$REPORT_CHANNEL_ID")
-MAX_WAIT=300  # 5 minutes max
-WAITED=0
-echo "▸ Waiting for turn on channel \$WAIT_CHANNEL to complete..."
-while [ \$WAITED -lt \$MAX_WAIT ]; do
-    # Check if the channel has an active turn via sessions API
-    WORKING=\$(curl -sf "http://127.0.0.1:\${REL_PORT}/api/sessions" 2>/dev/null \
-        | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    sessions = data if isinstance(data, list) else data.get('sessions', [])
-    active = [s for s in sessions if s.get('status') == 'working']
-    print(len(active))
-except: print('0')
-" 2>/dev/null || echo "0")
-    if [ "\$WORKING" = "0" ]; then
-        echo "✓ No active turns — proceeding with promotion"
-        break
-    fi
-    sleep 5
-    WAITED=\$((WAITED + 5))
-done
-if [ \$WAITED -ge \$MAX_WAIT ]; then
-    echo "⚠ Timeout waiting for turn — proceeding anyway"
-fi
 sleep $(printf '%q' "$PROMOTE_DELAY_SECS")
 export AGENTDESK_REPORT_CHANNEL_ID=$(printf '%q' "$REPORT_CHANNEL_ID")
 export AGENTDESK_REPORT_PROVIDER=$(printf '%q' "$REPORT_PROVIDER")
@@ -224,24 +244,41 @@ DIST_STAGED="$ADK_REL/dashboard/dist.new"
 rm -rf "$DIST_STAGED"
 cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 
-# Stop release
+# Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
-launchctl bootout "gui/$(id -u)/$PLIST_REL" 2>/dev/null || true
-sleep 2
-
-# Copy binary from dev
-echo "▸ Copying binary from dev..."
-# Remove immutable flag if set (only deploy scripts should touch the binary)
-chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
-cp "$ADK_DEV/bin/agentdesk" "$ADK_REL/bin/agentdesk"
-chmod +x "$ADK_REL/bin/agentdesk"
-xattr -d com.apple.provenance "$ADK_REL/bin/agentdesk" 2>/dev/null || true
-codesign -f -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" "$ADK_REL/bin/agentdesk"
-# Verify signature
-if ! codesign -v "$ADK_REL/bin/agentdesk" 2>/dev/null; then
-    echo "✗ Codesign verification failed — aborting"
-    exit 1
+LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
+OLD_PID=""
+if [ -f "$LOCK_FILE" ]; then
+    OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
 fi
+launchctl bootout "gui/$(id -u)/$PLIST_REL" 2>/dev/null || true
+if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "  waiting for PID $OLD_PID to exit..."
+    WAIT_SECS=0
+    while kill -0 "$OLD_PID" 2>/dev/null && [ "$WAIT_SECS" -lt 15 ]; do
+        sleep 1
+        WAIT_SECS=$((WAIT_SECS + 1))
+    done
+    if kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "  ⚠ PID $OLD_PID did not exit after 15s — sending SIGKILL"
+        kill -9 "$OLD_PID" 2>/dev/null || true
+        sleep 1
+    fi
+    echo "  ✓ old process terminated (${WAIT_SECS}s)"
+else
+    sleep 2
+fi
+
+# Copy binary from dev — atomic: sign in tmp, then mv to replace inode.
+# In-place codesign can corrupt the OS signing cache if it fails mid-write,
+# causing SIGKILL on subsequent launches even though the binary is valid.
+echo "▸ Copying binary from dev..."
+chflags nouchg "$ADK_REL/bin/agentdesk" 2>/dev/null || true
+cp "$ADK_DEV/bin/agentdesk" "$ADK_REL/bin/agentdesk.new"
+chmod +x "$ADK_REL/bin/agentdesk.new"
+xattr -d com.apple.provenance "$ADK_REL/bin/agentdesk.new" 2>/dev/null || true
+sign_binary_with_fallback "$ADK_REL/bin/agentdesk.new"
+mv -f "$ADK_REL/bin/agentdesk.new" "$ADK_REL/bin/agentdesk"
 # Lock binary to prevent unsigned overwrites
 chflags uchg "$ADK_REL/bin/agentdesk"
 

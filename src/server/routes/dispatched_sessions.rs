@@ -341,7 +341,7 @@ pub async fn hook_session(
            provider = excluded.provider,
            session_info = COALESCE(excluded.session_info, sessions.session_info),
            model = COALESCE(excluded.model, sessions.model),
-           tokens = CASE WHEN excluded.tokens > 0 THEN excluded.tokens ELSE sessions.tokens END,
+           tokens = excluded.tokens,
            cwd = COALESCE(excluded.cwd, sessions.cwd),
            active_dispatch_id = CASE
              WHEN excluded.status IN ('idle', 'disconnected') THEN NULL
@@ -1148,11 +1148,6 @@ pub async fn force_kill_session(
                     .ok();
                 }
                 retry_dispatch_id = Some(new_id.clone());
-
-                // Send to Discord (hooks already fired by create_dispatch)
-                crate::server::routes::dispatches::queue_dispatch_notify(
-                    &state.db, &new_id, agent, dtitle, &card_id,
-                );
             }
             Err(e) => {
                 tracing::warn!(

@@ -13,31 +13,28 @@ function sendDiscordReview(target, content, bot) {
 }
 
 function notifyPmdPendingDecision(cardId, reason) {
+  // #267: Queue to canonical pm_pending buffer (flushed by timeouts.js)
   var cards = agentdesk.db.query(
-    "SELECT title, github_issue_number, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
+    "SELECT title, github_issue_number FROM kanban_cards WHERE id = ?",
     [cardId]
   );
-  if (cards.length === 0) return;
-  var card = cards[0];
-  var issueNum = card.github_issue_number || "?";
-  var issueUrl = card.github_issue_url || "";
-  var msg = "PM 판단 필요 — #" + issueNum + " " + card.title +
-    "\n\n사유: " + reason +
-    (issueUrl ? "\nGitHub: " + issueUrl : "") +
-    "\n\n/api/pm-decision API로 처리해주세요. (resume/rework/dismiss/requeue)";
-
-  // Send to PMD channel — find pmd_channel from agents or use config
-  var pmdChannel = agentdesk.config.get("pmd_channel_id");
-  if (!pmdChannel) {
-    // Fallback: find agent with 'pmd' in id
-    var pmdAgents = agentdesk.db.query(
-      "SELECT discord_channel_id FROM agents WHERE id LIKE '%pmd%' LIMIT 1"
-    );
-    if (pmdAgents.length > 0) pmdChannel = pmdAgents[0].discord_channel_id;
+  var title = (cards.length > 0) ? ("#" + (cards[0].github_issue_number || "?") + " " + cards[0].title) : cardId;
+  var pendingKey = "pm_pending:" + cardId;
+  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
+  var entry;
+  if (existing.length > 0) {
+    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
   }
-  if (pmdChannel) {
-    sendDiscordReview("channel:" + pmdChannel, msg, "notify");
+  if (!entry) {
+    entry = { title: title, reasons: [] };
   }
+  if (entry.reasons.indexOf(reason) === -1) {
+    entry.reasons.push(reason);
+  }
+  agentdesk.db.execute(
+    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+600 seconds'))",
+    [pendingKey, JSON.stringify(entry)]
+  );
 }
 
 var reviewAutomation = {
@@ -143,6 +140,8 @@ var reviewAutomation = {
     var counterChannelId = agentRow[0].discord_channel_alt;
 
     // Create review dispatch (targets same agent — counter channel picks it up)
+    // #245: Log agent_id for diagnostics — "project-agentdesk-cdx" phantom agent was traced here
+    agentdesk.log.info("[review] Creating review dispatch: card=" + card.id + " agent=" + card.assigned_agent_id + " round=" + newRound);
     try {
       var reviewDispatchId = agentdesk.dispatch.create(
         card.id,
@@ -150,7 +149,7 @@ var reviewAutomation = {
         "review",
         "[Review R" + newRound + "] " + card.id
       );
-      agentdesk.log.info("[review] Counter-model review dispatched: " + reviewDispatchId);
+      agentdesk.log.info("[review] Counter-model review dispatched: " + reviewDispatchId + " to " + card.assigned_agent_id);
       // Discord notification is handled by the Rust handler (async send_dispatch_to_discord)
       // to avoid ureq deadlock on tokio runtime.
     } catch (e) {
@@ -166,6 +165,27 @@ var reviewAutomation = {
     );
     if (dispatches.length === 0) return;
     var dispatch = dispatches[0];
+
+    // #198: create-pr dispatch completed — transition card to terminal
+    if (dispatch.dispatch_type === "create-pr") {
+      var cfg2 = agentdesk.pipeline.resolveForCard(dispatch.kanban_card_id);
+      // Terminal guard — skip if card already reached terminal state
+      var cardStatus2 = agentdesk.db.query(
+        "SELECT status FROM kanban_cards WHERE id = ?", [dispatch.kanban_card_id]
+      );
+      if (cardStatus2.length > 0 && agentdesk.pipeline.isTerminal(cardStatus2[0].status, cfg2)) {
+        agentdesk.log.info("[review] create-pr completion skipped — card " + dispatch.kanban_card_id + " already terminal");
+        return;
+      }
+      // #257: Set card to wait for CI before going terminal
+      // ci-recovery.js will poll CI status and transition to terminal on success
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = ?",
+        [dispatch.kanban_card_id]
+      );
+      agentdesk.log.info("[review] Create-PR completed for card " + dispatch.kanban_card_id + " → waiting for CI");
+      return;
+    }
 
     // Only handle review-type dispatches
     if (dispatch.dispatch_type !== "review" && dispatch.dispatch_type !== "review-decision") return;
@@ -454,8 +474,39 @@ function processVerdict(cardId, verdict, result) {
         );
         agentdesk.log.info("[review] Card " + cardId + " completed all pipeline stages");
       }
-      agentdesk.kanban.setStatus(cardId, reviewPassTarget);
-      agentdesk.log.info("[review] Card " + cardId + " passed review → " + reviewPassTarget);
+
+      // #198: If the card has worktree sessions, create a "create-pr" dispatch
+      // so the agent pushes the branch and opens a PR before going terminal.
+      var prDispatched = false;
+      var prCardInfo = agentdesk.db.query(
+        "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?",
+        [cardId]
+      );
+      if (prCardInfo.length > 0 && prCardInfo[0].assigned_agent_id) {
+        var agentId = prCardInfo[0].assigned_agent_id;
+        var wtSessions = agentdesk.db.query(
+          "SELECT cwd FROM sessions WHERE agent_id = ? AND cwd LIKE '%worktrees/%' ORDER BY last_heartbeat DESC LIMIT 1",
+          [agentId]
+        );
+        if (wtSessions.length > 0) {
+          var issueNum = prCardInfo[0].github_issue_number || "?";
+          try {
+            agentdesk.dispatch.create(
+              cardId, agentId, "create-pr",
+              "[PR 생성] #" + issueNum + " " + prCardInfo[0].title
+            );
+            prDispatched = true;
+            agentdesk.log.info("[review] Create-PR dispatch created for worktree card " + cardId);
+          } catch (e) {
+            agentdesk.log.warn("[review] Create-PR dispatch failed: " + e + " — falling through to terminal");
+          }
+        }
+      }
+
+      if (!prDispatched) {
+        agentdesk.kanban.setStatus(cardId, reviewPassTarget);
+        agentdesk.log.info("[review] Card " + cardId + " passed review → " + reviewPassTarget);
+      }
     }
 
   } else if (verdict === "improve" || verdict === "reject" || verdict === "rework") {

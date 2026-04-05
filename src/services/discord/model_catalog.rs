@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use regex::Regex;
 use serde::Deserialize;
@@ -192,6 +193,8 @@ const GEMINI_MODEL_CATALOG: &[ModelCatalogEntry] = &[
 
 static CODEX_MODEL_CATALOG_DYNAMIC: OnceLock<Vec<ModelCatalogEntry>> = OnceLock::new();
 static GEMINI_MODEL_CATALOG_DYNAMIC: OnceLock<Vec<ModelCatalogEntry>> = OnceLock::new();
+static QWEN_MODEL_CATALOG_CACHE: OnceLock<Mutex<HashMap<String, QwenResolvedCatalog>>> =
+    OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 struct CodexModelsCache {
@@ -207,12 +210,41 @@ struct CodexModelsCacheEntry {
     visibility: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct QwenSettingsFile {
+    #[serde(default, rename = "modelProviders")]
+    model_providers: HashMap<String, Vec<QwenModelProviderEntry>>,
+    #[serde(default)]
+    model: Option<QwenSettingsModel>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct QwenSettingsModel {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct QwenModelProviderEntry {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct QwenResolvedCatalog {
+    entries: Vec<ModelCatalogEntry>,
+    default_model: Option<&'static str>,
+}
+
 fn intern_owned(value: String) -> &'static str {
     Box::leak(value.into_boxed_str())
 }
 
 fn codex_model_cache_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".codex").join("models_cache.json"))
+    model_catalog_home_dir().map(|home| home.join(".codex").join("models_cache.json"))
 }
 
 fn gemini_models_js_path() -> Option<PathBuf> {
@@ -491,21 +523,245 @@ const GEMINI_MODEL_ALIASES: &[(&str, &str)] = &[
     ("gemini-2.5-flash", "gemini-2.5-flash"),
 ];
 
+fn qwen_system_defaults_path() -> Option<PathBuf> {
+    std::env::var("QWEN_CODE_SYSTEM_DEFAULTS_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+}
+
+fn qwen_user_settings_path() -> Option<PathBuf> {
+    model_catalog_home_dir()
+        .map(|home| home.join(".qwen").join("settings.json"))
+        .filter(|path| path.is_file())
+}
+
+fn model_catalog_home_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os("AGENTDESK_TEST_HOME") {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
+
+    dirs::home_dir()
+}
+
+fn qwen_project_settings_path(working_dir: Option<&str>) -> Option<PathBuf> {
+    working_dir
+        .map(PathBuf::from)
+        .map(|path| path.join(".qwen").join("settings.json"))
+        .filter(|path| path.is_file())
+}
+
+fn qwen_system_settings_path() -> Option<PathBuf> {
+    std::env::var("QWEN_CODE_SYSTEM_SETTINGS_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+}
+
+fn load_qwen_settings_file(path: &PathBuf) -> Option<QwenSettingsFile> {
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn qwen_catalog_cache_key(layers: &[Option<PathBuf>]) -> String {
+    layers
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let Some(path) = path else {
+                return format!("{index}:<none>");
+            };
+            let metadata = fs::metadata(path).ok();
+            let len = metadata.as_ref().map(|meta| meta.len()).unwrap_or(0);
+            let modified = metadata
+                .as_ref()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|time| format!("{}.{:09}", time.as_secs(), time.subsec_nanos()))
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("{index}:{}|{len}|{modified}", path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_catalog_text(raw: &str, fallback: &str, max_chars: usize) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return fallback.to_string();
+    }
+    let collected: String = trimmed.chars().take(max_chars).collect();
+    if trimmed.chars().count() > max_chars {
+        format!("{}...", collected)
+    } else {
+        collected
+    }
+}
+
+fn qwen_secondary_summary(auth_type: &str) -> String {
+    format!("Qwen settings ({})", auth_type)
+}
+
+fn resolve_qwen_model_catalog(working_dir: Option<&str>) -> QwenResolvedCatalog {
+    let layers = [
+        qwen_system_defaults_path(),
+        qwen_user_settings_path(),
+        qwen_project_settings_path(working_dir),
+        qwen_system_settings_path(),
+    ];
+    let cache_key = qwen_catalog_cache_key(&layers);
+    if let Some(cached) = QWEN_MODEL_CATALOG_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned())
+    {
+        return cached;
+    }
+
+    let mut merged_entries: HashMap<String, (usize, ModelCatalogEntry)> = HashMap::new();
+    let mut next_order = 0usize;
+    let mut default_model: Option<&'static str> = None;
+
+    for settings in layers.iter().flatten().filter_map(load_qwen_settings_file) {
+        if let Some(default_name) = settings
+            .model
+            .as_ref()
+            .and_then(|model| model.name.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            default_model = Some(intern_owned(default_name.to_string()));
+        }
+
+        for (auth_type, models) in settings.model_providers {
+            for model in models {
+                let model_id = model.id.trim();
+                if model_id.is_empty() {
+                    continue;
+                }
+                let dedupe_key = format!(
+                    "{}/{}",
+                    auth_type.to_ascii_lowercase(),
+                    model_id.to_ascii_lowercase()
+                );
+                let label = model
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(model_id);
+                let primary_summary = truncate_catalog_text(
+                    model.description.as_deref().unwrap_or(""),
+                    &format!("Configured {} model", auth_type),
+                    52,
+                );
+                let secondary_summary = qwen_secondary_summary(&auth_type);
+                next_order += 1;
+                merged_entries.insert(
+                    dedupe_key,
+                    (
+                        next_order,
+                        ModelCatalogEntry {
+                            value: intern_owned(model_id.to_string()),
+                            label: intern_owned(label.to_string()),
+                            primary_summary: intern_owned(primary_summary),
+                            secondary_summary: intern_owned(secondary_summary),
+                        },
+                    ),
+                );
+            }
+        }
+    }
+
+    let mut entries: Vec<(usize, ModelCatalogEntry)> = merged_entries.into_values().collect();
+    entries.sort_by_key(|(order, _)| *order);
+    let mut entries: Vec<ModelCatalogEntry> = entries.into_iter().map(|(_, entry)| entry).collect();
+
+    if let Some(default_model) = default_model {
+        let exists = entries
+            .iter()
+            .any(|entry| entry.value.eq_ignore_ascii_case(default_model));
+        if !exists {
+            entries.insert(
+                0,
+                ModelCatalogEntry {
+                    value: default_model,
+                    label: default_model,
+                    primary_summary: "Configured default model",
+                    secondary_summary: "Qwen settings.model.name",
+                },
+            );
+        }
+    }
+
+    let resolved = QwenResolvedCatalog {
+        entries,
+        default_model,
+    };
+
+    if let Ok(mut cache) = QWEN_MODEL_CATALOG_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        cache.insert(cache_key, resolved.clone());
+    }
+
+    resolved
+}
+
+pub(crate) fn resolved_default_model(
+    provider: &ProviderKind,
+    working_dir: Option<&str>,
+) -> Option<String> {
+    match provider {
+        ProviderKind::Qwen => resolve_qwen_model_catalog(working_dir)
+            .default_model
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+pub(crate) fn resolved_models(
+    provider: &ProviderKind,
+    working_dir: Option<&str>,
+) -> Vec<ModelCatalogEntry> {
+    match provider {
+        ProviderKind::Qwen => resolve_qwen_model_catalog(working_dir).entries,
+        _ => known_models(provider).to_vec(),
+    }
+}
+
 pub(in crate::services::discord) fn provider_supports_model_override(
     provider: &ProviderKind,
 ) -> bool {
     matches!(
         provider,
-        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Gemini
+        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Gemini | ProviderKind::Qwen
     )
 }
 
-pub(in crate::services::discord) fn model_hint(provider: &ProviderKind) -> &'static str {
+pub(in crate::services::discord) fn model_hint(
+    provider: &ProviderKind,
+    working_dir: Option<&str>,
+) -> String {
     match provider {
-        ProviderKind::Claude => "default + curated Claude models + custom model id",
-        ProviderKind::Codex => "default + curated Codex models + custom model id",
-        ProviderKind::Gemini => "default + curated Gemini models + custom model id",
-        ProviderKind::Unsupported(_) => "모델 이름 또는 default",
+        ProviderKind::Claude => "default + curated Claude models + custom model id".to_string(),
+        ProviderKind::Codex => "default + curated Codex models + custom model id".to_string(),
+        ProviderKind::Gemini => "default + curated Gemini models + custom model id".to_string(),
+        ProviderKind::Qwen => {
+            let catalog = resolve_qwen_model_catalog(working_dir);
+            if catalog.entries.is_empty() {
+                "Qwen settings catalog is empty. Check ~/.qwen/settings.json or <workspace>/.qwen/settings.json".to_string()
+            } else {
+                "default + models resolved from Qwen settings files".to_string()
+            }
+        }
+        ProviderKind::Unsupported(_) => "모델 이름 또는 default".to_string(),
     }
 }
 
@@ -518,6 +774,7 @@ pub(crate) fn known_models(provider: &ProviderKind) -> &'static [ModelCatalogEnt
         ProviderKind::Gemini => GEMINI_MODEL_CATALOG_DYNAMIC
             .get_or_init(build_gemini_model_catalog)
             .as_slice(),
+        ProviderKind::Qwen => &[],
         ProviderKind::Unsupported(_) => &[],
     }
 }
@@ -527,6 +784,7 @@ fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static s
         ProviderKind::Claude => CLAUDE_MODEL_ALIASES,
         ProviderKind::Codex => CODEX_MODEL_ALIASES,
         ProviderKind::Gemini => GEMINI_MODEL_ALIASES,
+        ProviderKind::Qwen => &[],
         ProviderKind::Unsupported(_) => &[],
     }
 }
@@ -558,10 +816,27 @@ fn looks_like_model_identifier(raw: &str) -> bool {
 pub(in crate::services::discord) fn validate_model_input(
     provider: &ProviderKind,
     raw: &str,
+    working_dir: Option<&str>,
 ) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("Model name cannot be empty.".to_string());
+    }
+
+    if matches!(provider, ProviderKind::Qwen) {
+        if let Some(entry) = resolved_models(provider, working_dir)
+            .iter()
+            .find(|entry| entry.value.eq_ignore_ascii_case(trimmed))
+        {
+            return Ok(entry.value.to_string());
+        }
+
+        return Err(format!(
+            "Unrecognized model `{}` for {}.\n{}\nUse `/model` to open the interactive picker.",
+            trimmed,
+            provider.display_name(),
+            model_hint(provider, working_dir)
+        ));
     }
 
     if let Some(canonical) = canonical_known_model(provider, trimmed) {
@@ -576,13 +851,65 @@ pub(in crate::services::discord) fn validate_model_input(
         "Unrecognized model `{}` for {}.\n{}\nUse `/model` to open the interactive picker.",
         trimmed,
         provider.display_name(),
-        model_hint(provider)
+        model_hint(provider, working_dir)
     ))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use crate::services::provider::ProviderKind;
+
     use super::{build_codex_model_catalog_from_cache, build_gemini_model_catalog_from_models_js};
+
+    fn with_temp_qwen_env<F>(f: F)
+    where
+        F: FnOnce(&TempDir, &TempDir),
+    {
+        let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let temp_home = TempDir::new().unwrap();
+        let temp_project = TempDir::new().unwrap();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_test_home = std::env::var_os("AGENTDESK_TEST_HOME");
+        let prev_system_defaults = std::env::var_os("QWEN_CODE_SYSTEM_DEFAULTS_PATH");
+        let prev_system_settings = std::env::var_os("QWEN_CODE_SYSTEM_SETTINGS_PATH");
+
+        unsafe {
+            std::env::set_var("HOME", temp_home.path());
+            std::env::set_var("USERPROFILE", temp_home.path());
+            std::env::set_var("AGENTDESK_TEST_HOME", temp_home.path());
+            std::env::remove_var("QWEN_CODE_SYSTEM_DEFAULTS_PATH");
+            std::env::remove_var("QWEN_CODE_SYSTEM_SETTINGS_PATH");
+        }
+
+        f(&temp_home, &temp_project);
+
+        match prev_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match prev_userprofile {
+            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
+        }
+        match prev_test_home {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_TEST_HOME", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_TEST_HOME") },
+        }
+        match prev_system_defaults {
+            Some(value) => unsafe { std::env::set_var("QWEN_CODE_SYSTEM_DEFAULTS_PATH", value) },
+            None => unsafe { std::env::remove_var("QWEN_CODE_SYSTEM_DEFAULTS_PATH") },
+        }
+        match prev_system_settings {
+            Some(value) => unsafe { std::env::set_var("QWEN_CODE_SYSTEM_SETTINGS_PATH", value) },
+            None => unsafe { std::env::remove_var("QWEN_CODE_SYSTEM_SETTINGS_PATH") },
+        }
+    }
 
     #[test]
     fn codex_dynamic_catalog_uses_local_display_names() {
@@ -648,5 +975,107 @@ export const VALID_GEMINI_MODELS = new Set([
                 .iter()
                 .any(|entry| entry.value == "gemini-obsolete-lite")
         );
+    }
+
+    #[test]
+    fn qwen_resolved_models_merge_user_and_project_settings() {
+        with_temp_qwen_env(|temp_home, temp_project| {
+            let user_qwen_dir = temp_home.path().join(".qwen");
+            let project_qwen_dir = temp_project.path().join(".qwen");
+            fs::create_dir_all(&user_qwen_dir).unwrap();
+            fs::create_dir_all(&project_qwen_dir).unwrap();
+
+            fs::write(
+                user_qwen_dir.join("settings.json"),
+                r#"{
+                  "modelProviders": {
+                    "openai": [
+                      {
+                        "id": "user-model",
+                        "name": "User Model",
+                        "description": "User scoped model"
+                      }
+                    ]
+                  },
+                  "model": { "name": "user-model" }
+                }"#,
+            )
+            .unwrap();
+
+            fs::write(
+                project_qwen_dir.join("settings.json"),
+                r#"{
+                  "modelProviders": {
+                    "openai": [
+                      {
+                        "id": "project-model",
+                        "name": "Project Model",
+                        "description": "Project scoped model"
+                      }
+                    ]
+                  },
+                  "model": { "name": "project-model" }
+                }"#,
+            )
+            .unwrap();
+
+            let working_dir = temp_project.path().to_str().unwrap();
+            let default_model =
+                super::resolved_default_model(&ProviderKind::Qwen, Some(working_dir)).unwrap();
+            assert_eq!(default_model, "project-model");
+
+            let catalog = super::resolved_models(&ProviderKind::Qwen, Some(working_dir));
+            assert!(
+                catalog
+                    .iter()
+                    .any(|entry| entry.value == "user-model" && entry.label == "User Model")
+            );
+            assert!(catalog.iter().any(|entry| entry.value == "project-model"
+                && entry.label == "Project Model"
+                && entry.picker_description() == "Project scoped model | Qwen settings (openai)"));
+        });
+    }
+
+    #[test]
+    fn qwen_resolved_models_reuse_cached_static_strings() {
+        with_temp_qwen_env(|temp_home, temp_project| {
+            let user_qwen_dir = temp_home.path().join(".qwen");
+            fs::create_dir_all(&user_qwen_dir).unwrap();
+
+            fs::write(
+                user_qwen_dir.join("settings.json"),
+                r#"{
+                  "modelProviders": {
+                    "openai": [
+                      {
+                        "id": "cached-model",
+                        "name": "Cached Model",
+                        "description": "Cached model description"
+                      }
+                    ]
+                  },
+                  "model": { "name": "cached-model" }
+                }"#,
+            )
+            .unwrap();
+
+            let working_dir = temp_project.path().to_str().unwrap();
+            let first = super::resolve_qwen_model_catalog(Some(working_dir));
+            let second = super::resolve_qwen_model_catalog(Some(working_dir));
+            assert_eq!(first.entries.len(), 1);
+            assert_eq!(second.entries.len(), 1);
+            assert!(std::ptr::eq(
+                first.entries[0].value,
+                second.entries[0].value
+            ));
+            assert!(std::ptr::eq(
+                first.entries[0].label,
+                second.entries[0].label
+            ));
+            assert!(std::ptr::eq(
+                first.default_model.unwrap(),
+                second.default_model.unwrap()
+            ));
+        });
     }
 }

@@ -141,50 +141,7 @@ impl PolicyEngine {
         };
         // Execute the requested hook
         Self::fire_hook_with_guard(&inner, hook, payload)?;
-        // Drain deferred hooks from DB while holding inner guard
-        // (fire_hook_with_guard doesn't need separate lock)
-        let mut had_deferred = false;
-        loop {
-            let rows: Vec<(i64, String, String)> = {
-                let conn = match self.db.separate_conn() {
-                    Ok(c) => c,
-                    Err(_) => break,
-                };
-                let mut stmt = match conn.prepare(
-                    "SELECT id, hook_name, payload FROM deferred_hooks \
-                     WHERE status = 'pending' ORDER BY id ASC LIMIT 50",
-                ) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                    .ok()
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    .unwrap_or_default()
-            };
-            if rows.is_empty() {
-                break;
-            }
-            had_deferred = true;
-            for (id, hook_name, payload_str) in &rows {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] 🔄 fire_hook(deferred {hook_name}, id={id})");
-                let p: serde_json::Value =
-                    serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
-                let fire_result = if let Some(h) = Hook::from_str(hook_name) {
-                    Self::fire_hook_with_guard(&inner, h, p)
-                } else {
-                    Self::fire_dynamic_hook_with_guard(&inner, hook_name, p)
-                };
-                if let Err(e) = &fire_result {
-                    tracing::warn!("deferred hook {hook_name} (id={id}) failed: {e}");
-                }
-                // Delete after attempt (success or fail) — deferred hooks are best-effort
-                if let Ok(conn) = self.db.separate_conn() {
-                    let _ = conn.execute("DELETE FROM deferred_hooks WHERE id = ?1", [id]);
-                }
-            }
-        }
+        let had_deferred = Self::drain_deferred_with_guard(&self.db, &inner);
         // Must drop inner (engine lock) BEFORE draining intents — intent
         // execution needs a fresh lock acquisition via drain_pending_intents.
         drop(inner);
@@ -324,7 +281,62 @@ impl PolicyEngine {
                 return Err(anyhow::anyhow!("engine lock poisoned: {e}"));
             }
         };
-        Self::fire_dynamic_hook_with_guard(&inner, hook_name, payload)
+        Self::fire_dynamic_hook_with_guard(&inner, hook_name, payload)?;
+        let had_deferred = Self::drain_deferred_with_guard(&self.db, &inner);
+        // Drop engine lock before draining intents — intent execution needs
+        // a fresh lock acquisition via drain_pending_intents (#248).
+        drop(inner);
+        // Drain __createdDispatches outbox so custom pipeline hooks (on_enter/
+        // on_exit) that call dispatch.create() get their follow-up handling
+        // (notification, kickoff) materialized on this same path.
+        {
+            let result = self.drain_pending_intents();
+            if !result.created_dispatches.is_empty() || result.errors > 0 {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                let source = if had_deferred {
+                    "deferred+direct"
+                } else {
+                    "direct"
+                };
+                eprintln!(
+                    "  [{ts}] 🔄 dynamic hook intent drain ({source}): {} dispatches created, {} errors",
+                    result.created_dispatches.len(),
+                    result.errors
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Blocking variant of `try_fire_hook_by_name` — waits for the engine lock
+    /// instead of deferring on contention. Used only in safety-net paths where
+    /// the hook MUST execute (e.g. finalize_dispatch review-dispatch guarantee).
+    pub fn fire_hook_by_name_blocking(
+        &self,
+        hook_name: &str,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        if let Some(h) = Hook::from_str(hook_name) {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
+            Self::fire_hook_with_guard(&inner, h, payload)?;
+            Self::drain_deferred_with_guard(&self.db, &inner);
+            drop(inner);
+            self.drain_pending_intents();
+            return Ok(());
+        }
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
+        Self::fire_dynamic_hook_with_guard(&inner, hook_name, payload)?;
+        Self::drain_deferred_with_guard(&self.db, &inner);
+        drop(inner);
+        // Drain __createdDispatches outbox — same pattern as try_fire_hook_by_name (#248).
+        self.drain_pending_intents();
+        Ok(())
     }
 
     /// Fire a dynamic (non-enum) hook by looking up `dynamic_hooks` on each
@@ -475,6 +487,56 @@ impl PolicyEngine {
         })
     }
 
+    /// Drain deferred hooks from the DB while holding the engine guard.
+    /// Returns true if any deferred hooks were found and processed.
+    fn drain_deferred_with_guard(
+        db: &crate::db::Db,
+        inner: &std::sync::MutexGuard<'_, PolicyEngineInner>,
+    ) -> bool {
+        let mut had_deferred = false;
+        loop {
+            let rows: Vec<(i64, String, String)> = {
+                let conn = match db.separate_conn() {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                let mut stmt = match conn.prepare(
+                    "SELECT id, hook_name, payload FROM deferred_hooks \
+                     WHERE status = 'pending' ORDER BY id ASC LIMIT 50",
+                ) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            };
+            if rows.is_empty() {
+                break;
+            }
+            had_deferred = true;
+            for (id, hook_name, payload_str) in &rows {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] 🔄 fire_hook(deferred {hook_name}, id={id})");
+                let p: serde_json::Value =
+                    serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
+                let fire_result = if let Some(h) = Hook::from_str(hook_name) {
+                    Self::fire_hook_with_guard(inner, h, p)
+                } else {
+                    Self::fire_dynamic_hook_with_guard(inner, hook_name, p)
+                };
+                if let Err(e) = &fire_result {
+                    tracing::warn!("deferred hook {hook_name} (id={id}) failed: {e}");
+                }
+                if let Ok(conn) = db.separate_conn() {
+                    let _ = conn.execute("DELETE FROM deferred_hooks WHERE id = ?1", [id]);
+                }
+            }
+        }
+        had_deferred
+    }
+
     /// Drain pending card transitions accumulated by `agentdesk.kanban.setStatus()`
     /// during hook execution. Each entry is `(card_id, old_status, new_status)`.
     /// Call this after `fire_hook` to process transitions that need follow-up hooks.
@@ -530,6 +592,7 @@ impl PolicyEngine {
     /// Drain pending intents accumulated by bridge functions during hook execution.
     /// Calls `intent::execute_intents` to apply them and returns the result.
     /// Transitions in the result should be fed into `fire_transition_hooks`.
+    ///
     pub fn drain_pending_intents(&self) -> intent::IntentExecutionResult {
         let inner = match self.inner.lock() {
             Ok(g) => g,
@@ -564,14 +627,17 @@ impl PolicyEngine {
         drop(inner);
 
         let intents: Vec<intent::Intent> = serde_json::from_str(&json_str).unwrap_or_default();
-        if intents.is_empty() {
-            return intent::IntentExecutionResult {
+        let result = if intents.is_empty() {
+            intent::IntentExecutionResult {
                 transitions: Vec::new(),
                 created_dispatches: Vec::new(),
                 errors: 0,
-            };
-        }
-        intent::execute_intents(&self.db, intents)
+            }
+        } else {
+            intent::execute_intents(&self.db, intents)
+        };
+
+        result
     }
 
     /// List loaded policies (for API endpoint).
@@ -971,5 +1037,81 @@ mod tests {
             })
             .unwrap();
         assert_eq!(val, "low", "low-priority policy runs last (priority=100)");
+    }
+
+    /// #248: Regression test — dispatch.create() called from a dynamic hook
+    /// (custom on_enter/on_exit) must produce a real task_dispatches row.
+    /// Before the fix, try_fire_hook_by_name() returned without draining,
+    /// so follow-up handling could be stranded.
+    #[test]
+    fn test_dynamic_hook_dispatch_create_produces_db_row() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("dispatch-hook.js"),
+            r#"
+            var policy = {
+                name: "dispatch-hook",
+                priority: 1,
+                onCustomEnter: function(payload) {
+                    var id = agentdesk.dispatch.create(
+                        payload.card_id,
+                        payload.agent_id,
+                        "implementation",
+                        "Dynamic hook dispatch"
+                    );
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('dyn_dispatch_id', '" + id + "')",
+                        []
+                    );
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        // Seed: agent + kanban card
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('bot1', 'Bot', 'claude', 'idle', 0)",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, priority) VALUES ('card1', 'Test', 'ready', 'medium')",
+                [],
+            ).unwrap();
+        }
+
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+
+        engine
+            .try_fire_hook_by_name(
+                "onCustomEnter",
+                serde_json::json!({"card_id": "card1", "agent_id": "bot1"}),
+            )
+            .unwrap();
+
+        let conn = db.lock().unwrap();
+        // The dispatch ID was stashed in kv_meta by the hook
+        let dispatch_id: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'dyn_dispatch_id'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("hook should have written dispatch_id to kv_meta");
+
+        // Verify the dispatch row actually exists in task_dispatches
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM task_dispatches WHERE id = ?1",
+                [&dispatch_id],
+                |r| r.get(0),
+            )
+            .expect("dispatch row should exist in task_dispatches");
+        assert_eq!(title, "Dynamic hook dispatch");
     }
 }

@@ -1,815 +1,40 @@
+mod completion_guard;
+mod recovery_text;
+mod tmux_runtime;
+
+#[cfg(test)]
+mod tests;
+
 use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
-use crate::config::local_api_url;
-#[cfg(unix)]
-use crate::services::tmux_common::tmux_exact_target;
+use crate::services::provider::cancel_requested;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
-use crate::utils::format::{safe_suffix, tail_with_ellipsis};
+use crate::utils::format::tail_with_ellipsis;
 
-/// Auto-retry a failed resume by fetching recent Discord history,
-/// storing it in kv_meta for the router to inject into the LLM prompt,
-/// and re-sending the original message via announce bot.
-/// Discord only sees a short notice — the full history is LLM-only.
-async fn auto_retry_with_history(
-    http: &serenity::Http,
-    channel_id: ChannelId,
-    user_text: &str,
-    api_port: u16,
-) {
-    let ts = chrono::Local::now().format("%H:%M:%S");
+// Re-exports for pub(super) items used by sibling modules in the discord package
+pub(super) use completion_guard::guard_review_dispatch_completion;
+pub(super) use completion_guard::runtime_db_fallback_complete;
+pub(super) use recovery_text::result_event_has_stale_resume_error;
+pub(super) use tmux_runtime::cancel_active_token;
+pub(super) use tmux_runtime::stale_inflight_message;
 
-    // Dedup guard: use a static set to prevent turn_bridge + watcher from
-    // both firing auto-retry for the same channel simultaneously.
-    use std::sync::LazyLock;
-    static RETRY_PENDING: LazyLock<dashmap::DashSet<u64>> =
-        LazyLock::new(|| dashmap::DashSet::new());
-    if !RETRY_PENDING.insert(channel_id.get()) {
-        eprintln!("  [{ts}] ⏭ auto-retry: skipped (dedup) for channel {channel_id}");
-        return;
-    }
-    // Clean up guard after 30 seconds (allow future retries)
-    let ch_id = channel_id.get();
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-        RETRY_PENDING.remove(&ch_id);
-    });
+// Re-export pub(crate) items
+pub(crate) use tmux_runtime::tmux_runtime_paths;
 
-    eprintln!("  [{ts}] ↻ auto-retry: fetching last 10 messages for channel {channel_id}");
-
-    // Fetch last 10 messages from Discord
-    let history = match channel_id
-        .messages(http, serenity::builder::GetMessages::new().limit(10))
-        .await
-    {
-        Ok(msgs) => {
-            let mut lines = Vec::new();
-            for msg in msgs.iter().rev() {
-                let author = &msg.author.name;
-                let content = msg.content.chars().take(300).collect::<String>();
-                if !content.trim().is_empty() {
-                    lines.push(format!("{}: {}", author, content));
-                }
-            }
-            if lines.is_empty() {
-                None
-            } else {
-                Some(lines.join("\n"))
-            }
-        }
-        Err(e) => {
-            eprintln!("  [{ts}] ⚠ auto-retry: failed to fetch history: {e}");
-            None
-        }
-    };
-
-    // Store history in kv_meta for the router to inject into LLM prompt.
-    // Key: session_retry_context:{channel_id} — consumed on next turn start.
-    if let Some(ref hist) = history {
-        let _ = reqwest::Client::new()
-            .post(local_api_url(api_port, "/api/kv"))
-            .json(&serde_json::json!({
-                "key": format!("session_retry_context:{}", channel_id),
-                "value": hist,
-            }))
-            .send()
-            .await;
-    }
-
-    // Discord message: short notice only — history stays LLM-side
-    let retry_content = format!(
-        "[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n\n{}",
-        user_text
-    );
-    let retry_ch = channel_id.get().to_string();
-
-    let _ = reqwest::Client::new()
-        .post(local_api_url(api_port, "/api/send"))
-        .json(&serde_json::json!({
-            "target": format!("channel:{retry_ch}"),
-            "content": retry_content,
-            "source": "pipeline",
-            "bot": "announce",
-        }))
-        .send()
-        .await;
-}
-
-fn clear_local_session_state(
-    new_session_id: &mut Option<String>,
-    inflight_state: &mut InflightTurnState,
-) {
-    *new_session_id = None;
-    inflight_state.session_id = None;
-}
-
-async fn reset_session_for_auto_retry(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    cancel_token: &Arc<CancelToken>,
-    adk_session_key: Option<&str>,
-    new_session_id: &mut Option<String>,
-    inflight_state: &mut InflightTurnState,
-    reason: &str,
-) {
-    clear_local_session_state(new_session_id, inflight_state);
-    let _ = save_inflight_state(inflight_state);
-
-    let stale_sid = {
-        let mut data = shared.core.lock().await;
-        let old = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|s| s.session_id.clone());
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.session_id = None;
-        }
-        old
-    };
-
-    if let Some(key) = adk_session_key {
-        super::adk_session::clear_claude_session_id(key, shared.api_port).await;
-    }
-
-    if let Some(ref sid) = stale_sid {
-        let port = shared.api_port;
-        let sid_c = sid.clone();
-        let _ = reqwest::Client::new()
-            .post(crate::config::local_api_url(
-                port,
-                "/api/dispatched-sessions/clear-stale-session-id",
-            ))
-            .json(&serde_json::json!({"claude_session_id": sid_c}))
-            .send()
-            .await;
-    }
-
-    #[cfg(unix)]
-    if let Some(name) = cancel_token
-        .tmux_session
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!("  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})");
-        record_tmux_exit_reason(
-            &name,
-            &format!("forcing fresh session before auto-retry: {reason}"),
-        );
-        crate::services::platform::tmux::kill_session(&name);
-    }
-}
-
-pub(super) fn contains_stale_resume_error_text(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("no conversation found") || lower.contains("error: no conversation")
-}
-
-pub(super) fn result_event_has_stale_resume_error(value: &serde_json::Value) -> bool {
-    if value.get("type").and_then(|v| v.as_str()) != Some("result") {
-        return false;
-    }
-
-    let subtype = value.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
-    let is_error = value
-        .get("is_error")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-        || subtype.starts_with("error");
-    if !is_error {
-        return false;
-    }
-
-    if value
-        .get("result")
-        .and_then(|v| v.as_str())
-        .map(contains_stale_resume_error_text)
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    value
-        .get("errors")
-        .and_then(|v| v.as_array())
-        .map(|errors| {
-            errors.iter().any(|err| {
-                err.as_str()
-                    .map(contains_stale_resume_error_text)
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-fn output_file_has_stale_resume_error_after_offset(output_path: &str, start_offset: u64) -> bool {
-    let Ok(bytes) = std::fs::read(output_path) else {
-        return false;
-    };
-    let start = usize::try_from(start_offset)
-        .ok()
-        .map(|offset| offset.min(bytes.len()))
-        .unwrap_or(bytes.len());
-
-    String::from_utf8_lossy(&bytes[start..])
-        .lines()
-        .any(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return false;
-            }
-            serde_json::from_str::<serde_json::Value>(trimmed)
-                .ok()
-                .map(|value| result_event_has_stale_resume_error(&value))
-                .unwrap_or(false)
-        })
-}
-
-fn stream_error_has_stale_resume_error(message: &str, stderr: &str) -> bool {
-    contains_stale_resume_error_text(message) || contains_stale_resume_error_text(stderr)
-}
-
-/// Decide the final response text when a Done event arrives.
-///
-/// Returns the text that should be used as `full_response`.
-/// - If streaming accumulated post-tool text, keep the streamed `full_response`.
-/// - If streaming only accumulated pre-tool narration (tools used, no post-tool
-///   text), replace with the authoritative `result` from the Done event.
-/// - If streaming produced nothing, use `result` directly.
-fn resolve_done_response(
-    full_response: &str,
-    result: &str,
-    any_tool_used: bool,
-    has_post_tool_text: bool,
-) -> Option<String> {
-    if result.is_empty() {
-        return None;
-    }
-    if full_response.trim().is_empty() {
-        return Some(result.to_string());
-    }
-    if any_tool_used && !has_post_tool_text {
-        return Some(result.to_string());
-    }
-    None
-}
-
-pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, reason: &str) {
-    token.cancelled.store(true, Ordering::Relaxed);
-
-    let child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
-    if let Some(pid) = child_pid {
-        claude::kill_pid_tree(pid);
-    }
-
-    if cleanup_tmux {
-        if child_pid.is_some() {
-            if let Some(name) = token
-                .tmux_session
-                .lock()
-                .ok()
-                .and_then(|guard| guard.clone())
-            {
-                #[cfg(unix)]
-                {
-                    // #145: skip kill for unified-thread sessions with active runs
-                    let is_unified =
-                        crate::services::provider::parse_provider_and_channel_from_tmux_name(&name)
-                            .map(|(_, ch)| {
-                                crate::dispatch::is_unified_thread_channel_name_active(&ch)
-                            })
-                            .unwrap_or(false);
-                    if !is_unified {
-                        record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
-                        crate::services::platform::tmux::kill_session(&name);
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = &name;
-                }
-            }
-        } else {
-            #[cfg(unix)]
-            if let Some(name) = token
-                .tmux_session
-                .lock()
-                .ok()
-                .and_then(|guard| guard.clone())
-            {
-                record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
-            }
-            token.cancel_with_tmux_cleanup();
-        }
-    }
-}
-
-#[cfg(unix)]
-pub(crate) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
-    use crate::services::tmux_common::session_temp_path;
-    (
-        session_temp_path(tmux_session_name, "jsonl"),
-        session_temp_path(tmux_session_name, "input"),
-    )
-}
-
-#[cfg(not(unix))]
-pub(crate) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
-    let tmp = std::env::temp_dir();
-    (
-        tmp.join(format!("agentdesk-{}.jsonl", tmux_session_name))
-            .display()
-            .to_string(),
-        tmp.join(format!("agentdesk-{}.input", tmux_session_name))
-            .display()
-            .to_string(),
-    )
-}
-
-pub(super) fn stale_inflight_message(saved_response: &str) -> String {
-    let trimmed = saved_response.trim();
-    if trimmed.is_empty() {
-        "⚠️ AgentDesk가 재시작되어 진행 중이던 응답을 이어붙이지 못했습니다.".to_string()
-    } else {
-        let formatted = format_for_discord(trimmed);
-        format!("{}\n\n[Interrupted by restart]", formatted)
-    }
-}
-
-fn is_dcserver_restart_command(input: &str) -> bool {
-    let lower = input.to_lowercase();
-
-    if lower.contains("restart-dcserver") || lower.contains("restart_agentdesk.sh") {
-        return true;
-    }
-
-    if lower.contains("agentdesk-discord-smoke.sh") && lower.contains("--deploy-live") {
-        return true;
-    }
-
-    lower.contains("launchctl")
-        && lower.contains("com.agentdesk.dcserver")
-        && (lower.contains("kickstart") || lower.contains("bootstrap") || lower.contains("bootout"))
-}
-
-fn should_resume_watcher_after_turn(
-    defer_watcher_resume: bool,
-    has_local_queued_turns: bool,
-    can_chain_locally: bool,
-) -> bool {
-    !defer_watcher_resume && !(has_local_queued_turns && can_chain_locally)
-}
-
-fn total_context_tokens(input_tokens: u64, _output_tokens: u64) -> u64 {
-    // input_tokens already represents cumulative context window occupancy
-    // (system prompt + conversation history + new message + cache tokens).
-    // Adding output_tokens would double-count and inflate the percentage.
-    input_tokens
-}
-
-fn persisted_context_tokens(input_tokens: u64, output_tokens: u64) -> Option<u64> {
-    let total = total_context_tokens(input_tokens, output_tokens);
-    (total > 0).then_some(total)
-}
-
-#[derive(Debug)]
-struct DispatchSnapshot {
-    dispatch_type: String,
-    status: String,
-    kanban_card_id: Option<String>,
-}
-
-async fn fetch_dispatch_snapshot(api_port: u16, dispatch_id: &str) -> Option<DispatchSnapshot> {
-    let url = local_api_url(api_port, &format!("/api/dispatches/{dispatch_id}"));
-    let resp = reqwest::Client::new().get(url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body = resp.json::<serde_json::Value>().await.ok()?;
-    let dispatch = body.get("dispatch")?;
-    Some(DispatchSnapshot {
-        dispatch_type: dispatch.get("dispatch_type")?.as_str()?.to_string(),
-        status: dispatch.get("status")?.as_str()?.to_string(),
-        kanban_card_id: dispatch
-            .get("kanban_card_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    })
-}
-
-fn extract_review_decision(full_response: &str) -> Option<&'static str> {
-    // Match explicit patterns like "DECISION: accept" or "결정: dismiss"
-    let explicit =
-        regex::Regex::new(r"(?im)^\s*(?:decision|결정)\s*:\s*\**\s*(accept|dispute|dismiss)\b")
-            .ok()?;
-    if let Some(caps) = explicit.captures(full_response) {
-        let decision = caps.get(1)?.as_str().to_ascii_lowercase();
-        return match decision.as_str() {
-            "accept" => Some("accept"),
-            "dispute" => Some("dispute"),
-            "dismiss" => Some("dismiss"),
-            _ => None,
-        };
-    }
-    // Fallback: scan for standalone keywords in the last ~500 bytes (char-boundary safe)
-    let tail = safe_suffix(full_response, 500);
-    let keyword_re = regex::Regex::new(r"(?im)\b(accept|dispute|dismiss)\b").ok()?;
-    let mut found: Option<&'static str> = None;
-    for caps in keyword_re.captures_iter(tail) {
-        let kw = caps.get(1)?.as_str().to_ascii_lowercase();
-        let candidate = match kw.as_str() {
-            "accept" => "accept",
-            "dispute" => "dispute",
-            "dismiss" => "dismiss",
-            _ => continue,
-        };
-        if found.is_some() && found != Some(candidate) {
-            // Ambiguous — multiple different keywords found
-            return None;
-        }
-        found = Some(candidate);
-    }
-    found
-}
-
-async fn submit_review_decision_fallback(
-    api_port: u16,
-    card_id: &str,
-    dispatch_id: &str,
-    decision: &str,
-    full_response: &str,
-) -> Result<(), String> {
-    let comment = truncate_str(full_response.trim(), 4000).to_string();
-    let url = local_api_url(api_port, "/api/review-decision");
-    // #109: Include dispatch_id so the server can atomically consume the
-    // specific review-decision dispatch, preventing replay attacks.
-    let resp = reqwest::Client::new()
-        .post(url)
-        .json(&serde_json::json!({
-            "card_id": card_id,
-            "dispatch_id": dispatch_id,
-            "decision": decision,
-            "comment": comment,
-        }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        Err(format!("HTTP {status}: {body}"))
-    }
-}
-
-fn extract_explicit_review_verdict(full_response: &str) -> Option<&'static str> {
-    let pattern = regex::Regex::new(
-        r"(?im)^\s*(?:final\s+)?(?:verdict|overall)\s*:\s*\**\s*(pass|improve|reject|rework|approved)\b",
-    )
-    .ok()?;
-    let verdict = pattern
-        .captures(full_response)?
-        .get(1)?
-        .as_str()
-        .to_ascii_lowercase();
-    match verdict.as_str() {
-        "pass" => Some("pass"),
-        "improve" => Some("improve"),
-        "reject" => Some("reject"),
-        "rework" => Some("rework"),
-        "approved" => Some("approved"),
-        _ => None,
-    }
-}
-
-fn build_verdict_payload(
-    dispatch_id: &str,
-    verdict: &str,
-    full_response: &str,
-    provider: &str,
-) -> serde_json::Value {
-    let feedback = truncate_str(full_response.trim(), 4000).to_string();
-    serde_json::json!({
-        "dispatch_id": dispatch_id,
-        "overall": verdict,
-        "feedback": feedback,
-        "provider": provider,
-    })
-}
-
-async fn submit_review_verdict_fallback(
-    api_port: u16,
-    dispatch_id: &str,
-    verdict: &str,
-    full_response: &str,
-    provider: &str,
-) -> Result<(), String> {
-    let payload = build_verdict_payload(dispatch_id, verdict, full_response, provider);
-    let url = local_api_url(api_port, "/api/review-verdict");
-    let resp = reqwest::Client::new()
-        .post(url)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        Err(format!("HTTP {status}: {body}"))
-    }
-}
-
-async fn guard_review_dispatch_completion(
-    api_port: u16,
-    dispatch_id: Option<&str>,
-    full_response: &str,
-    provider: &str,
-) -> Option<String> {
-    let dispatch_id = dispatch_id?;
-    let snapshot = fetch_dispatch_snapshot(api_port, dispatch_id).await?;
-    if snapshot.status != "pending" {
-        return None;
-    }
-
-    match snapshot.dispatch_type.as_str() {
-        "review" => {
-            if let Some(verdict) = extract_explicit_review_verdict(full_response) {
-                match submit_review_verdict_fallback(
-                    api_port,
-                    dispatch_id,
-                    verdict,
-                    full_response,
-                    provider,
-                )
-                .await
-                {
-                    Ok(()) => return None,
-                    Err(err) => {
-                        return Some(format!(
-                            "⚠️ review verdict 자동 제출 실패: {err}\n`review-verdict` API를 다시 호출해야 파이프라인이 진행됩니다."
-                        ));
-                    }
-                }
-            }
-            Some(
-                "⚠️ review dispatch가 아직 pending입니다. 응답 첫 줄에 `VERDICT: pass|improve|reject|rework`를 적고 `review-verdict` API를 호출해야 완료됩니다."
-                    .to_string(),
-            )
-        }
-        "review-decision" => {
-            if let Some(decision) = extract_review_decision(full_response) {
-                if let Some(card_id) = snapshot.kanban_card_id.as_deref() {
-                    match submit_review_decision_fallback(
-                        api_port,
-                        card_id,
-                        dispatch_id,
-                        decision,
-                        full_response,
-                    )
-                    .await
-                    {
-                        Ok(()) => return None,
-                        Err(err) => {
-                            return Some(format!(
-                                "⚠️ review-decision 자동 제출 실패: {err}\n`review-decision` API를 다시 호출해야 파이프라인이 진행됩니다."
-                            ));
-                        }
-                    }
-                }
-            }
-            Some(
-                "⚠️ review-decision dispatch가 아직 pending입니다. `review-decision` API를 호출해야 카드가 다음 단계로 이동합니다."
-                    .to_string(),
-            )
-        }
-        _ => None,
-    }
-}
-
-/// Explicitly complete implementation/rework dispatches at turn end.
-/// Last-resort dispatch completion via runtime-root SQLite file.
-///
-/// Opens a fresh connection to the on-disk DB (bypassing the Db pool) and writes
-/// a status + reconciliation marker so onTick can run the hook chain later.
-/// Returns `true` if the UPDATE affected at least one row.
-pub(super) fn runtime_db_fallback_complete(dispatch_id: &str, source: &str) -> bool {
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
-        return false;
-    };
-    let db_path = root.join("data/agentdesk.sqlite");
-    let Ok(conn) = rusqlite::Connection::open(&db_path) else {
-        return false;
-    };
-    let result_json = format!("{{\"completion_source\":\"{source}\",\"needs_reconcile\":true}}");
-    let changed = conn
-        .execute(
-            "UPDATE task_dispatches SET status = 'completed', result = ?1, \
-             updated_at = datetime('now') WHERE id = ?2 AND status IN ('pending', 'dispatched')",
-            rusqlite::params![result_json, dispatch_id],
-        )
-        .unwrap_or(0);
-    if changed > 0 {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
-        )
-        .ok();
-    }
-    changed > 0
-}
-
-/// Unlike review dispatches (which auto-complete on session idle), these types
-/// require an explicit PATCH so the pipeline can advance deterministically.
-/// Fail a dispatch with retry on PATCH failure.
-async fn fail_dispatch_with_retry(api_port: u16, dispatch_id: Option<&str>, error_msg: &str) {
-    let Some(dispatch_id) = dispatch_id else {
-        return;
-    };
-    let url = local_api_url(api_port, &format!("/api/dispatches/{dispatch_id}"));
-    let payload = serde_json::json!({
-        "status": "failed",
-        "result": {"error": error_msg.chars().take(500).collect::<String>()}
-    });
-    for attempt in 1..=3 {
-        match reqwest::Client::new()
-            .patch(&url)
-            .json(&payload)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ Dispatch {dispatch_id} failed (transport error)");
-                return;
-            }
-            _ => {
-                if attempt < 3 {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
-            }
-        }
-    }
-    // Fallback: direct DB update to prevent orphan dispatch.
-    // Also leave a reconciliation marker so onTick can run the hook chain later.
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    eprintln!(
-        "  [{ts}] ❌ PATCH failed after 3 retries, falling back to direct DB for {dispatch_id}"
-    );
-    if let Some(root) = crate::cli::agentdesk_runtime_root() {
-        let db_path = root.join("data/agentdesk.sqlite");
-        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-            let result_json = serde_json::json!({"error": error_msg.chars().take(500).collect::<String>(), "fallback": true}).to_string();
-            let _ = conn.execute(
-                "UPDATE task_dispatches SET status = 'failed', result = ?1, updated_at = datetime('now') WHERE id = ?2 AND status = 'pending'",
-                rusqlite::params![result_json, dispatch_id],
-            );
-            // Leave reconciliation marker for onTick to pick up and run hook chain
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
-            );
-        }
-    }
-}
-
-/// Complete an implementation/rework dispatch via finalize_dispatch (#143).
-///
-/// Retries finalize_dispatch 3× with 1-second backoff. On exhaustion, falls back
-/// to direct DB UPDATE + reconciliation marker for onTick hook chain.
-/// When Db/Engine are unavailable, retries API PATCH 3× then DB fallback.
-async fn complete_work_dispatch_on_turn_end(
-    shared: &Arc<super::SharedData>,
-    dispatch_id: Option<&str>,
-) {
-    let Some(dispatch_id) = dispatch_id else {
-        return;
-    };
-    let Some(snapshot) = fetch_dispatch_snapshot(shared.api_port, dispatch_id).await else {
-        fail_dispatch_with_retry(
-            shared.api_port,
-            Some(dispatch_id),
-            "dispatch snapshot fetch failed",
-        )
-        .await;
-        return;
-    };
-    if snapshot.status != "pending" {
-        return;
-    }
-    match snapshot.dispatch_type.as_str() {
-        "implementation" | "rework" => {}
-        _ => return,
-    }
-
-    // Direct finalize_dispatch with retry — single completion authority (#143)
-    if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
-        for attempt in 1..=3u8 {
-            match crate::dispatch::finalize_dispatch(
-                db,
-                engine,
-                dispatch_id,
-                "turn_bridge_explicit",
-                None,
-            ) {
-                Ok(_) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id}",
-                        dtype = snapshot.dispatch_type,
-                    );
-                    crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
-                    return;
-                }
-                Err(e) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
-                        "  [{ts}] ⚠ finalize_dispatch failed for {dispatch_id} (attempt {attempt}/3): {e}"
-                    );
-                    if attempt < 3 {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
-                }
-            }
-        }
-        // All retries exhausted — DB fallback via pool, then runtime-root file
-        let fallback_ok = db.separate_conn().ok().map_or(false, |conn| {
-            let changed = conn.execute(
-                "UPDATE task_dispatches SET status = 'completed', \
-                 result = '{\"completion_source\":\"turn_bridge_db_fallback\",\"needs_reconcile\":true}', \
-                 updated_at = datetime('now') WHERE id = ?1 AND status IN ('pending', 'dispatched')",
-                [dispatch_id],
-            ).unwrap_or(0);
-            if changed > 0 {
-                conn.execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
-                ).ok();
-            }
-            changed > 0
-        });
-        if !fallback_ok {
-            let ok = runtime_db_fallback_complete(dispatch_id, "turn_bridge_db_fallback");
-            if !ok {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
-                    "  [{ts}] 🔴 CRITICAL: all completion paths exhausted for dispatch {dispatch_id} — dispatch stranded"
-                );
-            }
-        }
-    } else {
-        // Db/Engine not available — fall back to API PATCH with retry
-        let url = local_api_url(shared.api_port, &format!("/api/dispatches/{dispatch_id}"));
-        let payload = serde_json::json!({
-            "status": "completed",
-            "result": { "completion_source": "turn_bridge_explicit" },
-        });
-        for attempt in 1..=3u8 {
-            match reqwest::Client::new()
-                .patch(&url)
-                .json(&payload)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id} (via API)",
-                        dtype = snapshot.dispatch_type,
-                    );
-                    return;
-                }
-                Ok(resp) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
-                        "  [{ts}] ⚠ Explicit dispatch completion failed (attempt {attempt}/3): HTTP {}",
-                        resp.status()
-                    );
-                }
-                Err(e) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
-                        "  [{ts}] ⚠ Explicit dispatch completion error (attempt {attempt}/3): {e}"
-                    );
-                }
-            }
-            if attempt < 3 {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-        }
-        // API retries exhausted — runtime-root DB fallback
-        if !runtime_db_fallback_complete(dispatch_id, "turn_bridge_db_fallback") {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] 🔴 CRITICAL: all completion paths exhausted for dispatch {dispatch_id} — dispatch stranded"
-            );
-        }
-    }
-}
+// Items used by spawn_turn_bridge from submodules
+use completion_guard::{complete_work_dispatch_on_turn_end, fail_dispatch_with_retry};
+use recovery_text::{
+    auto_retry_with_history, clear_local_session_state, handle_gemini_retry_boundary,
+    output_file_has_stale_resume_error_after_offset, reset_session_for_auto_retry,
+    resolve_done_response, stream_error_has_stale_resume_error,
+    stream_error_requires_terminal_session_reset,
+};
+use tmux_runtime::{
+    is_dcserver_restart_command, persisted_context_tokens, should_resume_watcher_after_turn,
+    total_context_tokens,
+};
 
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
@@ -877,11 +102,12 @@ pub(super) fn spawn_turn_bridge(
         let mut tmux_handed_off = false;
         let mut transport_error = false;
         let mut resume_failure_detected = false;
+        let mut terminal_session_reset_required = false;
         let mut restart_recovery_handoff = false;
         let mut recovery_retry = false;
         let mut last_adk_heartbeat = std::time::Instant::now();
         let current_msg_id = bridge.current_msg_id;
-        let response_sent_offset = bridge.response_sent_offset;
+        let mut response_sent_offset = bridge.response_sent_offset;
         let mut tmux_last_offset = bridge.tmux_last_offset;
         let mut new_session_id = bridge.new_session_id.clone();
         let defer_watcher_resume = bridge.defer_watcher_resume;
@@ -927,14 +153,14 @@ pub(super) fn spawn_turn_bridge(
         while !done {
             let mut state_dirty = false;
 
-            if cancel_token.cancelled.load(Ordering::Relaxed) {
+            if cancel_requested(Some(cancel_token.as_ref())) {
                 cancelled = true;
                 break;
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-            if cancel_token.cancelled.load(Ordering::Relaxed) {
+            if cancel_requested(Some(cancel_token.as_ref())) {
                 cancelled = true;
                 break;
             }
@@ -942,6 +168,24 @@ pub(super) fn spawn_turn_bridge(
             loop {
                 match rx.try_recv() {
                     Ok(msg) => match msg {
+                        StreamMessage::RetryBoundary => {
+                            if provider == ProviderKind::Gemini
+                                && handle_gemini_retry_boundary(
+                                    &mut full_response,
+                                    &mut current_tool_line,
+                                    &mut last_tool_name,
+                                    &mut last_tool_summary,
+                                    &mut any_tool_used,
+                                    &mut has_post_tool_text,
+                                    &mut response_sent_offset,
+                                    &mut last_edit_text,
+                                    &mut new_session_id,
+                                    &mut inflight_state,
+                                )
+                            {
+                                state_dirty = true;
+                            }
+                        }
                         StreamMessage::Init { session_id: sid } => {
                             new_session_id = Some(sid.clone());
                             inflight_state.session_id = Some(sid);
@@ -1094,6 +338,8 @@ pub(super) fn spawn_turn_bridge(
                         } => {
                             let is_stale_resume =
                                 stream_error_has_stale_resume_error(&message, &stderr);
+                            let session_reset_required =
+                                stream_error_requires_terminal_session_reset(&message, &stderr);
                             transport_error = true;
                             let combined = format!("{} {}", message, stderr).to_lowercase();
                             if combined.contains("prompt is too long")
@@ -1130,6 +376,16 @@ pub(super) fn spawn_turn_bridge(
                             } else {
                                 full_response = format!("Error: {}", message);
                             }
+                            if session_reset_required {
+                                terminal_session_reset_required = true;
+                                clear_local_session_state(&mut new_session_id, &mut inflight_state);
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                eprintln!(
+                                    "  [{ts}] ⚠ Clearing stored provider session after terminal {} session failure (channel {})",
+                                    provider.as_str(),
+                                    channel_id,
+                                );
+                            }
                             inflight_state.full_response = full_response.clone();
                             state_dirty = true;
                             done = true;
@@ -1162,23 +418,39 @@ pub(super) fn spawn_turn_bridge(
                             inflight_state.input_fifo_path = Some(input_fifo_path);
                             inflight_state.last_offset = last_offset;
 
-                            let already_watching =
-                                shared_owned.tmux_watchers.contains_key(&channel_id);
-                            if !already_watching {
-                                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
-                                let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
-                                let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
-                                let turn_delivered =
-                                    Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                let handle = TmuxWatcherHandle {
-                                    paused: paused.clone(),
-                                    resume_offset: resume_offset.clone(),
-                                    cancel: cancel.clone(),
-                                    pause_epoch: pause_epoch.clone(),
-                                    turn_delivered: turn_delivered.clone(),
-                                };
-                                shared_owned.tmux_watchers.insert(channel_id, handle);
+                            // #226: Atomic claim via try_claim_watcher
+                            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                            let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
+                            let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
+                            let turn_delivered =
+                                Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            let handle = TmuxWatcherHandle {
+                                paused: paused.clone(),
+                                resume_offset: resume_offset.clone(),
+                                cancel: cancel.clone(),
+                                pause_epoch: pause_epoch.clone(),
+                                turn_delivered: turn_delivered.clone(),
+                            };
+                            let watcher_claimed = {
+                                #[cfg(unix)]
+                                {
+                                    // #243: Use claim_or_replace to avoid races where
+                                    // a stale watcher blocks the new turn's watcher.
+                                    super::tmux::claim_or_replace_watcher(
+                                        &shared_owned.tmux_watchers,
+                                        channel_id,
+                                        handle,
+                                    );
+                                    true
+                                }
+                                #[cfg(not(unix))]
+                                {
+                                    let _ = handle;
+                                    false
+                                }
+                            };
+                            if watcher_claimed {
                                 #[cfg(unix)]
                                 {
                                     let http_bg = http.clone();
@@ -1318,7 +590,12 @@ pub(super) fn spawn_turn_bridge(
         // Skip if: cancelled, prompt too long, or transport error.
         // transport_error is set by StreamMessage::Error — not substring matching.
         if !cancelled && !is_prompt_too_long && !transport_error {
-            complete_work_dispatch_on_turn_end(&shared_owned, dispatch_id.as_deref()).await;
+            complete_work_dispatch_on_turn_end(
+                &shared_owned,
+                dispatch_id.as_deref(),
+                adk_cwd.as_deref(),
+            )
+            .await;
         } else if transport_error && !cancelled {
             // Transport error — fail the dispatch instead of completing
             fail_dispatch_with_retry(
@@ -1343,10 +620,10 @@ pub(super) fn spawn_turn_bridge(
         )
         .await;
 
-        // ─── Auto-compact: send /compact if context window usage exceeds threshold ───
-        // Only for non-dispatch (main channel) sessions with a live tmux session.
+        // ─── Auto-compact: DISABLED — token counting still unreliable (224% after restart).
+        // #227 re-enabled but measurement is still wrong. Keep disabled until root cause fixed.
         #[cfg(unix)]
-        if dispatch_id.is_none() && !is_prompt_too_long {
+        if false && dispatch_id.is_none() && !is_prompt_too_long {
             let total_tokens =
                 total_context_tokens(accumulated_input_tokens, accumulated_output_tokens);
             let ctx_cfg = super::adk_session::fetch_context_thresholds(shared_owned.api_port).await;
@@ -1575,14 +852,15 @@ pub(super) fn spawn_turn_bridge(
         } else if cancelled {
             if let Ok(guard) = cancel_token.child_pid.lock() {
                 if let Some(pid) = *guard {
-                    claude::kill_pid_tree(pid);
+                    crate::services::process::kill_pid_tree(pid);
                 }
             }
 
             full_response = if full_response.trim().is_empty() {
                 "[Stopped]".to_string()
             } else {
-                let formatted = format_for_discord(&full_response);
+                let formatted =
+                    super::formatting::format_for_discord_with_provider(&full_response, &provider);
                 format!("{}\n\n[Stopped]", formatted)
             };
 
@@ -1838,7 +1116,8 @@ pub(super) fn spawn_turn_bridge(
                     )
                     .await;
             } else {
-                full_response = format_for_discord(&full_response);
+                full_response =
+                    super::formatting::format_for_discord_with_provider(&full_response, &provider);
                 let _ = super::formatting::replace_long_message_raw(
                     &http,
                     channel_id,
@@ -1939,7 +1218,7 @@ pub(super) fn spawn_turn_bridge(
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
                 if !session.cleared && !is_prompt_too_long {
-                    if resume_failure_detected {
+                    if resume_failure_detected || terminal_session_reset_required {
                         session.session_id = None;
                     } else if let Some(sid) = new_session_id {
                         session.session_id = Some(sid);
@@ -1962,7 +1241,7 @@ pub(super) fn spawn_turn_bridge(
         };
 
         // Persist provider session_id to DB so it survives dcserver restarts.
-        if !resume_failure_detected {
+        if !resume_failure_detected && !terminal_session_reset_required {
             if let (Some(ref session_key), Some(ref persisted_sid)) =
                 (adk_session_key, session_id_to_persist)
             {
@@ -1973,6 +1252,11 @@ pub(super) fn spawn_turn_bridge(
                     shared_owned.api_port,
                 )
                 .await;
+            }
+        } else if terminal_session_reset_required {
+            if let Some(ref session_key) = adk_session_key {
+                super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
+                    .await;
             }
         }
 
@@ -2197,6 +1481,7 @@ pub(super) fn spawn_turn_bridge(
         // completion_tx is sent automatically by CompletionGuard on drop
     });
 }
+<<<<<<< HEAD:src/services/discord/turn_bridge.rs
 
 #[cfg(test)]
 mod tests {
@@ -2527,3 +1812,5 @@ mod tests {
         assert_eq!(res, None);
     }
 }
+=======
+>>>>>>> upstream/main:src/services/discord/turn_bridge/mod.rs

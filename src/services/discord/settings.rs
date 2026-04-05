@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use poise::serenity_prelude as serenity;
 
-use crate::services::claude::DEFAULT_ALLOWED_TOOLS;
+use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::provider::ProviderKind;
 
 use super::DiscordBotSettings;
@@ -35,6 +35,32 @@ pub(crate) fn discord_token_hash(token: &str) -> String {
     hasher.update(token.as_bytes());
     let result = hasher.finalize();
     format!("discord_{}", hex::encode(&result[..8]))
+}
+
+fn default_allowed_tools_for_provider(provider: &ProviderKind) -> Vec<String> {
+    let _ = provider;
+    DEFAULT_ALLOWED_TOOLS
+        .iter()
+        .map(|tool| (*tool).to_string())
+        .collect()
+}
+
+fn find_bot_settings_entry<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    token: &str,
+) -> Option<(&'a String, &'a serde_json::Value)> {
+    let canonical_key = discord_token_hash(token);
+    if let Some((key, entry)) = obj.get_key_value(&canonical_key) {
+        return Some((key, entry));
+    }
+
+    obj.iter().find(|(_, entry)| {
+        entry
+            .get("token")
+            .and_then(|value| value.as_str())
+            .map(|value| value == token)
+            .unwrap_or(false)
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -473,8 +499,10 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
         return DiscordBotSettings::default();
     };
-    let key = discord_token_hash(token);
-    let Some(entry) = json.get(&key) else {
+    let Some(obj) = json.as_object() else {
+        return DiscordBotSettings::default();
+    };
+    let Some((_, entry)) = find_bot_settings_entry(obj, token) else {
         return DiscordBotSettings::default();
     };
     let agent = entry
@@ -517,6 +545,10 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(json_u64).collect())
         .unwrap_or_default();
+    let allow_all_users = entry
+        .get("allow_all_users")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let allowed_bot_ids = entry
         .get("allowed_bot_ids")
         .and_then(|v| v.as_array())
@@ -536,20 +568,20 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         })
         .unwrap_or_default();
     let allowed_tools = match entry.get("allowed_tools") {
-        None => DEFAULT_ALLOWED_TOOLS
-            .iter()
-            .map(|tool| (*tool).to_string())
-            .collect(),
+        None => default_allowed_tools_for_provider(&provider),
         Some(value) => {
             let Some(tools_arr) = value.as_array() else {
+                let allowed_tools = default_allowed_tools_for_provider(&provider);
                 return DiscordBotSettings {
                     agent,
                     provider,
+                    allowed_tools,
                     allowed_channel_ids,
                     owner_user_id,
                     last_sessions,
                     last_remotes,
                     allowed_user_ids,
+                    allow_all_users,
                     allowed_bot_ids,
                     ..DiscordBotSettings::default()
                 };
@@ -567,6 +599,7 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         channel_model_overrides,
         owner_user_id,
         allowed_user_ids,
+        allow_all_users,
         allowed_bot_ids,
     }
 }
@@ -596,12 +629,26 @@ pub(super) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
         "last_remotes": settings.last_remotes,
         "channel_model_overrides": settings.channel_model_overrides,
         "allowed_user_ids": settings.allowed_user_ids,
+        "allow_all_users": settings.allow_all_users,
         "allowed_bot_ids": settings.allowed_bot_ids,
     });
     if let Some(owner_id) = settings.owner_user_id {
         entry["owner_user_id"] = serde_json::json!(owner_id);
     }
-    json[key] = entry;
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    obj.retain(|existing_key, existing_entry| {
+        if existing_key == &key {
+            return true;
+        }
+        existing_entry
+            .get("token")
+            .and_then(|value| value.as_str())
+            .map(|existing_token| existing_token != token)
+            .unwrap_or(true)
+    });
+    obj.insert(key, entry);
     if let Ok(s) = serde_json::to_string_pretty(&json) {
         let _ = fs::write(&path, s);
     }
@@ -621,7 +668,8 @@ pub fn load_discord_bot_launch_configs() -> Vec<DiscordBotLaunchConfig> {
         return Vec::new();
     };
 
-    let mut configs = Vec::new();
+    let mut configs_by_token: std::collections::BTreeMap<String, DiscordBotLaunchConfig> =
+        std::collections::BTreeMap::new();
     for (hash_key, entry) in obj {
         let Some(token) = entry.get("token").and_then(|v| v.as_str()) else {
             continue;
@@ -631,13 +679,24 @@ pub fn load_discord_bot_launch_configs() -> Vec<DiscordBotLaunchConfig> {
             .and_then(|v| v.as_str())
             .map(ProviderKind::from_str_or_unsupported)
             .unwrap_or(ProviderKind::Claude);
-        configs.push(DiscordBotLaunchConfig {
+        let config = DiscordBotLaunchConfig {
             hash_key: hash_key.clone(),
             token: token.to_string(),
             provider,
-        });
+        };
+        let canonical_key = discord_token_hash(token);
+        match configs_by_token.get(token) {
+            Some(existing) if existing.hash_key == canonical_key => {}
+            _ if hash_key == &canonical_key => {
+                configs_by_token.insert(token.to_string(), config);
+            }
+            None => {
+                configs_by_token.insert(token.to_string(), config);
+            }
+            Some(_) => {}
+        }
     }
-    configs
+    configs_by_token.into_values().collect()
 }
 
 /// Resolve a Discord bot token from its hash by searching bot_settings.json
@@ -664,6 +723,7 @@ mod tests {
     use poise::serenity_prelude::ChannelId;
     use tempfile::TempDir;
 
+    use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
     use crate::services::provider::ProviderKind;
 
     use super::{
@@ -744,6 +804,37 @@ mod tests {
             assert_eq!(
                 settings.allowed_tools,
                 vec!["WebFetch".to_string(), "Bash".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_uses_default_allowed_tools_for_qwen_when_omitted() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "qwen-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "provider": "qwen"
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert_eq!(settings.provider, ProviderKind::Qwen);
+            assert_eq!(
+                settings.allowed_tools,
+                DEFAULT_ALLOWED_TOOLS
+                    .iter()
+                    .map(|tool| (*tool).to_string())
+                    .collect::<Vec<_>>()
             );
         });
     }
@@ -863,6 +954,62 @@ mod tests {
     }
 
     #[test]
+    fn test_load_bot_settings_falls_back_to_legacy_same_token_entry() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let json = serde_json::json!({
+                "claude": {
+                    "token": token,
+                    "owner_user_id": 42,
+                    "allowed_user_ids": [7],
+                    "allow_all_users": true
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert_eq!(settings.owner_user_id, Some(42));
+            assert_eq!(settings.allowed_user_ids, vec![7]);
+            assert!(settings.allow_all_users);
+        });
+    }
+
+    #[test]
+    fn test_load_bot_launch_configs_dedupes_same_token_preferring_hash_key() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "shared-token";
+            let canonical_key = discord_token_hash(token);
+            let other_token = "other-token";
+            let other_key = discord_token_hash(other_token);
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "claude": { "token": token, "provider": "claude" },
+                    canonical_key.clone(): { "token": token, "provider": "codex" },
+                    other_key: { "token": other_token, "provider": "claude" }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            let configs = load_discord_bot_launch_configs();
+            assert_eq!(configs.len(), 2);
+
+            let shared = configs.iter().find(|config| config.token == token).unwrap();
+            assert_eq!(shared.hash_key, canonical_key);
+            assert_eq!(shared.provider, ProviderKind::Codex);
+        });
+    }
+
+    #[test]
     fn test_save_bot_settings_persists_channel_model_overrides() {
         with_temp_home(|_temp_home: &TempDir| {
             let token = "test-token";
@@ -905,6 +1052,77 @@ mod tests {
 
             let loaded = load_bot_settings(token);
             assert_eq!(loaded.allowed_channel_ids, vec![123, 456]);
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_removes_same_token_legacy_entries() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let canonical_key = discord_token_hash(token);
+            let other_token = "other-token";
+            let other_key = discord_token_hash(other_token);
+            let path = settings_dir.join("bot_settings.json");
+            let json = serde_json::json!({
+                "claude": { "token": token, "owner_user_id": 1 },
+                other_key.clone(): { "token": other_token, "owner_user_id": 2 }
+            });
+            fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings.owner_user_id = Some(42);
+            save_bot_settings(token, &settings);
+
+            let raw = fs::read_to_string(&path).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let obj = saved.as_object().unwrap();
+            assert!(obj.get("claude").is_none());
+            assert!(obj.get(&canonical_key).is_some());
+            assert!(obj.get(&other_key).is_some());
+            assert_eq!(obj.len(), 2);
+
+            let loaded = load_bot_settings(token);
+            assert_eq!(loaded.owner_user_id, Some(42));
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_reads_allow_all_users() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "allow_all_users": true
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert!(settings.allow_all_users);
+        });
+    }
+
+    #[test]
+    fn test_save_bot_settings_persists_allow_all_users() {
+        with_temp_home(|_temp_home: &TempDir| {
+            let token = "test-token";
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings.allow_all_users = true;
+
+            save_bot_settings(token, &settings);
+
+            let loaded = load_bot_settings(token);
+            assert!(loaded.allow_all_users);
         });
     }
 

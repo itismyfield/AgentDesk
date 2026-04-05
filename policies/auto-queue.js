@@ -44,8 +44,7 @@ var autoQueue = {
     var doneEntries = agentdesk.db.query(
       "SELECT e.run_id, COALESCE(e.thread_group, 0) as thread_group FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
-      "WHERE e.kanban_card_id = ? AND e.status = 'done' " +
-      "AND e.dispatch_id IS NOT NULL " +
+      "WHERE e.kanban_card_id = ? AND e.status IN ('done', 'skipped') " +
       "AND r.status IN ('active', 'paused') " +
       "ORDER BY e.completed_at DESC LIMIT 1",
       [payload.card_id]
@@ -62,7 +61,7 @@ var autoQueue = {
     );
     if (remaining.length > 0 && remaining[0].cnt === 0) {
       var runInfo = agentdesk.db.query(
-        "SELECT unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count FROM auto_queue_runs WHERE id = ?",
+        "SELECT repo, unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count FROM auto_queue_runs WHERE id = ?",
         [runId]
       );
       if (runInfo.length > 0 && runInfo[0].unified_thread_id) {
@@ -103,6 +102,7 @@ var autoQueue = {
         "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
         [runId]
       );
+      notifyRunCompleted(runId, runInfo.length > 0 ? runInfo[0] : null);
       return;
     }
 
@@ -328,26 +328,13 @@ var autoQueue = {
       []
     );
 
-    // #214: Exclude dispatch_ids that are still in pendingIntents (not yet drained to DB).
-    // dispatch.create() pushes a CreateDispatch intent but DB INSERT happens after hook completes.
-    // Without this filter, path 2 would immediately reset entries created by path 1 in the same tick.
-    var pendingDispatchIds = {};
-    if (agentdesk.__pendingIntents) {
-      for (var pi = 0; pi < agentdesk.__pendingIntents.length; pi++) {
-        var intent = agentdesk.__pendingIntents[pi];
-        if (intent.type === "create_dispatch" && intent.dispatch_id) {
-          pendingDispatchIds[intent.dispatch_id] = true;
-        }
-      }
-    }
+    // #214: pendingIntents check REMOVED — it caused permanent recovery block when
+    // intent drain failed (dispatch never created in DB but intent stayed in array
+    // across ticks, skipping recovery forever). The 2-min grace period on
+    // dispatched_at is sufficient to avoid false detection within the same tick.
 
     for (var j = 0; j < stuckDispatched.length; j++) {
       var stuck = stuckDispatched[j];
-      // Skip entries whose dispatch is still pending in intent queue
-      if (stuck.dispatch_id && pendingDispatchIds[stuck.dispatch_id]) {
-        agentdesk.log.info("[auto-queue] onTick1min: skipping stuck check for entry " + stuck.id + " — dispatch " + stuck.dispatch_id + " is pending in intent queue");
-        continue;
-      }
       agentdesk.log.info("[auto-queue] onTick1min: resetting stuck dispatched entry " + stuck.id + " (dispatch " + (stuck.dispatch_id || "NULL") + " is orphan/cancelled/failed/phantom)");
       agentdesk.db.execute(
         "UPDATE auto_queue_entries SET status = 'pending', dispatch_id = NULL, dispatched_at = NULL WHERE id = ?",
@@ -356,6 +343,70 @@ var autoQueue = {
     }
   }
 };
+
+function _isDispatchableState(state, cfg) {
+  if (!cfg || !cfg.transitions) return false;
+  var hasGatedOut = false;
+  var hasGatedIn = false;
+  for (var i = 0; i < cfg.transitions.length; i++) {
+    var t = cfg.transitions[i];
+    if (t.from === state && t.type === "gated") hasGatedOut = true;
+    if (t.to === state && t.type === "gated") hasGatedIn = true;
+  }
+  return hasGatedOut && !hasGatedIn;
+}
+
+function _dispatchableTargets(cfg) {
+  if (!cfg || !cfg.states) return [];
+  var targets = [];
+
+  // #255: requested is the canonical preflight anchor when present.
+  if (agentdesk.pipeline.hasState("requested", cfg)) {
+    targets.push("requested");
+  }
+
+  for (var i = 0; i < cfg.states.length; i++) {
+    var s = cfg.states[i];
+    if (s.terminal) continue;
+    if (!_isDispatchableState(s.id, cfg)) continue;
+    if (targets.indexOf(s.id) === -1) targets.push(s.id);
+  }
+  return targets;
+}
+
+function _freePathToDispatchable(from, cfg) {
+  var targets = _dispatchableTargets(cfg);
+  if (targets.length === 0) return null;
+  if (targets.indexOf(from) >= 0) return [];
+  if (!cfg || !cfg.transitions) return null;
+
+  var queue = [from];
+  var visited = {};
+  var parent = {};
+  visited[from] = true;
+
+  while (queue.length > 0) {
+    var cur = queue.shift();
+    for (var i = 0; i < cfg.transitions.length; i++) {
+      var t = cfg.transitions[i];
+      if (t.from !== cur || t.type !== "free" || visited[t.to]) continue;
+      parent[t.to] = cur;
+      if (targets.indexOf(t.to) >= 0) {
+        var path = [t.to];
+        var p = cur;
+        while (p && p !== from) {
+          path.unshift(p);
+          p = parent[p];
+        }
+        return path;
+      }
+      visited[t.to] = true;
+      queue.push(t.to);
+    }
+  }
+
+  return null;
+}
 
 // ── Shared dispatch helper (group-aware) (#140) ─────────────────
 function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
@@ -397,6 +448,75 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
   var entry = nextEntry[0];
   agentdesk.log.info("[auto-queue] Dispatching group " + threadGroup + " entry for " + agentId + ": " + entry.kanban_card_id);
 
+  // #255/#261: Walk the card to the dispatchable preflight anchor before creating
+  // the implementation dispatch. In the default pipeline this is "requested";
+  // dispatch.create() then advances requested → in_progress.
+  var pCfg = agentdesk.pipeline.resolveForCard(entry.kanban_card_id) || agentdesk.pipeline.getConfig();
+  var cardStatus = agentdesk.db.query(
+    "SELECT status FROM kanban_cards WHERE id = ?",
+    [entry.kanban_card_id]
+  );
+  if (cardStatus.length > 0) {
+    var cur = cardStatus[0].status;
+    var walked = false;
+    var walkPath = _freePathToDispatchable(cur, pCfg);
+
+    if (walkPath === null && !_isDispatchableState(cur, pCfg)) {
+      agentdesk.log.warn("[auto-queue] Card " + entry.kanban_card_id + " stuck at " + cur + ", cannot reach a dispatchable preflight state — skipping dispatch");
+      return;
+    }
+
+    if (walkPath && walkPath.length > 0) {
+      for (var step = 0; step < walkPath.length; step++) {
+        var nextFree = walkPath[step];
+        try {
+          agentdesk.kanban.setStatus(entry.kanban_card_id, nextFree);
+          cur = nextFree;
+          walked = true;
+        } catch (e) {
+          agentdesk.log.warn("[auto-queue] Free-walk failed at " + cur + " → " + nextFree + " for " + entry.kanban_card_id + ": " + e);
+          return;
+        }
+      }
+    }
+
+    if (!_isDispatchableState(cur, pCfg)) {
+      agentdesk.log.warn("[auto-queue] Card " + entry.kanban_card_id + " is at " + cur + " after walk but still not dispatchable — skipping dispatch");
+      return;
+    }
+
+    if (walked) {
+      agentdesk.log.info("[auto-queue] Card " + entry.kanban_card_id + " walked to " + cur + " (dispatchable preflight)");
+    }
+  }
+
+  // #256: Check preflight result before creating dispatch
+  var meta = agentdesk.db.query(
+    "SELECT metadata FROM kanban_cards WHERE id = ?",
+    [entry.kanban_card_id]
+  );
+  if (meta.length > 0 && meta[0].metadata) {
+    try {
+      var parsed = JSON.parse(meta[0].metadata);
+      if (parsed.preflight_status === "consult_required") {
+        // Create consultation dispatch instead of implementation
+        _createConsultationDispatch(entry, agentId, parsed);
+        return;
+      }
+      if (parsed.preflight_status === "invalid" || parsed.preflight_status === "already_applied") {
+        // Card should already be moved to done, skip
+        agentdesk.log.info("[auto-queue] Skipping " + entry.kanban_card_id + " — preflight: " + parsed.preflight_status);
+        agentdesk.db.execute(
+          "UPDATE auto_queue_entries SET status = 'skipped' WHERE id = ?",
+          [entry.id]
+        );
+        return;
+      }
+    } catch (e) {
+      // metadata parse error, continue with dispatch
+    }
+  }
+
   try {
     // #173: Use dispatch.create which defers INSERT via intent.
     // Mark entry as dispatched ONLY after dispatch.create succeeds validation.
@@ -419,6 +539,48 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
     }
   } catch (e) {
     agentdesk.log.warn("[auto-queue] dispatch failed for " + entry.kanban_card_id + " (group " + threadGroup + "), will retry on next tick: " + e);
+  }
+}
+
+// ── Consultation dispatch helper (#256) ─────────────────────────
+function _createConsultationDispatch(entry, agentId, preflightMeta) {
+  // Find the counterpart agent for consultation
+  var agent = agentdesk.db.query(
+    "SELECT cli_provider FROM agents WHERE id = ?",
+    [agentId]
+  );
+  var provider = (agent.length > 0) ? agent[0].cli_provider : "claude";
+  var counterProvider = (provider === "claude") ? "codex" : "claude";
+  var counterAgent = agentdesk.db.query(
+    "SELECT id FROM agents WHERE cli_provider = ? LIMIT 1",
+    [counterProvider]
+  );
+  var consultAgentId = (counterAgent.length > 0) ? counterAgent[0].id : agentId;
+
+  try {
+    var dispatchId = agentdesk.dispatch.create(
+      entry.kanban_card_id,
+      consultAgentId,
+      "consultation",
+      "[Consultation] " + entry.title
+    );
+    if (dispatchId) {
+      // Update metadata with consultation info
+      var newMeta = JSON.parse(JSON.stringify(preflightMeta));
+      newMeta.consultation_status = "pending";
+      newMeta.consultation_dispatch_id = dispatchId;
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
+        [JSON.stringify(newMeta), entry.kanban_card_id]
+      );
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'dispatched', dispatch_id = ?, dispatched_at = datetime('now') WHERE id = ?",
+        [dispatchId, entry.id]
+      );
+      agentdesk.log.info("[auto-queue] Created consultation dispatch " + dispatchId + " for " + entry.kanban_card_id);
+    }
+  } catch (e) {
+    agentdesk.log.warn("[auto-queue] Consultation dispatch failed for " + entry.kanban_card_id + ": " + e);
   }
 }
 
@@ -451,6 +613,66 @@ function dispatchNextEntry(agentId) {
 
   var entry = nextEntry[0];
   dispatchNextEntryInGroup(agentId, entry.run_id, entry.thread_group);
+}
+
+function collectRunMainChannels(runId, runInfo) {
+  var targets = {};
+
+  if (runInfo && runInfo.unified_thread_id) {
+    try {
+      var map = JSON.parse(runInfo.unified_thread_id);
+      for (var key in map) {
+        if (!Object.prototype.hasOwnProperty.call(map, key)) continue;
+        var value = map[key];
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          for (var nestedKey in value) {
+            if (!Object.prototype.hasOwnProperty.call(value, nestedKey)) continue;
+            if (/^\d+$/.test(nestedKey)) targets[nestedKey] = true;
+          }
+        } else if (/^\d+$/.test(key)) {
+          targets[key] = true;
+        }
+      }
+    } catch (e) {
+      agentdesk.log.warn("[auto-queue] Failed to parse unified_thread_id for run " + runId + ": " + e);
+    }
+  }
+
+  var channelIds = Object.keys(targets);
+  if (channelIds.length > 0) return channelIds;
+
+  var fallback = agentdesk.db.query(
+    "SELECT DISTINCT COALESCE(a.discord_channel_id, '') as channel_id " +
+    "FROM auto_queue_entries e " +
+    "JOIN agents a ON a.id = e.agent_id " +
+    "WHERE e.run_id = ? AND COALESCE(a.discord_channel_id, '') != ''",
+    [runId]
+  );
+  for (var i = 0; i < fallback.length; i++) {
+    if (fallback[i].channel_id) targets[fallback[i].channel_id] = true;
+  }
+  return Object.keys(targets);
+}
+
+function notifyRunCompleted(runId, runInfo) {
+  var channelIds = collectRunMainChannels(runId, runInfo);
+  if (channelIds.length === 0) {
+    agentdesk.log.info("[auto-queue] Run " + runId + " complete — no main channel found for notify");
+    return;
+  }
+
+  var totals = agentdesk.db.query(
+    "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ?",
+    [runId]
+  );
+  var totalCount = (totals.length > 0) ? totals[0].cnt : 0;
+  var repoLabel = (runInfo && runInfo.repo) ? runInfo.repo : "auto-queue";
+  var shortRun = runId.substring(0, 8);
+  var message = "자동큐 완료: " + repoLabel + " / run " + shortRun + " / " + totalCount + "개";
+
+  for (var i = 0; i < channelIds.length; i++) {
+    agentdesk.message.queue("channel:" + channelIds[i], message, "notify", "system");
+  }
 }
 
 agentdesk.registerPolicy(autoQueue);

@@ -45,12 +45,12 @@ transitions:
     to: backlog
     type: free
 
-  # Dispatch-gated transitions
+  # Preflight transition (no dispatch required)
   - from: ready
     to: requested
-    type: gated
-    gates: [active_dispatch]
+    type: free
 
+  # Dispatch-gated transitions
   - from: requested
     to: in_progress
     type: gated
@@ -76,6 +76,11 @@ transitions:
   # Force-only transitions (timeouts, PMD overrides)
   - from: requested
     to: pending_decision
+    type: force_only
+
+  # Revert to backlog (force-only, for cancellation/requeue)
+  - from: requested
+    to: backlog
     type: force_only
 
   - from: in_progress

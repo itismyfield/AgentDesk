@@ -34,7 +34,7 @@ export interface Department {
 }
 
 export type AgentStatus = "idle" | "working" | "break" | "offline";
-export type CliProvider = "claude" | "codex" | "gemini" | "opencode" | "copilot" | "antigravity" | "api";
+export type CliProvider = "claude" | "codex" | "gemini" | "qwen" | "opencode" | "copilot" | "antigravity" | "api";
 export type MeetingReviewDecision = "reviewing" | "approved" | "hold";
 
 export type ActivitySource = "idle" | "agentdesk";

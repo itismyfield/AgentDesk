@@ -401,7 +401,7 @@ pub fn run(
     // Using kill_child_tree() instead of child.kill() ensures that child processes
     // spawned by Claude (e.g. cmd.exe on Windows, bash on Unix) are also terminated.
     // Without this, those descendants survive as orphan processes.
-    crate::services::claude::kill_child_tree(&mut child);
+    crate::services::process::kill_child_tree(&mut child);
 
     // Write exit reason file for recovery diagnostics
     let exit_reason_path = format!("{}.exit_reason", output_file);

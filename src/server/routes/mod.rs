@@ -8,6 +8,7 @@ pub mod departments;
 pub mod discord;
 pub mod dispatched_sessions;
 pub mod dispatches;
+pub mod dm_reply;
 pub mod docs;
 pub mod github;
 pub mod github_dashboard;
@@ -28,6 +29,7 @@ mod session_activity;
 pub mod settings;
 pub mod skills_api;
 pub mod stats;
+pub mod termination_events;
 
 use axum::{
     Json, Router,
@@ -147,6 +149,8 @@ pub fn api_router(
                 .delete(kanban::delete_card),
         )
         .route("/kanban-cards/{id}/assign", post(kanban::assign_card))
+        .route("/kanban-cards/{id}/rereview", post(kanban::rereview_card))
+        .route("/re-review", post(kanban::batch_rereview))
         .route("/kanban-cards/{id}/reopen", post(kanban::reopen_card))
         .route(
             "/kanban-cards/{id}/force-transition",
@@ -196,11 +200,16 @@ pub fn api_router(
             "/dispatches/{id}",
             get(dispatches::get_dispatch).patch(dispatches::update_dispatch),
         )
+        .route("/dispatch-cancel/{id}", post(dispatches::cancel_dispatch))
         .route(
             "/internal/link-dispatch-thread",
             post(dispatches::link_dispatch_thread),
         )
         .route("/internal/card-thread", get(dispatches::get_card_thread))
+        .route(
+            "/internal/pending-dispatch-for-thread",
+            get(dispatches::get_pending_dispatch_for_thread),
+        )
         // Pipeline stages (legacy path)
         .route(
             "/pipeline-stages",
@@ -334,6 +343,11 @@ pub fn api_router(
             "/sessions/force-kill",
             post(dispatched_sessions::force_kill_session),
         )
+        // Session termination events (#212)
+        .route(
+            "/session-termination-events",
+            get(termination_events::list_termination_events),
+        )
         // Messages
         .route(
             "/messages",
@@ -341,8 +355,18 @@ pub fn api_router(
         )
         // Discord bindings
         .route("/discord-bindings", get(discord::list_bindings))
+        .route(
+            "/discord/channels/{id}/messages",
+            get(discord::channel_messages),
+        )
+        .route("/discord/channels/{id}", get(discord::channel_info))
+        // DM reply tracking (#189)
+        .route("/dm-reply/register", post(dm_reply::register_handler))
         // Round-table meetings
-        .route("/round-table-meetings", get(meetings::list_meetings))
+        .route(
+            "/round-table-meetings",
+            get(meetings::list_meetings).post(meetings::upsert_meeting),
+        )
         .route("/round-table-meetings/start", post(meetings::start_meeting))
         .route(
             "/round-table-meetings/{id}",

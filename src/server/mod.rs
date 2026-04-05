@@ -107,6 +107,19 @@ pub async fn run(
         });
     }
 
+    // #189: Spawn DM reply notification retry loop (5-min interval)
+    {
+        let dm_retry_db = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                crate::services::discord::retry_failed_dm_notifications(&dm_retry_db).await;
+            }
+        });
+    }
+
     // Resolve dashboard dist path relative to runtime root or binary location
     let dashboard_dir = crate::cli::agentdesk_runtime_root()
         .map(|r| r.join("dashboard/dist"))
@@ -226,19 +239,6 @@ fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str, label
     let start = std::time::Instant::now();
     let now_ms = chrono::Utc::now().timestamp_millis().to_string();
 
-    // Capture pre-hook max dispatch rowid so we can detect dispatches created by JS policies
-    let pre_hook_max_rowid: i64 = db
-        .lock()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT COALESCE(MAX(rowid), 0) FROM task_dispatches",
-                [],
-                |row| row.get(0),
-            )
-            .ok()
-        })
-        .unwrap_or(0);
     let key_ms = format!("last_tick_{}_ms", label);
     let key_status = format!("last_tick_{}_status", label);
 
@@ -284,11 +284,6 @@ fn fire_tick_hook_by_name(engine: &PolicyEngine, db: &Db, hook_name: &str, label
     }
 
     crate::kanban::drain_hook_side_effects(db, engine);
-
-    // Notify any dispatches created by JS policies during this hook.
-    // Without this, dispatches created in onTick (e.g., auto-queue.js dispatchNextEntry)
-    // would only be picked up by [I-0] recovery 30s later.
-    crate::dispatch::notify_hook_created_dispatches(db, pre_hook_max_rowid);
 }
 
 /// Drain pending transitions after each tier execution.

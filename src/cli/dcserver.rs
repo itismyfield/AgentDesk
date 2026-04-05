@@ -353,7 +353,11 @@ pub fn verify_dcserver_ready_since(start_offset: u64, timeout: Duration) -> Resu
             return Ok(());
         }
 
-        if recent.contains(" bot error:") || recent.contains("Error: no bot tokens found") {
+        if recent.contains("continuing in onboarding mode") {
+            return Ok(());
+        }
+
+        if recent.contains(" bot error:") {
             return Err("dcserver emitted startup error".to_string());
         }
 
@@ -451,7 +455,7 @@ pub fn parse_restart_dcserver_report_context(
                 let raw = args
                     .get(i + 1)
                     .ok_or_else(|| {
-                        "--report-provider requires one of: claude, codex, gemini".to_string()
+                        "--report-provider requires one of: claude, codex, gemini, qwen".to_string()
                     })?
                     .clone();
                 report_provider = Some(raw);
@@ -483,7 +487,7 @@ pub fn parse_restart_dcserver_report_context(
         (Some(provider_raw), Some(channel_id), current_msg_id) => {
             let provider = ProviderKind::from_str(&provider_raw).ok_or_else(|| {
                 format!(
-                    "invalid value for --report-provider: {} (expected claude, codex, or gemini)",
+                    "invalid value for --report-provider: {} (expected claude, codex, gemini, or qwen)",
                     provider_raw
                 )
             })?;
@@ -546,28 +550,15 @@ pub fn handle_restart_dcserver(
         }
     };
 
-    match std::fs::read_to_string(&settings_path) {
-        Ok(_) => {}
-        Err(_) => {
-            eprintln!("Error: {} not found.", settings_path.display());
-            eprintln!("Run 'agentdesk dcserver' after configuring bot_settings.json.");
-            write_restart_report(
-                "failed",
-                "bot_settings.json이 없어서 dcserver restart를 시작하지 못했습니다.".to_string(),
-            );
-            return;
-        }
-    }
-
+    let has_settings_file = std::fs::read_to_string(&settings_path).is_ok();
     let configs = load_discord_bot_launch_configs();
-    if configs.is_empty() {
-        eprintln!("Error: no bot tokens found in bot_settings.json");
-        write_restart_report(
-            "failed",
-            "bot_settings.json에 bot token이 없어서 dcserver restart를 시작하지 못했습니다."
-                .to_string(),
+    let onboarding_mode = !has_settings_file || configs.is_empty();
+
+    if onboarding_mode {
+        eprintln!(
+            "  ⚠ No bot tokens found in {} — dcserver will start in onboarding mode",
+            settings_path.display()
         );
-        return;
     }
 
     // Increment generation counter — every restart request gets a unique generation,
@@ -586,7 +577,11 @@ pub fn handle_restart_dcserver(
     }
 
     println!("🔄 Restarting Discord bot server...");
-    println!("   Configured bots: {}", configs.len());
+    if onboarding_mode {
+        println!("   Mode: onboarding (HTTP-only, no Discord bots)");
+    } else {
+        println!("   Configured bots: {}", configs.len());
+    }
 
     let previous_release = previous_release_link_path()
         .as_deref()
@@ -1149,6 +1144,7 @@ pub fn handle_dcserver(token: Option<String>) {
         let mut discord_engine: Option<PolicyEngine> = None;
         match db::init(&ad_config) {
             Ok(ad_db) => {
+                crate::services::termination_audit::init_audit_db(ad_db.clone());
                 // Sync agents from config → DB
                 let agent_count = ad_config.agents.len();
                 if agent_count > 0 {
@@ -1242,14 +1238,44 @@ pub fn handle_dcserver(token: Option<String>) {
             }
             None => {
                 let configs = services::discord::load_discord_bot_launch_configs();
-                if configs.is_empty() {
+                if should_run_http_only_onboarding(token.as_deref(), configs.len()) {
+                    let settings_display = settings_path
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "bot_settings.json".to_string());
                     eprintln!(
-                        "Error: no bot tokens found in {}",
-                        settings_path
-                            .as_deref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "bot_settings.json".to_string())
+                        "  ⚠ No bot tokens found in {} — waiting for HTTP server...",
+                        settings_display
                     );
+                    // Gate onboarding-ready signal on actual /api/health success.
+                    // The HTTP server is spawned async above; probe until it
+                    // responds or give up so the watchdog can trigger rollback.
+                    let health_url =
+                        config::local_api_url(api_port, "/api/health");
+                    let mut http_ok = false;
+                    for _ in 0..15 {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        if let Ok(resp) = reqwest::get(&health_url).await {
+                            if resp.status().is_success() {
+                                http_ok = true;
+                                break;
+                            }
+                        }
+                    }
+                    if http_ok {
+                        // Emit to stdout — verify_dcserver_ready_since() reads
+                        // dcserver.stdout.log for this substring.
+                        println!(
+                            "  ⚠ continuing in onboarding mode (HTTP only) — {}",
+                            settings_display
+                        );
+                    } else {
+                        eprintln!(
+                            "  ✗ HTTP server not reachable at {} — onboarding mode unavailable",
+                            health_url
+                        );
+                    }
+                    std::future::pending::<()>().await;
                     return;
                 }
 
@@ -1297,4 +1323,28 @@ pub fn handle_dcserver(token: Option<String>) {
             }
         }
     });
+}
+
+fn should_run_http_only_onboarding(token: Option<&str>, launch_config_count: usize) -> bool {
+    token.is_none() && launch_config_count == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_run_http_only_onboarding;
+
+    #[test]
+    fn onboarding_mode_when_no_explicit_token_and_no_saved_bots() {
+        assert!(should_run_http_only_onboarding(None, 0));
+    }
+
+    #[test]
+    fn explicit_token_disables_http_only_onboarding() {
+        assert!(!should_run_http_only_onboarding(Some("token"), 0));
+    }
+
+    #[test]
+    fn saved_bot_configs_disable_http_only_onboarding() {
+        assert!(!should_run_http_only_onboarding(None, 1));
+    }
 }

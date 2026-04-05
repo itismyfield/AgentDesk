@@ -120,6 +120,9 @@ A React-based dashboard served from the same binary:
 ### Round-Table Meetings
 Coordinate multi-agent discussions with structured rounds, automatic transcript recording, and post-meeting issue extraction to GitHub.
 
+### OpenClaw Migration
+Import OpenClaw agent/runtime state into AgentDesk with `agentdesk migrate openclaw`. Generated role prompts point at the imported AgentDesk memory/workspace paths so migrated agents use runtime-managed data instead of raw OpenClaw source paths. See [`docs/openclaw-migrate.md`](docs/openclaw-migrate.md) for dry-run, apply, resume, and audit output details.
+
 ## Configuration
 
 ### agentdesk.yaml
@@ -378,7 +381,7 @@ AgentDesk incorporates and builds upon code from the following projects:
 
 ## License
 
-AgentDesk is licensed under the [Apache License 2.0](LICENSE).
+AgentDesk is licensed under the [MIT License](LICENSE).
 
 You are free to use, modify, and distribute this software, including for commercial purposes. **Attribution is required** — you must retain the copyright notice and include the [NOTICE](NOTICE) file in any distribution or derivative work.
 

@@ -6,14 +6,16 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
-use crate::services::claude::{
-    self, CancelToken, FollowupResult, ReadOutputResult, SessionProbe, StreamLineState,
-    StreamMessage, process_stream_line, read_output_file_until_result, shell_escape,
-};
+use crate::services::agent_protocol::StreamMessage;
+use crate::services::claude::{self, read_output_file_until_result};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::provider::ProviderKind;
+use crate::services::process::{kill_child_tree, shell_escape};
+use crate::services::provider::{
+    CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
+    fold_read_output_result, register_child_pid,
+};
 use crate::services::remote::RemoteProfile;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
@@ -113,6 +115,7 @@ pub fn execute_command_streaming(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     model: Option<&str>,
+    compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
 
@@ -164,6 +167,7 @@ pub fn execute_command_streaming(
                 tmux_name,
                 report_channel_id,
                 report_provider,
+                compact_token_limit,
             );
         }
         // ProcessBackend fallback for Codex (no tmux or non-unix)
@@ -174,6 +178,7 @@ pub fn execute_command_streaming(
             sender,
             cancel_token,
             tmux_name,
+            compact_token_limit,
         );
     }
 
@@ -186,6 +191,7 @@ pub fn execute_command_streaming(
         cancel_token,
         report_channel_id,
         report_provider,
+        compact_token_limit,
     )
 }
 
@@ -194,32 +200,7 @@ fn compose_codex_prompt(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
 ) -> String {
-    let mut sections = Vec::new();
-
-    if let Some(system_prompt) = system_prompt
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        sections.push(format!(
-            "[Authoritative Instructions]\n{}\n\nThese instructions are authoritative for this turn. \
-Follow them over any generic assistant persona unless the user explicitly asks to inspect or compare them.",
-            system_prompt
-        ));
-    }
-
-    if let Some(allowed_tools) = allowed_tools.filter(|tools| !tools.is_empty()) {
-        sections.push(format!(
-            "[Tool Policy]\nIf tools are needed, stay within this allowlist unless the user explicitly asks to change it: {}",
-            allowed_tools.join(", ")
-        ));
-    }
-
-    if sections.is_empty() {
-        return prompt.to_string();
-    }
-
-    sections.push(format!("[User Request]\n{}", prompt));
-    sections.join("\n\n")
+    crate::services::provider::compose_structured_turn_prompt(prompt, system_prompt, allowed_tools)
 }
 
 fn execute_streaming_direct(
@@ -231,9 +212,19 @@ fn execute_streaming_direct(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let codex_bin = get_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
-    let args = base_exec_args(session_id, prompt, model);
+    let mut args = base_exec_args(session_id, prompt, model);
+    if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
+        // Insert -c config before the "exec" subcommand
+        let exec_pos = args.iter().position(|a| a == "exec").unwrap_or(0);
+        args.insert(
+            exec_pos,
+            format!("model_auto_compact_token_limit={}", limit),
+        );
+        args.insert(exec_pos, "-c".to_string());
+    }
 
     let mut command = Command::new(codex_bin);
     crate::services::platform::apply_runtime_path(&mut command);
@@ -254,14 +245,12 @@ fn execute_streaming_direct(
         .spawn()
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
-    if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(child.id());
-        // Race condition fix: if /stop arrived before PID was stored, kill now
-        if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            claude::kill_child_tree(&mut child);
-            let _ = child.wait();
-            return Ok(());
-        }
+    register_child_pid(cancel_token.as_deref(), child.id());
+    // Race condition fix: if /stop arrived before PID was stored, kill now
+    if cancel_requested(cancel_token.as_deref()) {
+        kill_child_tree(&mut child);
+        let _ = child.wait();
+        return Ok(());
     }
 
     let stdout = child
@@ -276,11 +265,9 @@ fn execute_streaming_direct(
     let started_at = std::time::Instant::now();
 
     for line in reader.lines() {
-        if let Some(ref token) = cancel_token {
-            if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                claude::kill_child_tree(&mut child);
-                return Ok(());
-            }
+        if cancel_requested(cancel_token.as_deref()) {
+            kill_child_tree(&mut child);
+            return Ok(());
         }
 
         let line = match line {
@@ -366,6 +353,7 @@ fn execute_streaming_local_tmux(
     tmux_session_name: &str,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
@@ -489,7 +477,7 @@ fn execute_streaming_local_tmux(
         --input-fifo {input_fifo} \\\n  \
         --prompt-file {prompt} \\\n  \
         --cwd {wd} \\\n  \
-        --codex-bin {codex_bin}{model_arg}{effort_arg}\n",
+        --codex-bin {codex_bin}{model_arg}{effort_arg}{compact_arg}\n",
         env = env_lines,
         exe = shell_escape(&exe.display().to_string()),
         output = shell_escape(&output_path),
@@ -501,6 +489,10 @@ fn execute_streaming_local_tmux(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| format!(" \\\n  --codex-model {}", shell_escape(value)))
+            .unwrap_or_default(),
+        compact_arg = compact_token_limit
+            .filter(|&l| l > 0)
+            .map(|l| format!(" \\\n  --compact-token-limit {}", l))
             .unwrap_or_default(),
         effort_arg = std::env::var("AGENTDESK_CODEX_REASONING_EFFORT")
             .ok()
@@ -549,23 +541,24 @@ fn execute_streaming_local_tmux(
         SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path,
                 input_fifo_path,
                 tmux_session_name: tmux_session_name.to_string(),
                 last_offset: offset,
             });
-        }
-        ReadOutputResult::SessionDied { .. } => {
+        },
+        |_| {
             let _ = sender.send(StreamMessage::Done {
                 result: "⚠ 세션이 종료되었습니다. 새 메시지를 보내면 새 세션이 시작됩니다."
                     .to_string(),
                 session_id: None,
             });
-        }
-    }
+        },
+    );
 
     Ok(())
 }
@@ -618,20 +611,21 @@ fn send_followup_to_tmux(
         SessionProbe::tmux(tmux_session_name.to_string()),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    Ok(fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::TmuxReady {
                 output_path: output_path.to_string(),
                 input_fifo_path: input_fifo_path.to_string(),
                 tmux_session_name: tmux_session_name.to_string(),
                 last_offset: offset,
             });
-            Ok(FollowupResult::Delivered)
-        }
-        ReadOutputResult::SessionDied { .. } => Ok(FollowupResult::RecreateSession {
+            FollowupResult::Delivered
+        },
+        |_| FollowupResult::RecreateSession {
             error: "session died during follow-up output reading".to_string(),
-        }),
-    }
+        },
+    ))
 }
 
 /// Execute Codex via ProcessBackend (direct child process, no tmux).
@@ -642,6 +636,7 @@ fn execute_streaming_local_process_codex(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     session_name: &str,
+    compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     use crate::services::session_backend::{
         ProcessBackend, SessionBackend, SessionConfig, SessionHandle,
@@ -683,31 +678,44 @@ fn execute_streaming_local_process_codex(
                     backend.send_input(handle, &encoded)?;
                 }
                 drop(handles2);
-                let read_result = claude::read_output_file_until_result(
+                let read_result = read_output_file_until_result(
                     &output_path,
                     start_offset,
                     sender.clone(),
                     cancel_token,
-                    claude::SessionProbe::process(session_name.to_string()),
+                    SessionProbe::process({
+                        let session_name = session_name.to_string();
+                        move || {
+                            let handles = claude::PROCESS_HANDLES.lock().unwrap();
+                            if let Some(handle) = handles.get(&session_name) {
+                                use crate::services::session_backend::{
+                                    ProcessBackend, SessionBackend,
+                                };
+                                ProcessBackend::new().is_alive(handle)
+                            } else {
+                                false
+                            }
+                        }
+                    }),
                 )?;
 
-                match read_result {
-                    ReadOutputResult::Completed { offset }
-                    | ReadOutputResult::Cancelled { offset } => {
+                fold_read_output_result(
+                    read_result,
+                    |offset| {
                         let _ = sender.send(StreamMessage::ProcessReady {
                             output_path: output_path.to_string(),
                             session_name: session_name.to_string(),
                             last_offset: offset,
                         });
-                    }
-                    ReadOutputResult::SessionDied { .. } => {
+                    },
+                    |_| {
                         let _ = sender.send(StreamMessage::Done {
                             result: "⚠ 세션이 종료되었습니다.".to_string(),
                             session_id: None,
                         });
                         claude::PROCESS_HANDLES.lock().unwrap().remove(session_name);
-                    }
-                }
+                    },
+                );
                 return Ok(());
             }
         }
@@ -729,6 +737,7 @@ fn execute_streaming_local_process_codex(
         agentdesk_exe: exe.display().to_string(),
         output_path: output_path.clone(),
         prompt_path: prompt_path.clone(),
+        wrapper_subcommand: "codex-tmux-wrapper".to_string(),
         wrapper_args: {
             let mut args = vec!["--codex-bin".to_string(), codex_bin.to_string()];
             if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
@@ -741,9 +750,12 @@ fn execute_streaming_local_process_codex(
                     args.push(effort);
                 }
             }
+            if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
+                args.push("--compact-token-limit".to_string());
+                args.push(limit.to_string());
+            }
             args
         },
-        is_codex: true,
         env_vars: vec![],
     };
 
@@ -760,30 +772,42 @@ fn execute_streaming_local_process_codex(
         .unwrap()
         .insert(session_name.to_string(), handle);
 
-    let read_result = claude::read_output_file_until_result(
+    let read_result = read_output_file_until_result(
         &output_path,
         0,
         sender.clone(),
         cancel_token,
-        claude::SessionProbe::process(session_name.to_string()),
+        SessionProbe::process({
+            let session_name = session_name.to_string();
+            move || {
+                let handles = claude::PROCESS_HANDLES.lock().unwrap();
+                if let Some(handle) = handles.get(&session_name) {
+                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
+                    ProcessBackend::new().is_alive(handle)
+                } else {
+                    false
+                }
+            }
+        }),
     )?;
 
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+    fold_read_output_result(
+        read_result,
+        |offset| {
             let _ = sender.send(StreamMessage::ProcessReady {
                 output_path,
                 session_name: session_name.to_string(),
                 last_offset: offset,
             });
-        }
-        ReadOutputResult::SessionDied { .. } => {
+        },
+        |_| {
             let _ = sender.send(StreamMessage::Done {
                 result: "⚠ 프로세스가 종료되었습니다.".to_string(),
                 session_id: None,
             });
             claude::PROCESS_HANDLES.lock().unwrap().remove(session_name);
-        }
-    }
+        },
+    );
 
     Ok(())
 }
@@ -950,7 +974,7 @@ mod tests {
     use super::{
         TMUX_PROMPT_B64_PREFIX, base_exec_args, compose_codex_prompt, handle_codex_json_line,
     };
-    use crate::services::claude::StreamMessage;
+    use crate::services::agent_protocol::StreamMessage;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
     #[test]
@@ -1096,7 +1120,7 @@ mod tests {
     #[test]
     fn test_codex_followup_fifo_not_found_returns_recreate() {
         use super::send_followup_to_tmux;
-        use crate::services::claude::FollowupResult;
+        use crate::services::provider::FollowupResult;
 
         let (sender, _receiver) = mpsc::channel();
         let dir = std::env::temp_dir();

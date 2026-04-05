@@ -1,0 +1,499 @@
+use super::super::*;
+use crate::config::local_api_url;
+use crate::utils::format::safe_suffix;
+
+#[derive(Debug)]
+pub(super) struct DispatchSnapshot {
+    pub(super) dispatch_type: String,
+    pub(super) status: String,
+    pub(super) kanban_card_id: Option<String>,
+}
+
+pub(super) async fn fetch_dispatch_snapshot(
+    api_port: u16,
+    dispatch_id: &str,
+) -> Option<DispatchSnapshot> {
+    let url = local_api_url(api_port, &format!("/api/dispatches/{dispatch_id}"));
+    let resp = reqwest::Client::new().get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.json::<serde_json::Value>().await.ok()?;
+    let dispatch = body.get("dispatch")?;
+    Some(DispatchSnapshot {
+        dispatch_type: dispatch.get("dispatch_type")?.as_str()?.to_string(),
+        status: dispatch.get("status")?.as_str()?.to_string(),
+        kanban_card_id: dispatch
+            .get("kanban_card_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
+pub(in crate::services::discord) fn extract_review_decision(
+    full_response: &str,
+) -> Option<&'static str> {
+    // Match explicit patterns like "DECISION: accept" or "결정: dismiss"
+    let explicit =
+        regex::Regex::new(r"(?im)^\s*(?:decision|결정)\s*:\s*\**\s*(accept|dispute|dismiss)\b")
+            .ok()?;
+    if let Some(caps) = explicit.captures(full_response) {
+        let decision = caps.get(1)?.as_str().to_ascii_lowercase();
+        return match decision.as_str() {
+            "accept" => Some("accept"),
+            "dispute" => Some("dispute"),
+            "dismiss" => Some("dismiss"),
+            _ => None,
+        };
+    }
+    // Fallback: scan for standalone keywords in the last ~500 bytes (char-boundary safe)
+    let tail = safe_suffix(full_response, 500);
+    let keyword_re = regex::Regex::new(r"(?im)\b(accept|dispute|dismiss)\b").ok()?;
+    let mut found: Option<&'static str> = None;
+    for caps in keyword_re.captures_iter(tail) {
+        let kw = caps.get(1)?.as_str().to_ascii_lowercase();
+        let candidate = match kw.as_str() {
+            "accept" => "accept",
+            "dispute" => "dispute",
+            "dismiss" => "dismiss",
+            _ => continue,
+        };
+        if found.is_some() && found != Some(candidate) {
+            // Ambiguous — multiple different keywords found
+            return None;
+        }
+        found = Some(candidate);
+    }
+    found
+}
+
+async fn submit_review_decision_fallback(
+    api_port: u16,
+    card_id: &str,
+    dispatch_id: &str,
+    decision: &str,
+    full_response: &str,
+) -> Result<(), String> {
+    let comment = truncate_str(full_response.trim(), 4000).to_string();
+    let url = local_api_url(api_port, "/api/review-decision");
+    // #109: Include dispatch_id so the server can atomically consume the
+    // specific review-decision dispatch, preventing replay attacks.
+    let resp = reqwest::Client::new()
+        .post(url)
+        .json(&serde_json::json!({
+            "card_id": card_id,
+            "dispatch_id": dispatch_id,
+            "decision": decision,
+            "comment": comment,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("HTTP {status}: {body}"))
+    }
+}
+
+pub(in crate::services::discord) fn extract_explicit_review_verdict(
+    full_response: &str,
+) -> Option<&'static str> {
+    let pattern = regex::Regex::new(
+        r"(?im)^\s*(?:final\s+)?(?:verdict|overall)\s*:\s*\**\s*(pass|improve|reject|rework|approved)\b",
+    )
+    .ok()?;
+    let verdict = pattern
+        .captures(full_response)?
+        .get(1)?
+        .as_str()
+        .to_ascii_lowercase();
+    match verdict.as_str() {
+        "pass" => Some("pass"),
+        "improve" => Some("improve"),
+        "reject" => Some("reject"),
+        "rework" => Some("rework"),
+        "approved" => Some("approved"),
+        _ => None,
+    }
+}
+
+pub(super) fn build_verdict_payload(
+    dispatch_id: &str,
+    verdict: &str,
+    full_response: &str,
+    provider: &str,
+) -> serde_json::Value {
+    let feedback = truncate_str(full_response.trim(), 4000).to_string();
+    serde_json::json!({
+        "dispatch_id": dispatch_id,
+        "overall": verdict,
+        "feedback": feedback,
+        "provider": provider,
+    })
+}
+
+async fn submit_review_verdict_fallback(
+    api_port: u16,
+    dispatch_id: &str,
+    verdict: &str,
+    full_response: &str,
+    provider: &str,
+) -> Result<(), String> {
+    let payload = build_verdict_payload(dispatch_id, verdict, full_response, provider);
+    let url = local_api_url(api_port, "/api/review-verdict");
+    let resp = reqwest::Client::new()
+        .post(url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("HTTP {status}: {body}"))
+    }
+}
+
+pub(in crate::services::discord) async fn guard_review_dispatch_completion(
+    api_port: u16,
+    dispatch_id: Option<&str>,
+    full_response: &str,
+    provider: &str,
+) -> Option<String> {
+    let dispatch_id = dispatch_id?;
+    let snapshot = fetch_dispatch_snapshot(api_port, dispatch_id).await?;
+    if snapshot.status != "pending" {
+        return None;
+    }
+
+    match snapshot.dispatch_type.as_str() {
+        "review" => {
+            if let Some(verdict) = extract_explicit_review_verdict(full_response) {
+                match submit_review_verdict_fallback(
+                    api_port,
+                    dispatch_id,
+                    verdict,
+                    full_response,
+                    provider,
+                )
+                .await
+                {
+                    Ok(()) => return None,
+                    Err(err) => {
+                        return Some(format!(
+                            "⚠️ review verdict 자동 제출 실패: {err}\n`review-verdict` API를 다시 호출해야 파이프라인이 진행됩니다."
+                        ));
+                    }
+                }
+            }
+            Some(
+                "⚠️ review dispatch가 아직 pending입니다. 응답 첫 줄에 `VERDICT: pass|improve|reject|rework`를 적고 `review-verdict` API를 호출해야 완료됩니다."
+                    .to_string(),
+            )
+        }
+        "review-decision" => {
+            if let Some(decision) = extract_review_decision(full_response) {
+                if let Some(card_id) = snapshot.kanban_card_id.as_deref() {
+                    match submit_review_decision_fallback(
+                        api_port,
+                        card_id,
+                        dispatch_id,
+                        decision,
+                        full_response,
+                    )
+                    .await
+                    {
+                        Ok(()) => return None,
+                        Err(err) => {
+                            return Some(format!(
+                                "⚠️ review-decision 자동 제출 실패: {err}\n`review-decision` API를 다시 호출해야 파이프라인이 진행됩니다."
+                            ));
+                        }
+                    }
+                }
+            }
+            Some(
+                "⚠️ review-decision dispatch가 아직 pending입니다. `review-decision` API를 호출해야 카드가 다음 단계로 이동합니다."
+                    .to_string(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Explicitly complete implementation/rework dispatches at turn end.
+/// Last-resort dispatch completion via runtime-root SQLite file.
+///
+/// Opens a fresh connection to the on-disk DB (bypassing the Db pool) and writes
+/// a status + reconciliation marker so onTick can run the hook chain later.
+/// Returns `true` if the UPDATE affected at least one row.
+pub(in crate::services::discord) fn runtime_db_fallback_complete(
+    dispatch_id: &str,
+    source: &str,
+) -> bool {
+    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+        return false;
+    };
+    let db_path = root.join("data/agentdesk.sqlite");
+    let Ok(conn) = rusqlite::Connection::open(&db_path) else {
+        return false;
+    };
+    let result_json = format!("{{\"completion_source\":\"{source}\",\"needs_reconcile\":true}}");
+    let changed = conn
+        .execute(
+            "UPDATE task_dispatches SET status = 'completed', result = ?1, \
+             updated_at = datetime('now') WHERE id = ?2 AND status IN ('pending', 'dispatched')",
+            rusqlite::params![result_json, dispatch_id],
+        )
+        .unwrap_or(0);
+    if changed > 0 {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
+        )
+        .ok();
+    }
+    changed > 0
+}
+
+fn work_dispatch_completion_context(adk_cwd: Option<&str>) -> Option<serde_json::Value> {
+    let cwd = adk_cwd.filter(|p| std::path::Path::new(p).is_dir())?;
+    let completed_commit = crate::services::platform::git_head_commit(cwd)?;
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "completed_worktree_path".to_string(),
+        serde_json::Value::String(cwd.to_string()),
+    );
+    obj.insert(
+        "completed_commit".to_string(),
+        serde_json::Value::String(completed_commit),
+    );
+    if let Some(branch) = crate::services::platform::shell::git_branch_name(cwd) {
+        obj.insert(
+            "completed_branch".to_string(),
+            serde_json::Value::String(branch),
+        );
+    }
+    Some(serde_json::Value::Object(obj))
+}
+
+fn completion_result_with_context(
+    source: &str,
+    needs_reconcile: bool,
+    adk_cwd: Option<&str>,
+) -> serde_json::Value {
+    let mut result = work_dispatch_completion_context(adk_cwd)
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert(
+            "completion_source".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
+        if needs_reconcile {
+            obj.insert("needs_reconcile".to_string(), serde_json::Value::Bool(true));
+        }
+    }
+    result
+}
+
+/// Unlike review dispatches (which auto-complete on session idle), these types
+/// require an explicit PATCH so the pipeline can advance deterministically.
+/// Fail a dispatch with retry on PATCH failure.
+pub(super) async fn fail_dispatch_with_retry(
+    api_port: u16,
+    dispatch_id: Option<&str>,
+    error_msg: &str,
+) {
+    let Some(dispatch_id) = dispatch_id else {
+        return;
+    };
+    let url = local_api_url(api_port, &format!("/api/dispatches/{dispatch_id}"));
+    let payload = serde_json::json!({
+        "status": "failed",
+        "result": {"error": error_msg.chars().take(500).collect::<String>()}
+    });
+    for attempt in 1..=3 {
+        match reqwest::Client::new()
+            .patch(&url)
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!("  [{ts}] ⚠ Dispatch {dispatch_id} failed (transport error)");
+                return;
+            }
+            _ => {
+                if attempt < 3 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+    // Fallback: direct DB update to prevent orphan dispatch.
+    // Also leave a reconciliation marker so onTick can run the hook chain later.
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    eprintln!(
+        "  [{ts}] ❌ PATCH failed after 3 retries, falling back to direct DB for {dispatch_id}"
+    );
+    if let Some(root) = crate::cli::agentdesk_runtime_root() {
+        let db_path = root.join("data/agentdesk.sqlite");
+        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            let result_json = serde_json::json!({"error": error_msg.chars().take(500).collect::<String>(), "fallback": true}).to_string();
+            let _ = conn.execute(
+                "UPDATE task_dispatches SET status = 'failed', result = ?1, updated_at = datetime('now') WHERE id = ?2 AND status = 'pending'",
+                rusqlite::params![result_json, dispatch_id],
+            );
+            // Leave reconciliation marker for onTick to pick up and run hook chain
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
+            );
+        }
+    }
+}
+
+/// Complete an implementation/rework dispatch via finalize_dispatch (#143).
+///
+/// Retries finalize_dispatch 3x with 1-second backoff. On exhaustion, falls back
+/// to direct DB UPDATE + reconciliation marker for onTick hook chain.
+/// When Db/Engine are unavailable, retries API PATCH 3x then DB fallback.
+pub(super) async fn complete_work_dispatch_on_turn_end(
+    shared: &Arc<super::super::SharedData>,
+    dispatch_id: Option<&str>,
+    adk_cwd: Option<&str>,
+) {
+    let Some(dispatch_id) = dispatch_id else {
+        return;
+    };
+    let Some(snapshot) = fetch_dispatch_snapshot(shared.api_port, dispatch_id).await else {
+        fail_dispatch_with_retry(
+            shared.api_port,
+            Some(dispatch_id),
+            "dispatch snapshot fetch failed",
+        )
+        .await;
+        return;
+    };
+    if snapshot.status != "pending" {
+        return;
+    }
+    match snapshot.dispatch_type.as_str() {
+        "implementation" | "rework" => {}
+        _ => return,
+    }
+
+    // Direct finalize_dispatch with retry — single completion authority (#143)
+    if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+        let completion_context = work_dispatch_completion_context(adk_cwd);
+        for attempt in 1..=3u8 {
+            match crate::dispatch::finalize_dispatch(
+                db,
+                engine,
+                dispatch_id,
+                "turn_bridge_explicit",
+                completion_context.as_ref(),
+            ) {
+                Ok(_) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id}",
+                        dtype = snapshot.dispatch_type,
+                    );
+                    crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
+                    return;
+                }
+                Err(e) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ finalize_dispatch failed for {dispatch_id} (attempt {attempt}/3): {e}"
+                    );
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+        // All retries exhausted — DB fallback via pool, then runtime-root file
+        let fallback_ok = db.separate_conn().ok().map_or(false, |conn| {
+            let result_json =
+                completion_result_with_context("turn_bridge_db_fallback", true, adk_cwd)
+                    .to_string();
+            let changed = conn.execute(
+                "UPDATE task_dispatches SET status = 'completed', \
+                 result = ?1, \
+                 updated_at = datetime('now') WHERE id = ?2 AND status IN ('pending', 'dispatched')",
+                rusqlite::params![result_json, dispatch_id],
+            ).unwrap_or(0);
+            if changed > 0 {
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
+                ).ok();
+            }
+            changed > 0
+        });
+        if !fallback_ok {
+            let ok = runtime_db_fallback_complete(dispatch_id, "turn_bridge_db_fallback");
+            if !ok {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] 🔴 CRITICAL: all completion paths exhausted for dispatch {dispatch_id} — dispatch stranded"
+                );
+            }
+        }
+    } else {
+        // Db/Engine not available — fall back to API PATCH with retry
+        let url = local_api_url(shared.api_port, &format!("/api/dispatches/{dispatch_id}"));
+        let payload = serde_json::json!({
+            "status": "completed",
+            "result": completion_result_with_context("turn_bridge_explicit", false, adk_cwd),
+        });
+        for attempt in 1..=3u8 {
+            match reqwest::Client::new()
+                .patch(&url)
+                .json(&payload)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id} (via API)",
+                        dtype = snapshot.dispatch_type,
+                    );
+                    return;
+                }
+                Ok(resp) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ Explicit dispatch completion failed (attempt {attempt}/3): HTTP {}",
+                        resp.status()
+                    );
+                }
+                Err(e) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ Explicit dispatch completion error (attempt {attempt}/3): {e}"
+                    );
+                }
+            }
+            if attempt < 3 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+        // API retries exhausted — runtime-root DB fallback
+        if !runtime_db_fallback_complete(dispatch_id, "turn_bridge_db_fallback") {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!(
+                "  [{ts}] 🔴 CRITICAL: all completion paths exhausted for dispatch {dispatch_id} — dispatch stranded"
+            );
+        }
+    }
+}

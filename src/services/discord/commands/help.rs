@@ -47,6 +47,7 @@ AI can read, edit, and run commands in your session.
 `/debug` — Toggle debug logging
 
 **User Management** (owner only)
+`/allowall <true|false>` — Allow everyone or restrict to authorized users
 `/adduser @user` — Allow a user to use the bot
 `/removeuser @user` — Remove a user's access
 `/help` — Show this help",

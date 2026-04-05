@@ -52,6 +52,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ =
         conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN retry_count INTEGER DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN thread_id TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN primary_provider TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN reviewer_provider TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN participant_names TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN created_at INTEGER;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT;");
 
@@ -538,6 +542,42 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch("ALTER TABLE dispatch_outbox ADD COLUMN next_attempt_at DATETIME;")?;
         }
     }
+
+    // #212: Session termination audit trail
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_termination_events (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_key     TEXT NOT NULL,
+            dispatch_id     TEXT,
+            killer_component TEXT NOT NULL,
+            reason_code     TEXT NOT NULL,
+            reason_text     TEXT,
+            probe_snapshot  TEXT,
+            last_offset     INTEGER,
+            tmux_alive      INTEGER,
+            created_at      DATETIME DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ste_session_key ON session_termination_events(session_key);
+        CREATE INDEX IF NOT EXISTS idx_ste_dispatch_id ON session_termination_events(dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_ste_created_at ON session_termination_events(created_at);",
+    )?;
+
+    // #189: Generic DM reply tracking — replaces family profile probe hardcode.
+    // Agents register pending DM replies; router matches incoming DMs to pending entries.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pending_dm_replies (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_agent TEXT NOT NULL,
+            user_id      TEXT NOT NULL,
+            channel_id   TEXT,
+            context      TEXT NOT NULL DEFAULT '{}',
+            status       TEXT NOT NULL DEFAULT 'pending',
+            created_at   DATETIME DEFAULT (datetime('now')),
+            consumed_at  DATETIME,
+            expires_at   DATETIME
+        );
+        CREATE INDEX IF NOT EXISTS idx_pdr_user_status ON pending_dm_replies(user_id, status);",
+    )?;
 
     seed_builtin_pipeline_stages(conn)?;
 

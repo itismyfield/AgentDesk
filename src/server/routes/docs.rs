@@ -385,6 +385,18 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
             "discord",
             "List Discord bindings",
         ),
+        ep(
+            "GET",
+            "/api/discord/channels/{id}/messages",
+            "discord",
+            "Read channel/thread messages (limit, before, after params)",
+        ),
+        ep(
+            "GET",
+            "/api/discord/channels/{id}",
+            "discord",
+            "Get channel/thread info",
+        ),
         // Meetings
         ep(
             "GET",
@@ -549,6 +561,13 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
             "/api/skills-trend",
             "analytics",
             "Skill usage trend by day",
+        ),
+        // Cancel dispatch + kill session
+        ep(
+            "POST",
+            "/api/dispatch-cancel/{id}",
+            "dispatches",
+            "Cancel dispatch and kill associated agent session",
         ),
         // Resume
         ep(

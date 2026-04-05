@@ -8,6 +8,8 @@ use super::AppState;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
 /// GET /api/onboarding/status
 /// Returns whether onboarding is complete + existing config values.
 pub async fn status(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
@@ -322,6 +324,7 @@ pub struct CompleteBody {
     pub owner_id: Option<String>,
     pub provider: Option<String>,
     pub channels: Vec<ChannelMapping>,
+    pub template: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,6 +334,207 @@ pub struct ChannelMapping {
     pub role_id: String,
     pub description: Option<String>,
     pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedChannelMapping {
+    channel_id: String,
+    channel_name: String,
+    role_id: String,
+    description: Option<String>,
+    system_prompt: Option<String>,
+    created: bool,
+}
+
+fn is_discord_channel_id(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn normalized_channel_name(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_start_matches('#').trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn desired_channel_name(mapping: &ChannelMapping) -> Result<String, String> {
+    normalized_channel_name(&mapping.channel_name)
+        .or_else(|| normalized_channel_name(&mapping.channel_id))
+        .ok_or_else(|| format!("agent '{}' is missing a channel name", mapping.role_id))
+}
+
+async fn discord_list_guild_channels(
+    client: &reqwest::Client,
+    token: &str,
+    api_base: &str,
+    guild_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let url = format!(
+        "{}/guilds/{}/channels",
+        api_base.trim_end_matches('/'),
+        guild_id
+    );
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .send()
+        .await
+        .map_err(|e| format!("failed to fetch guild channels: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Discord API {status} while listing channels: {body}"
+        ));
+    }
+
+    resp.json::<Vec<serde_json::Value>>()
+        .await
+        .map_err(|e| format!("failed to parse guild channels: {e}"))
+}
+
+async fn discord_create_text_channel(
+    client: &reqwest::Client,
+    token: &str,
+    api_base: &str,
+    guild_id: &str,
+    channel_name: &str,
+    topic: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let url = format!(
+        "{}/guilds/{}/channels",
+        api_base.trim_end_matches('/'),
+        guild_id
+    );
+
+    let mut payload = json!({
+        "name": channel_name,
+        "type": 0,
+    });
+
+    if let Some(topic) = topic.map(str::trim).filter(|value| !value.is_empty()) {
+        let truncated: String = topic.chars().take(1024).collect();
+        payload["topic"] = json!(truncated);
+    }
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("failed to create channel '{channel_name}': {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Discord API {status} while creating channel '{channel_name}': {body}"
+        ));
+    }
+
+    resp.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("failed to parse created channel '{channel_name}': {e}"))
+}
+
+async fn resolve_channel_mapping(
+    client: &reqwest::Client,
+    token: &str,
+    api_base: &str,
+    guild_id: &str,
+    mapping: &ChannelMapping,
+) -> Result<ResolvedChannelMapping, String> {
+    let requested_name = desired_channel_name(mapping)?;
+
+    if is_discord_channel_id(&mapping.channel_id) {
+        return Ok(ResolvedChannelMapping {
+            channel_id: mapping.channel_id.trim().to_string(),
+            channel_name: requested_name,
+            role_id: mapping.role_id.clone(),
+            description: mapping.description.clone(),
+            system_prompt: mapping.system_prompt.clone(),
+            created: false,
+        });
+    }
+
+    let guild_id = guild_id.trim();
+    if guild_id.is_empty() {
+        return Err(format!(
+            "cannot create channel '{}' without selecting a Discord server",
+            requested_name
+        ));
+    }
+
+    let existing = discord_list_guild_channels(client, token, api_base, guild_id)
+        .await?
+        .into_iter()
+        .find(|channel| {
+            channel.get("type").and_then(|value| value.as_i64()) == Some(0)
+                && channel
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(|name| name == requested_name)
+                    .unwrap_or(false)
+        });
+
+    if let Some(channel) = existing {
+        let channel_id = channel
+            .get("id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("existing channel '{}' is missing an id", requested_name))?;
+        let channel_name = channel
+            .get("name")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&requested_name)
+            .to_string();
+
+        return Ok(ResolvedChannelMapping {
+            channel_id: channel_id.to_string(),
+            channel_name,
+            role_id: mapping.role_id.clone(),
+            description: mapping.description.clone(),
+            system_prompt: mapping.system_prompt.clone(),
+            created: false,
+        });
+    }
+
+    let created = discord_create_text_channel(
+        client,
+        token,
+        api_base,
+        guild_id,
+        &requested_name,
+        mapping.description.as_deref(),
+    )
+    .await?;
+
+    let channel_id = created
+        .get("id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("created channel '{}' is missing an id", requested_name))?;
+    let channel_name = created
+        .get("name")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&requested_name)
+        .to_string();
+
+    Ok(ResolvedChannelMapping {
+        channel_id: channel_id.to_string(),
+        channel_name,
+        role_id: mapping.role_id.clone(),
+        description: mapping.description.clone(),
+        system_prompt: mapping.system_prompt.clone(),
+        created: true,
+    })
 }
 
 fn upsert_bot_settings_entry(
@@ -470,6 +674,47 @@ pub async fn complete(
     State(state): State<AppState>,
     Json(body): Json<CompleteBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let provider = body.provider.as_deref().unwrap_or("claude");
+    let discord_token = body
+        .announce_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(body.token.as_str());
+    let client = reqwest::Client::new();
+    let mut resolved_channels = Vec::with_capacity(body.channels.len());
+
+    for mapping in &body.channels {
+        let resolved = match resolve_channel_mapping(
+            &client,
+            discord_token,
+            DISCORD_API_BASE,
+            &body.guild_id,
+            mapping,
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!(
+                            "failed to resolve channel for agent '{}': {}",
+                            mapping.role_id, error
+                        )
+                    })),
+                );
+            }
+        };
+        resolved_channels.push(resolved);
+    }
+
+    let channels_created = resolved_channels
+        .iter()
+        .filter(|mapping| mapping.created)
+        .count();
+
     let conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -479,8 +724,6 @@ pub async fn complete(
             );
         }
     };
-
-    let provider = body.provider.as_deref().unwrap_or("claude");
 
     // Save onboarding metadata
     conn.execute(
@@ -536,7 +779,7 @@ pub async fn complete(
 
     // Create/update agents for each channel mapping
     let mut created = 0;
-    for mapping in &body.channels {
+    for mapping in &resolved_channels {
         conn.execute(
             "INSERT INTO agents (id, name, discord_channel_id, description, system_prompt, status, xp) \
              VALUES (?1, ?2, ?3, ?4, ?5, 'active', 0) \
@@ -551,21 +794,95 @@ pub async fn complete(
         created += 1;
     }
 
+    // Create default office + department and assign agents
+    if !resolved_channels.is_empty() {
+        let (template_name, template_name_ko, template_icon, template_color) =
+            match body.template.as_deref() {
+                Some("household") => (
+                    "Household & Schedule",
+                    "가사 및 일정 도우미",
+                    "🏠",
+                    "#10b981",
+                ),
+                Some("startup") => ("Small Startup", "소규모 스타트업", "🚀", "#8b5cf6"),
+                Some("office") => ("Office Work", "사무업무", "🏢", "#3b82f6"),
+                _ => ("General", "일반", "📁", "#6b7280"),
+            };
+
+        let office_id = "hq";
+        conn.execute(
+            "INSERT OR IGNORE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
+        )
+        .ok();
+
+        let dept_id = body.template.as_deref().unwrap_or("general").to_string();
+        conn.execute(
+            "INSERT OR IGNORE INTO departments (id, name, name_ko, icon, color, office_id, sort_order) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+            rusqlite::params![
+                dept_id,
+                template_name,
+                template_name_ko,
+                template_icon,
+                template_color,
+                office_id,
+            ],
+        )
+        .ok();
+
+        for mapping in &resolved_channels {
+            conn.execute(
+                "INSERT OR REPLACE INTO office_agents (office_id, agent_id, department_id) \
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![office_id, mapping.role_id, dept_id],
+            )
+            .ok();
+            conn.execute(
+                "UPDATE agents SET department = ?1 WHERE id = ?2",
+                rusqlite::params![dept_id, mapping.role_id],
+            )
+            .ok();
+        }
+    }
+
     // Generate role_map.json
     let root = crate::cli::agentdesk_runtime_root();
     if let Some(root) = root {
         let config_dir = root.join("config");
         std::fs::create_dir_all(&config_dir).ok();
 
+        // Create workspace directories for each agent
+        let workspaces_dir = root.join("workspaces");
+        std::fs::create_dir_all(&workspaces_dir).ok();
+        for mapping in &resolved_channels {
+            let ws_dir = workspaces_dir.join(&mapping.role_id);
+            std::fs::create_dir_all(&ws_dir).ok();
+        }
+
         let mut by_channel_id = serde_json::Map::new();
         let mut by_channel_name = serde_json::Map::new();
 
-        for mapping in &body.channels {
+        for mapping in &resolved_channels {
+            let workspace_tilde = dirs::home_dir()
+                .and_then(|home| {
+                    let ws = root.join("workspaces").join(&mapping.role_id);
+                    ws.strip_prefix(&home)
+                        .ok()
+                        .map(|rel| format!("~/{}", rel.display()))
+                })
+                .unwrap_or_else(|| {
+                    root.join("workspaces")
+                        .join(&mapping.role_id)
+                        .display()
+                        .to_string()
+                });
             by_channel_id.insert(
                 mapping.channel_id.clone(),
                 json!({
                     "roleId": mapping.role_id,
                     "provider": provider,
+                    "workspace": workspace_tilde,
                 }),
             );
             by_channel_name.insert(
@@ -573,6 +890,7 @@ pub async fn complete(
                 json!({
                     "roleId": mapping.role_id,
                     "channelId": mapping.channel_id,
+                    "workspace": workspace_tilde,
                 }),
             );
         }
@@ -581,6 +899,7 @@ pub async fn complete(
             "version": 1,
             "byChannelId": by_channel_id,
             "byChannelName": by_channel_name,
+            "fallbackByChannelName": { "enabled": true },
         });
 
         let role_map_path = config_dir.join("role_map.json");
@@ -644,6 +963,7 @@ pub async fn complete(
         Json(json!({
             "ok": true,
             "agents_created": created,
+            "channels_created": channels_created,
             "provider": provider,
         })),
     )
@@ -652,6 +972,12 @@ pub async fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use axum::{Router, extract::Path as AxumPath, routing::get};
 
     #[test]
     fn strip_legacy_discord_section_removes_top_level_block() {
@@ -701,6 +1027,128 @@ mod tests {
             "notify-token\n"
         );
     }
+
+    #[test]
+    fn desired_channel_name_strips_leading_hash() {
+        let mapping = ChannelMapping {
+            channel_id: String::new(),
+            channel_name: "#agentdesk-cdx".to_string(),
+            role_id: "adk-cdx".to_string(),
+            description: None,
+            system_prompt: None,
+        };
+
+        assert_eq!(desired_channel_name(&mapping).unwrap(), "agentdesk-cdx");
+    }
+
+    #[tokio::test]
+    async fn resolve_channel_mapping_reuses_existing_channel() {
+        let post_count = Arc::new(AtomicUsize::new(0));
+        let post_count_for_route = post_count.clone();
+        let app = Router::new().route(
+            "/guilds/{guild_id}/channels",
+            get(|AxumPath(_guild_id): AxumPath<String>| async move {
+                Json(json!([
+                    {"id": "42", "name": "agentdesk-cdx", "type": 0}
+                ]))
+            })
+            .post(
+                move |AxumPath(_guild_id): AxumPath<String>,
+                      Json(body): Json<serde_json::Value>| {
+                    let post_count = post_count_for_route.clone();
+                    async move {
+                        post_count.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({
+                            "id": "77",
+                            "name": body.get("name").and_then(|value| value.as_str()).unwrap_or("created"),
+                            "type": 0
+                        }))
+                    }
+                },
+            ),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mapping = ChannelMapping {
+            channel_id: "agentdesk-cdx".to_string(),
+            channel_name: "agentdesk-cdx".to_string(),
+            role_id: "adk-cdx".to_string(),
+            description: Some("desc".to_string()),
+            system_prompt: Some("prompt".to_string()),
+        };
+
+        let resolved = resolve_channel_mapping(
+            &reqwest::Client::new(),
+            "token",
+            &format!("http://{}", addr),
+            "123",
+            &mapping,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.channel_id, "42");
+        assert_eq!(resolved.channel_name, "agentdesk-cdx");
+        assert!(!resolved.created);
+        assert_eq!(post_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_channel_mapping_creates_missing_channel() {
+        let post_count = Arc::new(AtomicUsize::new(0));
+        let post_count_for_route = post_count.clone();
+        let app = Router::new().route(
+            "/guilds/{guild_id}/channels",
+            get(|AxumPath(_guild_id): AxumPath<String>| async move { Json(json!([])) }).post(
+                move |AxumPath(_guild_id): AxumPath<String>,
+                      Json(body): Json<serde_json::Value>| {
+                    let post_count = post_count_for_route.clone();
+                    async move {
+                        post_count.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({
+                            "id": "77",
+                            "name": body.get("name").and_then(|value| value.as_str()).unwrap_or("created"),
+                            "type": 0
+                        }))
+                    }
+                },
+            ),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mapping = ChannelMapping {
+            channel_id: "agentdesk-cdx".to_string(),
+            channel_name: "agentdesk-cdx".to_string(),
+            role_id: "adk-cdx".to_string(),
+            description: Some("desc".to_string()),
+            system_prompt: Some("prompt".to_string()),
+        };
+
+        let resolved = resolve_channel_mapping(
+            &reqwest::Client::new(),
+            "token",
+            &format!("http://{}", addr),
+            "123",
+            &mapping,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.channel_id, "77");
+        assert_eq!(resolved.channel_name, "agentdesk-cdx");
+        assert!(resolved.created);
+        assert_eq!(post_count.load(Ordering::SeqCst), 1);
+    }
 }
 
 // ── Provider Check ──────────────────────────────────────────
@@ -711,7 +1159,7 @@ pub struct CheckProviderBody {
 }
 
 /// POST /api/onboarding/check-provider
-/// Checks if a CLI provider (claude/codex/gemini) is installed and authenticated.
+/// Checks if a CLI provider (claude/codex/gemini/qwen) is installed and authenticated.
 pub async fn check_provider(
     Json(body): Json<CheckProviderBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -719,10 +1167,11 @@ pub async fn check_provider(
         "claude" => "claude",
         "codex" => "codex",
         "gemini" => "gemini",
+        "qwen" => "qwen",
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "provider must be 'claude', 'codex', or 'gemini'"})),
+                Json(json!({"error": "provider must be 'claude', 'codex', 'gemini', or 'qwen'"})),
             );
         }
     };
@@ -736,6 +1185,7 @@ pub async fn check_provider(
             "claude" => crate::services::claude::resolve_claude_path(),
             "codex" => crate::services::codex::resolve_codex_path(),
             "gemini" => crate::services::gemini::resolve_gemini_path(),
+            "qwen" => crate::services::qwen::resolve_qwen_path(),
             _ => None,
         })
         .await
@@ -775,6 +1225,8 @@ pub async fn check_provider(
                 home.join(".claude")
             } else if cmd == "codex" {
                 home.join(".codex")
+            } else if cmd == "qwen" {
+                home.join(".qwen")
             } else {
                 home.join(".gemini")
             };

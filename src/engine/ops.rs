@@ -55,6 +55,7 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
 
     // ── agentdesk.message ────────────────────────────────────────
     let db_for_pipeline = db.clone();
+    let db_for_dm_reply = db.clone();
     register_message_ops(ctx, db)?;
 
     // ── agentdesk.exec ──────────────────────────────────────────
@@ -62,6 +63,9 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
 
     // ── agentdesk.pipeline ────────────────────────────────────────
     register_pipeline_ops(ctx, db_for_pipeline)?;
+
+    // ── agentdesk.dmReply ────────────────────────────────────
+    register_dm_reply_ops(ctx, db_for_dm_reply)?;
 
     Ok(())
 }
@@ -396,10 +400,11 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dispatch_obj = Object::new(ctx.clone())?;
 
-    // __dispatch_create_raw(card_id, agent_id, dispatch_type, title) → json_string
+    // #248: __dispatch_create_sync(card_id, agent_id, dispatch_type, title) → json_string
+    // Synchronous DB INSERT — no deferred intent.
     let db_d = db.clone();
     dispatch_obj.set(
-        "__create_raw",
+        "__create_sync",
         Function::new(
             ctx.clone(),
             rquickjs::function::MutFn::from(
@@ -408,7 +413,7 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                       dispatch_type: String,
                       title: String|
                       -> String {
-                    dispatch_create_raw(&db_d, &card_id, &agent_id, &dispatch_type, &title)
+                    dispatch_create_sync(&db_d, &card_id, &agent_id, &dispatch_type, &title)
                 },
             ),
         )?,
@@ -481,30 +486,19 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
     ad.set("dispatch", dispatch_obj)?;
 
-    // JS wrapper — #121: push CreateDispatch intent with pre-assigned ID
+    // JS wrapper — synchronous dispatch creation with Rust-side validation/INSERT
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
-            var raw = agentdesk.dispatch.__create_raw;
+            var sync = agentdesk.dispatch.__create_sync;
             agentdesk.dispatch.create = function(cardId, agentId, dispatchType, title) {
                 var dt = dispatchType || "implementation";
                 var t = title || "Dispatch";
-                // Eager validation: call the raw bridge to check terminal guard etc.
-                // If validation fails, it returns an error that we throw immediately.
-                var result = JSON.parse(raw(cardId, agentId, dt, t));
+                // #248: Synchronous DB INSERT — no deferred intent.
+                // Validation + INSERT happen atomically in Rust.
+                var result = JSON.parse(sync(cardId, agentId, dt, t));
                 if (result.error) throw new Error(result.error);
-                // #173: If dedup'd, return existing ID without pushing intent
-                if (result.reused) return result.dispatch_id;
-                // #121: Push CreateDispatch intent — execution deferred to Rust
                 var dispatchId = result.dispatch_id;
-                agentdesk.__pendingIntents.push({
-                    type: "create_dispatch",
-                    dispatch_id: dispatchId,
-                    card_id: cardId,
-                    agent_id: agentId,
-                    dispatch_type: dt,
-                    title: t
-                });
                 return dispatchId;
             };
             var rawFail = agentdesk.dispatch.__mark_failed_raw;
@@ -541,74 +535,47 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     Ok(())
 }
 
-/// #121: Validation-only dispatch check. Returns a pre-assigned ID if valid,
-/// or an error string. Does NOT write to DB — actual creation is deferred
-/// to intent execution via `intent::execute_create_dispatch`.
-fn dispatch_create_raw(
+/// #248/#249: Synchronous dispatch creation — validates and inserts into DB
+/// immediately. The notify outbox row is now inserted atomically inside
+/// `create_dispatch_core`, so no JS-side outbox buffering is needed.
+fn dispatch_create_sync(
     db: &Db,
     card_id: &str,
     agent_id: &str,
     dispatch_type: &str,
-    _title: &str,
+    title: &str,
 ) -> String {
-    // Validate: card exists and is not in a terminal state
-    let conn = match db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => return format!(r#"{{"error":"DB: {e}"}}"#),
-    };
-    let card_status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get(0),
-        )
-        .ok();
-    match card_status {
-        None => return r#"{"error":"card not found"}"#.to_string(),
-        Some(ref s) => {
-            crate::pipeline::ensure_loaded();
-            if let Some(pipeline) = crate::pipeline::try_get() {
-                if pipeline.is_terminal(s) && dispatch_type != "review-decision" {
-                    return format!(
-                        r#"{{"error":"cannot dispatch to terminal card (status={s})"}}"#
-                    );
-                }
+    let context = serde_json::json!({});
+    match crate::dispatch::create_dispatch_core(
+        db,
+        card_id,
+        agent_id,
+        dispatch_type,
+        title,
+        &context,
+    ) {
+        Ok((dispatch_id, _old_status, reused)) => {
+            if reused {
+                return format!(r#"{{"dispatch_id":"{dispatch_id}","reused":true}}"#);
             }
+            // #117/#158: Update card_review_state for review-decision dispatches
+            if dispatch_type == "review-decision" {
+                review_state_sync(
+                    db,
+                    &serde_json::json!({
+                        "card_id": card_id,
+                        "state": "suggestion_pending",
+                        "pending_dispatch_id": dispatch_id,
+                    })
+                    .to_string(),
+                );
+            }
+            format!(r#"{{"dispatch_id":"{dispatch_id}"}}"#)
+        }
+        Err(e) => {
+            format!(r#"{{"error":"{}"}}"#, e.to_string().replace('"', "'"))
         }
     }
-    // Validate: agent exists
-    let agent_exists: bool = conn
-        .query_row("SELECT 1 FROM agents WHERE id = ?1", [agent_id], |_| Ok(()))
-        .is_ok();
-    if !agent_exists {
-        return format!(r#"{{"error":"agent not found: {agent_id}"}}"#);
-    }
-    // #173: Dedup — if same card + same type already has pending/dispatched, return existing.
-    if dispatch_type != "review-decision" {
-        let existing_id: Option<String> = conn
-            .query_row(
-                "SELECT id FROM task_dispatches \
-                 WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
-                 AND status IN ('pending', 'dispatched') LIMIT 1",
-                rusqlite::params![card_id, dispatch_type],
-                |row| row.get(0),
-            )
-            .ok();
-        if let Some(eid) = existing_id {
-            tracing::info!(
-                "DEDUP: reusing existing dispatch {} for card {} type {}",
-                eid,
-                card_id,
-                dispatch_type
-            );
-            return format!(
-                r#"{{"dispatch_id":"{eid}","card_id":"{card_id}","agent_id":"{agent_id}","reused":true}}"#
-            );
-        }
-    }
-    // Generate pre-assigned dispatch ID (actual DB write deferred to intent executor)
-    let dispatch_id = uuid::Uuid::new_v4().to_string();
-    format!(r#"{{"dispatch_id":"{dispatch_id}","card_id":"{card_id}","agent_id":"{agent_id}"}}"#)
 }
 
 #[cfg(test)]
@@ -1095,6 +1062,45 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     r#"{{"error":"cannot revert terminal card from {} to {}"}}"#,
                     old_status, new_status
                 );
+            }
+
+            // #228: Enforce review_verdict_pass gate on transitions to terminal states.
+            // Only this specific gate is checked — other gates (has_active_dispatch,
+            // review_rework) and force_only transitions are used legitimately by
+            // policies and must not be blocked here. PMD bypasses via force-transition API.
+            if pipeline.is_terminal(&new_status) {
+                if let Some(t) = pipeline.find_transition(&old_status, &new_status) {
+                    let needs_review_pass = t.gates.iter().any(|g| {
+                        pipeline.gates.get(g.as_str())
+                            .map_or(false, |gc| gc.check.as_deref() == Some("review_verdict_pass"))
+                    });
+                    if needs_review_pass {
+                        // Mirror kanban.rs:112-125 — check the LATEST completed review
+                        // dispatch only, not any historical pass. A card with pass R1
+                        // then rework R2 must not skip the current review round.
+                        let latest_verdict: Option<String> = conn
+                            .query_row(
+                                "SELECT json_extract(result, '$.verdict') FROM task_dispatches \
+                                 WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+                                 AND status = 'completed' \
+                                 ORDER BY updated_at DESC LIMIT 1",
+                                [&card_id],
+                                |row| row.get(0),
+                            )
+                            .ok()
+                            .flatten();
+                        let has_pass = matches!(
+                            latest_verdict.as_deref(),
+                            Some("pass") | Some("approved")
+                        );
+                        if !has_pass {
+                            return format!(
+                                r#"{{"error":"gate blocked: review_verdict_pass — no review pass verdict","from":"{}","to":"{}"}}"#,
+                                old_status, new_status
+                            );
+                        }
+                    }
+                }
             }
 
             // Clock fields from pipeline config
@@ -1601,7 +1607,7 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
             let mut results = Vec::new();
             if let Some(root) = crate::cli::agentdesk_runtime_root() {
                 let inflight_dir = root.join("runtime/discord_inflight");
-                for provider in &["claude", "codex", "gemini"] {
+                for provider in &["claude", "codex", "gemini", "qwen"] {
                     let dir = inflight_dir.join(provider);
                     if let Ok(entries) = std::fs::read_dir(&dir) {
                         for entry in entries.flatten() {
@@ -1718,6 +1724,14 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                 .split_once(':')
                 .map(|(_, name)| name)
                 .unwrap_or(&session_key);
+            crate::services::termination_audit::record_termination_for_tmux(
+                tmux_name,
+                None,
+                "policy_engine",
+                "session_kill_api",
+                Some("force-kill via agentdesk.session.kill()"),
+                None,
+            );
             match crate::services::platform::tmux::kill_session_output(tmux_name) {
                 Ok(out) if out.status.success() => {
                     format!(r#"{{"ok":true,"session":"{}"}}"#, session_key)
@@ -1937,4 +1951,261 @@ fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     "#)?;
 
     Ok(())
+}
+
+// ── DM reply tracking ops ────────────────────────────────────────
+// agentdesk.dmReply.register(sourceAgent, userId, context, ttlSeconds?)
+// agentdesk.dmReply.consume(userId)
+// agentdesk.dmReply.pending(userId)
+
+fn register_dm_reply_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+    let ad: Object<'js> = ctx.globals().get("agentdesk")?;
+    let dm_obj = Object::new(ctx.clone())?;
+
+    // __register_raw(source_agent, user_id, channel_id, context, ttl_seconds) → json
+    let db_reg = db.clone();
+    dm_obj.set(
+        "__register_raw",
+        Function::new(
+            ctx.clone(),
+            rquickjs::function::MutFn::from(
+                move |source_agent: String,
+                      user_id: String,
+                      channel_id: String,
+                      context: String,
+                      ttl_seconds: i64|
+                      -> String {
+                    dm_reply_register_raw(
+                        &db_reg,
+                        &source_agent,
+                        &user_id,
+                        &channel_id,
+                        &context,
+                        ttl_seconds,
+                    )
+                },
+            ),
+        )?,
+    )?;
+
+    // __consume_raw(user_id) → json
+    let db_con = db.clone();
+    dm_obj.set(
+        "__consume_raw",
+        Function::new(
+            ctx.clone(),
+            rquickjs::function::MutFn::from(move |user_id: String| -> String {
+                dm_reply_consume_raw(&db_con, &user_id)
+            }),
+        )?,
+    )?;
+
+    // __pending_raw(user_id) → json
+    let db_pend = db.clone();
+    dm_obj.set(
+        "__pending_raw",
+        Function::new(
+            ctx.clone(),
+            rquickjs::function::MutFn::from(move |user_id: String| -> String {
+                dm_reply_pending_raw(&db_pend, &user_id)
+            }),
+        )?,
+    )?;
+
+    // __read_consumed_raw(user_id) → json (most recent consumed entry with _answer)
+    let db_read = db.clone();
+    dm_obj.set(
+        "__read_consumed_raw",
+        Function::new(
+            ctx.clone(),
+            rquickjs::function::MutFn::from(move |user_id: String| -> String {
+                dm_reply_read_consumed_raw(&db_read, &user_id)
+            }),
+        )?,
+    )?;
+
+    ad.set("dmReply", dm_obj)?;
+
+    ctx.eval::<(), _>(
+        r#"
+        agentdesk.dmReply.register = function(sourceAgent, userId, context, ttlSeconds) {
+            var channelId = (context && context.channelId) ? String(context.channelId) : "";
+            return JSON.parse(agentdesk.dmReply.__register_raw(
+                sourceAgent || "",
+                String(userId || ""),
+                channelId,
+                JSON.stringify(context || {}),
+                ttlSeconds || 3600
+            ));
+        };
+        agentdesk.dmReply.consume = function(userId) {
+            return JSON.parse(agentdesk.dmReply.__consume_raw(String(userId || "")));
+        };
+        agentdesk.dmReply.pending = function(userId) {
+            return JSON.parse(agentdesk.dmReply.__pending_raw(String(userId || "")));
+        };
+        agentdesk.dmReply.readConsumed = function(userId) {
+            return JSON.parse(agentdesk.dmReply.__read_consumed_raw(String(userId || "")));
+        };
+        "#,
+    )?;
+
+    Ok(())
+}
+
+fn dm_reply_register_raw(
+    db: &Db,
+    source_agent: &str,
+    user_id: &str,
+    channel_id: &str,
+    context: &str,
+    ttl_seconds: i64,
+) -> String {
+    let conn = match db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"db connection: {e}"}}"#),
+    };
+    let expires_at = if ttl_seconds > 0 {
+        format!("datetime('now', '+{ttl_seconds} seconds')")
+    } else {
+        "NULL".to_string()
+    };
+    let ch = if channel_id.is_empty() {
+        None
+    } else {
+        Some(channel_id)
+    };
+    let sql = format!(
+        "INSERT INTO pending_dm_replies (source_agent, user_id, channel_id, context, expires_at) \
+         VALUES (?1, ?2, ?3, ?4, {expires_at})"
+    );
+    match conn.execute(&sql, rusqlite::params![source_agent, user_id, ch, context]) {
+        Ok(_) => {
+            let id = conn.last_insert_rowid();
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] 📩 dmReply.register → user={user_id} agent={source_agent} (id={id})"
+            );
+            format!(r#"{{"ok":true,"id":{id}}}"#)
+        }
+        Err(e) => format!(r#"{{"error":"insert failed: {e}"}}"#),
+    }
+}
+
+fn dm_reply_consume_raw(db: &Db, user_id: &str) -> String {
+    let conn = match db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"db connection: {e}"}}"#),
+    };
+    // FIFO: consume the oldest pending entry for this user that hasn't expired
+    let result: Result<(i64, String, String, Option<String>), _> = conn.query_row(
+        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
+         WHERE user_id = ?1 AND status = 'pending' \
+         AND (expires_at IS NULL OR expires_at > datetime('now')) \
+         ORDER BY created_at ASC LIMIT 1",
+        rusqlite::params![user_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    );
+    match result {
+        Ok((id, source_agent, context, channel_id)) => {
+            // CAS: only mark consumed if still pending (guards against race)
+            let updated = conn.execute(
+                "UPDATE pending_dm_replies SET status = 'consumed', consumed_at = datetime('now') \
+                 WHERE id = ?1 AND status = 'pending'",
+                rusqlite::params![id],
+            );
+            match updated {
+                Ok(0) => {
+                    return r#"{"ok":false,"reason":"already_consumed"}"#.to_string();
+                }
+                Err(e) => {
+                    return format!(r#"{{"error":"update failed: {e}"}}"#);
+                }
+                _ => {}
+            }
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ✉️ dmReply.consume → user={user_id} agent={source_agent} (id={id})");
+            let ctx: serde_json::Value =
+                serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
+            let mut resp = serde_json::json!({
+                "ok": true,
+                "id": id,
+                "sourceAgent": source_agent,
+                "context": ctx,
+            });
+            if let Some(ch) = channel_id {
+                resp["channelId"] = serde_json::Value::String(ch);
+            }
+            serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            r#"{"ok":false,"reason":"no_pending"}"#.to_string()
+        }
+        Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
+    }
+}
+
+fn dm_reply_pending_raw(db: &Db, user_id: &str) -> String {
+    let conn = match db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"db connection: {e}"}}"#),
+    };
+    let result: Result<(i64, String, String, Option<String>), _> = conn.query_row(
+        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
+         WHERE user_id = ?1 AND status = 'pending' \
+         AND (expires_at IS NULL OR expires_at > datetime('now')) \
+         ORDER BY created_at ASC LIMIT 1",
+        rusqlite::params![user_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    );
+    match result {
+        Ok((id, source_agent, context, channel_id)) => {
+            let ctx: serde_json::Value =
+                serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
+            let mut resp = serde_json::json!({
+                "ok": true,
+                "id": id,
+                "sourceAgent": source_agent,
+                "context": ctx,
+            });
+            if let Some(ch) = channel_id {
+                resp["channelId"] = serde_json::Value::String(ch);
+            }
+            serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(),
+        Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
+    }
+}
+
+fn dm_reply_read_consumed_raw(db: &Db, user_id: &str) -> String {
+    let conn = match db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"error":"db connection: {e}"}}"#),
+    };
+    let result: Result<(i64, String, String, Option<String>), _> = conn.query_row(
+        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
+         WHERE user_id = ?1 AND status = 'consumed' \
+         ORDER BY consumed_at DESC LIMIT 1",
+        rusqlite::params![user_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    );
+    match result {
+        Ok((id, source_agent, context, channel_id)) => {
+            let ctx: serde_json::Value =
+                serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
+            let mut resp = serde_json::json!({
+                "ok": true,
+                "id": id,
+                "sourceAgent": source_agent,
+                "context": ctx,
+            });
+            if let Some(ch) = channel_id {
+                resp["channelId"] = serde_json::Value::String(ch);
+            }
+            serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string())
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(),
+        Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
+    }
 }

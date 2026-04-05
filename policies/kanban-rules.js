@@ -16,20 +16,115 @@ function sendDiscordNotification(target, content, bot) {
 }
 
 function notifyPMD(cardId, reason) {
-  var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
-  if (!pmdChannel) {
-    agentdesk.log.warn("[pm-gate] No kanban_manager_channel_id configured, skipping PMD notification");
-    return;
-  }
+  // #267: Queue to canonical pm_pending buffer (flushed by timeouts.js)
   var cards = agentdesk.db.query(
     "SELECT title FROM kanban_cards WHERE id = ?", [cardId]
   );
   var title = cards.length > 0 ? cards[0].title : cardId;
-  sendDiscordNotification(
-    "channel:" + pmdChannel,
-    "[PM Decision] " + title + "\n사유: " + reason,
-    "announce"
+  var pendingKey = "pm_pending:" + cardId;
+  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
+  var entry;
+  if (existing.length > 0) {
+    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
+  }
+  if (!entry) {
+    entry = { title: title, reasons: [] };
+  }
+  if (entry.reasons.indexOf(reason) === -1) {
+    entry.reasons.push(reason);
+  }
+  agentdesk.db.execute(
+    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+600 seconds'))",
+    [pendingKey, JSON.stringify(entry)]
   );
+}
+
+// ── Preflight helpers (#256) ─────────────────────────────────
+
+function _extractRepoFromUrl(url) {
+  if (!url) return null;
+  var match = url.match(/github\.com\/([^\/]+\/[^\/]+)/);
+  return match ? match[1] : null;
+}
+
+function _loadCardMetadata(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT metadata FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  if (rows.length === 0 || !rows[0].metadata) return {};
+  try {
+    var parsed = JSON.parse(rows[0].metadata);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function _mergeCardMetadata(cardId, patch) {
+  var meta = _loadCardMetadata(cardId);
+  for (var key in patch) {
+    if (Object.prototype.hasOwnProperty.call(patch, key)) {
+      meta[key] = patch[key];
+    }
+  }
+  agentdesk.db.execute(
+    "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
+    [JSON.stringify(meta), cardId]
+  );
+  return meta;
+}
+
+function _runPreflight(cardId) {
+  var card = agentdesk.db.query(
+    "SELECT kc.id, kc.title, kc.github_issue_number, kc.github_issue_url, kc.status, kc.description, " +
+    "kc.assigned_agent_id, kc.metadata, kc.blocked_reason " +
+    "FROM kanban_cards kc WHERE kc.id = ?",
+    [cardId]
+  );
+  if (card.length === 0) return { status: "invalid", summary: "Card not found" };
+  var c = card[0];
+
+  // Check 1: GitHub issue closed? (uses gh CLI since no bridge exists)
+  if (c.github_issue_number && c.github_issue_url) {
+    var repo = _extractRepoFromUrl(c.github_issue_url);
+    if (repo) {
+      try {
+        var ghOutput = agentdesk.exec("gh", [
+          "issue", "view", String(c.github_issue_number),
+          "--repo", repo, "--json", "state", "--jq", ".state"
+        ]);
+        if (ghOutput && ghOutput.trim() === "CLOSED") {
+          return { status: "already_applied", summary: "GitHub issue #" + c.github_issue_number + " is closed" };
+        }
+      } catch (e) {
+        // GitHub CLI not available or failed, skip check
+      }
+    }
+  }
+
+  // Check 2: Already has terminal dispatch?
+  var terminalDispatch = agentdesk.db.query(
+    "SELECT id, status FROM task_dispatches WHERE kanban_card_id = ? AND dispatch_type = 'implementation' AND status = 'completed'",
+    [cardId]
+  );
+  if (terminalDispatch.length > 0) {
+    return { status: "already_applied", summary: "Implementation dispatch already completed" };
+  }
+
+  // Check 3: Description/body too short or empty?
+  var body = c.description || "";
+  if (body.trim().length < 30) {
+    return { status: "consult_required", summary: "Issue body is too short or empty — needs clarification" };
+  }
+
+  // Check 4: No DoD section?
+  if (body.indexOf("DoD") === -1 && body.indexOf("Definition of Done") === -1 && body.indexOf("완료 기준") === -1) {
+    return { status: "assumption_ok", summary: "No explicit DoD found, assuming spec is sufficient" };
+  }
+
+  // All checks passed
+  return { status: "clear", summary: "Preflight checks passed" };
 }
 
 // ── Policy ───────────────────────────────────────────────────
@@ -175,7 +270,7 @@ var rules = {
   // ── Dispatch Completed — PM Decision Gate ─────────────────
   onDispatchCompleted: function(payload) {
     var dispatches = agentdesk.db.query(
-      "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, created_at FROM task_dispatches WHERE id = ?",
+      "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, created_at, result FROM task_dispatches WHERE id = ?",
       [payload.dispatch_id]
     );
     if (dispatches.length === 0) return;
@@ -202,6 +297,61 @@ var rules = {
 
     // #197: e2e-test dispatches — handled by deploy-pipeline policy
     if (dispatch.dispatch_type === "e2e-test") return;
+
+    // #256: Consultation dispatch completed — update preflight metadata
+    if (dispatch.dispatch_type === "consultation") {
+      var consultResult = {};
+      try { consultResult = JSON.parse(dispatch.result || "{}"); } catch(e) {}
+      var meta = _loadCardMetadata(dispatch.kanban_card_id);
+      meta.consultation_status = "completed";
+      meta.consultation_result = consultResult;
+      // If consultation clarified the issue, update preflight_status to "clear"
+      // and immediately resume the linked auto-queue entry with a fresh
+      // implementation dispatch. Otherwise escalate to pending_decision.
+      if (consultResult.verdict === "clear" || consultResult.verdict === "proceed") {
+        meta.preflight_status = "clear";
+        meta.preflight_summary = "Consultation resolved: " + (consultResult.summary || "clarified");
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
+          [JSON.stringify(meta), dispatch.kanban_card_id]
+        );
+        var aqEntries = agentdesk.db.query(
+          "SELECT id, agent_id FROM auto_queue_entries WHERE dispatch_id = ? AND status = 'dispatched' LIMIT 1",
+          [dispatch.id]
+        );
+        if (aqEntries.length > 0) {
+          try {
+            var nextDispatchId = agentdesk.dispatch.create(
+              dispatch.kanban_card_id,
+              aqEntries[0].agent_id,
+              "implementation",
+              card.title || "Implementation"
+            );
+            if (nextDispatchId) {
+              agentdesk.db.execute(
+                "UPDATE auto_queue_entries SET dispatch_id = ?, dispatched_at = datetime('now'), completed_at = NULL WHERE id = ? AND status = 'dispatched'",
+                [nextDispatchId, aqEntries[0].id]
+              );
+              agentdesk.log.info("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " — resumed implementation dispatch " + nextDispatchId);
+            }
+          } catch (e) {
+            agentdesk.log.warn("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " but implementation redispatch failed: " + e);
+          }
+        } else {
+          agentdesk.log.info("[preflight] Consultation resolved for " + dispatch.kanban_card_id + " → clear");
+        }
+      } else {
+        meta.preflight_status = "escalated";
+        meta.preflight_summary = "Consultation did not resolve: " + (consultResult.summary || "still ambiguous");
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET metadata = ?, blocked_reason = ? WHERE id = ?",
+          [JSON.stringify(meta), "Consultation did not resolve ambiguity", dispatch.kanban_card_id]
+        );
+        agentdesk.kanban.setStatus(dispatch.kanban_card_id, pendingState);
+        agentdesk.log.warn("[preflight] Consultation unresolved for " + dispatch.kanban_card_id + " → " + pendingState);
+      }
+      return;
+    }
 
     // Rework dispatches — skip gate, go directly to review
     if (dispatch.dispatch_type === "rework") {
@@ -252,21 +402,11 @@ var rules = {
         } catch (e) { /* parse fail = skip */ }
       }
 
-      // Check 2: Minimum work duration (2 min)
-      var MIN_WORK_SEC = 120;
-      var sessions = agentdesk.db.query(
-        "SELECT td.created_at as first_work, MAX(s.last_heartbeat) as last_seen " +
-        "FROM task_dispatches td " +
-        "JOIN sessions s ON s.active_dispatch_id = td.id AND s.status = 'working' " +
-        "WHERE td.id = ?",
-        [dispatch.id]
-      );
-      if (sessions.length > 0 && sessions[0].first_work && sessions[0].last_seen) {
-        var durationSec = (new Date(sessions[0].last_seen) - new Date(sessions[0].first_work)) / 1000;
-        if (durationSec < MIN_WORK_SEC) {
-          reasons.push("작업 시간 부족: " + Math.round(durationSec) + "초 (최소 " + MIN_WORK_SEC + "초)");
-        }
-      }
+      // Minimum work duration heuristic was intentionally removed.
+      // Unified-thread / turn-bridge completions can legitimately finalize with
+      // short measured wall-clock even when real work already happened, which
+      // created false PM escalations (#257, #261, #262). PM alerts must be
+      // reserved for objective failure signals, not timing heuristics.
 
       if (reasons.length > 0) {
         // Check if the only failure is DoD — give agent 15 min to complete it
@@ -305,36 +445,32 @@ var rules = {
     var blockedTargets = agentdesk.pipeline.forceOnlyTargets(inProgressForForce, cfg);
     var pendingState = blockedTargets[0];
 
-    // → initialState: auto-create dispatch
+    // → initialState (requested): run preflight validation (#256)
+    // #255: requested is a dispatch-free preflight state. Dispatch is created separately
+    // by auto-queue, which triggers DispatchAttached to advance requested → in_progress.
     if (payload.to === initialState && payload.from !== initialState) {
-      var cards = agentdesk.db.query(
-        "SELECT assigned_agent_id, title, latest_dispatch_id FROM kanban_cards WHERE id = ?",
-        [payload.card_id]
-      );
-      if (cards.length > 0 && cards[0].assigned_agent_id) {
-        var existingDispatch = cards[0].latest_dispatch_id
-          ? agentdesk.db.query("SELECT status FROM task_dispatches WHERE id = ?", [cards[0].latest_dispatch_id])
-          : [];
-        var alreadyPending = existingDispatch.length > 0 && existingDispatch[0].status === "pending";
+      var preflight = _runPreflight(payload.card_id);
+      // Store preflight result in metadata without clobbering unrelated keys.
+      _mergeCardMetadata(payload.card_id, {
+        preflight_status: preflight.status,
+        preflight_summary: preflight.summary,
+        preflight_checked_at: new Date().toISOString()
+      });
 
-        if (!alreadyPending) {
-          try {
-            var dispatchId = agentdesk.dispatch.create(
-              payload.card_id,
-              cards[0].assigned_agent_id,
-              "implementation",
-              cards[0].title
-            );
-            agentdesk.log.info("[kanban] dispatch created: " + dispatchId);
-            // Discord notification is handled by the Rust handler (async send_dispatch_to_discord)
-            // to avoid ureq deadlock on tokio runtime.
-          } catch (e) {
-            agentdesk.log.warn("[kanban] dispatch creation failed: " + e);
-          }
-        }
-      } else {
-        agentdesk.log.warn("[kanban] card " + payload.card_id + " has no assignee — dispatch skipped");
+      if (preflight.status === "invalid" || preflight.status === "already_applied") {
+        // Move to done without implementation dispatch
+        agentdesk.kanban.setStatus(payload.card_id, "done", true); // force
+        // Clean up any auto-queue entries so the run doesn't stall
+        agentdesk.db.execute(
+          "UPDATE auto_queue_entries SET status = 'skipped' WHERE kanban_card_id = ? AND status = 'pending'",
+          [payload.card_id]
+        );
+        agentdesk.log.info("[preflight] Card " + payload.card_id + " → done (" + preflight.status + "): " + preflight.summary);
+      } else if (preflight.status === "consult_required") {
+        // Store consultation status — auto-queue tick will handle consultation dispatch creation
+        agentdesk.log.info("[preflight] Card " + payload.card_id + " needs consultation: " + preflight.summary);
       }
+      // "clear" and "assumption_ok" → do nothing, auto-queue will create implementation dispatch
     }
 
     // → blocked (force-only target): PMD 알림 (Agent in the Loop)
@@ -344,18 +480,7 @@ var rules = {
     // blocked is typically the second force target (index 1)
     var blockedState = allForceTargets.length > 1 ? allForceTargets[1] : allForceTargets[0];
     if (payload.to === blockedState) {
-      var reason = "상태 전이: " + payload.from + " → " + payload.to;
-
-      // blocked_reason이 있으면 사용
-      var blockInfo = agentdesk.db.query(
-        "SELECT blocked_reason FROM kanban_cards WHERE id = ?",
-        [payload.card_id]
-      );
-      if (blockInfo.length > 0 && blockInfo[0].blocked_reason) {
-        reason = blockInfo[0].blocked_reason;
-      }
-
-      notifyPMD(payload.card_id, reason);
+      agentdesk.log.info("[kanban] card " + payload.card_id + " entered blocked state");
     }
 
     // → pendingState: create pm-decision dispatch + notify PMD
@@ -373,10 +498,12 @@ var rules = {
         title = blockInfo[0].title || title;
       }
 
-      // Create pm-decision dispatch to PMD
+      // #267: Create pm-decision dispatch to PMD — the dispatch itself
+      // sends a notification via dispatch outbox, so only fall back to
+      // the canonical pm_pending buffer when dispatch creation fails.
+      var dispatchSent = false;
       var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
       if (pmdChannel) {
-        // Find PMD agent by channel
         var pmdAgent = agentdesk.db.query(
           "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? LIMIT 1",
           [pmdChannel, pmdChannel]
@@ -389,6 +516,7 @@ var rules = {
               "pm-decision",
               "[PM Decision] " + title
             );
+            dispatchSent = true;
           } catch (e) {
             agentdesk.log.warn("[kanban] pm-decision dispatch failed: " + e);
           }
@@ -397,7 +525,9 @@ var rules = {
         }
       }
 
-      notifyPMD(payload.card_id, reason);
+      if (!dispatchSent) {
+        notifyPMD(payload.card_id, reason);
+      }
     }
   },
 

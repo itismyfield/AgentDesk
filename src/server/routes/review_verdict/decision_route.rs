@@ -1,0 +1,758 @@
+use axum::{Json, extract::State, http::StatusCode};
+use serde::Deserialize;
+use serde_json::json;
+
+use super::super::AppState;
+use super::review_state_repo::update_card_review_state;
+use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed};
+
+// ── Review Decision (agent's response to counter-model review) ──────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewDecisionBody {
+    pub card_id: String,
+    pub decision: String, // "accept", "dispute", "dismiss"
+    pub comment: Option<String>,
+    /// #109: dispatch-scoped targeting — when provided, the server validates
+    /// that this dispatch_id matches the pending review-decision dispatch for
+    /// the card. Prevents replayed/stale decisions from consuming the wrong
+    /// dispatch.
+    pub dispatch_id: Option<String>,
+}
+
+/// POST /api/review-decision
+///
+/// Agent's decision on counter-model review feedback.
+/// - accept: agent will rework based on review → card to in_progress
+/// - dispute: agent disagrees, sends back for re-review → new review dispatch
+/// - dismiss: agent ignores review → card to done
+pub async fn submit_review_decision(
+    State(state): State<AppState>,
+    Json(body): Json<ReviewDecisionBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let valid = ["accept", "dispute", "dismiss"];
+    if !valid.contains(&body.decision.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("decision must be one of: {}", valid.join(", "))})),
+        );
+    }
+
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    // Verify card exists
+    let card_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = ?1",
+            [&body.card_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if card_status.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "card not found"})),
+        );
+    }
+
+    // #117: Look up pending review-decision via canonical card_review_state first,
+    // falling back to legacy latest_dispatch_id for cards not yet in the canonical table.
+    let pending_rd_id: Option<String> = conn
+        .query_row(
+            "SELECT td.id FROM task_dispatches td \
+             JOIN card_review_state crs ON crs.pending_dispatch_id = td.id \
+             WHERE crs.card_id = ?1 AND td.dispatch_type = 'review-decision' \
+             AND td.status IN ('pending', 'dispatched')",
+            [&body.card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .or_else(|| {
+            // Fallback: legacy path via latest_dispatch_id
+            conn.query_row(
+                "SELECT td.id FROM task_dispatches td \
+                 JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id \
+                 WHERE kc.id = ?1 AND td.dispatch_type = 'review-decision' \
+                 AND td.status IN ('pending', 'dispatched')",
+                [&body.card_id],
+                |row| row.get(0),
+            )
+            .ok()
+        });
+
+    if pending_rd_id.is_none() {
+        // No pending review-decision dispatch → stale or duplicate call
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "no pending review-decision dispatch for this card",
+                "card_id": body.card_id,
+            })),
+        );
+    }
+
+    // #109: When dispatch_id is provided, validate it matches the pending
+    // review-decision dispatch. This prevents replayed or stale decisions from
+    // consuming a different dispatch than the one they were issued for.
+    if let Some(ref submitted_did) = body.dispatch_id {
+        if pending_rd_id.as_deref() != Some(submitted_did.as_str()) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!(
+                        "dispatch_id mismatch: submitted {} but pending is {}",
+                        submitted_did,
+                        pending_rd_id.as_deref().unwrap_or("(none)")
+                    ),
+                    "card_id": body.card_id,
+                })),
+            );
+        }
+    }
+
+    match body.decision.as_str() {
+        "accept" => {
+            // #195: Agent accepts review feedback — create a rework dispatch so the
+            // agent can address the findings. When the rework dispatch completes,
+            // OnDispatchCompleted (kanban-rules.js) transitions to review for re-review.
+            drop(conn);
+
+            let (card_status_now, card_repo_id, card_agent_id, card_title): (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|c| {
+                    c.query_row(
+                        "SELECT status, repo_id, assigned_agent_id, title FROM kanban_cards WHERE id = ?1",
+                        [&body.card_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .ok()
+                })
+                .unwrap_or_default();
+            crate::pipeline::ensure_loaded();
+            let effective_pipeline = {
+                let conn = match state.db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("database lock poisoned: {e}")})),
+                        );
+                    }
+                };
+                crate::pipeline::resolve_for_card(
+                    &conn,
+                    card_repo_id.as_deref(),
+                    card_agent_id.as_deref(),
+                )
+            };
+
+            // Guard: terminal card
+            if effective_pipeline.is_terminal(&card_status_now) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "card is terminal, cannot accept review feedback",
+                        "card_id": body.card_id,
+                    })),
+                );
+            }
+
+            // Find rework target via review_rework gate (same logic as timeouts.js section E)
+            let rework_target = effective_pipeline
+                .transitions
+                .iter()
+                .find(|t| {
+                    t.from == card_status_now
+                        && t.transition_type == crate::pipeline::TransitionType::Gated
+                        && t.gates.iter().any(|g| g == "review_rework")
+                })
+                .map(|t| t.to.clone())
+                .unwrap_or_else(|| {
+                    effective_pipeline
+                        .dispatchable_states()
+                        .first()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| effective_pipeline.initial_state().to_string())
+                });
+
+            // Consume review-decision dispatch FIRST — frees the duplicate dispatch guard
+            // so the rework dispatch can be created (create_dispatch_core rejects when
+            // any pending/dispatched dispatch already exists for the card).
+            if let Some(ref rd_id) = pending_rd_id {
+                crate::dispatch::mark_dispatch_completed(
+                    &state.db,
+                    rd_id,
+                    &json!({"decision": "accept", "completion_source": "review_decision_api"}),
+                )
+                .ok();
+            }
+
+            // #246: Check if the agent already committed new work during the
+            // review-decision turn. If the worktree HEAD differs from the
+            // reviewed_commit of the last review, skip rework and go straight
+            // to review (the agent already addressed the feedback).
+            let skip_rework = {
+                let last_reviewed_commit: Option<String> = state
+                    .db
+                    .lock()
+                    .ok()
+                    .and_then(|c| {
+                        c.query_row(
+                            "SELECT context FROM task_dispatches \
+                             WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+                             AND status = 'completed' \
+                             ORDER BY completed_at DESC LIMIT 1",
+                            [&body.card_id],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .and_then(|ctx_str| serde_json::from_str::<serde_json::Value>(&ctx_str).ok())
+                    .and_then(|v| {
+                        v.get("reviewed_commit")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
+                    });
+
+                let issue_number: Option<i64> = state.db.lock().ok().and_then(|c| {
+                    c.query_row(
+                        "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+                        [&body.card_id],
+                        |row| row.get(0),
+                    )
+                    .ok()
+                });
+
+                if let (Some(prev_commit), Some(issue_num)) = (&last_reviewed_commit, issue_number)
+                {
+                    let repo_dir =
+                        crate::services::platform::resolve_repo_dir().unwrap_or_default();
+                    let current_commit =
+                        crate::services::platform::find_worktree_for_issue(&repo_dir, issue_num)
+                            .map(|wt| wt.commit);
+                    if let Some(ref cur) = current_commit {
+                        let differs = cur != prev_commit;
+                        if differs {
+                            tracing::info!(
+                                "[review-decision] #246 New commit detected for card {}: prev={} cur={} — skipping rework",
+                                body.card_id,
+                                &prev_commit[..8.min(prev_commit.len())],
+                                &cur[..8.min(cur.len())]
+                            );
+                        }
+                        differs
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+
+            // #246: If agent already committed new work, skip rework and re-enter
+            // review via a two-step transition (rework_target → review) so that
+            // OnReviewEnter fires naturally (increments review_round, sets
+            // review_status, creates review dispatch via review-automation.js).
+            let direct_review_created = if skip_rework {
+                // Find the review state from the pipeline (gated transition from rework_target)
+                let review_state = effective_pipeline
+                    .transitions
+                    .iter()
+                    .find(|t| {
+                        t.from == rework_target
+                            && t.transition_type == crate::pipeline::TransitionType::Gated
+                    })
+                    .map(|t| t.to.clone());
+
+                if let Some(ref review_st) = review_state {
+                    // Step 1: Transition to rework_target (e.g., in_progress)
+                    let step1_ok = crate::kanban::transition_status_with_opts(
+                        &state.db,
+                        &state.engine,
+                        &body.card_id,
+                        &rework_target,
+                        "review_decision_accept_skip_rework_step1",
+                        true,
+                    )
+                    .is_ok();
+
+                    if step1_ok {
+                        // Step 2: Transition to review — fires OnReviewEnter
+                        match crate::kanban::transition_status_with_opts(
+                            &state.db,
+                            &state.engine,
+                            &body.card_id,
+                            review_st,
+                            "review_decision_accept_skip_rework_step2",
+                            true,
+                        ) {
+                            Ok(_) => {
+                                tracing::info!(
+                                    "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
+                                    body.card_id,
+                                    card_status_now,
+                                    rework_target,
+                                    review_st
+                                );
+                                true
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
+                                    review_st,
+                                    body.card_id
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            // Create rework dispatch (original path, or fallback if direct review failed)
+            let rework_dispatch_created = if !direct_review_created && !skip_rework {
+                // Transition card to rework target (e.g., in_progress)
+                if let Err(e) = crate::kanban::transition_status_with_opts(
+                    &state.db,
+                    &state.engine,
+                    &body.card_id,
+                    &rework_target,
+                    "review_decision_accept",
+                    true,
+                ) {
+                    tracing::warn!(
+                        "[review-decision] #195 Transition to rework target failed for card {}: {e}",
+                        body.card_id
+                    );
+                }
+
+                if let Some(ref agent_id) = card_agent_id {
+                    let rework_title = format!(
+                        "[Rework] {}",
+                        card_title.as_deref().unwrap_or(&body.card_id)
+                    );
+                    match crate::dispatch::create_dispatch_core(
+                        &state.db,
+                        &body.card_id,
+                        agent_id,
+                        "rework",
+                        &rework_title,
+                        &json!({}),
+                    ) {
+                        Ok((dispatch_id, _, _reused)) => {
+                            tracing::info!(
+                                "[review-decision] #195 Rework dispatch created: card={} dispatch={}",
+                                body.card_id,
+                                dispatch_id
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[review-decision] #195 Rework dispatch creation failed for card {}: {e}",
+                                body.card_id
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "[review-decision] #195 No agent assigned to card {} — cannot create rework dispatch",
+                        body.card_id
+                    );
+                    false
+                }
+            } else {
+                false
+            };
+
+            // Clear suggestion_pending_at (same as timeouts.js auto-accept)
+            if let Ok(c) = state.db.lock() {
+                c.execute(
+                    "UPDATE kanban_cards SET suggestion_pending_at = NULL WHERE id = ?1",
+                    [&body.card_id],
+                )
+                .ok();
+            }
+
+            // #119: Record tuning outcome
+            record_decision_tuning(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
+            spawn_aggregate_if_needed(&state.db);
+
+            // #117: Update canonical review state.
+            // For direct review: OnReviewEnter already set the state, so skip the
+            // rework_pending override that would conflict with the live review dispatch.
+            if !direct_review_created {
+                update_card_review_state(
+                    &state.db,
+                    &body.card_id,
+                    "accept",
+                    pending_rd_id.as_deref(),
+                );
+            }
+
+            // Emit kanban_card_updated for real-time dashboard
+            if let Ok(conn) = state.db.lock() {
+                if let Ok(card) = conn.query_row(
+                    &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
+                    [&body.card_id],
+                    |row| super::super::kanban::card_row_to_json(row),
+                ) {
+                    crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+                }
+            }
+            let message = if direct_review_created {
+                "Review-decision accepted, direct review dispatch created (rework skipped)"
+            } else {
+                "Review-decision accepted, rework dispatch created"
+            };
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "card_id": body.card_id,
+                    "decision": "accept",
+                    "rework_dispatch_created": rework_dispatch_created,
+                    "direct_review_created": direct_review_created,
+                    "message": message,
+                })),
+            );
+        }
+        "dispute" => {
+            // #143: Agent disputes → complete review-decision dispatch via shared helper
+            if let Some(ref rd_id) = pending_rd_id {
+                crate::dispatch::mark_dispatch_completed(
+                    &state.db,
+                    rd_id,
+                    &json!({"decision": "dispute", "completion_source": "review_decision_api"}),
+                )
+                .ok();
+            }
+            // #155: Use intents for review_status mutation (executor boundary)
+            use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+            let dispute_intents = vec![
+                TransitionIntent::SetReviewStatus {
+                    card_id: body.card_id.clone(),
+                    review_status: Some("reviewing".to_string()),
+                },
+                TransitionIntent::SyncReviewState {
+                    card_id: body.card_id.clone(),
+                    state: "reviewing".to_string(),
+                },
+            ];
+            for intent in &dispute_intents {
+                execute_intent_on_conn(&conn, intent).ok();
+            }
+            conn.execute(
+                "UPDATE kanban_cards SET review_entered_at = datetime('now') WHERE id = ?1",
+                [&body.card_id],
+            )
+            .ok();
+            drop(conn);
+
+            // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)
+            record_decision_tuning(
+                &state.db,
+                &body.card_id,
+                "dispute",
+                pending_rd_id.as_deref(),
+            );
+            spawn_aggregate_if_needed(&state.db);
+
+            // #229: Cancel stale pending/dispatched review dispatches for this card.
+            // Without this, the dedup guard in create_dispatch_core blocks
+            // OnReviewEnter from creating a fresh review dispatch after dispute.
+            if let Ok(conn) = state.db.lock() {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id FROM task_dispatches \
+                     WHERE kanban_card_id = ?1 AND dispatch_type = 'review' \
+                     AND status IN ('pending', 'dispatched')",
+                    )
+                    .ok();
+                if let Some(ref mut s) = stmt {
+                    let stale_ids: Vec<String> = s
+                        .query_map([&body.card_id], |row| row.get::<_, String>(0))
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    for stale_id in &stale_ids {
+                        crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                            &conn,
+                            stale_id,
+                            Some("superseded_by_dispute_re_review"),
+                        )
+                        .ok();
+                    }
+                    if !stale_ids.is_empty() {
+                        tracing::info!(
+                            "[review-decision] #229 Cancelled {} stale review dispatch(es) for card {} before dispute re-review",
+                            stale_ids.len(),
+                            body.card_id
+                        );
+                    }
+                }
+            }
+
+            // Fire on_enter hooks for current state (should be a review-like state with OnReviewEnter)
+            let dispute_status: String = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|c| {
+                    c.query_row(
+                        "SELECT status FROM kanban_cards WHERE id = ?1",
+                        [&body.card_id],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                })
+                .unwrap_or_else(|| "review".to_string());
+            crate::kanban::fire_enter_hooks(
+                &state.db,
+                &state.engine,
+                &body.card_id,
+                &dispute_status,
+            );
+
+            // #108: Drain all pending intents and transitions from OnReviewEnter hooks.
+            // drain_hook_side_effects handles both transition processing (e.g. setStatus
+            // for pending_decision on max rounds) and Discord notifications for any
+            // dispatches created by the hooks, eliminating the previous manual drain loop
+            // that only handled transitions and missed dispatch notifications.
+            crate::kanban::drain_hook_side_effects(&state.db, &state.engine);
+
+            // #229: Safety net — if card is still in a review-like state but no
+            // pending review dispatch exists (OnReviewEnter hook may have failed
+            // due to lock contention or JS error), re-fire with blocking lock.
+            {
+                crate::pipeline::ensure_loaded();
+                let needs_review = state.db.lock().ok().map(|conn| {
+                    let (card_status, repo_id, agent_id): (Option<String>, Option<String>, Option<String>) = conn
+                        .query_row(
+                            "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                            [&body.card_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .unwrap_or((None, None, None));
+                    let has_review_dispatch: bool = conn
+                        .query_row(
+                            "SELECT COUNT(*) > 0 FROM task_dispatches \
+                             WHERE kanban_card_id = ?1 AND dispatch_type IN ('review', 'review-decision') \
+                             AND status IN ('pending', 'dispatched')",
+                            [&body.card_id],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(false);
+                    let is_review_state = card_status.as_deref().map_or(false, |s| {
+                        let eff = crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref());
+                        eff.hooks_for_state(s)
+                            .map_or(false, |h| h.on_enter.iter().any(|n| n == "OnReviewEnter"))
+                    });
+                    is_review_state && !has_review_dispatch
+                }).unwrap_or(false);
+
+                if needs_review {
+                    tracing::warn!(
+                        "[review-decision] Card {} in review state but no review dispatch after dispute — re-firing OnReviewEnter (#229)",
+                        body.card_id
+                    );
+                    let _ = state.engine.fire_hook_by_name_blocking(
+                        "OnReviewEnter",
+                        json!({ "card_id": body.card_id }),
+                    );
+                    crate::kanban::drain_hook_side_effects(&state.db, &state.engine);
+                }
+            }
+
+            // #117: Update canonical review state before returning
+            update_card_review_state(
+                &state.db,
+                &body.card_id,
+                "dispute",
+                pending_rd_id.as_deref(),
+            );
+
+            // Emit kanban_card_updated for real-time dashboard
+            if let Ok(conn) = state.db.lock() {
+                if let Ok(card) = conn.query_row(
+                    &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
+                    [&body.card_id],
+                    |row| super::super::kanban::card_row_to_json(row),
+                ) {
+                    crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+                }
+            }
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "card_id": body.card_id,
+                    "decision": "dispute",
+                    "message": "Re-review dispatched to counter-model",
+                })),
+            );
+        }
+        "dismiss" => {
+            // Agent dismisses review → transition to terminal state, then clean up stale state.
+            // Order matters: transition_status requires an active dispatch, so we must
+            // transition BEFORE cancelling pending dispatches.
+            drop(conn);
+            crate::pipeline::ensure_loaded();
+            let terminal_state = {
+                let conn_lock = match state.db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("database lock poisoned: {e}")})),
+                        );
+                    }
+                };
+                let (repo_id, agent_id): (Option<String>, Option<String>) = conn_lock
+                    .query_row(
+                        "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                        [&body.card_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap_or((None, None));
+                let eff = crate::pipeline::resolve_for_card(
+                    &conn_lock,
+                    repo_id.as_deref(),
+                    agent_id.as_deref(),
+                );
+                eff.states
+                    .iter()
+                    .find(|s| s.terminal)
+                    .map(|s| s.id.clone())
+                    .unwrap_or_else(|| "done".to_string())
+            };
+            let _ = crate::kanban::transition_status_with_opts(
+                &state.db,
+                &state.engine,
+                &body.card_id,
+                &terminal_state,
+                "dismiss",
+                true, // force — dismiss bypasses review_passed gate
+            );
+
+            // Post-transition cleanup: cancel remaining pending review dispatches to prevent
+            // stale dispatches from re-triggering review loops after dismiss.
+            if let Ok(conn) = state.db.lock() {
+                let dispatch_ids: Vec<String> = conn
+                    .prepare(
+                        "SELECT id FROM task_dispatches \
+                         WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
+                         AND dispatch_type IN ('review', 'review-decision')",
+                    )
+                    .ok()
+                    .and_then(|mut stmt| {
+                        stmt.query_map([&body.card_id], |row| row.get::<_, String>(0))
+                            .ok()
+                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    })
+                    .unwrap_or_default();
+                conn.execute_batch("BEGIN").ok();
+                for dispatch_id in &dispatch_ids {
+                    if let Err(e) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+                        &conn,
+                        dispatch_id,
+                        None,
+                    ) {
+                        conn.execute_batch("ROLLBACK").ok();
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("{e}")})),
+                        );
+                    }
+                }
+                // #155: Belt-and-suspenders via intent (executor boundary)
+                use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+                if let Err(e) = execute_intent_on_conn(
+                    &conn,
+                    &TransitionIntent::SetReviewStatus {
+                        card_id: body.card_id.clone(),
+                        review_status: None,
+                    },
+                ) {
+                    conn.execute_batch("ROLLBACK").ok();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{e}")})),
+                    );
+                }
+                // Clear thread mappings so dismissed review threads are not reused.
+                super::super::dispatches::clear_all_threads(&conn, &body.card_id);
+                if let Err(e) = conn.execute_batch("COMMIT") {
+                    conn.execute_batch("ROLLBACK").ok();
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{e}")})),
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // #117: Update canonical review state for all decision paths
+    update_card_review_state(
+        &state.db,
+        &body.card_id,
+        &body.decision,
+        pending_rd_id.as_deref(),
+    );
+    // #119: Record tuning outcome (dismiss falls through here; accept/dispute call helper before returning)
+    record_decision_tuning(
+        &state.db,
+        &body.card_id,
+        &body.decision,
+        pending_rd_id.as_deref(),
+    );
+    spawn_aggregate_if_needed(&state.db);
+
+    // Emit kanban_card_updated for real-time dashboard
+    if let Ok(conn) = state.db.lock() {
+        if let Ok(card) = conn.query_row(
+            &format!("{} WHERE kc.id = ?1", super::super::kanban::CARD_SELECT),
+            [&body.card_id],
+            |row| super::super::kanban::card_row_to_json(row),
+        ) {
+            crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "card_id": body.card_id,
+            "decision": body.decision,
+        })),
+    )
+}

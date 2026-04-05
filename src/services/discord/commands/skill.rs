@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use poise::serenity_prelude as serenity;
 use serenity::CreateMessage;
 
@@ -7,7 +5,7 @@ use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::router::handle_text_message;
 use super::super::turn_bridge::cancel_active_token;
 use super::super::{Context, Error, auto_restore_session, check_auth};
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{ProviderKind, cancel_requested};
 
 // Re-use the report builders from diagnostics (they are private to diagnostics,
 // so cmd_cc duplicates the built-in handler logic inline, matching the original code).
@@ -82,7 +80,7 @@ pub(in crate::services::discord) async fn cmd_cc(
             };
             match token {
                 Some(token) => {
-                    if token.cancelled.load(Ordering::Relaxed) {
+                    if cancel_requested(Some(token.as_ref())) {
                         ctx.say("Already stopping...").await?;
                         return Ok(());
                     }
@@ -267,6 +265,19 @@ pub(in crate::services::discord) async fn cmd_cc(
             } else {
                 format!(
                     "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
+                     Follow its SKILL.md instructions exactly and adapt them to the request."
+                )
+            }
+        }
+        ProviderKind::Qwen => {
+            if args_str.is_empty() {
+                format!(
+                    "Use the local Qwen skill `/{skill}` now. \
+                     Follow its SKILL.md instructions exactly and complete the task."
+                )
+            } else {
+                format!(
+                    "Use the local Qwen skill `/{skill}` now with this user request: {args_str}\n\
                      Follow its SKILL.md instructions exactly and adapt them to the request."
                 )
             }

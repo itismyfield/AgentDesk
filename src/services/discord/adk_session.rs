@@ -25,6 +25,30 @@ pub(super) fn parse_dispatch_id(text: &str) -> Option<String> {
     Some(id.to_string())
 }
 
+/// #222: Look up a pending implementation/rework dispatch for a thread channel
+/// via the ADK API. Used as fallback when parse_dispatch_id fails (unified threads
+/// where user_text doesn't contain DISPATCH: prefix).
+pub(super) async fn lookup_pending_dispatch_for_thread(
+    api_port: u16,
+    thread_channel_id: u64,
+) -> Option<String> {
+    let url = local_api_url(
+        api_port,
+        &format!(
+            "/api/internal/pending-dispatch-for-thread?thread_id={}",
+            thread_channel_id
+        ),
+    );
+    let resp = reqwest::Client::new().get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    body.get("dispatch_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 pub(super) async fn build_adk_session_key(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
@@ -161,9 +185,9 @@ pub(super) async fn delete_adk_session(session_key: &str, api_port: u16) {
     }
 }
 
-/// Clear the stored claude_session_id from DB for a given session_key.
+/// Clear the stored provider session_id from DB for a given session_key.
 /// Called when the user runs /clear so the next turn doesn't resume a dead session.
-pub(super) async fn clear_claude_session_id(session_key: &str, api_port: u16) {
+pub(super) async fn clear_provider_session_id(session_key: &str, api_port: u16) {
     let body = serde_json::json!({ "session_key": session_key });
     match reqwest::Client::new()
         .post(local_api_url(
@@ -177,16 +201,20 @@ pub(super) async fn clear_claude_session_id(session_key: &str, api_port: u16) {
         Ok(resp) if !resp.status().is_success() => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
-                "  [{ts}] ⚠ clear_claude_session_id failed: HTTP {}",
+                "  [{ts}] ⚠ clear_provider_session_id failed: HTTP {}",
                 resp.status()
             );
         }
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ clear_claude_session_id error: {e}");
+            eprintln!("  [{ts}] ⚠ clear_provider_session_id error: {e}");
         }
         _ => {}
     }
+}
+
+pub(super) async fn clear_claude_session_id(session_key: &str, api_port: u16) {
+    clear_provider_session_id(session_key, api_port).await;
 }
 
 /// Save a provider session_id to DB so it survives dcserver restarts.
@@ -610,8 +638,11 @@ mod tests {
 
 /// Context window management thresholds.
 /// Single source of truth used by both Rust turn-end compact and JS onContextCheck.
+/// Provider-specific overrides: `context_compact_percent_codex`, `context_compact_percent_claude`, etc.
 pub(super) struct ContextThresholds {
     pub compact_pct: u64,
+    /// Provider-specific override (if set). Falls back to compact_pct.
+    pub compact_pct_codex: u64,
     pub context_window: u64,
 }
 
@@ -619,13 +650,25 @@ impl Default for ContextThresholds {
     fn default() -> Self {
         Self {
             compact_pct: 60,
+            compact_pct_codex: 100,
             context_window: 1_000_000,
+        }
+    }
+}
+
+impl ContextThresholds {
+    /// Get compact percent for a specific provider.
+    pub fn compact_pct_for(&self, provider: &crate::services::provider::ProviderKind) -> u64 {
+        match provider {
+            crate::services::provider::ProviderKind::Codex => self.compact_pct_codex,
+            _ => self.compact_pct,
         }
     }
 }
 
 /// Fetch context thresholds from the ADK config API (individual kv_meta keys).
 /// Falls back to defaults on any error.
+/// Supports provider-specific overrides: `context_compact_percent_codex`, etc.
 pub(super) async fn fetch_context_thresholds(api_port: u16) -> ContextThresholds {
     let defaults = ContextThresholds::default();
     let url = local_api_url(api_port, "/api/settings/config");
@@ -638,17 +681,25 @@ pub(super) async fn fetch_context_thresholds(api_port: u16) -> ContextThresholds
         _ => return defaults,
     };
     let entries = body.get("entries").and_then(|v| v.as_array());
-    let compact_pct = entries
-        .and_then(|arr| {
-            arr.iter()
-                .find(|e| e.get("key").and_then(|k| k.as_str()) == Some("context_compact_percent"))
-        })
-        .and_then(|e| e.get("value"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(defaults.compact_pct);
+
+    let find_u64 = |key: &str| -> Option<u64> {
+        entries
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|e| e.get("key").and_then(|k| k.as_str()) == Some(key))
+            })
+            .and_then(|e| e.get("value"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+    };
+
+    let compact_pct = find_u64("context_compact_percent").unwrap_or(defaults.compact_pct);
+    let compact_pct_codex =
+        find_u64("context_compact_percent_codex").unwrap_or(defaults.compact_pct_codex);
+
     ContextThresholds {
         compact_pct,
+        compact_pct_codex,
         context_window: defaults.context_window,
     }
 }
