@@ -37,7 +37,6 @@ fn get_codex_path() -> Option<String> {
     resolve_codex_path()
 }
 
-#[cfg(unix)]
 fn build_tmux_launch_env_lines(
     exec_path: Option<&str>,
     report_channel_id: Option<u64>,
