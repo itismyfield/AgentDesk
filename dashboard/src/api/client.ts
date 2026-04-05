@@ -1006,7 +1006,7 @@ export interface AutoQueueRun {
   id: string;
   repo: string | null;
   agent_id: string | null;
-  status: "pending" | "active" | "paused" | "completed";
+  status: "pending" | "generated" | "active" | "paused" | "completed";
   ai_model: string | null;
   ai_rationale: string | null;
   timeout_minutes: number;
@@ -1041,6 +1041,7 @@ export interface ThreadGroupStatus {
   done: number;
   skipped: number;
   status: string;
+  reason?: string | null;
   entries: { id: string; card_id: string; github_issue_number?: number | null; status: string }[];
 }
 
@@ -1051,13 +1052,28 @@ export interface AutoQueueStatus {
   thread_groups?: Record<string, ThreadGroupStatus>;
 }
 
-export async function generateAutoQueue(repo?: string | null, agentId?: string | null, mode?: string | null): Promise<{
+export type AutoQueueGenerateMode =
+  | "priority-sort"
+  | "dependency-aware"
+  | "similarity-aware"
+  | "pm-assisted";
+
+export async function generateAutoQueue(
+  repo?: string | null,
+  agentId?: string | null,
+  mode?: AutoQueueGenerateMode | null,
+): Promise<{
   run: AutoQueueRun;
   entries: DispatchQueueEntry[];
 }> {
   return request("/api/auto-queue/generate", {
     method: "POST",
-    body: JSON.stringify({ repo: repo ?? null, agent_id: agentId ?? null, mode: mode ?? "priority-sort" }),
+    body: JSON.stringify({
+      repo: repo ?? null,
+      agent_id: agentId ?? null,
+      mode: mode ?? "priority-sort",
+      parallel: mode === "similarity-aware" || undefined,
+    }),
   });
 }
 

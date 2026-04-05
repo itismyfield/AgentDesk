@@ -3023,6 +3023,74 @@ fn seed_parallel_test_cards(db: &Db) -> Vec<String> {
     card_ids
 }
 
+fn seed_similarity_group_cards(db: &Db) -> Vec<String> {
+    let conn = db.lock().unwrap();
+    for i in 1..=3 {
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO agents (id, name, provider, status, discord_channel_id, discord_channel_alt)
+                 VALUES ('sim-agent-{i}', 'SimAgent{i}', 'claude', 'idle', '{}', '{}')",
+                3000 + i,
+                4000 + i,
+            ),
+            [],
+        )
+        .unwrap();
+    }
+
+    let rows = [
+        (
+            "sim-card-auth-1",
+            "sim-agent-1",
+            101,
+            "Auto-queue route generate update",
+            "Touches src/server/routes/auto_queue.rs and dashboard/src/components/agent-manager/AutoQueuePanel.tsx",
+        ),
+        (
+            "sim-card-auth-2",
+            "sim-agent-1",
+            102,
+            "Auto-queue panel reason rendering",
+            "Updates src/server/routes/auto_queue.rs plus dashboard/src/api/client.ts for generated reason text",
+        ),
+        (
+            "sim-card-billing-1",
+            "sim-agent-2",
+            201,
+            "Unified thread nested map cleanup",
+            "Files: src/server/routes/dispatches/discord_delivery.rs and policies/auto-queue.js",
+        ),
+        (
+            "sim-card-billing-2",
+            "sim-agent-2",
+            202,
+            "Auto queue follow-up dispatch policy",
+            "Relevant files: policies/auto-queue.js and src/server/routes/routes_tests.rs",
+        ),
+        (
+            "sim-card-ops-1",
+            "sim-agent-3",
+            301,
+            "Release health probe logs",
+            "Only docs/operations/release-health.md changes are needed here",
+        ),
+    ];
+
+    let mut ids = Vec::new();
+    for (card_id, agent_id, issue_num, title, description) in rows {
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, repo_id, title, description, status, priority, assigned_agent_id, github_issue_number
+             ) VALUES (?1, 'test-repo', ?2, ?3, 'ready', 'medium', ?4, ?5)",
+            rusqlite::params![card_id, title, description, agent_id, issue_num],
+        )
+        .unwrap();
+        ids.push(card_id.to_string());
+    }
+
+    ids
+}
+
 #[tokio::test]
 async fn parallel_generate_creates_correct_thread_groups() {
     let db = test_db();
@@ -3118,6 +3186,212 @@ async fn parallel_generate_creates_correct_thread_groups() {
     // #6 depends on #5, #7 depends on #5 and #6 — so #6 before #7
     assert_eq!(chain_issues[2], 6, "#6 depends on #5, must be third");
     assert_eq!(chain_issues[3], 7, "#7 depends on #5 and #6, must be last");
+}
+
+#[tokio::test]
+async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let _card_ids = seed_similarity_group_cards(&db);
+
+    let app = test_api_router(db, engine, None);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "mode": "similarity-aware",
+                        "parallel": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let run = &json["run"];
+    let entries = json["entries"].as_array().expect("entries must be array");
+    assert_eq!(
+        entries.len(),
+        5,
+        "all similarity test cards should be queued"
+    );
+    assert_eq!(
+        run["thread_group_count"].as_i64().unwrap(),
+        3,
+        "two similarity pairs plus one independent task should yield three groups"
+    );
+    assert_eq!(
+        run["max_concurrent_threads"].as_i64().unwrap(),
+        3,
+        "recommended concurrency should match the number of distinct runnable groups"
+    );
+    assert_eq!(
+        run["ai_model"].as_str().unwrap(),
+        "similarity-aware-thread-group"
+    );
+
+    let similarity_reason_count = entries
+        .iter()
+        .filter(|entry| {
+            entry["reason"]
+                .as_str()
+                .map(|reason| reason.contains("유사도 그룹"))
+                .unwrap_or(false)
+        })
+        .count();
+    assert!(
+        similarity_reason_count >= 4,
+        "two similarity groups should stamp group reasons on their entries"
+    );
+
+    let status_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/auto-queue/status?repo=test-repo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status_resp.status(), StatusCode::OK);
+    let status_body = axum::body::to_bytes(status_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+    let thread_groups = status_json["thread_groups"]
+        .as_object()
+        .expect("thread_groups must be present");
+    assert!(
+        thread_groups.values().any(|group| {
+            group["reason"]
+                .as_str()
+                .map(|reason| reason.contains("유사도 그룹"))
+                .unwrap_or(false)
+        }),
+        "status should expose group-level reasons for similarity-based lanes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generate_similarity_aware_without_file_paths_falls_back_to_dependency_only_groups() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let _card_ids = seed_parallel_test_cards(&db);
+
+    let app = test_api_router(db, engine, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "mode": "similarity-aware",
+                        "parallel": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let run = &json["run"];
+    let entries = json["entries"].as_array().expect("entries must be array");
+    assert_eq!(
+        entries.len(),
+        7,
+        "all dependency-seed cards should be queued"
+    );
+    assert_eq!(
+        run["thread_group_count"].as_i64().unwrap(),
+        4,
+        "without file paths, similarity-aware must fall back to dependency-only grouping"
+    );
+    assert_eq!(
+        run["ai_model"].as_str().unwrap(),
+        "similarity-aware-thread-group"
+    );
+    assert!(
+        run["ai_rationale"]
+            .as_str()
+            .map(|text| text.contains("fallback"))
+            .unwrap_or(false),
+        "rationale should explain the dependency-only fallback"
+    );
+    assert!(
+        entries.iter().all(|entry| {
+            entry["reason"]
+                .as_str()
+                .map(|reason| !reason.contains("유사도 그룹"))
+                .unwrap_or(true)
+        }),
+        "fallback path should not stamp similarity reasons"
+    );
+}
+
+#[tokio::test]
+async fn priority_sort_default_keeps_similarity_candidates_in_single_group() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let _card_ids = seed_similarity_group_cards(&db);
+
+    let app = test_api_router(db, engine, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let run = &json["run"];
+    let entries = json["entries"].as_array().expect("entries must be array");
+    assert_eq!(run["thread_group_count"], 1);
+    assert_eq!(run["max_concurrent_threads"], 1);
+    assert_eq!(run["ai_model"], "priority-sort");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["thread_group"].as_i64().unwrap() == 0),
+        "default priority-sort should keep a single sequential group"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3246,6 +3520,7 @@ async fn parallel_false_keeps_single_group_sequential() {
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
+                        "parallel": false,
                     }))
                     .unwrap(),
                 ))

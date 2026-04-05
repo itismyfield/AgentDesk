@@ -363,7 +363,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     return agent ? localeName(locale, agent) : agentId.slice(0, 8);
   };
 
-  const [generateMode, setGenerateMode] = useState<"priority-sort" | "dependency-aware" | "pm-assisted">("priority-sort");
+  const [generateMode, setGenerateMode] = useState<"priority-sort" | "dependency-aware" | "similarity-aware" | "pm-assisted">("priority-sort");
 
   const handleGenerate = async () => {
     setGenerating(true);
@@ -454,6 +454,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
   const dispatchedCount = entries.filter((e) => e.status === "dispatched").length;
   const doneCount = entries.filter((e) => e.status === "done").length;
   const totalCount = entries.length;
+  const canDispatch = !!run && (run.status === "generated" || run.status === "active") && pendingCount > 0;
 
   // Group entries by agent
   const entriesByAgent = new Map<string, DispatchQueueEntryType[]>();
@@ -514,11 +515,35 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
             <span
               className="text-xs px-2 py-0.5 rounded-full"
               style={{
-                backgroundColor: run.status === "pending" ? "rgba(56,189,248,0.2)" : run.status === "active" ? "rgba(139,92,246,0.2)" : run.status === "paused" ? "rgba(245,158,11,0.2)" : "rgba(34,197,94,0.2)",
-                color: run.status === "pending" ? "#38bdf8" : run.status === "active" ? "#a78bfa" : run.status === "paused" ? "#fbbf24" : "#4ade80",
+                backgroundColor: run.status === "pending"
+                  ? "rgba(56,189,248,0.2)"
+                  : run.status === "generated"
+                    ? "rgba(96,165,250,0.18)"
+                    : run.status === "active"
+                      ? "rgba(139,92,246,0.2)"
+                      : run.status === "paused"
+                        ? "rgba(245,158,11,0.2)"
+                        : "rgba(34,197,94,0.2)",
+                color: run.status === "pending"
+                  ? "#38bdf8"
+                  : run.status === "generated"
+                    ? "#60a5fa"
+                    : run.status === "active"
+                      ? "#a78bfa"
+                      : run.status === "paused"
+                        ? "#fbbf24"
+                        : "#4ade80",
               }}
             >
-              {run.status === "pending" ? tr("PMD 대기", "Awaiting PMD") : run.status === "active" ? tr("실행 중", "Active") : run.status === "paused" ? tr("일시정지", "Paused") : tr("완료", "Done")}
+              {run.status === "pending"
+                ? tr("PMD 대기", "Awaiting PMD")
+                : run.status === "generated"
+                  ? tr("생성됨", "Generated")
+                  : run.status === "active"
+                    ? tr("실행 중", "Active")
+                    : run.status === "paused"
+                      ? tr("일시정지", "Paused")
+                      : tr("완료", "Done")}
             </span>
           )}
           {totalCount > 0 && (
@@ -529,7 +554,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
         </button>
 
         <div className="flex items-center gap-2">
-          {run?.status === "active" && pendingCount > 0 && (
+          {canDispatch && (
             <>
               <label
                 className="flex items-center gap-1 text-xs cursor-pointer select-none"
@@ -559,7 +584,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                   backgroundColor: "rgba(245,158,11,0.1)",
                 }}
               >
-                {activating ? "…" : tr("디스패치", "Dispatch")}
+                {activating ? "…" : run?.status === "generated" ? tr("시작", "Start") : tr("디스패치", "Dispatch")}
               </button>
             </>
           )}
@@ -567,12 +592,13 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
             <>
               <select
                 value={generateMode}
-                onChange={(e) => setGenerateMode(e.target.value as "priority-sort" | "dependency-aware" | "pm-assisted")}
-                className="text-xs px-2 py-1 rounded-lg border bg-transparent"
+                onChange={(e) => setGenerateMode(e.target.value as "priority-sort" | "dependency-aware" | "similarity-aware" | "pm-assisted")}
+                className="text-[11px] px-2 py-1 rounded-lg border bg-transparent"
                 style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}
               >
                 <option value="priority-sort">{tr("우선순위 정렬", "Priority Sort")}</option>
                 <option value="dependency-aware">{tr("의존관계 고려", "Dependency Aware")}</option>
+                <option value="similarity-aware">{tr("유사도 자동 그룹", "Similarity Aware")}</option>
                 <option value="pm-assisted">{tr("PM 분석 요청", "PM Assisted")}</option>
               </select>
               <button
@@ -632,6 +658,19 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
           style={{ borderColor: "rgba(248,113,113,0.4)", color: "#fecaca", backgroundColor: "rgba(127,29,29,0.2)" }}
         >
           {error}
+        </div>
+      )}
+
+      {run?.ai_rationale && (
+        <div
+          className="rounded-lg px-3 py-2 text-[11px] border"
+          style={{
+            borderColor: "rgba(96,165,250,0.22)",
+            color: "var(--th-text-secondary)",
+            backgroundColor: "rgba(30,41,59,0.45)",
+          }}
+        >
+          {run.ai_rationale}
         </div>
       )}
 
@@ -852,6 +891,11 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                           {groupEntries.filter((e) => e.status === "done").length}/{groupEntries.length}
                         </span>
                       </div>
+                      {tgStatus?.reason && (
+                        <div className="px-1 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                          {tgStatus.reason}
+                        </div>
+                      )}
                       {groupEntries.map((entry, idx) => (
                         <EntryRow
                           key={entry.id}
