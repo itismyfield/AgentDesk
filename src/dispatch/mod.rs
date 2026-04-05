@@ -2087,8 +2087,15 @@ mod tests {
         let db = test_db();
         seed_card(&db, "card-review-target", "review");
 
-        let repo_dir = crate::services::platform::resolve_repo_dir().unwrap();
-        let completed_commit = crate::services::platform::git_head_commit(&repo_dir).unwrap();
+        let repo_dir = crate::services::platform::resolve_repo_dir()
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.display().to_string())
+            })
+            .unwrap();
+        let completed_commit = crate::services::platform::git_head_commit(&repo_dir)
+            .unwrap_or_else(|| "ci-detached-head".to_string());
         let completed_branch = crate::services::platform::shell::git_branch_name(&repo_dir);
 
         let conn = db.separate_conn().unwrap();

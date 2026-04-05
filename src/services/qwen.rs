@@ -30,7 +30,6 @@ use crate::services::tmux_diagnostics::{
     tmux_session_exists, tmux_session_has_live_pane,
 };
 
-static QWEN_PATH: OnceLock<Option<String>> = OnceLock::new();
 const QWEN_CANCELLED_MESSAGE: &str = "Qwen request cancelled";
 const QWEN_SESSION_DEAD_MESSAGE: &str = "Qwen stream ended without a terminal result";
 const QWEN_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -159,42 +158,23 @@ struct QwenAttemptState {
 }
 
 pub fn resolve_qwen_path() -> Option<String> {
-    if let Some(path) = crate::services::platform::resolve_binary_with_login_shell("qwen") {
-        return Some(path);
-    }
-
-    let home = dirs::home_dir().unwrap_or_default();
-    let mut known_paths = vec![home.join(".local/bin/qwen"), home.join("bin/qwen")];
-    #[cfg(unix)]
-    {
-        known_paths.push(PathBuf::from("/usr/local/bin/qwen"));
-        known_paths.push(PathBuf::from("/opt/homebrew/bin/qwen"));
-    }
-    #[cfg(windows)]
-    {
-        known_paths.push(home.join("AppData/Local/Programs/qwen/qwen.exe"));
-        known_paths.push(PathBuf::from("C:/Program Files/qwen/qwen.exe"));
-    }
-
-    for path in &known_paths {
-        if path.is_file() {
-            return Some(path.display().to_string());
-        }
-    }
-
-    None
+    crate::services::platform::resolve_provider_binary("qwen").resolved_path
 }
 
-fn get_qwen_path() -> Option<&'static str> {
-    QWEN_PATH.get_or_init(resolve_qwen_path).as_deref()
+fn resolve_qwen_binary() -> crate::services::platform::BinaryResolution {
+    crate::services::platform::resolve_provider_binary("qwen")
 }
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    let qwen_bin = get_qwen_path().ok_or_else(|| "Qwen CLI not found".to_string())?;
+    let resolution = resolve_qwen_binary();
+    let qwen_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Qwen CLI not found".to_string())?;
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let mut command = Command::new(qwen_bin);
-    crate::services::platform::apply_runtime_path(&mut command);
+    let mut command = Command::new(&qwen_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     let output = command
         .args(build_simple_exec_args(prompt))
         .current_dir(working_dir)
@@ -243,9 +223,13 @@ pub fn execute_command_streaming(
         return Err(remote_profile_not_supported_message());
     }
 
-    let qwen_bin = get_qwen_path().ok_or_else(|| "Qwen CLI not found".to_string())?;
     let allowed_core_tools = resolve_allowed_core_tools(allowed_tools)?;
     let prompt = compose_qwen_prompt(prompt, system_prompt, allowed_tools);
+    let resolution = resolve_qwen_binary();
+    let qwen_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Qwen CLI not found".to_string())?;
 
     if let Some(session_name) = tmux_session_name {
         #[cfg(unix)]
@@ -258,6 +242,7 @@ pub fn execute_command_streaming(
                 sender,
                 cancel_token,
                 session_name,
+                &resolution,
                 allowed_core_tools.as_deref(),
                 report_channel_id,
                 report_provider,
@@ -271,6 +256,7 @@ pub fn execute_command_streaming(
             sender,
             cancel_token,
             session_name,
+            &resolution,
             allowed_core_tools.as_deref(),
         );
     }
@@ -279,7 +265,8 @@ pub fn execute_command_streaming(
 
     for attempt in 0..=QWEN_MAX_SESSION_RETRIES {
         match execute_qwen_streaming_attempt(
-            qwen_bin,
+            &qwen_bin,
+            &resolution,
             &prompt,
             model,
             resume_strategy.clone(),
@@ -321,6 +308,7 @@ pub fn execute_command_streaming(
 #[allow(clippy::too_many_arguments)]
 fn execute_qwen_streaming_attempt(
     qwen_bin: &str,
+    resolution: &crate::services::platform::BinaryResolution,
     prompt: &str,
     model: Option<&str>,
     resume_strategy: QwenResumeStrategy,
@@ -333,7 +321,7 @@ fn execute_qwen_streaming_attempt(
 ) -> Result<QwenAttemptResult, String> {
     let settings_override = create_system_settings_override(allowed_core_tools)?;
     let mut command = Command::new(qwen_bin);
-    crate::services::platform::apply_runtime_path(&mut command);
+    crate::services::platform::apply_binary_resolution(&mut command, resolution);
     command
         .args(build_stream_exec_args(prompt, model, &resume_strategy))
         .current_dir(working_dir)
@@ -963,6 +951,7 @@ fn execute_streaming_local_tmux(
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
     tmux_session_name: &str,
+    qwen_resolution: &crate::services::platform::BinaryResolution,
     allowed_core_tools: Option<&[String]>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
@@ -1033,10 +1022,19 @@ fn execute_streaming_local_tmux(
 
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-    let qwen_bin = get_qwen_path().ok_or_else(|| "Qwen CLI not found".to_string())?;
+    let qwen_bin = qwen_resolution
+        .resolved_path
+        .as_deref()
+        .ok_or_else(|| "Qwen CLI not found".to_string())?;
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
 
     let mut env_lines = String::new();
+    if let Some(exec_path) = qwen_resolution.exec_path.as_deref() {
+        env_lines.push_str(&format!(
+            "export PATH='{}'\n",
+            exec_path.replace('\'', "'\\''")
+        ));
+    }
     if let Ok(root_dir) = std::env::var("AGENTDESK_ROOT_DIR") {
         let trimmed = root_dir.trim();
         if !trimmed.is_empty() {
@@ -1226,6 +1224,7 @@ fn execute_streaming_local_process(
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
     session_name: &str,
+    qwen_resolution: &crate::services::platform::BinaryResolution,
     allowed_core_tools: Option<&[String]>,
 ) -> Result<(), String> {
     use crate::services::session_backend::{
@@ -1307,7 +1306,10 @@ fn execute_streaming_local_process(
     std::fs::write(&prompt_path, prompt)
         .map_err(|e| format!("Failed to write prompt file: {}", e))?;
 
-    let qwen_bin = get_qwen_path().ok_or_else(|| "Qwen CLI not found".to_string())?;
+    let qwen_bin = qwen_resolution
+        .resolved_path
+        .as_deref()
+        .ok_or_else(|| "Qwen CLI not found".to_string())?;
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
@@ -1336,7 +1338,11 @@ fn execute_streaming_local_process(
             }
             args
         },
-        env_vars: vec![],
+        env_vars: qwen_resolution
+            .exec_path
+            .as_ref()
+            .map(|exec_path| vec![("PATH".to_string(), exec_path.clone())])
+            .unwrap_or_default(),
     };
 
     let backend = ProcessBackend::new();

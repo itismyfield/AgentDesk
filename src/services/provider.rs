@@ -1,8 +1,8 @@
+use crate::services::platform::BinaryResolution;
 use crate::utils::format::safe_prefix;
 use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use crate::services::platform::BinaryResolution;
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";

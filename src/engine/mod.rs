@@ -1075,7 +1075,7 @@ mod tests {
         {
             let conn = db.lock().unwrap();
             conn.execute(
-                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('bot1', 'Bot', 'claude', 'idle', 0)",
+                "INSERT INTO agents (id, name, provider, status, xp, discord_channel_id) VALUES ('bot1', 'Bot', 'claude', 'idle', 0, '1234567890')",
                 [],
             ).unwrap();
             conn.execute(
