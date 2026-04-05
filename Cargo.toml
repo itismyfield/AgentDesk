@@ -46,6 +46,7 @@ dirs = "6.0.0"
 unicode-width = "0.2"
 textwrap = "0.16"
 regex = "1"
+which = "8"
 
 # From RCC — crypto/encoding
 base64 = "0.22"

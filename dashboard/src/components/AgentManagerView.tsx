@@ -92,9 +92,9 @@ export default function AgentManagerView({
       filtered = filtered.filter(
         (a) =>
           a.name.toLowerCase().includes(q) ||
-          a.name_ko.toLowerCase().includes(q) ||
+          (a.name_ko ?? "").toLowerCase().includes(q) ||
           (a.alias && a.alias.toLowerCase().includes(q)) ||
-          a.avatar_emoji.includes(q),
+          (a.avatar_emoji ?? "").includes(q),
       );
     }
     return [...filtered].sort((a, b) => {

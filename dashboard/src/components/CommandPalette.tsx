@@ -62,9 +62,9 @@ export default function CommandPalette({
     for (const a of agents) {
       if (
         a.name.toLowerCase().includes(q) ||
-        a.name_ko.toLowerCase().includes(q) ||
+        (a.name_ko ?? "").toLowerCase().includes(q) ||
         (a.alias && a.alias.toLowerCase().includes(q)) ||
-        a.avatar_emoji.includes(q)
+        (a.avatar_emoji ?? "").includes(q)
       ) {
         items.push({ type: "agent", agent: a });
       }
@@ -72,7 +72,7 @@ export default function CommandPalette({
 
     // Filter departments
     for (const d of departments) {
-      if (d.name.toLowerCase().includes(q) || d.name_ko.toLowerCase().includes(q)) {
+      if (d.name.toLowerCase().includes(q) || (d.name_ko ?? "").toLowerCase().includes(q)) {
         items.push({ type: "dept", dept: d });
       }
     }
@@ -151,7 +151,7 @@ export default function CommandPalette({
               style={{ color: "var(--th-text)" }}
             >
               <span className="text-base w-6 text-center">
-                {item.type === "agent" ? item.agent.avatar_emoji
+                {item.type === "agent" ? (item.agent.avatar_emoji || "🤖")
                   : item.type === "nav" ? item.icon
                   : item.dept.icon}
               </span>

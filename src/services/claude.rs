@@ -20,46 +20,61 @@ use crate::services::tmux_diagnostics::{
     record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
     tmux_session_exists, tmux_session_has_live_pane,
 };
-/// Cached path to the claude binary.
-/// Once resolved, reused for all subsequent calls.
-static CLAUDE_PATH: OnceLock<Option<String>> = OnceLock::new();
+use crate::utils::format::safe_prefix;
 
 /// Resolve the path to the claude binary.
-/// Uses platform::resolve_binary_with_login_shell, then falls back to known paths.
-/// Public so onboarding/health-check can use the exact same resolution contract.
 pub fn resolve_claude_path() -> Option<String> {
-    // Try platform-aware binary resolution (which/where + login shell fallback)
-    if let Some(path) = crate::services::platform::resolve_binary_with_login_shell("claude") {
-        return Some(path);
-    }
-
-    // Fallback: check known installation paths
-    let home = dirs::home_dir().unwrap_or_default();
-    let mut known_paths = vec![home.join(".local/bin/claude"), home.join("bin/claude")];
-    #[cfg(unix)]
-    {
-        known_paths.push(std::path::PathBuf::from("/usr/local/bin/claude"));
-        known_paths.push(std::path::PathBuf::from("/opt/homebrew/bin/claude"));
-    }
-    #[cfg(windows)]
-    {
-        known_paths.push(home.join("AppData/Local/Programs/claude/claude.exe"));
-        known_paths.push(std::path::PathBuf::from(
-            "C:/Program Files/claude/claude.exe",
-        ));
-    }
-    for path in &known_paths {
-        if path.is_file() {
-            return Some(path.display().to_string());
-        }
-    }
-
-    None
+    crate::services::platform::resolve_provider_binary("claude").resolved_path
 }
 
-/// Get the cached claude binary path, resolving it on first call.
-fn get_claude_path() -> Option<&'static str> {
-    CLAUDE_PATH.get_or_init(|| resolve_claude_path()).as_deref()
+fn resolve_claude_binary() -> crate::services::platform::BinaryResolution {
+    crate::services::platform::resolve_provider_binary("claude")
+}
+
+fn get_claude_path() -> Option<String> {
+    resolve_claude_path()
+}
+
+fn build_tmux_launch_env_lines(
+    exec_path: Option<&str>,
+    report_channel_id: Option<u64>,
+    report_provider: Option<ProviderKind>,
+    compact_percent: Option<u64>,
+) -> String {
+    let mut env_lines = String::from("unset CLAUDECODE\n");
+    if let Some(exec_path) = exec_path {
+        env_lines.push_str(&format!(
+            "export PATH='{}'\n",
+            exec_path.replace('\'', "'\\''")
+        ));
+    }
+    if let Ok(root_dir) = std::env::var("AGENTDESK_ROOT_DIR") {
+        let trimmed = root_dir.trim();
+        if !trimmed.is_empty() {
+            env_lines.push_str(&format!(
+                "export AGENTDESK_ROOT_DIR='{}'\n",
+                trimmed.replace('\'', "'\\''")
+            ));
+        }
+    }
+    if let Some(channel_id) = report_channel_id {
+        env_lines.push_str(&format!(
+            "export {}={}\n",
+            RESTART_REPORT_CHANNEL_ENV, channel_id
+        ));
+    }
+    if let Some(provider) = report_provider {
+        env_lines.push_str(&format!(
+            "export {}={}\n",
+            RESTART_REPORT_PROVIDER_ENV,
+            provider.as_str()
+        ));
+    }
+    if let Some(pct) = compact_percent.filter(|&p| p > 0) {
+        env_lines.push_str(&format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={}\n", pct));
+    }
+
+    env_lines
 }
 
 #[cfg(unix)]
@@ -179,7 +194,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
         args.push(sid.to_string());
     }
 
-    let claude_bin = match get_claude_path() {
+    let resolution = resolve_claude_binary();
+    let claude_bin = match resolution.resolved_path.clone() {
         Some(path) => path,
         None => {
             return ClaudeResponse {
@@ -191,8 +207,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
         }
     };
 
-    let mut bootstrap = Command::new(claude_bin);
-    crate::services::platform::apply_runtime_path(&mut bootstrap);
+    let mut bootstrap = Command::new(&claude_bin);
+    crate::services::platform::apply_binary_resolution(&mut bootstrap, &resolution);
     let mut child = match bootstrap
         .args(&args)
         .current_dir(working_dir)
@@ -317,10 +333,14 @@ pub fn is_ai_supported() -> bool {
 /// Used for short synchronous tasks like meeting participant selection.
 /// This is a blocking function — call from tokio::task::spawn_blocking.
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    let claude_bin = get_claude_path().ok_or("Claude CLI not found")?;
+    let resolution = resolve_claude_binary();
+    let claude_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or("Claude CLI not found")?;
 
-    let mut command = Command::new(claude_bin);
-    crate::services::platform::apply_runtime_path(&mut command);
+    let mut command = Command::new(&claude_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     let mut child = command
         .args(["-p", "--output-format", "text"])
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
@@ -527,7 +547,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
         return execute_streaming_remote(profile, &args, prompt, working_dir, sender, cancel_token);
     }
 
-    let claude_bin = get_claude_path().ok_or_else(|| {
+    let resolution = resolve_claude_binary();
+    let claude_bin = resolution.resolved_path.clone().ok_or_else(|| {
         debug_log("ERROR: Claude CLI not found");
         "Claude CLI not found. Is Claude CLI installed?".to_string()
     })?;
@@ -552,8 +573,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log("Env: BASH_MAX_TIMEOUT_MS=86400000");
 
     let spawn_start = std::time::Instant::now();
-    let mut command = Command::new(claude_bin);
-    crate::services::platform::apply_runtime_path(&mut command);
+    let mut command = Command::new(&claude_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     command
         .args(&args)
         .current_dir(working_dir)
@@ -1506,7 +1527,11 @@ fn execute_streaming_local_tmux(
     // Get paths
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-    let claude_bin = get_claude_path().ok_or_else(|| "Claude CLI not found".to_string())?;
+    let resolution = resolve_claude_binary();
+    let claude_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Claude CLI not found".to_string())?;
 
     // Build wrapper command via script file to avoid tmux "command too long" errors.
     // The system prompt in --append-system-prompt can be thousands of chars, exceeding
@@ -1514,32 +1539,12 @@ fn execute_streaming_local_tmux(
     let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
 
-    let mut env_lines = String::from("unset CLAUDECODE\n");
-    if let Ok(root_dir) = std::env::var("AGENTDESK_ROOT_DIR") {
-        let trimmed = root_dir.trim();
-        if !trimmed.is_empty() {
-            env_lines.push_str(&format!(
-                "export AGENTDESK_ROOT_DIR='{}'\n",
-                trimmed.replace('\'', "'\\''")
-            ));
-        }
-    }
-    if let Some(channel_id) = report_channel_id {
-        env_lines.push_str(&format!(
-            "export {}={}\n",
-            RESTART_REPORT_CHANNEL_ENV, channel_id
-        ));
-    }
-    if let Some(provider) = report_provider {
-        env_lines.push_str(&format!(
-            "export {}={}\n",
-            RESTART_REPORT_PROVIDER_ENV,
-            provider.as_str()
-        ));
-    }
-    if let Some(pct) = compact_percent.filter(|&p| p > 0) {
-        env_lines.push_str(&format!("export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE={}\n", pct));
-    }
+    let env_lines = build_tmux_launch_env_lines(
+        resolution.exec_path.as_deref(),
+        report_channel_id,
+        report_provider,
+        compact_percent,
+    );
 
     let script_content = format!(
         "#!/bin/bash\n\
@@ -1556,7 +1561,7 @@ fn execute_streaming_local_tmux(
         input_fifo = shell_escape(&input_fifo_path),
         prompt = shell_escape(&prompt_path),
         wd = shell_escape(working_dir),
-        claude_bin = claude_bin,
+        claude_bin = shell_escape(&claude_bin),
         claude_args = escaped_args.join(" "),
     );
 
@@ -1948,14 +1953,22 @@ pub(crate) fn execute_streaming_local_process(
 
     // Build wrapper args — no shell_escape here because ProcessBackend uses
     // Command::new().args() (direct argv), not a shell script.
-    let claude_bin = get_claude_path().ok_or_else(|| "Claude CLI not found".to_string())?;
+    let resolution = resolve_claude_binary();
+    let claude_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Claude CLI not found".to_string())?;
     let mut wrapper_args: Vec<String> = vec!["--".to_string(), claude_bin.to_string()];
     wrapper_args.extend(args.iter().map(|a| a.to_string()));
 
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
-    let mut env_vars = vec![];
+    let mut env_vars = resolution
+        .exec_path
+        .clone()
+        .map(|path| vec![("PATH".to_string(), path)])
+        .unwrap_or_default();
     if let Some(pct) = compact_percent.filter(|&p| p > 0) {
         env_vars.push((
             "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE".to_string(),
@@ -2168,7 +2181,72 @@ fn execute_streaming_remote_tmux(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::restart_report::{
+        RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
+    };
 
+    // ========== is_valid_session_id tests ==========
+
+    #[test]
+    fn test_tmux_launch_env_lines_include_exec_path_and_report_envs() {
+        let env_lines = build_tmux_launch_env_lines(
+            Some("/tmp/provider:/usr/bin"),
+            Some(7),
+            Some(ProviderKind::Claude),
+            None,
+        );
+
+        assert!(env_lines.contains("unset CLAUDECODE"));
+        assert!(env_lines.contains("export PATH='/tmp/provider:/usr/bin'"));
+        assert!(env_lines.contains(&format!("export {}=7", RESTART_REPORT_CHANNEL_ENV)));
+        assert!(env_lines.contains(&format!("export {}=claude", RESTART_REPORT_PROVIDER_ENV)));
+    }
+
+    #[test]
+    fn test_session_id_valid() {
+        assert!(is_valid_session_id("abc123"));
+        assert!(is_valid_session_id("session-1"));
+        assert!(is_valid_session_id("session_2"));
+        assert!(is_valid_session_id("ABC-XYZ_123"));
+        assert!(is_valid_session_id("a")); // Single char
+    }
+
+    #[test]
+    fn test_session_id_empty_rejected() {
+        assert!(!is_valid_session_id(""));
+    }
+
+    #[test]
+    fn test_session_id_too_long_rejected() {
+        // 64 characters should be valid
+        let max_len = "a".repeat(64);
+        assert!(is_valid_session_id(&max_len));
+
+        // 65 characters should be rejected
+        let too_long = "a".repeat(65);
+        assert!(!is_valid_session_id(&too_long));
+    }
+
+    #[test]
+    fn test_session_id_special_chars_rejected() {
+        assert!(!is_valid_session_id("session;rm -rf"));
+        assert!(!is_valid_session_id("session'OR'1=1"));
+        assert!(!is_valid_session_id("session`cmd`"));
+        assert!(!is_valid_session_id("session$(cmd)"));
+        assert!(!is_valid_session_id("session\nline2"));
+        assert!(!is_valid_session_id("session\0null"));
+        assert!(!is_valid_session_id("path/traversal"));
+        assert!(!is_valid_session_id("session with space"));
+        assert!(!is_valid_session_id("session.dot"));
+        assert!(!is_valid_session_id("session@email"));
+    }
+
+    #[test]
+    fn test_session_id_unicode_rejected() {
+        assert!(!is_valid_session_id("세션아이디"));
+        assert!(!is_valid_session_id("session_日本語"));
+        assert!(!is_valid_session_id("émoji🎉"));
+    }
     // ========== ClaudeResponse tests ==========
 
     #[test]

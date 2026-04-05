@@ -3,10 +3,37 @@ pub mod sync;
 pub mod triage;
 
 use crate::db::Db;
+use std::sync::OnceLock;
+
+fn gh_path() -> Option<&'static str> {
+    static GH_PATH: OnceLock<Option<String>> = OnceLock::new();
+    GH_PATH
+        .get_or_init(|| crate::services::platform::resolve_binary_with_login_shell("gh"))
+        .as_deref()
+}
+
+fn gh_command() -> Result<std::process::Command, String> {
+    let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
+    let mut command = std::process::Command::new(gh);
+    crate::services::platform::apply_runtime_path(&mut command);
+    Ok(command)
+}
+
+fn tokio_gh_command() -> Result<tokio::process::Command, String> {
+    let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
+    let mut command = tokio::process::Command::new(gh);
+    if let Some(path) = crate::services::platform::merged_runtime_path() {
+        command.env("PATH", path);
+    }
+    Ok(command)
+}
 
 /// Check whether the `gh` CLI is available on this system.
 pub fn gh_available() -> bool {
-    std::process::Command::new("gh")
+    let Ok(mut command) = gh_command() else {
+        return false;
+    };
+    command
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -18,7 +45,8 @@ pub fn gh_available() -> bool {
 /// Run a `gh` CLI command and return its stdout as a String.
 /// Returns an error if the command fails or is not available.
 pub(crate) fn run_gh(args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new("gh")
+    let mut command = gh_command()?;
+    let output = command
         .args(args)
         .output()
         .map_err(|e| format!("gh command failed to execute: {e}"))?;
@@ -47,7 +75,8 @@ pub async fn reopen_issue_by_url(url: &str) -> Result<(), String> {
     let number = &rest[slash_pos + "/issues/".len()..];
 
     // gh issue reopen <number> --repo <owner/repo>
-    let output = tokio::process::Command::new("gh")
+    let mut command = tokio_gh_command()?;
+    let output = command
         .args(["issue", "reopen", number, "--repo", repo])
         .output()
         .await

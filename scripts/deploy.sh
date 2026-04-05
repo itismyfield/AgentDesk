@@ -28,6 +28,7 @@ REAL_BIN="$LIBEXEC_DIR/agentdesk"
 HEALTH_PORT="${AGENTDESK_SERVER_PORT:-$ADK_DEFAULT_PORT}"
 LABEL="com.agentdesk.release"
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 
 SKIP_BUILD=false
 SKIP_DASHBOARD=false
@@ -133,6 +134,31 @@ run_installed_binary_self_check() {
   fail "Installed binary self-check failed for $WRAPPER_BIN"
 }
 
+sign_binary_with_fallback() {
+  local target="$1"
+  local identity="${CODESIGN_IDENTITY:--}"
+
+  if [ -n "$identity" ] && [ "$identity" != "-" ] && command -v security >/dev/null 2>&1; then
+    if ! security find-identity -v -p codesigning 2>/dev/null | grep -Fq "$identity"; then
+      info "Signing identity not found locally; falling back to ad-hoc signature"
+      identity="-"
+    fi
+  fi
+
+  if [ -z "$identity" ]; then
+    identity="-"
+  fi
+
+  if [ "$identity" = "-" ]; then
+    codesign -s "$identity" --identifier "com.itismyfield.agentdesk" --force "$target"
+  else
+    codesign -s "$identity" --options runtime --identifier "com.itismyfield.agentdesk" --force "$target"
+  fi
+  if ! codesign -v "$target" 2>/dev/null; then
+    fail "Codesign verification failed — aborting"
+  fi
+}
+
 # ── Step 1: Build ─────────────────────────────────────────────────────────────
 if [ "$SKIP_BUILD" = true ]; then
   info "Build skipped (--skip-build)"
@@ -168,13 +194,11 @@ if [ -e "$REAL_BIN" ]; then
   BACKUP_REAL="$(mktemp "$LIBEXEC_DIR/agentdesk.real.backup.XXXXXX")"
   cp "$REAL_BIN" "$BACKUP_REAL"
 fi
+rm -f "$REAL_BIN"
 cp "$PROJECT_DIR/target/release/agentdesk" "$REAL_BIN"
 chmod +x "$REAL_BIN"
 if [ "$OS" = "darwin" ]; then
-  codesign -s "Developer ID Application: Wonchang Oh (A7LJY7HNGA)" --options runtime --identifier "com.itismyfield.agentdesk" --force "$REAL_BIN" 2>/dev/null || true
-  if ! codesign -v "$REAL_BIN" 2>/dev/null; then
-    fail "Codesign verification failed — aborting"
-  fi
+  sign_binary_with_fallback "$REAL_BIN"
 fi
 write_wrapper_script
 ok "Binary wrapper: $WRAPPER_BIN -> $REAL_BIN"
@@ -255,6 +279,7 @@ info "Restarting service..."
 
 restart_launchd() {
   local PLIST="$HOME/Library/LaunchAgents/com.agentdesk.release.plist"
+  local bootstrap_log
   if [ ! -f "$PLIST" ]; then
     info "Plist not installed — skipping restart"
     return
@@ -265,8 +290,21 @@ restart_launchd() {
   sleep 1
 
   # Load
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  ok "Service restarted via launchd"
+  bootstrap_log="$(mktemp)"
+  for attempt in 1 2 3; do
+    if launchctl bootstrap "gui/$(id -u)" "$PLIST" >"$bootstrap_log" 2>&1; then
+      rm -f "$bootstrap_log"
+      ok "Service restarted via launchd"
+      return
+    fi
+
+    info "launchd bootstrap failed on attempt $attempt/3"
+    sed 's/^/  /' "$bootstrap_log" || true
+    sleep 2
+  done
+
+  rm -f "$bootstrap_log"
+  fail "launchd bootstrap failed after retries"
 }
 
 restart_systemd() {

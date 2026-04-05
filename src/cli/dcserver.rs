@@ -1149,7 +1149,10 @@ pub fn handle_dcserver(token: Option<String>) {
                 let agent_count = ad_config.agents.len();
                 if agent_count > 0 {
                     match db::agents::sync_agents_from_config(&ad_db, &ad_config.agents) {
-                        Ok(n) => println!("  ▸ Agents : {n} synced from config"),
+                        Ok(result) => println!(
+                            "  ▸ Agents : {} synced from config ({} pruned, {} skipped)",
+                            result.upserted, result.pruned, result.skipped_prune
+                        ),
                         Err(e) => eprintln!("  ⚠ Agent sync failed: {e}"),
                     }
                 }

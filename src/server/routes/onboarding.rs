@@ -972,12 +972,28 @@ pub async fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::{
-        Arc,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicUsize, Ordering},
     };
 
     use axum::{Router, extract::Path as AxumPath, routing::get};
+
+    fn env_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, contents).unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
 
     #[test]
     fn strip_legacy_discord_section_removes_top_level_block() {
@@ -1149,6 +1165,99 @@ mod tests {
         assert!(resolved.created);
         assert_eq!(post_count.load(Ordering::SeqCst), 1);
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_provider_uses_resolver_exec_path_under_minimal_path() {
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let helper = temp.path().join("provider-helper");
+        let provider = temp.path().join("claude");
+        let original_path = std::env::var_os("PATH");
+        let original_home = std::env::var_os("HOME");
+
+        write_executable(&helper, "#!/bin/sh\nprintf 'claude-test 9.9.9\\n'\n");
+        write_executable(
+            &provider,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  provider-helper\nelse\n  exit 64\nfi\n",
+        );
+
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            std::env::set_var("HOME", temp.path());
+            std::env::set_var("AGENTDESK_CLAUDE_PATH", &provider);
+        }
+
+        let (status, Json(body)) = check_provider(Json(CheckProviderBody {
+            provider: "claude".to_string(),
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["installed"], json!(true));
+        assert_eq!(body["logged_in"], json!(false));
+        assert_eq!(body["version"], json!("claude-test 9.9.9"));
+        assert_eq!(body["source"], json!("env_override"));
+        assert_eq!(body["path"], json!(provider.to_string_lossy().to_string()));
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_CLAUDE_PATH");
+            match original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match original_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_provider_reports_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let provider = temp.path().join("claude");
+        let original_path = std::env::var_os("PATH");
+        let original_home = std::env::var_os("HOME");
+
+        std::fs::write(&provider, "#!/bin/sh\nprintf 'claude-test 9.9.9\\n'\n").unwrap();
+        let mut perms = std::fs::metadata(&provider).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&provider, perms).unwrap();
+
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            std::env::set_var("HOME", temp.path());
+            std::env::set_var("AGENTDESK_CLAUDE_PATH", &provider);
+        }
+
+        let (status, Json(body)) = check_provider(Json(CheckProviderBody {
+            provider: "claude".to_string(),
+        }))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["installed"], json!(false));
+        assert_eq!(body["version"], json!(null));
+        assert_eq!(body["failure_kind"], json!("permission_denied"));
+        assert_eq!(body["path"], json!(null));
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_CLAUDE_PATH");
+            match original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+            match original_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 }
 
 // ── Provider Check ──────────────────────────────────────────
@@ -1179,44 +1288,52 @@ pub async fn check_provider(
     // Resolve binary using the exact same provider-specific resolver as the runtime,
     // including known-path fallbacks (~/bin, /opt/homebrew/bin, etc.).
     // This ensures onboarding and actual launch always agree on availability.
-    let resolved_path = {
+    let resolution = {
         let provider = cmd.to_string();
         tokio::task::spawn_blocking(move || match provider.as_str() {
-            "claude" => crate::services::claude::resolve_claude_path(),
-            "codex" => crate::services::codex::resolve_codex_path(),
-            "gemini" => crate::services::gemini::resolve_gemini_path(),
-            "qwen" => crate::services::qwen::resolve_qwen_path(),
+            "claude" | "codex" | "gemini" | "qwen" => Some(
+                crate::services::platform::resolve_provider_binary(&provider),
+            ),
             _ => None,
         })
         .await
         .ok()
         .flatten()
-    };
+    }
+    .unwrap_or_else(|| crate::services::platform::resolve_provider_binary(cmd));
+    let mut failure_kind = resolution.failure_kind.clone();
 
-    let Some(bin_path) = resolved_path else {
+    let Some(bin_path) = resolution.resolved_path.clone() else {
         return (
             StatusCode::OK,
             Json(json!({
                 "installed": false,
                 "logged_in": false,
                 "version": null,
+                "path": null,
+                "canonical_path": null,
+                "source": null,
+                "failure_kind": resolution.failure_kind,
+                "attempts": resolution.attempts,
             })),
         );
     };
 
     // Get version using the resolved binary path (not bare command name)
     // so it works even when PATH doesn't contain the provider.
-    let version_out = tokio::process::Command::new(&bin_path)
-        .arg("--version")
-        .output()
-        .await;
-    let version = version_out.ok().and_then(|o| {
-        if o.status.success() {
-            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-        } else {
-            None
-        }
-    });
+    let (version, probe_failure_kind) = {
+        let resolution = resolution.clone();
+        let bin_path = bin_path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::services::platform::probe_resolved_binary_version(&bin_path, &resolution)
+        })
+        .await
+        .ok()
+        .unwrap_or((None, Some("version_probe_spawn_failed".to_string())))
+    };
+    if failure_kind.is_none() {
+        failure_kind = probe_failure_kind.clone();
+    }
 
     // Check login (heuristic: config directory exists with content)
     let logged_in = dirs::home_dir()
@@ -1240,6 +1357,11 @@ pub async fn check_provider(
             "installed": true,
             "logged_in": logged_in,
             "version": version,
+            "path": resolution.resolved_path,
+            "canonical_path": resolution.canonical_path,
+            "source": resolution.source,
+            "failure_kind": failure_kind,
+            "attempts": resolution.attempts,
         })),
     )
 }

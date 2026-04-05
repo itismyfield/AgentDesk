@@ -226,7 +226,7 @@ fn run_turn(
 
     let args = build_turn_args(prompt, qwen_model, session_id.as_deref());
     let mut command = Command::new(qwen_bin);
-    crate::services::platform::apply_runtime_path(&mut command);
+    crate::services::platform::augment_exec_path(&mut command, qwen_bin);
     command
         .args(&args)
         .current_dir(working_dir)

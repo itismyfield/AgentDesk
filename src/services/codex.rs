@@ -3,7 +3,6 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
@@ -23,28 +22,73 @@ use crate::services::tmux_diagnostics::{
     tmux_session_exists, tmux_session_has_live_pane,
 };
 
-static CODEX_PATH: OnceLock<Option<String>> = OnceLock::new();
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 
 /// Public so onboarding/health-check can use the exact same resolution contract.
 pub fn resolve_codex_path() -> Option<String> {
-    crate::services::platform::resolve_binary_with_login_shell("codex")
+    crate::services::platform::resolve_provider_binary("codex").resolved_path
 }
 
-fn get_codex_path() -> Option<&'static str> {
-    CODEX_PATH.get_or_init(resolve_codex_path).as_deref()
+fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
+    crate::services::platform::resolve_provider_binary("codex")
+}
+
+fn get_codex_path() -> Option<String> {
+    resolve_codex_path()
+}
+
+fn build_tmux_launch_env_lines(
+    exec_path: Option<&str>,
+    report_channel_id: Option<u64>,
+    report_provider: Option<ProviderKind>,
+) -> String {
+    let mut env_lines = String::from("unset CLAUDECODE\n");
+    if let Some(exec_path) = exec_path {
+        env_lines.push_str(&format!(
+            "export PATH='{}'\n",
+            exec_path.replace('\'', "'\\''")
+        ));
+    }
+    if let Ok(root_dir) = std::env::var("AGENTDESK_ROOT_DIR") {
+        let trimmed = root_dir.trim();
+        if !trimmed.is_empty() {
+            env_lines.push_str(&format!(
+                "export AGENTDESK_ROOT_DIR='{}'\n",
+                trimmed.replace('\'', "'\\''")
+            ));
+        }
+    }
+    if let Some(channel_id) = report_channel_id {
+        env_lines.push_str(&format!(
+            "export {}={}\n",
+            RESTART_REPORT_CHANNEL_ENV, channel_id
+        ));
+    }
+    if let Some(provider) = report_provider {
+        env_lines.push_str(&format!(
+            "export {}={}\n",
+            RESTART_REPORT_PROVIDER_ENV,
+            provider.as_str()
+        ));
+    }
+
+    env_lines
 }
 
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_exact_target, tmux_owner_path, write_tmux_owner_marker};
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    let codex_bin = get_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
+    let resolution = resolve_codex_binary();
+    let codex_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Codex CLI not found".to_string())?;
     let args = base_exec_args(None, prompt, None);
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let mut command = Command::new(codex_bin);
-    crate::services::platform::apply_runtime_path(&mut command);
+    let mut command = Command::new(&codex_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     let output = command
         .args(&args)
         .current_dir(working_dir)
@@ -214,10 +258,14 @@ fn execute_streaming_direct(
     report_provider: Option<ProviderKind>,
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
-    let codex_bin = get_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
+    let resolution = resolve_codex_binary();
+    let codex_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Codex CLI not found".to_string())?;
     let mut args = base_exec_args(session_id, prompt, model);
     if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
-        // Insert -c config before the "exec" subcommand
+        // Insert -c config before the "exec" subcommand.
         let exec_pos = args.iter().position(|a| a == "exec").unwrap_or(0);
         args.insert(
             exec_pos,
@@ -226,8 +274,8 @@ fn execute_streaming_direct(
         args.insert(exec_pos, "-c".to_string());
     }
 
-    let mut command = Command::new(codex_bin);
-    crate::services::platform::apply_runtime_path(&mut command);
+    let mut command = Command::new(&codex_bin);
+    crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     command
         .args(&args)
         .current_dir(working_dir)
@@ -422,52 +470,20 @@ fn execute_streaming_local_tmux(
 
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-    let codex_bin = get_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
+    let resolution = resolve_codex_binary();
+    let codex_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Codex CLI not found".to_string())?;
 
     // Write launch script to file to avoid tmux "command too long" errors
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
 
-    let mut env_lines = String::from("unset CLAUDECODE\n");
-    // Build a PATH that includes the codex binary's parent directory.
-    // Codex is a `#!/usr/bin/env node` script, so `node` must be in PATH.
-    // When launchd spawns the server, PATH is minimal (/usr/bin:/bin:…)
-    // and lacks Homebrew paths, so we explicitly prepend them.
-    {
-        let mut path = std::env::var("PATH").unwrap_or_default();
-        if let Some(codex_dir) = std::path::Path::new(codex_bin).parent() {
-            let dir = codex_dir.to_string_lossy();
-            if !path.split(':').any(|p| p == dir.as_ref()) {
-                path = format!("{}:{}", dir, path);
-            }
-        }
-        // Also ensure /opt/homebrew/bin is present (common node location on Apple Silicon)
-        if !path.split(':').any(|p| p == "/opt/homebrew/bin") {
-            path = format!("/opt/homebrew/bin:{}", path);
-        }
-        env_lines.push_str(&format!("export PATH='{}'\n", path.replace('\'', "'\\''")));
-    }
-    if let Ok(root_dir) = std::env::var("AGENTDESK_ROOT_DIR") {
-        let trimmed = root_dir.trim();
-        if !trimmed.is_empty() {
-            env_lines.push_str(&format!(
-                "export AGENTDESK_ROOT_DIR='{}'\n",
-                trimmed.replace('\'', "'\\''")
-            ));
-        }
-    }
-    if let Some(channel_id) = report_channel_id {
-        env_lines.push_str(&format!(
-            "export {}={}\n",
-            RESTART_REPORT_CHANNEL_ENV, channel_id
-        ));
-    }
-    if let Some(provider) = report_provider {
-        env_lines.push_str(&format!(
-            "export {}={}\n",
-            RESTART_REPORT_PROVIDER_ENV,
-            provider.as_str()
-        ));
-    }
+    let env_lines = build_tmux_launch_env_lines(
+        resolution.exec_path.as_deref(),
+        report_channel_id,
+        report_provider,
+    );
 
     let script_content = format!(
         "#!/bin/bash\n\
@@ -484,7 +500,7 @@ fn execute_streaming_local_tmux(
         input_fifo = shell_escape(&input_fifo_path),
         prompt = shell_escape(&prompt_path),
         wd = shell_escape(working_dir),
-        codex_bin = shell_escape(codex_bin),
+        codex_bin = shell_escape(&codex_bin),
         model_arg = model
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -727,7 +743,11 @@ fn execute_streaming_local_process_codex(
     std::fs::write(&prompt_path, prompt)
         .map_err(|e| format!("Failed to write prompt file: {}", e))?;
 
-    let codex_bin = get_codex_path().ok_or_else(|| "Codex CLI not found".to_string())?;
+    let resolution = resolve_codex_binary();
+    let codex_bin = resolution
+        .resolved_path
+        .clone()
+        .ok_or_else(|| "Codex CLI not found".to_string())?;
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
@@ -756,7 +776,11 @@ fn execute_streaming_local_process_codex(
             }
             args
         },
-        env_vars: vec![],
+        env_vars: resolution
+            .exec_path
+            .clone()
+            .map(|path| vec![("PATH".to_string(), path)])
+            .unwrap_or_default(),
     };
 
     let backend = ProcessBackend::new();
@@ -972,10 +996,29 @@ mod tests {
     #[cfg(unix)]
     use super::send_followup_to_tmux;
     use super::{
-        TMUX_PROMPT_B64_PREFIX, base_exec_args, compose_codex_prompt, handle_codex_json_line,
+        TMUX_PROMPT_B64_PREFIX, base_exec_args, build_tmux_launch_env_lines, compose_codex_prompt,
+        handle_codex_json_line,
     };
     use crate::services::agent_protocol::StreamMessage;
+    use crate::services::discord::restart_report::{
+        RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
+    };
+    use crate::services::provider::ProviderKind;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+
+    #[test]
+    fn test_tmux_launch_env_lines_include_exec_path_and_report_envs() {
+        let env_lines = build_tmux_launch_env_lines(
+            Some("/tmp/provider:/usr/bin"),
+            Some(42),
+            Some(ProviderKind::Codex),
+        );
+
+        assert!(env_lines.contains("unset CLAUDECODE"));
+        assert!(env_lines.contains("export PATH='/tmp/provider:/usr/bin'"));
+        assert!(env_lines.contains(&format!("export {}=42", RESTART_REPORT_CHANNEL_ENV)));
+        assert!(env_lines.contains(&format!("export {}=codex", RESTART_REPORT_PROVIDER_ENV)));
+    }
 
     #[test]
     fn test_handle_codex_json_line_maps_thread_and_turn_completion() {

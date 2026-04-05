@@ -35,6 +35,16 @@ async function request<T>(
   return res.json();
 }
 
+function normalizeAgent(agent: Agent): Agent {
+  return {
+    ...agent,
+    name_ko: agent.name_ko ?? agent.name,
+    avatar_emoji: agent.avatar_emoji ?? "",
+    department_name: agent.department_name ?? null,
+    department_name_ko: agent.department_name_ko ?? agent.department_name ?? null,
+  };
+}
+
 // Auth
 export async function getSession(): Promise<{ ok: boolean; csrf_token: string }> {
   return request("/api/auth/session");
@@ -116,7 +126,7 @@ export async function batchAddAgentsToOffice(
 export async function getAgents(officeId?: string): Promise<Agent[]> {
   const q = officeId ? `?officeId=${officeId}` : "";
   const data = await request<{ agents: Agent[] }>(`/api/agents${q}`);
-  return data.agents;
+  return data.agents.map(normalizeAgent);
 }
 
 export async function createAgent(

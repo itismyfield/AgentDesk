@@ -637,24 +637,65 @@ pub fn handle_init(reconfigure: bool) {
             eprintln!("Error: cannot determine home directory");
             return;
         };
-        let agentdesk_bin = root.join("bin").join("agentdesk");
-
-        // Create wrapper bin dir
         let bin_dir = root.join("bin");
+        let libexec_dir = root.join("libexec");
+        let agentdesk_bin = bin_dir.join("agentdesk");
+        let agentdesk_real_bin = libexec_dir.join("agentdesk");
         if let Err(e) = fs::create_dir_all(&bin_dir) {
             eprintln!("Failed to create directory {}: {}", bin_dir.display(), e);
             return;
         }
+        if let Err(e) = fs::create_dir_all(&libexec_dir) {
+            eprintln!(
+                "Failed to create directory {}: {}",
+                libexec_dir.display(),
+                e
+            );
+            return;
+        }
 
-        // If no binary installed yet, copy current executable
-        if !agentdesk_bin.exists() {
+        let should_refresh_real_bin = fs::symlink_metadata(&agentdesk_real_bin)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+            || !agentdesk_real_bin.exists();
+
+        // If no real binary is installed yet, or a stale symlink is present, copy current
+        // executable into libexec as a regular file.
+        if should_refresh_real_bin {
             if let Ok(current_exe) = std::env::current_exe() {
-                if let Err(e) = fs::copy(&current_exe, &agentdesk_bin) {
+                let _ = fs::remove_file(&agentdesk_real_bin);
+                if let Err(e) = fs::copy(&current_exe, &agentdesk_real_bin) {
                     eprintln!("  [WARN] 바이너리 복사 실패: {} — 수동으로 복사하세요", e);
                 } else {
-                    println!("  [OK] {}", agentdesk_bin.display());
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(
+                            &agentdesk_real_bin,
+                            fs::Permissions::from_mode(0o755),
+                        );
+                    }
+                    println!("  [OK] {}", agentdesk_real_bin.display());
                 }
             }
+        }
+
+        let wrapper_script = format!(
+            "#!/bin/bash\nexec \"{}\" \"$@\"\n",
+            agentdesk_real_bin.display()
+        );
+        if let Err(e) = fs::write(&agentdesk_bin, wrapper_script) {
+            eprintln!(
+                "  [WARN] wrapper script 쓰기 실패: {} — 수동으로 생성하세요",
+                e
+            );
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&agentdesk_bin, fs::Permissions::from_mode(0o755));
+            }
+            println!("  [OK] {}", agentdesk_bin.display());
         }
 
         #[cfg(unix)]
