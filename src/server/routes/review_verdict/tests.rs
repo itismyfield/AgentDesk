@@ -1263,3 +1263,77 @@ async fn accept_clears_suggestion_pending_review_status() {
         "#266: suggestion_pending_at must be NULL after accept"
     );
 }
+
+/// #266: When the agent already committed new work during the review-decision
+/// turn (skip_rework / direct_review_created path), OnReviewEnter sets
+/// review_status='reviewing'. The accept cleanup must NOT clear it.
+///
+/// This test requires a real git worktree for `find_worktree_for_issue()` to
+/// detect the differing commit and trigger skip_rework=true.
+#[tokio::test]
+#[ignore] // CI: requires a real git worktree with a newer commit than reviewed_commit
+async fn accept_direct_review_preserves_reviewing_status() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
+             review_status, suggestion_pending_at, github_issue_number, created_at, updated_at) \
+             VALUES ('card-266dr', 'Direct Review Path', 'review', 'agent-1', 'rd-266dr', \
+             'suggestion_pending', datetime('now', '-10 minutes'), 266, datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        // Completed review dispatch with reviewed_commit (needed for skip_rework detection)
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, \
+             context, completed_at, created_at, updated_at) \
+             VALUES ('review-prev', 'card-266dr', 'agent-1', 'review', 'completed', '[Review R1]', \
+             '{\"reviewed_commit\":\"aaa1111\"}', datetime('now', '-5 minutes'), datetime('now', '-10 minutes'), datetime('now'))",
+            [],
+        ).unwrap();
+        // Pending review-decision dispatch
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('rd-266dr', 'card-266dr', 'agent-1', 'review-decision', 'pending', 'RD #266 direct', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-266dr".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            dispatch_id: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "accept should succeed");
+    let resp: serde_json::Value = serde_json::from_value(body.0).unwrap();
+
+    // When skip_rework triggers, direct_review_created should be true
+    if resp.get("direct_review_created") == Some(&serde_json::Value::Bool(true)) {
+        let conn = db.lock().unwrap();
+        let review_status: Option<String> = conn
+            .query_row(
+                "SELECT review_status FROM kanban_cards WHERE id = 'card-266dr'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            review_status,
+            Some("reviewing".to_string()),
+            "#266: direct-review accept must preserve review_status='reviewing' set by OnReviewEnter"
+        );
+    }
+    // else: skip_rework was false (no real worktree found) — normal rework path tested above
+}

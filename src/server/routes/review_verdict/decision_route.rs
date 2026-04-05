@@ -389,19 +389,24 @@ pub async fn submit_review_decision(
                 false
             };
 
-            // Clear suggestion_pending_at and review_status (#266: review_status was
-            // left as "suggestion_pending" because the review→in_progress rework
-            // transition is non-terminal and ClearTerminalFields never fires).
+            // Clear suggestion_pending_at (always) and review_status (rework path only).
+            // #266: review_status was left as "suggestion_pending" because the
+            // review→in_progress rework transition is non-terminal and
+            // ClearTerminalFields never fires.
+            // Guard: when direct_review_created, OnReviewEnter already set
+            // review_status='reviewing' — clearing it would break the live review.
             if let Ok(c) = state.db.lock() {
-                use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
-                execute_intent_on_conn(
-                    &c,
-                    &TransitionIntent::SetReviewStatus {
-                        card_id: body.card_id.clone(),
-                        review_status: None,
-                    },
-                )
-                .ok();
+                if !direct_review_created {
+                    use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
+                    execute_intent_on_conn(
+                        &c,
+                        &TransitionIntent::SetReviewStatus {
+                            card_id: body.card_id.clone(),
+                            review_status: None,
+                        },
+                    )
+                    .ok();
+                }
                 c.execute(
                     "UPDATE kanban_cards SET suggestion_pending_at = NULL WHERE id = ?1",
                     [&body.card_id],
