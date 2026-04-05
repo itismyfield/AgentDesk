@@ -17,8 +17,14 @@ pub struct AgentChannelBindings {
 impl AgentChannelBindings {
     pub fn primary_channel(&self) -> Option<String> {
         match self.provider.as_deref().and_then(ProviderKind::from_str) {
-            Some(ProviderKind::Claude) => self.claude_channel(),
-            Some(ProviderKind::Codex) => self.codex_channel(),
+            Some(ProviderKind::Claude) => self
+                .claude_channel()
+                .or_else(|| self.codex_channel())
+                .or_else(|| self.legacy_primary_channel()),
+            Some(ProviderKind::Codex) => self
+                .codex_channel()
+                .or_else(|| self.claude_channel())
+                .or_else(|| self.legacy_primary_channel()),
             Some(_) | None => self.legacy_primary_channel(),
         }
     }
@@ -346,9 +352,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_primary_channel_does_not_fall_back_to_counter_model_columns() {
+    fn single_provider_channel_falls_back_to_any_available() {
         let db = test_db();
         let conn = db.lock().unwrap();
+        // Claude agent (DEFAULT provider) with only codex channels configured
         conn.execute(
             "INSERT INTO agents (
                 id, name,
@@ -362,15 +369,42 @@ mod tests {
         let bindings = load_agent_channel_bindings(&conn, "ag-02")
             .unwrap()
             .expect("bindings");
-        assert_eq!(bindings.primary_channel(), None);
+        // Falls back to codex channel since no claude channel exists
+        assert_eq!(bindings.primary_channel(), Some("cdx-chan".into()));
         assert_eq!(bindings.counter_model_channel(), Some("cdx-chan".into()));
         assert_eq!(
             resolve_agent_dispatch_channel_on_conn(&conn, "ag-02", Some("implementation")).unwrap(),
-            None
+            Some("cdx-chan".into())
         );
         assert_eq!(
             resolve_agent_dispatch_channel_on_conn(&conn, "ag-02", Some("review")).unwrap(),
             Some("cdx-chan".into())
+        );
+    }
+
+    #[test]
+    fn single_channel_codex_agent_falls_back_to_claude_channel() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        // Codex agent with only a claude channel configured
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider,
+                discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx
+            ) VALUES ('ag-03', 'SingleCh', 'codex', 'cc-only', NULL, 'cc-only', NULL)",
+            [],
+        )
+        .unwrap();
+
+        let bindings = load_agent_channel_bindings(&conn, "ag-03")
+            .unwrap()
+            .expect("bindings");
+        // Should fall back to claude channel instead of returning None
+        assert_eq!(bindings.primary_channel(), Some("cc-only".into()));
+        assert_eq!(
+            resolve_agent_dispatch_channel_on_conn(&conn, "ag-03", Some("implementation")).unwrap(),
+            Some("cc-only".into())
         );
     }
 }
