@@ -4,6 +4,11 @@ import type { AutoQueueStatus, DispatchQueueEntry as DispatchQueueEntryType, Aut
 
 import type { Agent, UiLanguage } from "../../types";
 import { localeName } from "../../i18n";
+import {
+  createEmptyAutoQueueStatus,
+  getAutoQueuePrimaryAction,
+  normalizeAutoQueueStatus,
+} from "./auto-queue-panel-state";
 
 interface Props {
   tr: (ko: string, en: string) => string;
@@ -30,6 +35,14 @@ const ENTRY_STATUS_STYLE: Record<string, { bg: string; text: string; label: stri
   dispatched: { bg: "rgba(245,158,11,0.18)", text: "#fbbf24", label: "진행", labelEn: "Active" },
   done: { bg: "rgba(34,197,94,0.22)", text: "#4ade80", label: "완료", labelEn: "Done" },
   skipped: { bg: "rgba(107,114,128,0.18)", text: "#9ca3af", label: "건너뜀", labelEn: "Skipped" },
+};
+
+const RUN_STATUS_STYLE: Record<AutoQueueRun["status"], { bg: string; text: string; label: string; labelEn: string }> = {
+  generated: { bg: "rgba(59,130,246,0.18)", text: "#60a5fa", label: "생성됨", labelEn: "Generated" },
+  pending: { bg: "rgba(56,189,248,0.2)", text: "#38bdf8", label: "PMD 대기", labelEn: "Awaiting PMD" },
+  active: { bg: "rgba(139,92,246,0.2)", text: "#a78bfa", label: "실행 중", labelEn: "Active" },
+  paused: { bg: "rgba(245,158,11,0.2)", text: "#fbbf24", label: "일시정지", labelEn: "Paused" },
+  completed: { bg: "rgba(34,197,94,0.2)", text: "#4ade80", label: "완료", labelEn: "Done" },
 };
 
 function reorderPendingIds(ids: string[], fromId: string, toId: string): string[] | null {
@@ -336,17 +349,34 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
   const [viewMode, setViewMode] = useState<ViewMode>("thread");
 
   const agentMap = new Map(agents.map((a) => [a.id, a]));
+  const suppressedRunIdRef = useRef<string | null>(null);
+
+  const resetPanelState = useCallback(() => {
+    setStatus(createEmptyAutoQueueStatus());
+    setError(null);
+    setNoReadyCards(false);
+    setUnifiedThread(false);
+    setViewMode("thread");
+    setGenerating(false);
+    setActivating(false);
+  }, []);
 
   const fetchStatus = useCallback(async () => {
     try {
       const s = await api.getAutoQueueStatus(selectedRepo || null, selectedAgentId);
-      setStatus(s);
+      const normalized = normalizeAutoQueueStatus(s, suppressedRunIdRef.current);
+      if (suppressedRunIdRef.current && normalized.run?.id !== suppressedRunIdRef.current) {
+        suppressedRunIdRef.current = null;
+      }
+      setStatus(normalized);
       // Sync unified_thread toggle from server state
-      if (s?.run?.unified_thread !== undefined) {
-        setUnifiedThread(!!s.run.unified_thread);
+      if (normalized.run?.unified_thread !== undefined) {
+        setUnifiedThread(!!normalized.run.unified_thread);
+      } else if (!normalized.run) {
+        setUnifiedThread(false);
       }
       // Only reset noReadyCards when a run with entries exists
-      if (s?.run && s?.entries?.length > 0) setNoReadyCards(false);
+      if (!normalized.run || normalized.entries.length > 0) setNoReadyCards(false);
     } catch {
       // silent
     }
@@ -369,6 +399,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     setGenerating(true);
     setError(null);
     try {
+      suppressedRunIdRef.current = null;
       await api.resetAutoQueue();
       const result = await api.generateAutoQueue(selectedRepo || null, selectedAgentId, generateMode) as Record<string, unknown>;
       if (result.entries && Array.isArray(result.entries) && result.entries.length === 0) {
@@ -388,6 +419,18 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
       setError(e instanceof Error ? e.message : tr("큐 생성 실패", "Queue generation failed"));
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const handleReset = async () => {
+    setError(null);
+    suppressedRunIdRef.current = status?.run?.id ?? null;
+    try {
+      await api.resetAutoQueue();
+      resetPanelState();
+    } catch (e) {
+      suppressedRunIdRef.current = null;
+      setError(e instanceof Error ? e.message : tr("초기화 실패", "Reset failed"));
     }
   };
 
@@ -454,6 +497,9 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
   const dispatchedCount = entries.filter((e) => e.status === "dispatched").length;
   const doneCount = entries.filter((e) => e.status === "done").length;
   const totalCount = entries.length;
+  const primaryAction = getAutoQueuePrimaryAction(run, pendingCount);
+  const showRunStartControls = !!run && (run.status === "generated" || run.status === "active") && pendingCount > 0;
+  const startActionLabel = run?.status === "generated" ? tr("시작", "Start") : tr("디스패치", "Dispatch");
 
   // Group entries by agent
   const entriesByAgent = new Map<string, DispatchQueueEntryType[]>();
@@ -514,11 +560,11 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
             <span
               className="text-[11px] px-2 py-0.5 rounded-full"
               style={{
-                backgroundColor: run.status === "pending" ? "rgba(56,189,248,0.2)" : run.status === "active" ? "rgba(139,92,246,0.2)" : run.status === "paused" ? "rgba(245,158,11,0.2)" : "rgba(34,197,94,0.2)",
-                color: run.status === "pending" ? "#38bdf8" : run.status === "active" ? "#a78bfa" : run.status === "paused" ? "#fbbf24" : "#4ade80",
+                backgroundColor: RUN_STATUS_STYLE[run.status].bg,
+                color: RUN_STATUS_STYLE[run.status].text,
               }}
             >
-              {run.status === "pending" ? tr("PMD 대기", "Awaiting PMD") : run.status === "active" ? tr("실행 중", "Active") : run.status === "paused" ? tr("일시정지", "Paused") : tr("완료", "Done")}
+              {tr(RUN_STATUS_STYLE[run.status].label, RUN_STATUS_STYLE[run.status].labelEn)}
             </span>
           )}
           {totalCount > 0 && (
@@ -529,7 +575,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
         </button>
 
         <div className="flex items-center gap-2">
-          {run?.status === "active" && pendingCount > 0 && (
+          {showRunStartControls && (
             <>
               <label
                 className="flex items-center gap-1 text-[11px] cursor-pointer select-none"
@@ -539,12 +585,12 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                   type="checkbox"
                   checked={unifiedThread}
                   onChange={(e) => {
-                  const val = e.target.checked;
-                  setUnifiedThread(val);
-                  if (run?.id) {
-                    void api.updateAutoQueueRun(run.id, undefined, val);
-                  }
-                }}
+                    const val = e.target.checked;
+                    setUnifiedThread(val);
+                    if (run?.id) {
+                      void api.updateAutoQueueRun(run.id, undefined, val);
+                    }
+                  }}
                   style={{ cursor: "pointer", accentColor: "#f59e0b" }}
                 />
                 {tr("통합 스레드", "Unified Thread")}
@@ -559,11 +605,11 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                   backgroundColor: "rgba(245,158,11,0.1)",
                 }}
               >
-                {activating ? "…" : tr("디스패치", "Dispatch")}
+                {activating ? "…" : startActionLabel}
               </button>
             </>
           )}
-          {(!run || run.status === "completed") && (
+          {primaryAction === "generate" && (
             <>
               <select
                 value={generateMode}
@@ -593,12 +639,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
           )}
           {run && (
             <button
-              onClick={async () => {
-                try {
-                  await api.resetAutoQueue();
-                  await fetchStatus();
-                } catch { /* ignore */ }
-              }}
+              onClick={() => void handleReset()}
               className="text-[11px] px-2 py-1 rounded-lg border"
               style={{ borderColor: "rgba(248,113,113,0.3)", color: "#f87171", backgroundColor: "rgba(248,113,113,0.08)" }}
             >
