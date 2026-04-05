@@ -263,7 +263,13 @@ pub(crate) async fn handle_completed_dispatch_followups(
         // Only send_review_result_to_primary for explicit verdicts (pass/improve/reject)
         // submitted via the verdict API — these have a real "verdict" field in the result.
         if verdict != "unknown" {
-            super::discord_delivery::send_review_result_to_primary(db, &card_id, &verdict).await?;
+            super::discord_delivery::send_review_result_to_primary(
+                db,
+                &card_id,
+                dispatch_id,
+                &verdict,
+            )
+            .await?;
         } else {
             println!(
                 "  [{ts}] ⏭ REVIEW-FOLLOWUP: skipping send_review_result_to_primary (verdict=unknown)"
@@ -337,8 +343,8 @@ pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
 
 pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
     // "review", "e2e-test" (#197), and "consultation" (#256) go to the counter-model channel.
-    // "review-decision" is sent to the original agent's primary channel
-    // so it reuses the implementation thread.
+    // "review-decision" is routed back to the original implementation provider
+    // so it reuses the implementation-side thread rather than the reviewer channel.
     matches!(
         dispatch_type,
         Some("review") | Some("e2e-test") | Some("consultation")

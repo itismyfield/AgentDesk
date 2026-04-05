@@ -198,6 +198,9 @@ pub fn transition_status_with_opts(
     drop(conn);
 
     // ── 5. Post-transition side-effects (hooks, GitHub sync) ──
+    if effective.is_terminal(new_status) {
+        sync_terminal_card_state(db, card_id);
+    }
     github_sync_on_transition(db, &effective, card_id, new_status);
     fire_dynamic_hooks(engine, &effective, card_id, &old_status, new_status);
 
@@ -367,6 +370,53 @@ fn fire_dynamic_hooks(
     // No fallback — YAML is the sole source of truth for hook bindings.
 }
 
+const TERMINAL_DISPATCH_CLEANUP_REASON: &str = "auto_cancelled_on_terminal_card";
+
+fn sync_terminal_card_state(db: &Db, card_id: &str) {
+    let Ok(conn) = db.lock() else {
+        return;
+    };
+
+    conn.execute(
+        "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') \
+         WHERE kanban_card_id = ?1 AND status = 'dispatched'",
+        [card_id],
+    )
+    .ok();
+
+    let pending_followups: Vec<String> = conn
+        .prepare(
+            "SELECT id FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type IN ('review-decision', 'rework') \
+             AND status IN ('pending', 'dispatched')",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([card_id], |row| row.get::<_, String>(0))
+                .ok()
+                .map(|rows| rows.filter_map(|row| row.ok()).collect())
+        })
+        .unwrap_or_default();
+
+    let mut cancelled = 0usize;
+    for dispatch_id in pending_followups {
+        cancelled += crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
+            &conn,
+            &dispatch_id,
+            Some(TERMINAL_DISPATCH_CLEANUP_REASON),
+        )
+        .unwrap_or(0);
+    }
+
+    if cancelled > 0 {
+        tracing::info!(
+            "[kanban] Cancelled {} pending terminal follow-up dispatch(es) for card {}",
+            cancelled,
+            card_id
+        );
+    }
+}
+
 /// Drain deferred side-effects produced while hooks were executing.
 ///
 /// Hooks cannot re-enter the engine, so transition requests and dispatch
@@ -526,14 +576,7 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     if let Some(ref pipeline) = effective {
         // Sync auto_queue_entries + GitHub on terminal status
         if pipeline.is_terminal(to) {
-            if let Ok(conn) = db.lock() {
-                conn.execute(
-                    "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') \
-                     WHERE kanban_card_id = ?1 AND status = 'dispatched'",
-                    [card_id],
-                )
-                .ok();
-            }
+            sync_terminal_card_state(db, card_id);
         }
 
         github_sync_on_transition(db, pipeline, card_id, to);
@@ -995,6 +1038,22 @@ mod tests {
         ).unwrap();
     }
 
+    fn seed_dispatch_with_type(
+        db: &Db,
+        dispatch_id: &str,
+        card_id: &str,
+        dispatch_type: &str,
+        dispatch_status: &str,
+    ) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES (?1, ?2, 'agent-1', ?3, ?4, 'Typed Dispatch', datetime('now'), datetime('now'))",
+            rusqlite::params![dispatch_id, card_id, dispatch_type, dispatch_status],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn completed_dispatch_only_does_not_authorize_transition() {
         let db = test_db();
@@ -1250,6 +1309,68 @@ mod tests {
         assert_eq!(
             count, 1,
             "#202: tick hook dispatch intent must be persisted by try_fire_hook's internal drain"
+        );
+    }
+
+    #[test]
+    fn fire_transition_hooks_terminal_cleanup_cancels_review_followups_with_reason() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-terminal-cleanup", "review");
+        seed_dispatch_with_type(
+            &db,
+            "dispatch-rd-cleanup",
+            "card-terminal-cleanup",
+            "review-decision",
+            "pending",
+        );
+        seed_dispatch_with_type(
+            &db,
+            "dispatch-rw-cleanup",
+            "card-terminal-cleanup",
+            "rework",
+            "dispatched",
+        );
+        seed_dispatch_with_type(
+            &db,
+            "dispatch-impl-keep",
+            "card-terminal-cleanup",
+            "implementation",
+            "pending",
+        );
+
+        fire_transition_hooks(&db, &engine, "card-terminal-cleanup", "review", "done");
+
+        let conn = db.lock().unwrap();
+        let (rd_status, rd_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, json_extract(result, '$.reason') FROM task_dispatches WHERE id = 'dispatch-rd-cleanup'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let (rw_status, rw_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, json_extract(result, '$.reason') FROM task_dispatches WHERE id = 'dispatch-rw-cleanup'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let impl_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-impl-keep'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(rd_status, "cancelled");
+        assert_eq!(rd_reason.as_deref(), Some(TERMINAL_DISPATCH_CLEANUP_REASON));
+        assert_eq!(rw_status, "cancelled");
+        assert_eq!(rw_reason.as_deref(), Some(TERMINAL_DISPATCH_CLEANUP_REASON));
+        assert_eq!(
+            impl_status, "pending",
+            "terminal cleanup must not cancel unrelated pending work dispatches"
         );
     }
 

@@ -4,8 +4,72 @@ use super::thread_reuse::{
     clear_thread_for_channel, get_thread_for_channel, set_thread_for_channel, try_reuse_thread,
 };
 use crate::db::agents::{
-    resolve_agent_dispatch_channel_on_conn, resolve_agent_primary_channel_on_conn,
+    resolve_agent_channel_for_provider_on_conn, resolve_agent_dispatch_channel_on_conn,
 };
+
+fn review_source_provider_from_context(dispatch_context: Option<&str>) -> Option<String> {
+    dispatch_context
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+        .and_then(|ctx| {
+            ctx.get("from_provider")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        })
+}
+
+fn latest_completed_review_provider_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> Option<String> {
+    let review_context: Option<String> = conn
+        .query_row(
+            "SELECT context FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type = 'review' AND status = 'completed' \
+             ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC, rowid DESC LIMIT 1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    review_source_provider_from_context(review_context.as_deref())
+}
+
+fn resolve_agent_channel_with_provider_override_on_conn(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    dispatch_type: Option<&str>,
+    provider_override: Option<&str>,
+) -> rusqlite::Result<Option<String>> {
+    if let Some(provider) = provider_override.filter(|provider| !provider.trim().is_empty()) {
+        if let Some(channel) =
+            resolve_agent_channel_for_provider_on_conn(conn, agent_id, Some(provider))?
+        {
+            return Ok(Some(channel));
+        }
+    }
+    resolve_agent_dispatch_channel_on_conn(conn, agent_id, dispatch_type)
+}
+
+pub(super) fn resolve_dispatch_delivery_channel_on_conn(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    card_id: &str,
+    dispatch_type: Option<&str>,
+    dispatch_context: Option<&str>,
+) -> rusqlite::Result<Option<String>> {
+    let provider_override = if dispatch_type == Some("review-decision") {
+        review_source_provider_from_context(dispatch_context)
+            .or_else(|| latest_completed_review_provider_on_conn(conn, card_id))
+    } else {
+        None
+    };
+    resolve_agent_channel_with_provider_override_on_conn(
+        conn,
+        agent_id,
+        dispatch_type,
+        provider_override.as_deref(),
+    )
+}
 
 /// Send a dispatch notification to the target agent's Discord channel.
 /// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
@@ -85,20 +149,35 @@ async fn send_dispatch_to_discord_inner(
     card_id: &str,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    // Determine dispatch type to choose the right channel
-    let dispatch_type: Option<String> = {
+    // Determine dispatch type + status before attempting Discord delivery.
+    let (dispatch_type, dispatch_status, dispatch_context): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return Err("db lock failed for dispatch type query".into()),
+            Err(_) => return Err("db lock failed for dispatch metadata query".into()),
         };
         conn.query_row(
-            "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
+            "SELECT dispatch_type, status, context FROM task_dispatches WHERE id = ?1",
             [dispatch_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .ok()
-        .flatten()
+        .map_err(|_| format!("dispatch {dispatch_id} not found"))?
     };
+
+    if !matches!(
+        dispatch_status.as_deref(),
+        Some("pending") | Some("dispatched")
+    ) {
+        tracing::info!(
+            "[dispatch] Skipping Discord send for dispatch {} with non-deliverable status {:?}",
+            dispatch_id,
+            dispatch_status
+        );
+        return Ok(());
+    }
 
     // For review dispatches, use the alternate channel (counter-model)
     let use_alt = use_counter_model_channel(dispatch_type.as_deref());
@@ -139,9 +218,15 @@ async fn send_dispatch_to_discord_inner(
             Ok(c) => c,
             Err(_) => return Err("db lock failed for channel lookup".into()),
         };
-        resolve_agent_dispatch_channel_on_conn(&conn, agent_id, dispatch_type.as_deref())
-            .ok()
-            .flatten()
+        resolve_dispatch_delivery_channel_on_conn(
+            &conn,
+            agent_id,
+            card_id,
+            dispatch_type.as_deref(),
+            dispatch_context.as_deref(),
+        )
+        .ok()
+        .flatten()
     };
 
     let channel_id = match channel_id {
@@ -187,28 +272,19 @@ async fn send_dispatch_to_discord_inner(
         .unwrap_or_default()
     };
 
+    let dispatch_context_json = dispatch_context
+        .as_deref()
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok());
+
     // For review dispatches, look up reviewed commit SHA, branch, and target provider from context
     let (reviewed_commit, target_provider, review_branch): (
         Option<String>,
         Option<String>,
         Option<String>,
     ) = if use_alt {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return Err("db lock failed for context query".into()),
-        };
-        let ctx: Option<String> = conn
-            .query_row(
-                "SELECT context FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-        let ctx_val: serde_json::Value = ctx
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::json!({}));
+        let ctx_val = dispatch_context_json
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
         (
             ctx_val
                 .get("reviewed_commit")
@@ -226,17 +302,6 @@ async fn send_dispatch_to_discord_inner(
     } else {
         (None, None, None)
     };
-
-    // Read dispatch context for reason/source info
-    let dispatch_context: Option<String> = db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT context FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten()
-    });
 
     let message = format_dispatch_message(
         dispatch_id,
@@ -691,6 +756,7 @@ async fn send_dispatch_to_discord_inner(
 pub(super) async fn send_review_result_to_primary(
     db: &crate::db::Db,
     card_id: &str,
+    review_dispatch_id: &str,
     verdict: &str,
 ) -> Result<(), String> {
     // Look up card info
@@ -711,15 +777,18 @@ pub(super) async fn send_review_result_to_primary(
             Err(_) => return Err(format!("card {card_id} not found or missing agent")),
         }
     };
-    let channel_id = {
+    let review_dispatch_context: Option<String> = {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return Err("db lock failed for primary channel lookup".into()),
+            Err(_) => return Err("db lock failed for review dispatch lookup".into()),
         };
-        resolve_agent_primary_channel_on_conn(&conn, &agent_id)
-            .ok()
-            .flatten()
-            .ok_or_else(|| format!("agent {agent_id} missing primary discord channel"))?
+        conn.query_row(
+            "SELECT context FROM task_dispatches WHERE id = ?1",
+            [review_dispatch_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
     };
 
     // For improve/rework/reject: create a review-decision dispatch via the
@@ -750,13 +819,33 @@ pub(super) async fn send_review_result_to_primary(
             }
         }
 
+        let review_context_json = review_dispatch_context
+            .as_deref()
+            .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok());
+        let mut decision_context = serde_json::Map::new();
+        decision_context.insert("verdict".to_string(), serde_json::json!(verdict));
+        if let Some(provider) = review_context_json
+            .as_ref()
+            .and_then(|ctx| ctx.get("from_provider"))
+            .and_then(|value| value.as_str())
+        {
+            decision_context.insert("from_provider".to_string(), serde_json::json!(provider));
+        }
+        if let Some(provider) = review_context_json
+            .as_ref()
+            .and_then(|ctx| ctx.get("target_provider"))
+            .and_then(|value| value.as_str())
+        {
+            decision_context.insert("target_provider".to_string(), serde_json::json!(provider));
+        }
+
         return match crate::dispatch::create_dispatch_core(
             db,
             card_id,
             &agent_id,
             "review-decision",
             &format!("[리뷰 검토] {title}"),
-            &serde_json::json!({"verdict": verdict}),
+            &serde_json::Value::Object(decision_context),
         ) {
             Ok((id, _old_status, _reused)) => {
                 if let Ok(conn) = db.lock() {
@@ -788,6 +877,23 @@ pub(super) async fn send_review_result_to_primary(
             }
         };
     }
+
+    let channel_id = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return Err("db lock failed for primary channel lookup".into()),
+        };
+        resolve_dispatch_delivery_channel_on_conn(
+            &conn,
+            &agent_id,
+            card_id,
+            Some("review-decision"),
+            review_dispatch_context.as_deref(),
+        )
+        .ok()
+        .flatten()
+        .ok_or_else(|| format!("agent {agent_id} missing review followup discord channel"))?
+    };
 
     // Resolve channel ID (may be a name alias)
     let channel_id_num: u64 = match channel_id.parse() {

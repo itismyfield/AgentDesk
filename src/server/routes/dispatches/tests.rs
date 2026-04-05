@@ -188,7 +188,6 @@ fn review_verdict_extraction_defaults_to_unknown() {
 }
 
 #[tokio::test]
-#[ignore] // CI: send_review_result_to_primary early-returns without local ADK runtime (channel resolution)
 async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
     // When a review dispatch has an explicit verdict (e.g. "improve"),
     // Rust creates a review-decision dispatch for the original agent.
@@ -196,7 +195,9 @@ async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
     {
         let conn = db.lock().unwrap();
         conn.execute(
-            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            "INSERT INTO agents (
+                id, name, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+             ) VALUES ('agent-1', 'Agent 1', 'claude', '123', '456', '123', '456')",
             [],
         )
         .unwrap();
@@ -207,8 +208,8 @@ async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
-             VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"improve\"}', datetime('now'), datetime('now'))",
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, context, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"improve\"}', '{\"from_provider\":\"codex\",\"target_provider\":\"claude\"}', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
@@ -225,15 +226,62 @@ async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
         )
         .unwrap();
     assert_ne!(latest_dispatch_id, "dispatch-review");
-    let (dispatch_type, dispatch_status): (String, String) = conn
+    let (dispatch_type, dispatch_status, context): (String, String, Option<String>) = conn
         .query_row(
-            "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+            "SELECT dispatch_type, status, context FROM task_dispatches WHERE id = ?1",
             [&latest_dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!(dispatch_type, "review-decision");
     assert_eq!(dispatch_status, "pending");
+    let context = context.expect("review-decision should persist provider routing context");
+    assert!(context.contains("\"from_provider\":\"codex\""));
+}
+
+#[test]
+fn review_decision_routing_falls_back_to_latest_completed_review_provider() {
+    let db = test_db();
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO agents (
+            id, name, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+         ) VALUES ('agent-1', 'Agent 1', 'claude', '123', '456', '123', '456')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+         VALUES ('card-route', 'Route test', 'review', 'agent-1', 'dispatch-rd', datetime('now'), datetime('now'))",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+         VALUES ('dispatch-review', 'card-route', 'agent-1', 'review', 'completed', '[Review R1] card-route', '{\"from_provider\":\"codex\",\"target_provider\":\"claude\"}', datetime('now', '-1 minute'), datetime('now', '-1 minute'))",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+         VALUES ('dispatch-rd', 'card-route', 'agent-1', 'review-decision', 'pending', '[리뷰 검토] card-route', datetime('now'), datetime('now'))",
+        [],
+    )
+    .unwrap();
+
+    let channel = super::discord_delivery::resolve_dispatch_delivery_channel_on_conn(
+        &conn,
+        "agent-1",
+        "card-route",
+        Some("review-decision"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        channel.as_deref(),
+        Some("456"),
+        "review-decision should route back to the implementation provider channel"
+    );
 }
 
 #[tokio::test]
