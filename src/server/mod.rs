@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::Router;
 use axum::routing::get;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::Config;
 use crate::db::Db;
@@ -181,7 +181,11 @@ pub async fn run(
                 health_registry,
             ),
         )
-        .fallback_service(ServeDir::new(&dashboard_dir));
+        .fallback_service(
+            ServeDir::new(&dashboard_dir)
+                .append_index_html_on_directories(true)
+                .not_found_service(ServeFile::new(dashboard_dir.join("index.html"))),
+        );
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
