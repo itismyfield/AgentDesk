@@ -591,6 +591,72 @@ mod tests {
     }
 
     #[test]
+    fn requested_preflight_cards_skip_timeout_without_dispatch() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, requested_at, created_at, updated_at) \
+                 VALUES ('card-s5-preflight', 'Preflight', 'requested', 'agent-1', datetime('now', '-50 minutes'), datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let _ = engine.try_fire_hook_by_name("OnTick1min", serde_json::json!({}));
+
+        loop {
+            let transitions = engine.drain_pending_transitions();
+            if transitions.is_empty() {
+                break;
+            }
+            for (card_id, old_s, new_s) in &transitions {
+                kanban::fire_transition_hooks(&db, &engine, card_id, old_s, new_s);
+            }
+        }
+
+        let conn = db.lock().unwrap();
+        let (status, latest_dispatch_id, blocked_reason): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, latest_dispatch_id, blocked_reason FROM kanban_cards WHERE id = 'card-s5-preflight'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let dispatch_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-s5-preflight'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            status, "requested",
+            "requested preflight cards without a dispatch must not be forced to pending_decision"
+        );
+        assert!(
+            latest_dispatch_id.is_none(),
+            "preflight timeout skip must not attach a dispatch"
+        );
+        assert!(
+            blocked_reason.is_none(),
+            "preflight timeout skip must not leave a blocked reason"
+        );
+        assert_eq!(
+            dispatch_count, 0,
+            "preflight timeout skip must not create a side dispatch"
+        );
+    }
+
+    #[test]
     fn auto_queue_on_tick_dispatches_ready_card_via_requested_preflight() {
         let db = test_db();
         let engine = test_engine(&db);
