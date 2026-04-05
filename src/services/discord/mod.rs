@@ -223,12 +223,20 @@ pub(super) struct DiscordSession {
     pub(super) born_generation: u64,
 }
 
+fn allows_nonlocal_session_path(remote_profile_name: Option<&str>) -> bool {
+    remote_profile_name.is_some_and(|name| !name.trim().is_empty())
+}
+
+fn session_path_is_usable(current_path: &str, remote_profile_name: Option<&str>) -> bool {
+    allows_nonlocal_session_path(remote_profile_name) || std::path::Path::new(current_path).is_dir()
+}
+
 impl DiscordSession {
     /// Validate `current_path` and return it if it exists on disk.
     /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
     pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
         let current_path = self.current_path.as_ref()?;
-        if std::path::Path::new(current_path).is_dir() {
+        if session_path_is_usable(current_path, self.remote_profile_name.as_deref()) {
             return Some(current_path.clone());
         }
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -3151,11 +3159,10 @@ pub(super) async fn auto_restore_session(
 
     // Read settings first to get last_sessions/last_remotes info
     // DB cwd takes priority over yaml last_sessions (preserves worktree paths)
-    let (last_path, is_remote, saved_remote, provider) = {
+    let (last_path, saved_remote, provider) = {
         let settings = shared.settings.read().await;
         let channel_key = channel_id.get().to_string();
         let yaml_path = settings.last_sessions.get(&channel_key).cloned();
-        let is_remote = settings.last_remotes.contains_key(&channel_key);
         let saved_remote = settings.last_remotes.get(&channel_key).cloned();
         let provider = settings.provider.clone();
 
@@ -3174,13 +3181,13 @@ pub(super) async fn auto_restore_session(
                         |row| row.get::<_, String>(0),
                     )
                     .ok()
-                    .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir())
+                    .filter(|p| !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref()))
                 })
             })
         });
         let last_path = db_cwd.or(yaml_path);
 
-        (last_path, is_remote, saved_remote, provider)
+        (last_path, saved_remote, provider)
     };
 
     let mut data = shared.core.lock().await;
@@ -3198,7 +3205,7 @@ pub(super) async fn auto_restore_session(
     }
 
     if let Some(last_path) = last_path {
-        if is_remote || Path::new(&last_path).is_dir() {
+        if session_path_is_usable(&last_path, saved_remote.as_deref()) {
             // Session ID is restored from DB (sessions.claude_session_id column)
             // which is already loaded into DiscordSession.session_id at startup.
             let session = data
@@ -3513,8 +3520,9 @@ fn enrich_role_map_with_channel_ids() {
 mod tests {
     use super::ChannelId;
     use super::{
-        DiscordBotSettings, choose_restore_channel_name, is_synthetic_thread_channel_name,
-        synthetic_thread_channel_name, user_is_authorized,
+        DiscordBotSettings, allows_nonlocal_session_path, choose_restore_channel_name,
+        is_synthetic_thread_channel_name, session_path_is_usable, synthetic_thread_channel_name,
+        user_is_authorized,
     };
 
     #[test]
@@ -3583,5 +3591,17 @@ mod tests {
 
         assert!(user_is_authorized(&settings, 42));
         assert!(user_is_authorized(&settings, 99));
+    }
+
+    #[test]
+    fn allows_nonlocal_session_path_requires_remote_profile_name() {
+        assert!(allows_nonlocal_session_path(Some("mac-mini")));
+        assert!(!allows_nonlocal_session_path(Some("")));
+        assert!(!allows_nonlocal_session_path(None));
+    }
+
+    #[test]
+    fn session_path_is_usable_for_remote_nonlocal_path() {
+        assert!(session_path_is_usable("~/repo", Some("mac-mini")));
     }
 }

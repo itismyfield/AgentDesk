@@ -2469,7 +2469,8 @@ mod tests {
         let missing_path = dir.path().to_str().unwrap().to_string();
         drop(dir);
         let mut session = make_session(Some(missing_path), Some("mac-mini".to_string()));
-        // Remote sessions should also validate local paths (no bypass)
-        assert!(session.validated_path("test-channel").is_none());
+        // Remote sessions keep their CWD even when it is non-local to this machine.
+        assert!(session.validated_path("test-channel").is_some());
+        assert!(session.current_path.is_some());
     }
 }
