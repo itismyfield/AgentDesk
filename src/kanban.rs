@@ -991,8 +991,10 @@ pub fn correct_tn_to_fn_on_reopen(db: &Db, card_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
 
     fn test_db() -> Db {
@@ -1014,6 +1016,38 @@ mod tests {
         config.policies.dir = dir.to_path_buf();
         config.policies.hot_reload = false;
         PolicyEngine::new(&config, db.clone()).unwrap()
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, contents).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
     }
 
     fn seed_card(db: &Db, card_id: &str, status: &str) {
@@ -1537,6 +1571,120 @@ mod tests {
         assert_eq!(
             new_dispatches, 0,
             "no new dispatch should be created by pipeline.js onDispatchCompleted"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deploy_pipeline_uses_card_scoped_worktree_instead_of_latest_session_cwd() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let policies_dir = temp.path().join("policies");
+        fs::create_dir_all(&policies_dir).unwrap();
+        fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("policies")
+                .join("deploy-pipeline.js"),
+            policies_dir.join("deploy-pipeline.js"),
+        )
+        .unwrap();
+
+        let fake_bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&fake_bin_dir).unwrap();
+        let tmux_log = temp.path().join("tmux.log");
+        write_executable_script(
+            &fake_bin_dir.join("tmux"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"has-session\" ]; then\n  echo \"missing\" >&2\n  exit 1\nfi\nexit 0\n",
+                tmux_log.display()
+            ),
+        );
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path_guard = EnvVarGuard::set(
+            "PATH",
+            &format!("{}:{}", fake_bin_dir.display(), original_path),
+        );
+
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, &policies_dir);
+        seed_card_with_repo(&db, "card-deploy-301", "review", "repo-1");
+
+        let correct_worktree = temp.path().join("worktrees").join("card-301");
+        let wrong_worktree = temp.path().join("worktrees").join("other-card");
+        fs::create_dir_all(&correct_worktree).unwrap();
+        fs::create_dir_all(&wrong_worktree).unwrap();
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, provider)
+                 VALUES ('repo-1', 'dev-deploy', 1, 'review_pass', 'self')",
+                [],
+            )
+            .unwrap();
+            let stage_id = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE kanban_cards
+                 SET pipeline_stage_id = ?1, blocked_reason = 'deploy:waiting', updated_at = datetime('now')
+                 WHERE id = 'card-deploy-301'",
+                [stage_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
+                 ) VALUES (
+                    'dispatch-card-deploy-301', 'card-deploy-301', 'agent-1', 'implementation', 'completed',
+                    'Implementation Done', ?1, '{}', datetime('now'), datetime('now')
+                 )",
+                rusqlite::params![serde_json::json!({
+                    "worktree_path": correct_worktree.display().to_string(),
+                    "worktree_branch": "feat/301-correct-worktree"
+                })
+                .to_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (
+                    session_key, agent_id, provider, status, cwd, last_heartbeat
+                 ) VALUES (
+                    'session-card-other', 'agent-1', 'codex', 'connected', ?1, datetime('now')
+                 )",
+                [wrong_worktree.display().to_string()],
+            )
+            .unwrap();
+        }
+
+        engine
+            .try_fire_hook_by_name("onTick30s", json!({}))
+            .unwrap();
+
+        let blocked_reason: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-deploy-301'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(
+            blocked_reason.starts_with("deploy:deploying:adk-deploy-"),
+            "deploy queue should transition card into deploying state"
+        );
+
+        let tmux_invocations = fs::read_to_string(&tmux_log).unwrap();
+        println!("[test] deploy tmux invocations:\n{tmux_invocations}");
+        assert!(
+            tmux_invocations.contains(&correct_worktree.display().to_string()),
+            "deploy command must use card-scoped worktree path from dispatch context"
+        );
+        assert!(
+            !tmux_invocations.contains(&wrong_worktree.display().to_string()),
+            "deploy command must ignore latest session cwd from another card"
         );
     }
 
