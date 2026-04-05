@@ -522,11 +522,6 @@ fn main() -> Result<()> {
                     ConfigAction::Set { json } => cli::client::cmd_config_set(&json),
                 });
             }
-            Some(Commands::Migrate { action }) => {
-                return exit_for_cli(match action {
-                    MigrateAction::Openclaw(args) => cli::migrate::cmd_migrate_openclaw(args),
-                });
-            }
             Some(Commands::Api { method, path, body }) => {
                 return exit_for_cli(cli::client::cmd_api(&method, &path, body.as_deref()));
             }
