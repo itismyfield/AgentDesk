@@ -815,14 +815,20 @@ fn check_provider_cli(
     let log_hint = dcserver_log_hint();
     let binary_name = provider.as_str().to_string();
     match provider.probe_runtime() {
-        Some(probe) => match (probe.binary_path, probe.version) {
+        Some(probe) => match (probe.resolution.resolved_path.clone(), probe.version) {
             (Some(path), Some(ver)) => {
                 let health_note = match connected {
                     Some(true) => "health=connected".to_string(),
                     Some(false) => "health=disconnected".to_string(),
                     None => "health=unknown".to_string(),
                 };
-                let detail = format!("{ver} — {path} [{capability_summary}; {health_note}]");
+                let source = probe
+                    .resolution
+                    .source
+                    .as_deref()
+                    .unwrap_or("unknown_source");
+                let detail =
+                    format!("{ver} — {path} [{source}; {capability_summary}; {health_note}]");
 
                 if !configured {
                     Check::warn(
@@ -862,7 +868,18 @@ fn check_provider_cli(
                 }
             }
             (Some(path), None) => {
-                let detail = format!("{path} — version probe failed [{capability_summary}]");
+                let source = probe
+                    .resolution
+                    .source
+                    .as_deref()
+                    .unwrap_or("unknown_source");
+                let probe_failure_kind = probe
+                    .probe_failure_kind
+                    .clone()
+                    .unwrap_or_else(|| "version_probe_failed".to_string());
+                let detail = format!(
+                    "{path} — version probe failed [{source}; {probe_failure_kind}; {capability_summary}]"
+                );
                 if configured {
                     Check::fail(
                         id,
@@ -900,12 +917,17 @@ fn check_provider_cli(
             )
             .with_expected_actual("provider path known", "version known but path unknown"),
             (None, None) => {
+                let failure_kind = probe
+                    .resolution
+                    .failure_kind
+                    .clone()
+                    .unwrap_or_else(|| "not_found".to_string());
                 if configured {
                     Check::fail(
                         id,
                         CheckGroup::ProviderRuntime,
                         name,
-                        format!("not found in runtime PATH [{capability_summary}]"),
+                        format!("not found in runtime PATH [{failure_kind}; {capability_summary}]"),
                         provider_runtime_guidance(&provider),
                     )
                     .with_expected_actual(
@@ -1412,12 +1434,29 @@ pub fn cmd_doctor(fix: bool, json: bool) -> Result<(), String> {
 mod tests {
     use super::{
         Check, CheckGroup, CheckStatus, FixAction, HealthSnapshot, build_json_report,
-        check_server_running, configured_provider_names, discord_bot_check_from_health,
-        provider_capability_summary,
+        check_provider_cli, check_server_running, configured_provider_names,
+        discord_bot_check_from_health, provider_capability_summary,
     };
     use crate::config::ServerConfig;
     use crate::services::provider::ProviderKind;
     use serde_json::json;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, contents).unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
 
     fn test_base_url() -> String {
         format!(
@@ -1508,6 +1547,91 @@ mod tests {
         let configured = configured_provider_names(&cfg, &snapshot);
         assert!(configured.contains("claude"));
         assert!(configured.contains("codex"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_runtime_check_uses_resolver_exec_path_under_minimal_path() {
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let helper = temp.path().join("provider-helper");
+        let provider = temp.path().join("codex");
+        let original_path = std::env::var_os("PATH");
+
+        write_executable(&helper, "#!/bin/sh\nprintf 'codex-test 1.2.3\\n'\n");
+        write_executable(
+            &provider,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  provider-helper\nelse\n  exit 64\nfi\n",
+        );
+
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            std::env::set_var("AGENTDESK_CODEX_PATH", &provider);
+        }
+
+        let snapshot = HealthSnapshot {
+            base: test_base_url(),
+            body: None,
+            error: None,
+        };
+        let check = check_provider_cli(ProviderKind::Codex, true, &snapshot);
+
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(check.detail.contains("codex-test 1.2.3"));
+        assert!(check.detail.contains("env_override"));
+        assert_eq!(
+            check.path.as_deref(),
+            Some(provider.to_string_lossy().as_ref())
+        );
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_CODEX_PATH");
+            match original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_runtime_check_reports_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let provider = temp.path().join("codex");
+        let original_path = std::env::var_os("PATH");
+
+        std::fs::write(&provider, "#!/bin/sh\nprintf 'codex-test 1.2.3\\n'\n").unwrap();
+        let mut perms = std::fs::metadata(&provider).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&provider, perms).unwrap();
+
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            std::env::set_var("AGENTDESK_CODEX_PATH", &provider);
+        }
+
+        let snapshot = HealthSnapshot {
+            base: test_base_url(),
+            body: None,
+            error: None,
+        };
+        let check = check_provider_cli(ProviderKind::Codex, true, &snapshot);
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("permission_denied"));
+        assert!(check.detail.contains("not found in runtime PATH"));
+        assert_eq!(check.path.as_deref(), None);
+
+        unsafe {
+            std::env::remove_var("AGENTDESK_CODEX_PATH");
+            match original_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
     }
 
     #[test]
