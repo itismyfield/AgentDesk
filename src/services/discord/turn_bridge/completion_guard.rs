@@ -261,10 +261,67 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete(
     changed > 0
 }
 
+/// Extract the last git commit SHA from agent turn output.
+///
+/// Scans the output for `git commit` result lines like:
+///   `[main abc1234] fix: some message`
+///   `[wt/304-rework def5678] feat: add feature`
+///
+/// Returns the **last** (most recent) match, resolved to full SHA via
+/// `git rev-parse` in the given CWD.  This is the most reliable commit
+/// capture method because it reads what the agent actually committed.
+fn extract_commit_sha_from_output(output: &str, cwd: &str) -> Option<String> {
+    // Pattern: [branch_or_tag SHORT_SHA] message
+    // Git commit output format: [main abc1234] commit message here
+    let mut last_short_sha: Option<&str> = None;
+    for line in output.lines().rev() {
+        let trimmed = line.trim();
+        // Fast pre-check before full parse
+        if !trimmed.starts_with('[') {
+            continue;
+        }
+        // Parse: [branch_name SHA] rest
+        let after_bracket = match trimmed.strip_prefix('[') {
+            Some(s) => s,
+            None => continue,
+        };
+        let close_idx = match after_bracket.find(']') {
+            Some(i) => i,
+            None => continue,
+        };
+        let inside = &after_bracket[..close_idx];
+        // Split into branch and SHA: "main abc1234" or "wt/304 def5678"
+        let parts: Vec<&str> = inside.split_whitespace().collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let candidate_sha = parts[1];
+        // Validate: 7-12 hex chars (short SHA from git commit output)
+        if candidate_sha.len() >= 7
+            && candidate_sha.len() <= 12
+            && candidate_sha.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            last_short_sha = Some(candidate_sha);
+            break; // Scanning in reverse, first match is the last commit
+        }
+    }
+    let short_sha = last_short_sha?;
+    // Resolve short SHA to full SHA
+    std::process::Command::new("git")
+        .args(["rev-parse", short_sha])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
 /// Context needed to resolve the correct completed commit for a dispatch.
 struct DispatchCompletionHints {
     issue_number: Option<i64>,
     dispatch_created_at: Option<String>,
+    /// Commit SHA extracted directly from agent output (most reliable).
+    output_commit: Option<String>,
 }
 
 fn lookup_dispatch_completion_hints(
@@ -296,6 +353,7 @@ fn lookup_dispatch_completion_hints(
     DispatchCompletionHints {
         issue_number,
         dispatch_created_at,
+        output_commit: None,
     }
 }
 
@@ -304,18 +362,22 @@ fn work_dispatch_completion_context(
     hints: &DispatchCompletionHints,
 ) -> Option<serde_json::Value> {
     let cwd = adk_cwd.filter(|p| std::path::Path::new(p).is_dir())?;
-    // 1) Best: find a commit since dispatch start, preferring issue-scoped match
-    // 2) Fallback: issue grep on recent commits (no time scope)
-    // 3) Last resort: plain HEAD
+    // Commit resolution priority:
+    // 1) Agent's own commit extracted from turn output (most reliable — direct evidence)
+    // 2) Time-scoped: newest commit since dispatch start, preferring issue-number match
+    // 3) Issue grep: recent commits matching (#issue_number)
+    // 4) Plain HEAD (last resort)
     let completed_commit = hints
-        .dispatch_created_at
-        .as_deref()
-        .and_then(|since| {
-            crate::services::platform::shell::git_best_commit_for_dispatch(
-                cwd,
-                since,
-                hints.issue_number,
-            )
+        .output_commit
+        .clone()
+        .or_else(|| {
+            hints.dispatch_created_at.as_deref().and_then(|since| {
+                crate::services::platform::shell::git_best_commit_for_dispatch(
+                    cwd,
+                    since,
+                    hints.issue_number,
+                )
+            })
         })
         .or_else(|| {
             hints
@@ -428,6 +490,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
     shared: &Arc<super::super::SharedData>,
     dispatch_id: Option<&str>,
     adk_cwd: Option<&str>,
+    turn_output: Option<&str>,
 ) {
     let Some(dispatch_id) = dispatch_id else {
         return;
@@ -451,11 +514,25 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
 
     // Direct finalize_dispatch with retry — single completion authority (#143)
     if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
-        let hints = lookup_dispatch_completion_hints(
+        // Extract commit SHA directly from agent output (most reliable method)
+        let output_commit = turn_output.and_then(|output| {
+            adk_cwd
+                .filter(|p| std::path::Path::new(p).is_dir())
+                .and_then(|cwd| extract_commit_sha_from_output(output, cwd))
+        });
+        if let Some(ref sha) = output_commit {
+            tracing::info!(
+                "[turn_bridge] Extracted commit {} from agent output for dispatch {}",
+                &sha[..8.min(sha.len())],
+                dispatch_id,
+            );
+        }
+        let mut hints = lookup_dispatch_completion_hints(
             Some(db),
             dispatch_id,
             snapshot.kanban_card_id.as_deref(),
         );
+        hints.output_commit = output_commit;
         let completion_context = work_dispatch_completion_context(adk_cwd, &hints);
         for attempt in 1..=3u8 {
             match crate::dispatch::finalize_dispatch(
@@ -518,7 +595,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         let url = local_api_url(shared.api_port, &format!("/api/dispatches/{dispatch_id}"));
         let payload = serde_json::json!({
             "status": "completed",
-            "result": completion_result_with_context("turn_bridge_explicit", false, adk_cwd, &DispatchCompletionHints { issue_number: None, dispatch_created_at: None }),
+            "result": completion_result_with_context("turn_bridge_explicit", false, adk_cwd, &DispatchCompletionHints { issue_number: None, dispatch_created_at: None, output_commit: None }),
         });
         for attempt in 1..=3u8 {
             match reqwest::Client::new()
