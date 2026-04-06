@@ -3011,38 +3011,37 @@ pub async fn force_transition(
     }
 
     let needs_cleanup = force_transition_needs_cleanup(&body.status, body.cancel_dispatches);
+    let target_status = body.status;
+    let mut cleanup_counts = (0, 0);
 
-    match crate::kanban::transition_status_with_opts(
-        &state.db,
-        &state.engine,
-        &id,
-        &body.status,
-        "pmd",
-        true,
-    ) {
+    let transition_result = if needs_cleanup {
+        crate::kanban::transition_status_with_opts_and_on_conn(
+            &state.db,
+            &state.engine,
+            &id,
+            &target_status,
+            "pmd",
+            true,
+            |conn| {
+                cleanup_counts =
+                    cleanup_force_transition_revert_on_conn(conn, &id, &target_status)?;
+                Ok(())
+            },
+        )
+    } else {
+        crate::kanban::transition_status_with_opts(
+            &state.db,
+            &state.engine,
+            &id,
+            &target_status,
+            "pmd",
+            true,
+        )
+    };
+
+    match transition_result {
         Ok(result) => {
-            let (cancelled_dispatches, skipped_auto_queue_entries) = if needs_cleanup {
-                let conn = match state.db.lock() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{e}")})),
-                        );
-                    }
-                };
-                match cleanup_force_transition_revert_on_conn(&conn, &id, &body.status) {
-                    Ok(counts) => counts,
-                    Err(e) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("force-transition cleanup failed: {e}")})),
-                        );
-                    }
-                }
-            } else {
-                (0, 0)
-            };
+            let (cancelled_dispatches, skipped_auto_queue_entries) = cleanup_counts;
 
             let conn = state.db.lock().unwrap();
             let card = conn.query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {

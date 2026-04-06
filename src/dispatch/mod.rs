@@ -472,6 +472,17 @@ pub fn cancel_active_dispatches_for_card_on_conn(
     card_id: &str,
     reason: Option<&str>,
 ) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE sessions \
+         SET status = CASE WHEN status = 'working' THEN 'idle' ELSE status END, \
+             active_dispatch_id = NULL \
+         WHERE active_dispatch_id IN (
+             SELECT id FROM task_dispatches
+             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')
+         )",
+        [card_id],
+    )?;
+
     if let Some(reason) = reason {
         conn.execute(
             "UPDATE task_dispatches \
