@@ -999,7 +999,7 @@ pub struct ForceKillOptions {
     pub retry: bool,
 }
 
-async fn force_kill_session_impl(
+pub(crate) async fn force_kill_session_impl(
     state: &AppState,
     session_key: &str,
     retry: bool,
