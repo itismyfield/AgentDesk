@@ -2560,6 +2560,16 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at
+            ) VALUES (
+                'session-ft-clean', 'agent-ft-clean', 'codex', 'working', 'dispatch-ft-clean',
+                datetime('now', '-9 minutes'), datetime('now', '-9 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
              VALUES ('run-ft-clean', 'test-repo', 'agent-ft-clean', 'active')",
             [],
@@ -2659,6 +2669,15 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         .unwrap()
         .collect::<std::result::Result<_, _>>()
         .unwrap();
+    let (session_status, active_dispatch_id): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, active_dispatch_id
+             FROM sessions
+             WHERE session_key = 'session-ft-clean'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
 
     assert_eq!(card_status, "ready");
     assert!(
@@ -2680,6 +2699,14 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         entry_rows,
         vec![("skipped".to_string(), None), ("skipped".to_string(), None),],
         "force-transition cleanup must skip live auto-queue entries and clear dispatch links"
+    );
+    assert_eq!(
+        session_status, "idle",
+        "force-transition cleanup must demote working sessions off the cancelled dispatch"
+    );
+    assert!(
+        active_dispatch_id.is_none(),
+        "force-transition cleanup must clear stale session active_dispatch_id"
     );
 }
 

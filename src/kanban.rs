@@ -40,21 +40,18 @@ pub fn transition_status(
     transition_status_with_opts(db, engine, card_id, new_status, "system", false)
 }
 
-/// Full transition with source tracking and force override.
-///
-/// #155: Uses the TransitionDecision + Executor pattern.
-/// 1. Assemble TransitionContext from DB
-/// 2. Call decide_status_transition (pure function — no I/O)
-/// 3. Execute decision intents via Executor
-/// 4. Fire post-transition hooks (GitHub sync, policy hooks)
-pub fn transition_status_with_opts(
+fn transition_status_with_opts_inner<F>(
     db: &Db,
     engine: &PolicyEngine,
     card_id: &str,
     new_status: &str,
     source: &str,
     force: bool,
-) -> Result<TransitionResult> {
+    on_conn_after_intents: F,
+) -> Result<TransitionResult>
+where
+    F: FnOnce(&rusqlite::Connection) -> Result<()>,
+{
     use crate::engine::transition::{
         self, CardState, GateSnapshot, TransitionContext, TransitionOutcome,
     };
@@ -187,6 +184,7 @@ pub fn transition_status_with_opts(
         for intent in &decision.intents {
             transition::execute_intent_on_conn(&conn, intent)?;
         }
+        on_conn_after_intents(&conn)?;
         Ok(())
     })();
     if let Err(e) = exec_result {
@@ -213,6 +211,51 @@ pub fn transition_status_with_opts(
         from: old_status,
         to: new_status.to_string(),
     })
+}
+
+/// Full transition with source tracking and force override.
+///
+/// #155: Uses the TransitionDecision + Executor pattern.
+/// 1. Assemble TransitionContext from DB
+/// 2. Call decide_status_transition (pure function — no I/O)
+/// 3. Execute decision intents via Executor
+/// 4. Fire post-transition hooks (GitHub sync, policy hooks)
+pub fn transition_status_with_opts(
+    db: &Db,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force: bool,
+) -> Result<TransitionResult> {
+    transition_status_with_opts_inner(db, engine, card_id, new_status, source, force, |_conn| {
+        Ok(())
+    })
+}
+
+/// Full transition with an extra DB mutation executed inside the same
+/// transaction as the canonical transition intents.
+pub fn transition_status_with_opts_and_on_conn<F>(
+    db: &Db,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force: bool,
+    on_conn_after_intents: F,
+) -> Result<TransitionResult>
+where
+    F: FnOnce(&rusqlite::Connection) -> Result<()>,
+{
+    transition_status_with_opts_inner(
+        db,
+        engine,
+        card_id,
+        new_status,
+        source,
+        force,
+        on_conn_after_intents,
+    )
 }
 
 /// Transition a card through the full reducer (decision → intents → execute)
@@ -1169,6 +1212,39 @@ mod tests {
         let result =
             transition_status_with_opts(&db, &engine, "card-force", "in_progress", "pmd", true);
         assert!(result.is_ok(), "force=true should bypass dispatch check");
+    }
+
+    #[test]
+    fn transition_status_with_on_conn_rolls_back_on_cleanup_error() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-force-rollback", "requested");
+        seed_dispatch(&db, "card-force-rollback", "pending");
+
+        let result = transition_status_with_opts_and_on_conn(
+            &db,
+            &engine,
+            "card-force-rollback",
+            "in_progress",
+            "pmd",
+            true,
+            |_conn| Err(anyhow::anyhow!("cleanup failed")),
+        );
+        assert!(result.is_err(), "cleanup failure must abort the transition");
+
+        let status: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-force-rollback'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            status, "requested",
+            "cleanup failure must roll back the card status change"
+        );
     }
 
     #[test]
