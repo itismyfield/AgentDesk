@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serenity::ChannelId;
@@ -242,7 +242,14 @@ pub(super) fn resolve_workspace(
 }
 
 pub(super) fn load_role_prompt(binding: &RoleBinding) -> Option<String> {
-    let raw = fs::read_to_string(Path::new(&binding.prompt_file)).ok()?;
+    let prompt_path = Path::new(&binding.prompt_file);
+    let raw = fs::read_to_string(prompt_path)
+        .or_else(|_| {
+            legacy_prompt_fallback_path(prompt_path)
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+                .and_then(fs::read_to_string)
+        })
+        .ok()?;
     const MAX_CHARS: usize = 12_000;
     if raw.chars().count() <= MAX_CHARS {
         return Some(raw);
@@ -251,21 +258,45 @@ pub(super) fn load_role_prompt(binding: &RoleBinding) -> Option<String> {
     Some(truncated)
 }
 
+fn legacy_prompt_fallback_path(path: &Path) -> Option<PathBuf> {
+    let mut rewritten = PathBuf::new();
+    let mut replaced = false;
+
+    for component in path.components() {
+        match component {
+            Component::Normal(name) if name == "role-context" => {
+                rewritten.push("agents");
+                replaced = true;
+            }
+            other => rewritten.push(other.as_os_str()),
+        }
+    }
+
+    replaced.then_some(rewritten)
+}
+
 /// Build a catalog of long-term memory files for a given role.
-/// Scans $AGENTDESK_ROOT_DIR/role-context/{role_id}.memory/ for .md files and extracts
+/// Scans config/memories/long-term/{role_id}/ for .md files and extracts
 /// name + description from YAML frontmatter (or first heading as fallback).
 /// Returns None if directory doesn't exist or has no .md files.
 pub(super) fn load_longterm_memory_catalog(role_id: &str) -> Option<String> {
-    let root = super::runtime_store::agentdesk_root()?;
-    let memory_dir = root
-        .join("role-context")
-        .join(format!("{}.memory", role_id));
+    let memory_dir = super::runtime_store::long_term_memory_root()?.join(role_id);
     if !memory_dir.is_dir() {
-        return None;
+        let root = super::runtime_store::agentdesk_root()?;
+        let legacy_dir = root
+            .join("role-context")
+            .join(format!("{}.memory", role_id));
+        if !legacy_dir.is_dir() {
+            return None;
+        }
+        return load_longterm_memory_catalog_from_dir(&legacy_dir);
     }
+    load_longterm_memory_catalog_from_dir(&memory_dir)
+}
 
+fn load_longterm_memory_catalog_from_dir(memory_dir: &std::path::Path) -> Option<String> {
     let mut entries: Vec<(String, String)> = Vec::new();
-    let Ok(read_dir) = std::fs::read_dir(&memory_dir) else {
+    let Ok(read_dir) = std::fs::read_dir(memory_dir) else {
         return None;
     };
 

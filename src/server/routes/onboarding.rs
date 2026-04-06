@@ -655,7 +655,11 @@ fn strip_legacy_discord_section(existing: &str) -> String {
 }
 
 fn cleanup_legacy_yaml_discord_section(runtime_root: &Path) -> Result<(), String> {
-    let yaml_path = runtime_root.join("agentdesk.yaml");
+    let yaml_path = if crate::runtime_layout::config_file_path(runtime_root).exists() {
+        crate::runtime_layout::config_file_path(runtime_root)
+    } else {
+        crate::runtime_layout::legacy_config_file_path(runtime_root)
+    };
     if !yaml_path.exists() {
         return Ok(());
     }
@@ -846,66 +850,76 @@ pub async fn complete(
         }
     }
 
-    // Generate role_map.json
-    let root = crate::cli::agentdesk_runtime_root();
-    if let Some(root) = root {
-        let config_dir = root.join("config");
-        std::fs::create_dir_all(&config_dir).ok();
+    let Some(root) = crate::cli::agentdesk_runtime_root() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "cannot determine runtime root"})),
+        );
+    };
 
-        // Create workspace directories for each agent
-        let workspaces_dir = root.join("workspaces");
-        std::fs::create_dir_all(&workspaces_dir).ok();
-        for mapping in &resolved_channels {
-            let ws_dir = workspaces_dir.join(&mapping.role_id);
-            std::fs::create_dir_all(&ws_dir).ok();
-        }
+    if let Err(error) = crate::runtime_layout::ensure_runtime_layout(&root) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to prepare runtime layout: {error}")})),
+        );
+    }
 
-        let mut by_channel_id = serde_json::Map::new();
-        let mut by_channel_name = serde_json::Map::new();
+    let config_dir = crate::runtime_layout::config_dir(&root);
+    std::fs::create_dir_all(&config_dir).ok();
 
-        for mapping in &resolved_channels {
-            let workspace_tilde = dirs::home_dir()
-                .and_then(|home| {
-                    let ws = root.join("workspaces").join(&mapping.role_id);
-                    ws.strip_prefix(&home)
-                        .ok()
-                        .map(|rel| format!("~/{}", rel.display()))
-                })
-                .unwrap_or_else(|| {
-                    root.join("workspaces")
-                        .join(&mapping.role_id)
-                        .display()
-                        .to_string()
-                });
-            by_channel_id.insert(
-                mapping.channel_id.clone(),
-                json!({
-                    "roleId": mapping.role_id,
-                    "provider": provider,
-                    "workspace": workspace_tilde,
-                }),
-            );
-            by_channel_name.insert(
-                mapping.channel_name.clone(),
-                json!({
-                    "roleId": mapping.role_id,
-                    "channelId": mapping.channel_id,
-                    "workspace": workspace_tilde,
-                }),
-            );
-        }
+    // Create workspace directories for each agent
+    let workspaces_dir = root.join("workspaces");
+    std::fs::create_dir_all(&workspaces_dir).ok();
+    for mapping in &resolved_channels {
+        let ws_dir = workspaces_dir.join(&mapping.role_id);
+        std::fs::create_dir_all(&ws_dir).ok();
+    }
 
-        let role_map = json!({
-            "version": 1,
-            "byChannelId": by_channel_id,
-            "byChannelName": by_channel_name,
-            "fallbackByChannelName": { "enabled": true },
-        });
+    let mut by_channel_id = serde_json::Map::new();
+    let mut by_channel_name = serde_json::Map::new();
 
-        let role_map_path = config_dir.join("role_map.json");
-        if let Ok(json_str) = serde_json::to_string_pretty(&role_map) {
-            std::fs::write(&role_map_path, json_str).ok();
-        }
+    for mapping in &resolved_channels {
+        let workspace_tilde = dirs::home_dir()
+            .and_then(|home| {
+                let ws = root.join("workspaces").join(&mapping.role_id);
+                ws.strip_prefix(&home)
+                    .ok()
+                    .map(|rel| format!("~/{}", rel.display()))
+            })
+            .unwrap_or_else(|| {
+                root.join("workspaces")
+                    .join(&mapping.role_id)
+                    .display()
+                    .to_string()
+            });
+        by_channel_id.insert(
+            mapping.channel_id.clone(),
+            json!({
+                "roleId": mapping.role_id,
+                "provider": provider,
+                "workspace": workspace_tilde,
+            }),
+        );
+        by_channel_name.insert(
+            mapping.channel_name.clone(),
+            json!({
+                "roleId": mapping.role_id,
+                "channelId": mapping.channel_id,
+                "workspace": workspace_tilde,
+            }),
+        );
+    }
+
+    let role_map = json!({
+        "version": 1,
+        "byChannelId": by_channel_id,
+        "byChannelName": by_channel_name,
+        "fallbackByChannelName": { "enabled": true },
+    });
+
+    let role_map_path = crate::runtime_layout::role_map_path(&root);
+    if let Ok(json_str) = serde_json::to_string_pretty(&role_map) {
+        std::fs::write(&role_map_path, json_str).ok();
     }
 
     // Mark onboarding complete
@@ -915,13 +929,6 @@ pub async fn complete(
     )
     .ok();
     drop(conn);
-
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "cannot determine runtime root"})),
-        );
-    };
 
     if let Err(e) = write_bot_settings(
         &root,
@@ -1001,6 +1008,23 @@ mod tests {
 
         let output = strip_legacy_discord_section(input);
         assert_eq!(output, "server:\n  port: 8791\ndata:\n  dir: ./data\n");
+    }
+
+    #[test]
+    fn cleanup_legacy_yaml_discord_section_uses_v2_config_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config").join("agentdesk.yaml"),
+            "server:\n  port: 8791\ndiscord:\n  bots:\n    claude:\n      token: \"secret\"\n",
+        )
+        .unwrap();
+
+        cleanup_legacy_yaml_discord_section(root).unwrap();
+
+        let output = std::fs::read_to_string(root.join("config").join("agentdesk.yaml")).unwrap();
+        assert_eq!(output, "server:\n  port: 8791\n");
     }
 
     #[test]

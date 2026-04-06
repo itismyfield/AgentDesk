@@ -1285,7 +1285,15 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
+        let should_record_final_turn = !is_prompt_too_long
+            && !resume_failure_detected
+            && !recovery_retry
+            && !restart_recovery_handoff
+            && !(rx_disconnected && tmux_handed_off && full_response.is_empty())
+            && !full_response.trim().is_empty();
+
         // Update in-memory session under lock.
+        let mut should_persist_transcript = false;
         let session_id_to_persist = {
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -1295,14 +1303,17 @@ pub(super) fn spawn_turn_bridge(
                     } else if let Some(sid) = new_session_id {
                         session.session_id = Some(sid);
                     }
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::User,
-                        content: user_text_owned.clone(),
-                    });
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::Assistant,
-                        content: full_response.clone(),
-                    });
+                    if should_record_final_turn {
+                        session.history.push(HistoryItem {
+                            item_type: HistoryType::User,
+                            content: user_text_owned.clone(),
+                        });
+                        session.history.push(HistoryItem {
+                            item_type: HistoryType::Assistant,
+                            content: full_response.clone(),
+                        });
+                        should_persist_transcript = true;
+                    }
                     session.session_id.clone()
                 } else {
                     None
@@ -1314,8 +1325,8 @@ pub(super) fn spawn_turn_bridge(
 
         // Persist provider session_id to DB so it survives dcserver restarts.
         if !resume_failure_detected && !terminal_session_reset_required {
-            if let (Some(ref session_key), Some(ref persisted_sid)) =
-                (adk_session_key, session_id_to_persist)
+            if let (Some(session_key), Some(persisted_sid)) =
+                (adk_session_key.as_deref(), session_id_to_persist.as_deref())
             {
                 super::adk_session::save_provider_session_id(
                     session_key,
@@ -1329,6 +1340,29 @@ pub(super) fn spawn_turn_bridge(
             if let Some(ref session_key) = adk_session_key {
                 super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
                     .await;
+            }
+        }
+
+        if should_persist_transcript {
+            if let Some(db) = shared_owned.db.as_ref() {
+                let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
+                let channel_id_text = channel_id.get().to_string();
+                if let Err(e) = crate::db::session_transcripts::persist_turn(
+                    db,
+                    crate::db::session_transcripts::PersistSessionTranscript {
+                        turn_id: &turn_id,
+                        session_key: adk_session_key.as_deref(),
+                        channel_id: Some(channel_id_text.as_str()),
+                        agent_id: None,
+                        provider: Some(provider.as_str()),
+                        dispatch_id: dispatch_id.as_deref(),
+                        user_message: &user_text_owned,
+                        assistant_message: &full_response,
+                    },
+                ) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!("  [{ts}] ⚠ failed to persist session transcript: {e}");
+                }
             }
         }
 

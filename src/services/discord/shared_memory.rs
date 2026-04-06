@@ -1,13 +1,12 @@
 use std::fs;
 
-use super::runtime_store::shared_agent_memory_root;
+use super::runtime_store::shared_agent_knowledge_path;
 
-/// Read shared_knowledge.md from the shared_agent_memory directory.
+/// Read shared_knowledge.md from the managed SAK path.
 /// Returns the file content wrapped in a [Shared Agent Knowledge] section,
 /// or None if the file doesn't exist or is empty.
 pub(super) fn load_shared_knowledge() -> Option<String> {
-    let root = shared_agent_memory_root()?;
-    let path = root.join("shared_knowledge.md");
+    let path = shared_agent_knowledge_path()?;
     let content = fs::read_to_string(&path).ok()?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -27,11 +26,14 @@ mod tests {
         let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join(".adk");
-        let sam = root.join("shared_agent_memory");
-        std::fs::create_dir_all(&sam).unwrap();
+        let sak_dir = root
+            .join("config")
+            .join("memories")
+            .join("shared-agent-knowledge");
+        std::fs::create_dir_all(&sak_dir).unwrap();
         let prev = std::env::var_os("AGENTDESK_ROOT_DIR");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
-        f(&sam);
+        f(&sak_dir);
         match prev {
             Some(v) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", v) },
             None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },

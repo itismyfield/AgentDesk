@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::{DISCORD_MSG_LIMIT, SharedData, rate_limit_wait};
+use crate::services::provider::ProviderKind;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
@@ -187,6 +188,35 @@ pub(super) fn extract_skill_description(content: &str) -> String {
     "Custom skill".to_string()
 }
 
+/// Build the system-prompt skill notice using one-line descriptions only.
+pub(super) fn format_skills_notice(provider: &ProviderKind, skills: &[(String, String)]) -> String {
+    if skills.is_empty() {
+        return String::new();
+    }
+
+    let header = match provider {
+        ProviderKind::Claude => "Available skills (invoke via the Skill tool):",
+        ProviderKind::Codex => "Available local Codex skills (use them by name when relevant):",
+        ProviderKind::Gemini => "Available local Gemini skills (use them by name when relevant):",
+        ProviderKind::Qwen => "Available local Qwen skills (use them by name when relevant):",
+        ProviderKind::Unsupported(_) => return String::new(),
+    };
+
+    let list = skills
+        .iter()
+        .map(|(name, desc)| format!("  - /{}: {}", name, desc))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "\n\n{header}\n\
+         The entries below are descriptions only, not the full skill body.\n\
+         If a skill is relevant or explicitly requested, load that skill's `SKILL.md` before acting.\n\
+         Read files under `references/` only when the `SKILL.md` points to them or you need extra detail.\n\
+         {list}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -305,6 +335,26 @@ mod tests {
             extract_skill_description(content),
             "This is the body of the skill."
         );
+    }
+
+    #[test]
+    fn test_format_skills_notice_adds_progressive_disclosure_guidance() {
+        use super::format_skills_notice;
+        use crate::services::provider::ProviderKind;
+
+        let notice = format_skills_notice(
+            &ProviderKind::Codex,
+            &[(
+                "deploy".to_string(),
+                "Build and deploy the project".to_string(),
+            )],
+        );
+
+        assert!(notice.contains("Available local Codex skills"));
+        assert!(notice.contains("/deploy: Build and deploy the project"));
+        assert!(notice.contains("descriptions only"));
+        assert!(notice.contains("`SKILL.md`"));
+        assert!(notice.contains("`references/`"));
     }
 
     #[test]

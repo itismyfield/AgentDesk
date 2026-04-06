@@ -133,6 +133,10 @@ pub fn api_router(
         .route("/agents/{id}/turn/stop", post(agents::stop_agent_turn))
         .route("/agents/{id}/timeline", get(agents::agent_timeline))
         .route("/sessions", get(agents_crud::list_sessions))
+        .route(
+            "/sessions/search",
+            get(dispatched_sessions::search_session_transcripts),
+        )
         .route("/policies", get(agents_crud::list_policies))
         // Auth
         .route("/auth/session", get(auth::get_session))

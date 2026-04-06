@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::runtime_layout;
 use crate::services::provider::ProviderKind;
 
 use super::runtime_root_path;
@@ -718,16 +719,20 @@ fn load_existing_role_ids(runtime_root: Option<&Path>) -> BTreeSet<String> {
         }
     }
 
-    let agentdesk_path = runtime_root.join("agentdesk.yaml");
-    if let Ok(content) = fs::read_to_string(agentdesk_path) {
-        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-            if let Some(agents) = value.get("agents").and_then(serde_yaml::Value::as_sequence) {
-                ids.extend(agents.iter().filter_map(|agent| {
-                    agent
-                        .get("id")
-                        .and_then(serde_yaml::Value::as_str)
-                        .map(ToOwned::to_owned)
-                }));
+    for agentdesk_path in [
+        runtime_layout::config_file_path(runtime_root),
+        runtime_layout::legacy_config_file_path(runtime_root),
+    ] {
+        if let Ok(content) = fs::read_to_string(agentdesk_path) {
+            if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                if let Some(agents) = value.get("agents").and_then(serde_yaml::Value::as_sequence) {
+                    ids.extend(agents.iter().filter_map(|agent| {
+                        agent
+                            .get("id")
+                            .and_then(serde_yaml::Value::as_str)
+                            .map(ToOwned::to_owned)
+                    }));
+                }
             }
         }
     }

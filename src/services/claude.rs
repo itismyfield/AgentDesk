@@ -333,16 +333,35 @@ pub fn is_ai_supported() -> bool {
 /// Used for short synchronous tasks like meeting participant selection.
 /// This is a blocking function — call from tokio::task::spawn_blocking.
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
+    execute_command_simple_with_model(prompt, None)
+}
+
+/// Execute a simple Claude CLI call with optional model override (no tools, text-only response).
+/// This is a blocking function — call from tokio::task::spawn_blocking.
+pub fn execute_command_simple_with_model(
+    prompt: &str,
+    model_override: Option<&str>,
+) -> Result<String, String> {
     let resolution = resolve_claude_binary();
     let claude_bin = resolution
         .resolved_path
         .clone()
         .ok_or("Claude CLI not found")?;
 
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "text".to_string(),
+    ];
+    if let Some(model) = model_override {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+
     let mut command = Command::new(&claude_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
     let mut child = command
-        .args(["-p", "--output-format", "text"])
+        .args(&args)
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
         .env_remove("CLAUDECODE")
         .stdin(Stdio::piped())

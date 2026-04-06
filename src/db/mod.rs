@@ -1,5 +1,6 @@
 pub mod agents;
 pub(crate) mod schema;
+pub mod session_transcripts;
 
 use anyhow::Result;
 use rusqlite::Connection;

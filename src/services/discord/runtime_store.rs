@@ -21,11 +21,11 @@ pub(super) fn worktrees_root() -> Option<PathBuf> {
 }
 
 pub(super) fn bot_settings_path() -> Option<PathBuf> {
-    agentdesk_root().map(|root| root.join("config").join("bot_settings.json"))
+    agentdesk_root().map(|root| crate::runtime_layout::config_dir(&root).join("bot_settings.json"))
 }
 
 pub(super) fn role_map_path() -> Option<PathBuf> {
-    agentdesk_root().map(|root| root.join("config").join("role_map.json"))
+    agentdesk_root().map(|root| crate::runtime_layout::role_map_path(&root))
 }
 
 pub(super) fn org_schema_path() -> Option<PathBuf> {
@@ -33,7 +33,7 @@ pub(super) fn org_schema_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn org_schema_path_for_root(root: &Path) -> PathBuf {
-    root.join("config").join("org.yaml")
+    crate::runtime_layout::org_schema_path(root)
 }
 
 pub(super) fn discord_uploads_root() -> Option<PathBuf> {
@@ -57,7 +57,15 @@ pub(super) fn discord_handoff_root() -> Option<PathBuf> {
 }
 
 pub(super) fn shared_agent_memory_root() -> Option<PathBuf> {
-    agentdesk_root().map(|root| root.join("shared_agent_memory"))
+    agentdesk_root().map(|root| crate::runtime_layout::shared_agent_memory_root(&root))
+}
+
+pub(super) fn shared_agent_knowledge_path() -> Option<PathBuf> {
+    agentdesk_root().map(|root| crate::runtime_layout::shared_agent_knowledge_path(&root))
+}
+
+pub(super) fn long_term_memory_root() -> Option<PathBuf> {
+    agentdesk_root().map(|root| crate::runtime_layout::long_term_memory_root(&root))
 }
 
 /// Path to the generation counter file.

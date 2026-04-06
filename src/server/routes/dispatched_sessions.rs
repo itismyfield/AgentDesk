@@ -5,13 +5,17 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Duration;
 
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
 use crate::db::agents::AgentChannelBindings;
+use crate::db::session_transcripts::SessionTranscriptSearchHit;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
+use crate::utils::format::safe_prefix;
 
 const STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL: &str = "-6 hours";
+const SEARCH_SUMMARY_MODEL: &str = "haiku";
 
 /// Extract parent channel name from a thread channel name.
 /// Thread names follow the convention `{parent}-t{thread_id}` where thread_id
@@ -134,7 +138,153 @@ pub struct DeleteSessionQuery {
     pub provider: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchSessionsQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SearchSummary {
+    model: &'static str,
+    text: String,
+}
+
+fn summary_requested(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if value == "0" || value == "false" || value == "no"
+    )
+}
+
+fn build_search_summary_prompt(query: &str, hits: &[SessionTranscriptSearchHit]) -> String {
+    let mut sections = Vec::new();
+    for (idx, hit) in hits.iter().take(8).enumerate() {
+        let user = safe_prefix(hit.user_message.trim(), 700);
+        let assistant = safe_prefix(hit.assistant_message.trim(), 900);
+        let snippet = safe_prefix(hit.snippet.trim(), 220);
+        sections.push(format!(
+            "[{index}] session_key={session_key}\nprovider={provider}\nagent_id={agent_id}\ncreated_at={created_at}\nsnippet={snippet}\n\nUser:\n{user}\n\nAssistant:\n{assistant}",
+            index = idx + 1,
+            session_key = hit.session_key.as_deref().unwrap_or("-"),
+            provider = hit.provider.as_deref().unwrap_or("-"),
+            agent_id = hit.agent_id.as_deref().unwrap_or("-"),
+            created_at = hit.created_at,
+            snippet = if snippet.is_empty() { "-" } else { snippet },
+        ));
+    }
+
+    format!(
+        "당신은 AgentDesk의 과거 세션 검색 결과를 요약하는 분석기입니다.\n\
+         검색어: {query}\n\n\
+         규칙:\n\
+         - 검색 결과에 실제로 나온 정보만 사용합니다.\n\
+         - 추측하지 않습니다.\n\
+         - 한국어로 3개 이하 bullet로 답합니다.\n\
+         - 반복 설명 대신 공통 주제, 관련 이슈/기능, 눈에 띄는 결론만 압축합니다.\n\n\
+         검색 결과:\n{results}",
+        results = sections.join("\n\n---\n\n")
+    )
+}
+
+async fn summarize_search_hits(
+    query: &str,
+    hits: &[SessionTranscriptSearchHit],
+) -> Result<Option<SearchSummary>, String> {
+    if hits.is_empty() {
+        return Ok(None);
+    }
+
+    let prompt = build_search_summary_prompt(query, hits);
+    let task = tokio::task::spawn_blocking(move || {
+        crate::services::claude::execute_command_simple_with_model(
+            &prompt,
+            Some(SEARCH_SUMMARY_MODEL),
+        )
+    });
+
+    let text = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .map_err(|_| "summary generation timed out".to_string())?
+        .map_err(|e| format!("summary task join failed: {e}"))?
+        .map_err(|e| format!("summary generation failed: {e}"))?;
+
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(SearchSummary {
+            model: SEARCH_SUMMARY_MODEL,
+            text,
+        }))
+    }
+}
+
 // ── Handlers ──────────────────────────────────────────────────
+
+/// GET /api/sessions/search?q=keyword
+pub async fn search_session_transcripts(
+    State(state): State<AppState>,
+    Query(params): Query<SearchSessionsQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let raw_query = params.q.trim();
+    if raw_query.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "q is required"})),
+        );
+    }
+
+    let conn = match state.db.read_conn() {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("db read_conn failed: {e}")})),
+            );
+        }
+    };
+
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
+    let (match_query, hits) =
+        match crate::db::session_transcripts::search_transcripts(&conn, raw_query, limit) {
+            Ok(result) => result,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("search failed: {e}")})),
+                );
+            }
+        };
+    drop(conn);
+
+    let want_summary = summary_requested(params.summary.as_deref());
+    let (summary, summary_error) = if want_summary && !hits.is_empty() {
+        match summarize_search_hits(raw_query, &hits).await {
+            Ok(summary) => (summary, None),
+            Err(e) => (None, Some(e)),
+        }
+    } else {
+        (None, None)
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "query": raw_query,
+            "match_query": match_query,
+            "count": hits.len(),
+            "summary_requested": want_summary,
+            "summary": summary.as_ref().map(|summary| json!({
+                "model": summary.model,
+                "text": summary.text,
+            })),
+            "summary_error": summary_error,
+            "results": hits,
+        })),
+    )
+}
 
 /// GET /api/dispatched-sessions
 pub async fn list_dispatched_sessions(
@@ -1379,6 +1529,80 @@ mod tests {
 
     fn response_json(resp: Json<Value>) -> Value {
         resp.0
+    }
+
+    #[tokio::test]
+    async fn search_session_transcripts_returns_fts_hits_without_summary() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let mut conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name) VALUES ('agent-search', 'Agent Search')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, agent_id, provider, status, created_at)
+                 VALUES ('host:search-1', 'agent-search', 'claude', 'idle', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            crate::db::session_transcripts::persist_turn_on_conn(
+                &mut conn,
+                crate::db::session_transcripts::PersistSessionTranscript {
+                    turn_id: "discord:search:1",
+                    session_key: Some("host:search-1"),
+                    channel_id: Some("1490559149790986270"),
+                    agent_id: None,
+                    provider: Some("claude"),
+                    dispatch_id: Some("dispatch-search"),
+                    user_message: "FTS5 세션검색 구현 상태 알려줘",
+                    assistant_message: "LLM 요약과 session transcript FTS 검색 API를 추가했습니다.",
+                },
+            )
+            .unwrap();
+        }
+
+        let (status, body) = search_session_transcripts(
+            State(state),
+            Query(SearchSessionsQuery {
+                q: "FTS5 요약".to_string(),
+                limit: Some(5),
+                summary: Some("0".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = response_json(body);
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["summary_requested"], false);
+        assert!(body["summary"].is_null());
+        assert_eq!(body["results"][0]["session_key"], "host:search-1");
+    }
+
+    #[tokio::test]
+    async fn search_session_transcripts_rejects_empty_query() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db, engine);
+
+        let (status, body) = search_session_transcripts(
+            State(state),
+            Query(SearchSessionsQuery {
+                q: "   ".to_string(),
+                limit: None,
+                summary: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = response_json(body);
+        assert_eq!(body["error"], "q is required");
     }
 
     #[tokio::test]

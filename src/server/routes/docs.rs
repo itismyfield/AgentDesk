@@ -61,6 +61,12 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
         // Sessions
         ep("GET", "/api/sessions", "sessions", "List sessions"),
         ep(
+            "GET",
+            "/api/sessions/search?q=keyword",
+            "sessions",
+            "Search persisted session transcripts with optional Haiku summary",
+        ),
+        ep(
             "POST",
             "/api/sessions/{session_key}/force-kill",
             "sessions",
