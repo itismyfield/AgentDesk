@@ -32,24 +32,37 @@ const OfficeManagerModal = lazy(() => import("./components/OfficeManagerModal"))
 const AgentInfoCard = lazy(() => import("./components/agent-manager/AgentInfoCard"));
 import { useSpriteMap } from "./components/AgentAvatar";
 import { useI18n } from "./i18n";
-import NotificationCenter, { type Notification, useNotifications, ToastOverlay } from "./components/NotificationCenter";
+import { type Notification, useNotifications, ToastOverlay } from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
 import {
   Building2,
   LayoutDashboard,
   Users,
   FileText,
-  MessageSquare,
   Puzzle,
   Wifi,
   WifiOff,
   Settings,
   KanbanSquare,
+  Menu,
+  ChevronRight,
 } from "lucide-react";
-const ChatView = lazy(() => import("./components/ChatView"));
+const PulseView = lazy(() => import("./components/PulseView"));
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
 
 import { VIEW_REGISTRY, NAV_ROUTES, type ViewMode } from "./app/routes";
+
+// SM breakpoint (640px) matches Tailwind's `sm:` — used to switch Pulse vs full Dashboard
+function useIsMobile(breakpoint = 640) {
+  const [mobile, setMobile] = useState(() => window.matchMedia(`(max-width: ${breakpoint - 1}px)`).matches);
+  useEffect(() => {
+    const mql = window.matchMedia(`(max-width: ${breakpoint - 1}px)`);
+    const handler = (e: MediaQueryListEvent) => setMobile(e.matches);
+    mql.addEventListener("change", handler);
+    return () => mql.removeEventListener("change", handler);
+  }, [breakpoint]);
+  return mobile;
+}
 
 function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {
   const totalIssues = meeting.proposed_issues?.length ?? 0;
@@ -151,15 +164,10 @@ export default function App() {
         const msg = e instanceof Error ? e.message : String(e);
         console.error("Bootstrap failed:", e);
         setBootstrapError(msg);
-        // Do NOT call setData — keep data null so the error UI renders
       }
     })();
   }, [pushNotification]);
 
-  // WS connection — kept at root so wsRef is available early
-  // The handler is a no-op pass-through: each context listens via the
-  // CustomEvent("pcd-ws-event") that useDashboardSocket already dispatches.
-  // We only handle notification-only events here (kanban card notifications).
   const handleWsEvent = useCallback(
     (event: WSEvent) => {
       switch (event.type) {
@@ -242,11 +250,21 @@ interface AppShellProps {
   dismissNotification: (id: string) => void;
 }
 
+// Views reachable from the mobile "More" tab
+const MORE_VIEWS = new Set<ViewMode>(["agents", "meetings", "skills", "settings"]);
+
 function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismissNotification }: AppShellProps) {
   const [view, setView] = useState<ViewMode>("office");
   const [showOfficeManager, setShowOfficeManager] = useState(false);
   const [officeInfoAgent, setOfficeInfoAgent] = useState<Agent | null>(null);
   const [showCmdPalette, setShowCmdPalette] = useState(false);
+  const [showMobileMore, setShowMobileMore] = useState(false);
+  const isMobile = useIsMobile();
+
+  // Reset mobile-more overlay when viewport switches to desktop
+  useEffect(() => {
+    if (!isMobile) setShowMobileMore(false);
+  }, [isMobile]);
 
   const { settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr } = useSettings();
   const {
@@ -304,13 +322,13 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
     Object.fromEntries(VIEW_REGISTRY.map((r) => [r.id, isKo ? r.loadingKo : r.loadingEn])) as Record<ViewMode, string>,
   [isKo]);
 
+  // Desktop sidebar icon map (all views)
   const navIconMap: Record<string, React.ReactNode> = {
     office: <Building2 size={20} />,
     dashboard: <LayoutDashboard size={20} />,
     kanban: <KanbanSquare size={20} />,
     agents: <Users size={20} />,
     meetings: <FileText size={20} />,
-    chat: <MessageSquare size={20} />,
     skills: <Puzzle size={20} />,
     settings: <Settings size={20} />,
   };
@@ -323,6 +341,26 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
     label: isKo ? r.labelKo : r.labelEn,
     ...navBadges[r.id],
   }));
+
+  // Mobile 4-tab definitions
+  const mobileActiveTab = showMobileMore ? "more" : MORE_VIEWS.has(view) ? "more" : view;
+  const mobileMoreBadge = newMeetingsCount || undefined;
+
+  const handleMobileNav = useCallback((tabId: string) => {
+    if (tabId === "more") {
+      setShowMobileMore((v) => !v);
+    } else {
+      setShowMobileMore(false);
+      setView(tabId as ViewMode);
+      if (tabId === "dashboard") refreshStats();
+    }
+  }, [refreshStats]);
+
+  const handleMobileMoreSelect = useCallback((viewId: ViewMode) => {
+    setShowMobileMore(false);
+    setView(viewId);
+    if (viewId === "settings") return;
+  }, []);
 
   return (
     <div className="flex sm:fixed sm:inset-0 min-h-dvh bg-th-bg-primary">
@@ -341,7 +379,6 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
           />
         ))}
         <div className="flex-1" />
-        <NotificationCenter notifications={notifications} onDismiss={dismissNotification} />
         <div
           className="w-10 h-10 flex items-center justify-center rounded-lg"
           title={wsConnected ? (isKo ? "서버 연결됨" : "Server connected") : (isKo ? "서버 연결 끊김" : "Server disconnected")}
@@ -356,8 +393,8 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Office selector bar — hide on chat/settings views */}
-        {offices.length > 0 && view !== "chat" && view !== "settings" && view !== "kanban" && (
+        {/* Office selector bar — hide on settings/kanban views */}
+        {offices.length > 0 && view !== "settings" && view !== "kanban" && (
           <OfficeSelectorBar
             offices={offices}
             selectedOfficeId={selectedOfficeId}
@@ -387,141 +424,142 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
         )}
 
         <main className="flex-1 min-h-0 flex flex-col overflow-hidden mb-14 sm:mb-0">
-          <Suspense
-            fallback={
-              <div className="flex items-center justify-center h-full text-gray-500">
-                {viewFallbackLabel[view]}
-              </div>
-            }
-          >
-            {view === "office" && (
-              <OfficeView
-                agents={agentsWithDispatched}
-                departments={departments}
-                language={settings.language}
-                theme={settings.theme === "auto" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : settings.theme}
-                subAgents={subAgents}
-                notifications={notifications}
-                auditLogs={auditLogs}
-                activeMeeting={roundTableMeetings.find((m) => m.status === "in_progress") ?? null}
-                kanbanCards={kanbanCards}
-                onNavigateToKanban={() => setView("kanban")}
-                onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
-                onSelectDepartment={() => { setView("agents"); }}
-                customDeptThemes={settings.roomThemes}
+          {/* Mobile "More" menu overlay */}
+          {showMobileMore && (
+            <div className="sm:hidden flex-1 overflow-y-auto p-4">
+              <MobileMoreMenu
+                isKo={isKo}
+                activeView={view}
+                meetingBadge={newMeetingsCount}
+                onSelect={handleMobileMoreSelect}
+                wsConnected={wsConnected}
               />
-            )}
-            {view === "dashboard" && (
-              <DashboardPageView
-                stats={stats}
-                agents={agents}
-                settings={settings}
-                onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
-              />
-            )}
-            {view === "agents" && (
-              <AgentManagerView
-                agents={agents}
-                departments={departments}
-                language={settings.language}
-                officeId={selectedOfficeId}
-                onAgentsChange={() => { refreshAgents(); refreshAllAgents(); refreshOffices(); }}
-                onDepartmentsChange={() => { refreshDepartments(); refreshAllDepartments(); refreshOffices(); }}
-                sessions={visibleDispatchedSessions}
-                onAssign={async (id, patch) => {
-                  const updated = await api.assignDispatchedSession(id, patch);
-                  setSessions((prev) =>
-                    prev.map((s) => (s.id === updated.id ? updated : s)),
-                  );
-                }}
-              />
-            )}
-            {view === "kanban" && (
-              <div className="h-full overflow-auto p-4 sm:p-6 pb-40">
-                <KanbanTab
-                  tr={(ko: string, en: string) => settings.language === "ko" ? ko : en}
-                  locale={settings.language}
-                  cards={kanbanCards}
-                  dispatches={taskDispatches}
-                  agents={allAgents}
-                  departments={allDepartments}
-                  onAssignIssue={async (payload) => {
-                    const assigned = await api.assignKanbanIssue(payload);
-                    upsertKanbanCard(assigned);
-                  }}
-                  onUpdateCard={async (id, patch) => {
-                    const updated = await api.updateKanbanCard(id, patch);
-                    upsertKanbanCard(updated);
-                  }}
-                  onRetryCard={async (id, payload) => {
-                    const updated = await api.retryKanbanCard(id, payload);
-                    upsertKanbanCard(updated);
-                  }}
-                  onRedispatchCard={async (id, payload) => {
-                    const updated = await api.redispatchKanbanCard(id, payload);
-                    upsertKanbanCard(updated);
-                  }}
-                  onDeleteCard={async (id) => {
-                    await api.deleteKanbanCard(id);
-                    setKanbanCards((prev) => prev.filter((card) => card.id !== id));
+            </div>
+          )}
+          {!showMobileMore && (
+            <Suspense
+              fallback={
+                <div className="flex items-center justify-center h-full text-gray-500">
+                  {viewFallbackLabel[view]}
+                </div>
+              }
+            >
+              {view === "office" && (
+                <OfficeView
+                  agents={agentsWithDispatched}
+                  departments={departments}
+                  language={settings.language}
+                  theme={settings.theme === "auto" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : settings.theme}
+                  subAgents={subAgents}
+                  notifications={notifications}
+                  auditLogs={auditLogs}
+                  activeMeeting={roundTableMeetings.find((m) => m.status === "in_progress") ?? null}
+                  kanbanCards={kanbanCards}
+                  onNavigateToKanban={() => setView("kanban")}
+                  onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                  onSelectDepartment={() => { setView("agents"); }}
+                  customDeptThemes={settings.roomThemes}
+                />
+              )}
+              {view === "dashboard" && (
+                isMobile ? (
+                  <PulseView
+                    stats={stats}
+                    agents={agents}
+                    kanbanCards={kanbanCards}
+                    auditLogs={auditLogs}
+                    isKo={isKo}
+                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                  />
+                ) : (
+                  <DashboardPageView
+                    stats={stats}
+                    agents={agents}
+                    settings={settings}
+                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                  />
+                )
+              )}
+              {view === "agents" && (
+                <AgentManagerView
+                  agents={agents}
+                  departments={departments}
+                  language={settings.language}
+                  officeId={selectedOfficeId}
+                  onAgentsChange={() => { refreshAgents(); refreshAllAgents(); refreshOffices(); }}
+                  onDepartmentsChange={() => { refreshDepartments(); refreshAllDepartments(); refreshOffices(); }}
+                  sessions={visibleDispatchedSessions}
+                  onAssign={async (id, patch) => {
+                    const updated = await api.assignDispatchedSession(id, patch);
+                    setSessions((prev) =>
+                      prev.map((s) => (s.id === updated.id ? updated : s)),
+                    );
                   }}
                 />
-              </div>
-            )}
-            {view === "meetings" && (
-              <MeetingMinutesView
-                meetings={roundTableMeetings}
-                onRefresh={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
-              />
-            )}
-            {view === "skills" && <SkillCatalogView />}
-            {view === "chat" && (
-              <ChatView
-                agents={allAgents}
-                departments={departments}
-                notifications={notifications}
-                auditLogs={auditLogs}
-                isKo={isKo}
-                wsRef={wsRef}
-                onMessageSent={refreshAuditLogs}
-              />
-            )}
-            {view === "settings" && (
-              <SettingsView settings={settings} onSave={async (patch) => {
-                await api.saveSettings(patch);
-                setSettings((prev) => ({ ...prev, ...patch } as CompanySettings));
-                refreshAuditLogs();
-              }} isKo={isKo} />
-            )}
-          </Suspense>
+              )}
+              {view === "kanban" && (
+                <div className="h-full overflow-auto p-4 sm:p-6 pb-40">
+                  <KanbanTab
+                    tr={(ko: string, en: string) => settings.language === "ko" ? ko : en}
+                    locale={settings.language}
+                    cards={kanbanCards}
+                    dispatches={taskDispatches}
+                    agents={allAgents}
+                    departments={allDepartments}
+                    onAssignIssue={async (payload) => {
+                      const assigned = await api.assignKanbanIssue(payload);
+                      upsertKanbanCard(assigned);
+                    }}
+                    onUpdateCard={async (id, patch) => {
+                      const updated = await api.updateKanbanCard(id, patch);
+                      upsertKanbanCard(updated);
+                    }}
+                    onRetryCard={async (id, payload) => {
+                      const updated = await api.retryKanbanCard(id, payload);
+                      upsertKanbanCard(updated);
+                    }}
+                    onRedispatchCard={async (id, payload) => {
+                      const updated = await api.redispatchKanbanCard(id, payload);
+                      upsertKanbanCard(updated);
+                    }}
+                    onDeleteCard={async (id) => {
+                      await api.deleteKanbanCard(id);
+                      setKanbanCards((prev) => prev.filter((card) => card.id !== id));
+                    }}
+                  />
+                </div>
+              )}
+              {view === "meetings" && (
+                <MeetingMinutesView
+                  meetings={roundTableMeetings}
+                  onRefresh={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
+                />
+              )}
+              {view === "skills" && <SkillCatalogView />}
+              {view === "settings" && (
+                <SettingsView settings={settings} onSave={async (patch) => {
+                  await api.saveSettings(patch);
+                  setSettings((prev) => ({ ...prev, ...patch } as CompanySettings));
+                  refreshAuditLogs();
+                }} isKo={isKo} />
+              )}
+            </Suspense>
+          )}
         </main>
 
       </div>
 
-      {/* G1: Mobile bottom tab bar */}
+      {/* Mobile bottom tab bar: 4 tabs (Office / Pulse / Kanban / More) */}
       <nav className="sm:hidden fixed bottom-0 left-0 right-0 bg-th-nav-bg border-t border-th-card-border flex justify-around items-center h-14 z-50">
         {(refreshing || refreshingStats) && (
           <div className="absolute top-0 left-0 right-0 h-0.5 overflow-hidden">
             <div className="h-full bg-indigo-400 animate-[loading-bar_1.5s_ease-in-out_infinite]" />
           </div>
         )}
-        {navItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => { setView(item.id); if (item.id === "dashboard") refreshStats(); }}
-            className={`relative flex flex-col items-center justify-center flex-1 h-full text-xs ${
-              view === item.id ? "text-indigo-400" : "text-th-text-muted"
-            }`}
-          >
-            {item.icon}
-            <span className="mt-0.5">{item.label}</span>
-            {item.badge !== undefined && item.badge > 0 && (
-              <span className={`absolute top-1 right-1/4 ${item.badgeColor || "bg-emerald-500"} text-white text-xs w-3.5 h-3.5 rounded-full flex items-center justify-center`}>
-                {item.badge}
-              </span>
-            )}
-          </button>
-        ))}
+        <MobileTabBtn id="office" icon={<Building2 size={20} />} label={isKo ? "오피스" : "Office"} active={mobileActiveTab === "office"} onClick={handleMobileNav} />
+        <MobileTabBtn id="dashboard" icon={<LayoutDashboard size={20} />} label={isKo ? "펄스" : "Pulse"} active={mobileActiveTab === "dashboard"} onClick={handleMobileNav} />
+        <MobileTabBtn id="kanban" icon={<KanbanSquare size={20} />} label={isKo ? "칸반" : "Kanban"} active={mobileActiveTab === "kanban"} onClick={handleMobileNav} />
+        <MobileTabBtn id="more" icon={<Menu size={20} />} label={isKo ? "더보기" : "More"} active={mobileActiveTab === "more"} badge={mobileMoreBadge} badgeColor="bg-amber-500" onClick={handleMobileNav} />
       </nav>
 
       {/* Agent Info Card (from Office View click) */}
@@ -573,7 +611,7 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
   );
 }
 
-// ── NavBtn ──
+// ── Desktop sidebar NavBtn ──
 
 function NavBtn({
   icon,
@@ -608,5 +646,107 @@ function NavBtn({
         </span>
       )}
     </button>
+  );
+}
+
+// ── Mobile bottom tab button ──
+
+function MobileTabBtn({
+  id,
+  icon,
+  label,
+  active,
+  badge,
+  badgeColor,
+  onClick,
+}: {
+  id: string;
+  icon: React.ReactNode;
+  label: string;
+  active: boolean;
+  badge?: number;
+  badgeColor?: string;
+  onClick: (id: string) => void;
+}) {
+  return (
+    <button
+      onClick={() => onClick(id)}
+      className={`relative flex flex-col items-center justify-center flex-1 h-full text-xs ${
+        active ? "text-indigo-400" : "text-th-text-muted"
+      }`}
+    >
+      {icon}
+      <span className="mt-0.5">{label}</span>
+      {badge !== undefined && badge > 0 && (
+        <span className={`absolute top-1 right-1/4 ${badgeColor || "bg-emerald-500"} text-white text-xs w-3.5 h-3.5 rounded-full flex items-center justify-center`}>
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+// ── Mobile "More" menu ──
+
+const MORE_MENU_ITEMS: Array<{ id: ViewMode; icon: React.ReactNode; labelKo: string; labelEn: string; desc_ko: string; desc_en: string }> = [
+  { id: "agents", icon: <Users size={20} />, labelKo: "직원", labelEn: "Staff", desc_ko: "에이전트·부서 관리", desc_en: "Agents & departments" },
+  { id: "meetings", icon: <FileText size={20} />, labelKo: "회의", labelEn: "Meetings", desc_ko: "라운드테이블 회의록", desc_en: "Round-table minutes" },
+  { id: "skills", icon: <Puzzle size={20} />, labelKo: "스킬", labelEn: "Skills", desc_ko: "스킬 카탈로그", desc_en: "Skill catalog" },
+  { id: "settings", icon: <Settings size={20} />, labelKo: "설정", labelEn: "Settings", desc_ko: "테마·언어·런타임 설정", desc_en: "Theme, language & runtime" },
+];
+
+function MobileMoreMenu({
+  isKo,
+  activeView,
+  meetingBadge,
+  onSelect,
+  wsConnected,
+}: {
+  isKo: boolean;
+  activeView: ViewMode;
+  meetingBadge: number;
+  onSelect: (view: ViewMode) => void;
+  wsConnected: boolean;
+}) {
+  return (
+    <div className="space-y-2">
+      <h2 className="text-xs font-semibold uppercase tracking-widest px-1 mb-3" style={{ color: "var(--th-text-muted)" }}>
+        {isKo ? "더보기" : "More"}
+      </h2>
+      {MORE_MENU_ITEMS.map((item) => (
+        <button
+          key={item.id}
+          onClick={() => onSelect(item.id)}
+          className="w-full flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-colors"
+          style={{
+            background: activeView === item.id ? "var(--th-card-bg)" : "transparent",
+            border: `1px solid ${activeView === item.id ? "var(--th-card-border)" : "transparent"}`,
+          }}
+        >
+          <span className="text-th-text-muted">{item.icon}</span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+                {isKo ? item.labelKo : item.labelEn}
+              </span>
+              {item.id === "meetings" && meetingBadge > 0 && (
+                <span className="bg-amber-500 text-white text-xs w-4 h-4 rounded-full flex items-center justify-center">
+                  {meetingBadge}
+                </span>
+              )}
+            </div>
+            <div className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
+              {isKo ? item.desc_ko : item.desc_en}
+            </div>
+          </div>
+          <ChevronRight size={16} className="text-th-text-muted shrink-0" />
+        </button>
+      ))}
+      <div className="mt-4 px-1 flex items-center gap-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+        {wsConnected
+          ? <><Wifi size={12} className="text-emerald-500" /> <span>{isKo ? "서버 연결됨" : "Connected"}</span></>
+          : <><WifiOff size={12} className="text-red-400" /> <span>{isKo ? "연결 끊김" : "Disconnected"}</span></>}
+      </div>
+    </div>
   );
 }
