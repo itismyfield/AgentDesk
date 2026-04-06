@@ -37,6 +37,12 @@ fn parse_channel_name_from_session_key(session_key: &str) -> Option<String> {
     Some(channel_name)
 }
 
+fn parse_thread_channel_id_from_session_key(session_key: &str) -> Option<String> {
+    parse_channel_name_from_session_key(session_key).and_then(|channel_name| {
+        parse_thread_channel_name(&channel_name).map(|(_, thread_id)| thread_id.to_string())
+    })
+}
+
 fn resolve_agent_id_from_channel_name(
     conn: &rusqlite::Connection,
     channel_name: &str,
@@ -462,12 +468,7 @@ pub async fn hook_session(
         .as_deref()
         .and_then(parse_thread_channel_name)
         .map(|(_, tid)| tid.to_string())
-        .or_else(|| {
-            session_key_channel_name
-                .as_deref()
-                .and_then(parse_thread_channel_name)
-                .map(|(_, tid)| tid.to_string())
-        });
+        .or_else(|| parse_thread_channel_id_from_session_key(&body.session_key));
 
     let agent_id = [body.name.as_deref(), session_key_channel_name.as_deref()]
         .into_iter()
@@ -981,14 +982,51 @@ pub async fn clear_session_id_by_key(
     (StatusCode::OK, Json(json!({"cleared": changes})))
 }
 
+fn backfill_legacy_thread_channel_ids(conn: &rusqlite::Connection) -> usize {
+    let updates: Vec<(String, String)> = {
+        let mut stmt = match conn
+            .prepare("SELECT session_key FROM sessions WHERE thread_channel_id IS NULL")
+        {
+            Ok(stmt) => stmt,
+            Err(_) => return 0,
+        };
+        let rows = match stmt.query_map([], |row| row.get::<_, Option<String>>(0)) {
+            Ok(rows) => rows,
+            Err(_) => return 0,
+        };
+        rows.filter_map(|row| {
+            row.ok().flatten().and_then(|session_key| {
+                parse_thread_channel_id_from_session_key(&session_key)
+                    .map(|thread_channel_id| (session_key, thread_channel_id))
+            })
+        })
+        .collect()
+    };
+
+    updates
+        .into_iter()
+        .map(|(session_key, thread_channel_id)| {
+            conn.execute(
+                "UPDATE sessions
+                 SET thread_channel_id = ?1
+                 WHERE session_key = ?2 AND thread_channel_id IS NULL",
+                rusqlite::params![thread_channel_id, session_key],
+            )
+            .unwrap_or(0)
+        })
+        .sum()
+}
+
 /// GC stale thread sessions from DB: idle/disconnected + older than 1 hour.
-/// Thread sessions are identified by having a non-NULL thread_channel_id.
+/// Legacy rows may only encode the Discord thread ID inside session_key, so
+/// backfill thread_channel_id before applying the normal thread-session GC.
 pub fn gc_stale_thread_sessions_db(conn: &rusqlite::Connection) -> usize {
+    let _ = backfill_legacy_thread_channel_ids(conn);
     conn.execute(
         "DELETE FROM sessions
          WHERE thread_channel_id IS NOT NULL
            AND status IN ('idle', 'disconnected')
-           AND last_heartbeat < datetime('now', '-1 hour')",
+           AND COALESCE(last_heartbeat, created_at) < datetime('now', '-1 hour')",
         [],
     )
     .unwrap_or(0)
@@ -2185,6 +2223,139 @@ mod tests {
     fn parse_thread_channel_name_returns_none_for_short_suffix() {
         // "-t" followed by less than 15 digits is not a thread ID
         assert_eq!(parse_thread_channel_name("test-t123"), None);
+    }
+
+    #[test]
+    fn parse_thread_channel_id_from_session_key_extracts_thread_id() {
+        assert_eq!(
+            parse_thread_channel_id_from_session_key(
+                "mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011"
+            )
+            .as_deref(),
+            Some("1485506232256168011")
+        );
+    }
+
+    #[test]
+    fn parse_thread_channel_id_from_session_key_rejects_non_thread_suffix() {
+        assert_eq!(
+            parse_thread_channel_id_from_session_key("mac-mini:AgentDesk-claude-adk-cc-token-test"),
+            None
+        );
+    }
+
+    fn insert_gc_candidate_session(
+        conn: &rusqlite::Connection,
+        session_key: &str,
+        status: &str,
+        thread_channel_id: Option<&str>,
+        heartbeat_age_sql: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
+             VALUES (?1, 'codex', ?2, ?3, datetime('now', ?4), datetime('now', ?4))",
+            rusqlite::params![session_key, status, thread_channel_id, heartbeat_age_sql],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn gc_stale_thread_sessions_db_deletes_legacy_rows_without_touching_fixed_channels() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        let legacy_thread_session = "mac-mini:AgentDesk-codex-adk-cdx-t1490653467734446120";
+        let fixed_channel_session = "mac-mini:AgentDesk-claude-adk-cc-token-test";
+        let recent_thread_session = "mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796";
+
+        insert_gc_candidate_session(&conn, legacy_thread_session, "idle", None, "-2 hours");
+        insert_gc_candidate_session(
+            &conn,
+            fixed_channel_session,
+            "disconnected",
+            None,
+            "-2 hours",
+        );
+        insert_gc_candidate_session(&conn, recent_thread_session, "idle", None, "-10 minutes");
+
+        let deleted = gc_stale_thread_sessions_db(&conn);
+        assert_eq!(deleted, 1);
+
+        let legacy_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [legacy_thread_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_count, 0);
+
+        let fixed_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [fixed_channel_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fixed_count, 1);
+
+        let fixed_thread_channel_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_channel_id FROM sessions WHERE session_key = ?1",
+                [fixed_channel_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fixed_thread_channel_id, None);
+
+        let recent_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [recent_thread_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recent_count, 1);
+
+        let recent_thread_channel_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_channel_id FROM sessions WHERE session_key = ?1",
+                [recent_thread_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            recent_thread_channel_id.as_deref(),
+            Some("1485400795435372796")
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_thread_sessions_handler_reports_deleted_legacy_thread_rows() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let conn = db.lock().unwrap();
+            insert_gc_candidate_session(
+                &conn,
+                "mac-mini:AgentDesk-codex-adk-cdx-t1490653467734446120",
+                "idle",
+                None,
+                "-2 hours",
+            );
+        }
+
+        let (status, body) = gc_thread_sessions(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response_json(body)["gc_threads"], 1);
+
+        let conn = db.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test]
