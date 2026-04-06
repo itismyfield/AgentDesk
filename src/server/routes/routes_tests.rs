@@ -1,7 +1,11 @@
 use super::*;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use serde_json::json;
+use std::ffi::OsString;
+use std::process::Command;
 use std::sync::Arc;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tower::ServiceExt;
 
 fn test_db() -> Db {
@@ -41,6 +45,33 @@ fn test_api_router(
     let tx = crate::server::ws::new_broadcast();
     let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
     api_router(db, engine, tx, buf, health_registry)
+}
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
 }
 
 #[tokio::test]
@@ -138,6 +169,218 @@ async fn offices_reorder_rejects_wrapped_order_body() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
+    let _env_lock = env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let inflight_dir = temp
+        .path()
+        .join("runtime")
+        .join("discord_inflight")
+        .join("codex");
+    std::fs::create_dir_all(&inflight_dir).unwrap();
+
+    let tmux_name = "AgentDesk-codex-adk-cdx";
+    std::fs::write(
+        inflight_dir.join("1485506232256168011.json"),
+        serde_json::to_string(&json!({
+            "tmux_session_name": tmux_name,
+            "started_at": "2026-04-06 10:11:12",
+            "current_tool_line": "⚙ Bash: rg -n turn src",
+            "full_response": "partial output\nOPENAI_API_KEY=sk-secret",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ('agent-turn', 'Agent Turn', 'codex', '1485506232256168011', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at)
+             VALUES (?1, 'agent-turn', 'codex', 'working', 'dispatch-turn', datetime('now'), '2026-04-06 10:00:00')",
+            [format!("mac-mini:{tmux_name}")],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/agent-turn/turn")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "working");
+    assert_eq!(json["started_at"], "2026-04-06 10:11:12");
+    assert_eq!(json["recent_output_source"], "inflight");
+    assert_eq!(json["active_dispatch_id"], "dispatch-turn");
+    let recent_output = json["recent_output"].as_str().unwrap();
+    assert!(recent_output.contains("⚙ Bash: rg -n turn src"));
+    assert!(recent_output.contains("OPENAI_API_KEY=[REDACTED]"));
+    assert!(!recent_output.contains("sk-secret"));
+}
+
+#[tokio::test]
+async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, created_at, updated_at)
+             VALUES ('agent-idle', 'Agent Idle', 'codex', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agents/agent-idle/turn")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "idle");
+    assert!(json["recent_output"].is_null());
+    assert!(json["started_at"].is_null());
+}
+
+#[tokio::test]
+async fn stop_agent_turn_force_kills_matching_tmux_session() {
+    let _env_lock = env_lock();
+    if Command::new("tmux").arg("-V").output().is_err() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let inflight_dir = temp
+        .path()
+        .join("runtime")
+        .join("discord_inflight")
+        .join("codex");
+    std::fs::create_dir_all(&inflight_dir).unwrap();
+
+    let tmux_name = format!("AgentDesk-codex-agent-turn-stop-{}", std::process::id());
+    let session_key = format!("mac-mini:{tmux_name}");
+    let inflight_path = inflight_dir.join("agent-stop.json");
+    std::fs::write(
+        &inflight_path,
+        serde_json::to_string(&json!({
+            "tmux_session_name": tmux_name,
+            "started_at": "2026-04-06 10:20:00",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let tmux_started = Command::new("tmux")
+        .args(["new-session", "-d", "-s", &tmux_name, "sleep 30"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !tmux_started {
+        return;
+    }
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ('agent-stop', 'Agent Stop', 'codex', '1485506232256168011', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES (?1, 'agent-stop', 'codex', 'working', datetime('now'), datetime('now'))",
+            [session_key.clone()],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/agent-stop/turn/stop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let tmux_still_alive = Command::new("tmux")
+        .args(["has-session", "-t", &tmux_name])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if tmux_still_alive {
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &tmux_name])
+            .status();
+    }
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "stopped");
+    assert_eq!(json["tmux_killed"], true);
+    assert!(
+        !tmux_still_alive,
+        "tmux session should be gone after /turn/stop"
+    );
+    assert!(
+        !inflight_path.exists(),
+        "matching inflight state should be removed by /turn/stop"
+    );
+
+    let conn = db.lock().unwrap();
+    let session_status: String = conn
+        .query_row(
+            "SELECT status FROM sessions WHERE session_key = ?1",
+            [session_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(session_status, "disconnected");
 }
 
 #[tokio::test]

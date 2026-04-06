@@ -42,6 +42,18 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
         ),
         ep(
             "GET",
+            "/api/agents/{id}/turn",
+            "agents",
+            "Get active turn status and recent output for agent",
+        ),
+        ep(
+            "POST",
+            "/api/agents/{id}/turn/stop",
+            "agents",
+            "Stop the active turn for agent",
+        ),
+        ep(
+            "GET",
             "/api/agents/{id}/timeline",
             "agents",
             "Agent activity timeline",

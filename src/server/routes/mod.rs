@@ -129,6 +129,8 @@ pub fn api_router(
             "/agents/{id}/dispatched-sessions",
             get(agents::agent_dispatched_sessions),
         )
+        .route("/agents/{id}/turn", get(agents::agent_turn))
+        .route("/agents/{id}/turn/stop", post(agents::stop_agent_turn))
         .route("/agents/{id}/timeline", get(agents::agent_timeline))
         .route("/sessions", get(agents_crud::list_sessions))
         .route("/policies", get(agents_crud::list_policies))
