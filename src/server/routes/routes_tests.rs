@@ -2877,14 +2877,26 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         conn.execute(
             "INSERT INTO kanban_cards (
                 id, title, status, priority, assigned_agent_id, repo_id,
-                github_issue_number, latest_dispatch_id, review_status,
+                github_issue_number, latest_dispatch_id, review_status, review_round, review_notes,
                 suggestion_pending_at, review_entered_at, awaiting_dod_at,
                 created_at, updated_at, started_at
             ) VALUES (
                 'card-ft-clean', 'Force Transition Cleanup', 'in_progress', 'medium', 'agent-ft-clean', 'test-repo',
-                330, 'dispatch-ft-clean', 'reviewing',
+                330, 'dispatch-ft-clean', 'reviewing', 4, 'stale review notes',
                 datetime('now', '-12 minutes'), datetime('now', '-11 minutes'), datetime('now', '-10 minutes'),
                 datetime('now', '-20 minutes'), datetime('now', '-20 minutes'), datetime('now', '-20 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                created_at, updated_at, completed_at
+            ) VALUES (
+                'review-ft-stale', 'card-ft-clean', 'agent-ft-clean', 'review', 'completed',
+                'old pass review', '{\"verdict\":\"pass\"}',
+                datetime('now', '-2 hours'), datetime('now', '-2 hours'), datetime('now', '-2 hours')
             )",
             [],
         )
@@ -2934,6 +2946,17 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (
+                card_id, state, pending_dispatch_id, review_round, last_verdict, last_decision,
+                approach_change_round, review_entered_at, updated_at
+            ) VALUES (
+                'card-ft-clean', 'suggestion_pending', 'old-review-dispatch', 4, 'pass', 'approved',
+                3, datetime('now', '-11 minutes'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
     }
 
     let app = test_api_router(db.clone(), engine, None);
@@ -2964,6 +2987,8 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         card_status,
         latest_dispatch_id,
         review_status,
+        review_round,
+        review_notes,
         suggestion_pending_at,
         review_entered_at,
         awaiting_dod_at,
@@ -2971,12 +2996,15 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         String,
         Option<String>,
         Option<String>,
+        i64,
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
     ) = conn
         .query_row(
-            "SELECT status, latest_dispatch_id, review_status, suggestion_pending_at, review_entered_at, awaiting_dod_at
+            "SELECT status, latest_dispatch_id, review_status, review_round, review_notes,
+                    suggestion_pending_at, review_entered_at, awaiting_dod_at
              FROM kanban_cards WHERE id = 'card-ft-clean'",
             [],
             |row| {
@@ -2987,6 +3015,43 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .unwrap();
+    let (
+        review_state_round,
+        review_state_status,
+        review_state_pending_dispatch,
+        review_state_verdict,
+        review_state_decision,
+        review_state_approach_change_round,
+        review_state_entered_at,
+    ): (
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT review_round, state, pending_dispatch_id, last_verdict, last_decision,
+                    approach_change_round, review_entered_at
+             FROM card_review_state WHERE card_id = 'card-ft-clean'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
@@ -3028,9 +3093,45 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         review_status.is_none(),
         "force-transition cleanup must clear stale review_status"
     );
+    assert_eq!(
+        review_round, 0,
+        "force-transition cleanup must reset kanban_cards.review_round"
+    );
+    assert!(
+        review_notes.is_none(),
+        "force-transition cleanup must clear kanban_cards.review_notes"
+    );
     assert!(suggestion_pending_at.is_none());
     assert!(review_entered_at.is_none());
     assert!(awaiting_dod_at.is_none());
+    assert_eq!(
+        review_state_round, 0,
+        "force-transition cleanup must reset card_review_state.review_round"
+    );
+    assert_eq!(
+        review_state_status, "idle",
+        "force-transition cleanup must reset card_review_state.state to idle"
+    );
+    assert!(
+        review_state_pending_dispatch.is_none(),
+        "force-transition cleanup must clear stale pending review dispatch"
+    );
+    assert!(
+        review_state_verdict.is_none(),
+        "force-transition cleanup must clear card_review_state.last_verdict"
+    );
+    assert!(
+        review_state_decision.is_none(),
+        "force-transition cleanup must clear card_review_state.last_decision"
+    );
+    assert!(
+        review_state_approach_change_round.is_none(),
+        "force-transition cleanup must clear card_review_state.approach_change_round"
+    );
+    assert!(
+        review_state_entered_at.is_none(),
+        "force-transition cleanup must clear card_review_state.review_entered_at"
+    );
     assert_eq!(
         dispatch_status, "cancelled",
         "force-transition to ready must cancel the live dispatch"
@@ -3047,6 +3148,60 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
     assert!(
         active_dispatch_id.is_none(),
         "force-transition cleanup must clear stale session active_dispatch_id"
+    );
+
+    drop(conn);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-ft-clean-retry', 'card-ft-clean', 'agent-ft-clean', 'implementation', 'pending',
+                'retry impl', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let verify_engine = test_engine(&db);
+    crate::kanban::transition_status(&db, &verify_engine, "card-ft-clean", "requested").unwrap();
+    crate::kanban::transition_status(&db, &verify_engine, "card-ft-clean", "in_progress").unwrap();
+    crate::kanban::transition_status(&db, &verify_engine, "card-ft-clean", "review").unwrap();
+
+    let conn = db.lock().unwrap();
+    let (reentered_round, reentered_at): (i64, Option<String>) = conn
+        .query_row(
+            "SELECT review_round, review_entered_at FROM kanban_cards WHERE id = 'card-ft-clean'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let (reentered_review_state_round, reentered_review_state_status): (i64, String) = conn
+        .query_row(
+            "SELECT review_round, state FROM card_review_state WHERE card_id = 'card-ft-clean'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+
+    assert_eq!(
+        reentered_round, 1,
+        "force-transitioned card must restart review_round at R1 on next review entry"
+    );
+    assert!(
+        reentered_at.is_some(),
+        "re-entering review must stamp a fresh review_entered_at"
+    );
+    assert_eq!(
+        reentered_review_state_round, 1,
+        "card_review_state.review_round must also restart from 1 after force-transition"
+    );
+    assert_eq!(
+        reentered_review_state_status, "reviewing",
+        "card_review_state.state must reflect the new review round"
     );
 }
 

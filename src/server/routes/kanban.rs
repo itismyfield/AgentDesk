@@ -2925,14 +2925,32 @@ fn cleanup_force_transition_revert_on_conn(
     )?;
     conn.execute(
         "UPDATE kanban_cards \
-         SET suggestion_pending_at = NULL, review_entered_at = NULL, awaiting_dod_at = NULL, updated_at = datetime('now') \
+         SET review_round = 0, review_notes = NULL, suggestion_pending_at = NULL, \
+             review_entered_at = NULL, awaiting_dod_at = NULL, updated_at = datetime('now') \
          WHERE id = ?1",
         [card_id],
     )?;
-    crate::engine::ops::review_state_sync_on_conn(
-        conn,
-        &json!({"card_id": card_id, "state": "idle"}).to_string(),
-    );
+    conn.execute(
+        "INSERT INTO card_review_state (
+            card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
+            decided_by, decided_at, approach_change_round, review_entered_at, updated_at
+         ) VALUES (
+            ?1, 0, 'idle', NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL, datetime('now')
+         )
+         ON CONFLICT(card_id) DO UPDATE SET
+            review_round = 0,
+            state = 'idle',
+            pending_dispatch_id = NULL,
+            last_verdict = NULL,
+            last_decision = NULL,
+            decided_by = NULL,
+            decided_at = NULL,
+            approach_change_round = NULL,
+            review_entered_at = NULL,
+            updated_at = datetime('now')",
+        [card_id],
+    )?;
 
     Ok((cancelled_dispatches, skipped_auto_queue_entries))
 }

@@ -59,15 +59,23 @@ where
     // ── 1. Assemble TransitionContext (DB reads) ──
     let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
 
-    let (old_status, review_status, latest_dispatch_id, card_repo_id, card_agent_id): (
+    let (
+        old_status,
+        review_status,
+        latest_dispatch_id,
+        card_repo_id,
+        card_agent_id,
+        review_entered_at,
+    ): (
         String,
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
     ) = conn
         .query_row(
-            "SELECT status, review_status, latest_dispatch_id, repo_id, assigned_agent_id \
+            "SELECT status, review_status, latest_dispatch_id, repo_id, assigned_agent_id, review_entered_at \
              FROM kanban_cards WHERE id = ?1",
             [card_id],
             |row| {
@@ -77,6 +85,7 @@ where
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
@@ -104,14 +113,16 @@ where
         )
         .unwrap_or(false);
 
-    // Review verdict gate: check the LATEST completed review dispatch for this card.
-    // Only dispatches completed AFTER the most recent review entry count.
+    // Review verdict gate: check the latest completed review dispatch for this card.
+    // When the card has a current review_entered_at clock, ignore verdicts from
+    // earlier rounds. Legacy cards without review_entered_at keep the old behavior.
     let latest_review_verdict: Option<String> = conn
         .query_row(
             "SELECT json_extract(result, '$.verdict') FROM task_dispatches \
              WHERE kanban_card_id = ?1 AND dispatch_type = 'review' AND status = 'completed' \
-             ORDER BY updated_at DESC LIMIT 1",
-            [card_id],
+               AND (?2 IS NULL OR datetime(COALESCE(completed_at, updated_at)) >= datetime(?2)) \
+             ORDER BY datetime(COALESCE(completed_at, updated_at)) DESC, id DESC LIMIT 1",
+            rusqlite::params![card_id, review_entered_at.as_deref()],
             |row| row.get(0),
         )
         .ok()
@@ -1212,6 +1223,85 @@ mod tests {
         let result =
             transition_status_with_opts(&db, &engine, "card-force", "in_progress", "pmd", true);
         assert!(result.is_ok(), "force=true should bypass dispatch check");
+    }
+
+    #[test]
+    fn stale_completed_review_verdict_does_not_open_current_done_gate() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-stale-review-pass", "review");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards
+                 SET review_entered_at = datetime('now')
+                 WHERE id = 'card-stale-review-pass'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                    created_at, updated_at, completed_at
+                 ) VALUES (
+                    'review-stale-pass', 'card-stale-review-pass', 'agent-1', 'review', 'completed',
+                    'stale pass', ?1,
+                    datetime('now', '-30 minutes'), datetime('now', '-30 minutes'), datetime('now', '-30 minutes')
+                 )",
+                rusqlite::params![json!({"verdict": "pass"}).to_string()],
+            )
+            .unwrap();
+        }
+
+        let result = transition_status(&db, &engine, "card-stale-review-pass", "done");
+        assert!(
+            result.is_err(),
+            "completed review verdicts from older rounds must not satisfy the current review_passed gate"
+        );
+
+        let status: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-stale-review-pass'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            status, "review",
+            "stale review verdict must leave the card in review"
+        );
+    }
+
+    #[test]
+    fn legacy_review_without_review_entered_at_keeps_latest_pass_behavior() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-legacy-review-pass", "review");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                    created_at, updated_at, completed_at
+                 ) VALUES (
+                    'review-legacy-pass', 'card-legacy-review-pass', 'agent-1', 'review', 'completed',
+                    'legacy pass', ?1,
+                    datetime('now', '-10 minutes'), datetime('now', '-5 minutes'), datetime('now', '-5 minutes')
+                 )",
+                rusqlite::params![json!({"verdict": "pass"}).to_string()],
+            )
+            .unwrap();
+        }
+
+        let result = transition_status(&db, &engine, "card-legacy-review-pass", "done");
+        assert!(
+            result.is_ok(),
+            "cards without review_entered_at must preserve the legacy pass verdict behavior"
+        );
     }
 
     #[test]
