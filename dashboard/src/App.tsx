@@ -462,23 +462,12 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
                 />
               )}
               {view === "dashboard" && (
-                isMobile ? (
-                  <PulseView
-                    stats={stats}
-                    agents={agents}
-                    kanbanCards={kanbanCards}
-                    auditLogs={auditLogs}
-                    isKo={isKo}
-                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
-                  />
-                ) : (
                   <DashboardPageView
                     stats={stats}
                     agents={agents}
                     settings={settings}
                     onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
                   />
-                )
               )}
               {view === "agents" && (
                 <AgentManagerView
@@ -557,7 +546,7 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
           </div>
         )}
         <MobileTabBtn id="office" icon={<Building2 size={20} />} label={isKo ? "오피스" : "Office"} active={mobileActiveTab === "office"} onClick={handleMobileNav} />
-        <MobileTabBtn id="dashboard" icon={<LayoutDashboard size={20} />} label={isKo ? "펄스" : "Pulse"} active={mobileActiveTab === "dashboard"} onClick={handleMobileNav} />
+        <MobileTabBtn id="dashboard" icon={<LayoutDashboard size={20} />} label={isKo ? "대시보드" : "Dashboard"} active={mobileActiveTab === "dashboard"} onClick={handleMobileNav} />
         <MobileTabBtn id="kanban" icon={<KanbanSquare size={20} />} label={isKo ? "칸반" : "Kanban"} active={mobileActiveTab === "kanban"} onClick={handleMobileNav} />
         <MobileTabBtn id="more" icon={<Menu size={20} />} label={isKo ? "더보기" : "More"} active={mobileActiveTab === "more"} badge={mobileMoreBadge} badgeColor="bg-amber-500" onClick={handleMobileNav} />
       </nav>

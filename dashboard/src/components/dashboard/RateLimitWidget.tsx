@@ -183,9 +183,9 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
           return (
             <div key={provider.provider} className="flex items-center gap-0 min-w-0">
               {/* Fixed-width left: provider + stale */}
-              <div className="flex items-center gap-1.5 shrink-0" style={{ width: 100 }}>
+              <div className="flex items-center gap-1 shrink-0" style={{ width: 120 }}>
                 <span
-                  className="text-xs sm:text-xs font-bold uppercase tracking-wider"
+                  className="text-xs font-bold uppercase tracking-wider whitespace-nowrap"
                   style={{ color: accent }}
                 >
                   {(PROVIDER_ICONS[provider.provider] ?? "•")}{" "}
@@ -193,7 +193,7 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                 </span>
                 {provider.stale ? (
                   <span
-                    className="rounded px-1 py-0.5 text-xs font-medium shrink-0"
+                    className="rounded px-1 py-px text-[10px] leading-tight font-medium shrink-0"
                     style={{ color: "#fbbf24", background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.2)" }}
                   >
                     {t({ ko: "지연", en: "STALE", ja: "遅延", zh: "延迟" })}
