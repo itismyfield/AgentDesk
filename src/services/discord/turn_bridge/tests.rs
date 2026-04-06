@@ -2,15 +2,18 @@ use super::completion_guard::{
     build_verdict_payload, extract_explicit_review_verdict, extract_explicit_work_outcome,
     extract_review_decision,
 };
-use super::recovery_text::{
-    clear_local_session_state, contains_stale_resume_error_text, handle_gemini_retry_boundary,
-    output_file_has_stale_resume_error_after_offset, reset_gemini_retry_attempt_state,
-    resolve_done_response, result_event_has_stale_resume_error,
-    should_reset_gemini_retry_attempt_state, stream_error_requires_terminal_session_reset,
+use super::context_window::{
+    persisted_context_tokens, resolve_done_response, total_context_tokens,
 };
-use super::tmux_runtime::{
-    persisted_context_tokens, should_resume_watcher_after_turn, total_context_tokens,
+use super::retry_state::{
+    clear_local_session_state, handle_gemini_retry_boundary, reset_gemini_retry_attempt_state,
+    should_reset_gemini_retry_attempt_state,
 };
+use super::stale_resume::{
+    contains_stale_resume_error_text, output_file_has_stale_resume_error_after_offset,
+    result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
+};
+use super::tmux_runtime::should_resume_watcher_after_turn;
 use crate::services::discord::InflightTurnState;
 use crate::services::provider::ProviderKind;
 use std::io::Write;
