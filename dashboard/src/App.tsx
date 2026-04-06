@@ -47,9 +47,22 @@ import {
   Menu,
   ChevronRight,
 } from "lucide-react";
+const PulseView = lazy(() => import("./components/PulseView"));
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
 
 import { VIEW_REGISTRY, NAV_ROUTES, type ViewMode } from "./app/routes";
+
+// SM breakpoint (640px) matches Tailwind's `sm:` — used to switch Pulse vs full Dashboard
+function useIsMobile(breakpoint = 640) {
+  const [mobile, setMobile] = useState(() => window.matchMedia(`(max-width: ${breakpoint - 1}px)`).matches);
+  useEffect(() => {
+    const mql = window.matchMedia(`(max-width: ${breakpoint - 1}px)`);
+    const handler = (e: MediaQueryListEvent) => setMobile(e.matches);
+    mql.addEventListener("change", handler);
+    return () => mql.removeEventListener("change", handler);
+  }, [breakpoint]);
+  return mobile;
+}
 
 function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {
   const totalIssues = meeting.proposed_issues?.length ?? 0;
@@ -246,6 +259,7 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
   const [officeInfoAgent, setOfficeInfoAgent] = useState<Agent | null>(null);
   const [showCmdPalette, setShowCmdPalette] = useState(false);
   const [showMobileMore, setShowMobileMore] = useState(false);
+  const isMobile = useIsMobile();
 
   const { settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr } = useSettings();
   const {
@@ -443,12 +457,23 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
                 />
               )}
               {view === "dashboard" && (
-                <DashboardPageView
-                  stats={stats}
-                  agents={agents}
-                  settings={settings}
-                  onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
-                />
+                isMobile ? (
+                  <PulseView
+                    stats={stats}
+                    agents={agents}
+                    kanbanCards={kanbanCards}
+                    auditLogs={auditLogs}
+                    isKo={isKo}
+                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                  />
+                ) : (
+                  <DashboardPageView
+                    stats={stats}
+                    agents={agents}
+                    settings={settings}
+                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                  />
+                )
               )}
               {view === "agents" && (
                 <AgentManagerView
