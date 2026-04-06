@@ -32,6 +32,7 @@ interface UseOfficePixiRuntimeParams {
   activeMeeting?: RoundTableMeeting | null;
   customDeptThemes?: Record<string, { floor1: number; floor2: number; wall: number; accent: number }>;
   currentTheme: string;
+  disabled?: boolean;
 }
 
 export function useOfficePixiRuntime({
@@ -61,8 +62,15 @@ export function useOfficePixiRuntime({
   activeMeeting,
   customDeptThemes,
   currentTheme,
+  disabled = false,
 }: UseOfficePixiRuntimeParams): void {
   useEffect(() => {
+    if (disabled) {
+      const element = containerRef.current;
+      if (element) element.innerHTML = "";
+      return;
+    }
+
     const element = containerRef.current;
     if (!element) return;
 
@@ -197,9 +205,11 @@ export function useOfficePixiRuntime({
     triggerDepartmentInteract,
     keysRef,
     tickerContext,
+    disabled,
   ]);
 
   useEffect(() => {
+    if (disabled) return;
     if (initDoneRef.current && appRef.current) {
       buildScene();
     }
@@ -217,5 +227,6 @@ export function useOfficePixiRuntime({
     buildScene,
     initDoneRef,
     appRef,
+    disabled,
   ]);
 }

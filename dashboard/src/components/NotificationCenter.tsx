@@ -1,6 +1,5 @@
-import { useState, useCallback, useRef } from "react";
-import { Bell, X } from "lucide-react";
-import { useI18n } from "../i18n";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 
 export interface Notification {
   id: string;
@@ -22,83 +21,79 @@ export function useNotifications(maxItems = 50) {
   );
 
   const dismissNotification = useCallback((id: string) => {
-    setNotifications((prev) => prev.filter((n) => n.id !== id));
+    setNotifications((prev) => prev.filter((notification) => notification.id !== id));
   }, []);
 
-  return { notifications, pushNotification, dismissNotification };
+  return { notifications, pushNotification, dismissNotification } as const;
 }
 
-interface NotificationCenterProps {
-  notifications: Notification[];
-  onDismiss: (id: string) => void;
-}
+const TOAST_TTL_MS = 5000;
 
-const TYPE_COLORS: Record<Notification["type"], string> = {
+export const NOTIFICATION_TYPE_COLORS: Record<Notification["type"], string> = {
   info: "#60a5fa",
   success: "#34d399",
   warning: "#fbbf24",
   error: "#f87171",
 };
 
-export default function NotificationCenter({ notifications, onDismiss }: NotificationCenterProps) {
-  const { t, locale } = useI18n();
-  const [open, setOpen] = useState(false);
-  const unread = notifications.filter((n) => Date.now() - n.ts < 60_000).length;
+const NOTIFICATION_TYPE_BACKGROUNDS: Record<Notification["type"], string> = {
+  info: "rgba(96,165,250,0.14)",
+  success: "rgba(52,211,153,0.14)",
+  warning: "rgba(251,191,36,0.14)",
+  error: "rgba(248,113,113,0.14)",
+};
+
+interface ToastOverlayProps {
+  notifications: Notification[];
+  onDismiss: (id: string) => void;
+}
+
+export function ToastOverlay({ notifications, onDismiss }: ToastOverlayProps) {
+  const recent = notifications.filter((notification) => Date.now() - notification.ts < TOAST_TTL_MS);
+
+  useEffect(() => {
+    if (recent.length === 0) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      for (const notification of recent) {
+        if (now - notification.ts >= TOAST_TTL_MS) {
+          onDismiss(notification.id);
+        }
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [recent, onDismiss]);
+
+  if (recent.length === 0) return null;
 
   return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="relative w-10 h-10 rounded-lg flex items-center justify-center text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
-        title={t({ ko: "알림", en: "Notifications" })}
-      >
-        <Bell size={20} />
-        {unread > 0 && (
-          <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] w-4 h-4 rounded-full flex items-center justify-center">
-            {unread > 9 ? "9+" : unread}
-          </span>
-        )}
-      </button>
-
-      {open && (
+    <div className="fixed right-3 z-[100] flex max-w-sm flex-col gap-2 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] sm:bottom-4 sm:right-4">
+      {recent.slice(0, 4).map((notification) => (
         <div
-          className="absolute left-12 bottom-0 w-80 max-h-96 overflow-auto rounded-xl border border-gray-700 bg-gray-900 shadow-2xl z-50"
-          style={{ minHeight: 100 }}
+          key={notification.id}
+          className="flex items-start gap-2 rounded-xl border px-3 py-2 text-sm shadow-lg backdrop-blur-sm"
+          style={{
+            borderColor: `${NOTIFICATION_TYPE_COLORS[notification.type]}55`,
+            background: `linear-gradient(135deg, ${NOTIFICATION_TYPE_BACKGROUNDS[notification.type]}, color-mix(in srgb, var(--th-surface) 92%, transparent))`,
+            color: "var(--th-text)",
+          }}
         >
-          <div className="sticky top-0 bg-gray-900 border-b border-gray-700 px-3 py-2 flex items-center justify-between">
-            <span className="text-sm font-semibold text-gray-300">{t({ ko: "알림 센터", en: "Notification Center" })}</span>
-            <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-gray-300">
-              <X size={14} />
-            </button>
+          <span
+            className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
+            style={{ background: NOTIFICATION_TYPE_COLORS[notification.type] }}
+          />
+          <div className="min-w-0 flex-1">
+            <p className="break-words text-xs leading-relaxed">{notification.message}</p>
           </div>
-          {notifications.length === 0 ? (
-            <div className="px-3 py-6 text-center text-gray-500 text-sm">{t({ ko: "알림이 없습니다", en: "No notifications" })}</div>
-          ) : (
-            <ul className="divide-y divide-gray-800">
-              {notifications.slice(0, 30).map((n) => (
-                <li key={n.id} className="px-3 py-2 flex items-start gap-2 hover:bg-gray-800/50">
-                  <span
-                    className="mt-1.5 w-2 h-2 rounded-full shrink-0"
-                    style={{ background: TYPE_COLORS[n.type] }}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs text-gray-300 break-words">{n.message}</div>
-                    <div className="text-[10px] text-gray-600 mt-0.5">
-                      {new Date(n.ts).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => onDismiss(n.id)}
-                    className="text-gray-600 hover:text-gray-400 shrink-0"
-                  >
-                    <X size={12} />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+          <button
+            onClick={() => onDismiss(notification.id)}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--th-text-muted)] transition-colors hover:bg-black/5 hover:text-[var(--th-text)]"
+            aria-label="Dismiss notification"
+          >
+            <X size={12} />
+          </button>
         </div>
-      )}
+      ))}
     </div>
   );
 }

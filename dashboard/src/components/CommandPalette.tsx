@@ -2,6 +2,13 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { Search } from "lucide-react";
 import type { Agent, Department } from "../types";
 
+interface PaletteRoute {
+  id: string;
+  labelKo: string;
+  labelEn: string;
+  icon: string;
+}
+
 interface CommandPaletteProps {
   agents: Agent[];
   departments: Department[];
@@ -9,6 +16,8 @@ interface CommandPaletteProps {
   onSelectAgent: (agent: Agent) => void;
   onNavigate: (view: string) => void;
   onClose: () => void;
+  routes: PaletteRoute[];
+  departmentRouteId?: string;
 }
 
 export default function CommandPalette({
@@ -18,6 +27,8 @@ export default function CommandPalette({
   onSelectAgent,
   onNavigate,
   onClose,
+  routes,
+  departmentRouteId = "control",
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -35,15 +46,11 @@ export default function CommandPalette({
     const items: ResultItem[] = [];
     const q = query.toLowerCase().trim();
 
-    // Navigation items
-    const navs = [
-      { id: "office", label: tr("오피스 뷰", "Office View"), icon: "🏢" },
-      { id: "dashboard", label: tr("대시보드", "Dashboard"), icon: "📊" },
-      { id: "agents", label: tr("직원 관리", "Agent Manager"), icon: "👥" },
-      { id: "chat", label: tr("채팅", "Chat"), icon: "💬" },
-      { id: "sessions", label: tr("파견 세션", "Sessions"), icon: "⚡" },
-      { id: "settings", label: tr("설정", "Settings"), icon: "⚙️" },
-    ];
+    const navs = routes.map((route) => ({
+      id: route.id,
+      label: tr(route.labelKo, route.labelEn),
+      icon: route.icon,
+    }));
 
     if (!q) {
       items.push(...navs.map((n) => ({ type: "nav" as const, ...n })));
@@ -78,7 +85,7 @@ export default function CommandPalette({
     }
 
     return items.slice(0, 12);
-  }, [query, agents, departments, isKo]);
+  }, [query, agents, departments, isKo, routes]);
 
   useEffect(() => {
     setSelectedIndex(0);
@@ -90,7 +97,7 @@ export default function CommandPalette({
     } else if (item.type === "agent") {
       onSelectAgent(item.agent);
     } else if (item.type === "dept") {
-      onNavigate("agents");
+      onNavigate(departmentRouteId);
     }
     onClose();
   };
