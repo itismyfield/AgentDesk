@@ -1669,22 +1669,26 @@ pub async fn activate(
         }
 
         // Busy-agent guard (#110): skip if agent has active cards outside auto-queue.
-        // Exclude the card being dispatched (#162) — its own pre-dispatch state
-        // (e.g. 'requested') must not block its own activation.
+        // Exclude the card being dispatched (#162) and cards that belong to the
+        // same auto-queue run — those work in isolated worktrees so parallel
+        // execution is safe.
         let conn = state.db.separate_conn().unwrap();
         let busy: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM kanban_cards \
                  WHERE assigned_agent_id = ?1 AND status IN ('requested', 'in_progress', 'review') \
-                 AND id != ?2",
-                rusqlite::params![agent_id, card_id],
+                 AND id != ?2 \
+                 AND id NOT IN (SELECT kanban_card_id FROM auto_queue_entries WHERE run_id = ?3)",
+                rusqlite::params![agent_id, card_id, run_id],
                 |row| row.get(0),
             )
             .unwrap_or(false);
         drop(conn);
 
         if busy {
-            tracing::info!("[auto-queue] Skipping activate for {agent_id}: agent has active cards");
+            tracing::info!(
+                "[auto-queue] Skipping activate for {agent_id}: agent has active cards outside auto-queue"
+            );
             continue;
         }
 
