@@ -16,6 +16,7 @@ use super::AppState;
 pub struct GenerateBody {
     pub repo: Option<String>,
     pub agent_id: Option<String>,
+    pub issue_numbers: Option<Vec<i64>>,
     pub mode: Option<String>, // "priority-sort" (default), "dependency-aware", "similarity-aware", or "pm-assisted"
     pub parallel: Option<bool>,
     pub max_concurrent_threads: Option<i64>,
@@ -134,7 +135,7 @@ impl GenerateMode {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn ensure_tables(conn: &rusqlite::Connection) {
+pub(crate) fn ensure_tables(conn: &rusqlite::Connection) {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS auto_queue_runs (
             id          TEXT PRIMARY KEY,
@@ -266,6 +267,52 @@ fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<Str
         states.push("ready".to_string());
     }
     states
+}
+
+fn build_card_filters(
+    alias: &str,
+    repo: Option<&String>,
+    agent_id: Option<&String>,
+    issue_numbers: Option<&Vec<i64>>,
+) -> (Vec<String>, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    let prefix = if alias.is_empty() {
+        String::new()
+    } else {
+        format!("{alias}.")
+    };
+    let mut conditions = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(repo) = repo {
+        conditions.push(format!("{}repo_id = ?{}", prefix, params.len() + 1));
+        params.push(Box::new(repo.clone()));
+    }
+    if let Some(agent_id) = agent_id {
+        conditions.push(format!(
+            "{}assigned_agent_id = ?{}",
+            prefix,
+            params.len() + 1
+        ));
+        params.push(Box::new(agent_id.clone()));
+    }
+    if let Some(issue_numbers) = issue_numbers.filter(|nums| !nums.is_empty()) {
+        let base_idx = params.len() + 1;
+        let placeholders = issue_numbers
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| format!("?{}", base_idx + idx))
+            .collect::<Vec<_>>()
+            .join(",");
+        conditions.push(format!(
+            "{}github_issue_number IN ({})",
+            prefix, placeholders
+        ));
+        for issue_number in issue_numbers {
+            params.push(Box::new(*issue_number));
+        }
+    }
+
+    (conditions, params)
 }
 
 fn priority_sort_key(priority: &str) -> i32 {
@@ -806,6 +853,102 @@ pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    if let Some(issue_numbers) = body.issue_numbers.as_ref().filter(|nums| !nums.is_empty()) {
+        let conn = match state.db.separate_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        ensure_tables(&conn);
+        let (mut conditions, params) = build_card_filters(
+            "kc",
+            body.repo.as_ref(),
+            body.agent_id.as_ref(),
+            Some(issue_numbers),
+        );
+        conditions.push("kc.status = 'backlog'".to_string());
+        let sql = format!(
+            "SELECT kc.id, kc.repo_id, kc.assigned_agent_id
+             FROM kanban_cards kc
+             WHERE {}",
+            conditions.join(" AND ")
+        );
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(stmt) => stmt,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        let backlog_cards: Vec<(String, Option<String>, Option<String>)> = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            .unwrap_or_default();
+        drop(stmt);
+        drop(conn);
+
+        for (card_id, repo_id, assigned_agent_id) in backlog_cards {
+            let conn = match state.db.separate_conn() {
+                Ok(c) => c,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{e}")})),
+                    );
+                }
+            };
+            crate::pipeline::ensure_loaded();
+            let effective = crate::pipeline::resolve_for_card(
+                &conn,
+                repo_id.as_deref(),
+                assigned_agent_id.as_deref(),
+            );
+            let prep_path = if effective.is_valid_state("ready") {
+                effective
+                    .free_path_to_state("backlog", "ready")
+                    .or_else(|| effective.free_path_to_dispatchable("backlog"))
+            } else {
+                effective.free_path_to_dispatchable("backlog")
+            };
+            let Some(path) = prep_path else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!("card {card_id} has no free path from backlog to ready/dispatchable state"),
+                    })),
+                );
+            };
+            drop(conn);
+
+            for step in &path {
+                if let Err(e) = crate::kanban::transition_status_no_hooks(
+                    &state.db,
+                    &card_id,
+                    step,
+                    "auto-queue-generate",
+                ) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!("failed to auto-transition card {card_id} to {step}: {e}"),
+                        })),
+                    );
+                }
+            }
+        }
+    }
+
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -828,16 +971,13 @@ pub async fn generate(
                 .join(",")
         })
         .unwrap_or_else(|| "'ready','requested'".to_string());
-    let mut conditions = vec![format!("kc.status IN ({})", enqueueable)];
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    if let Some(ref repo) = body.repo {
-        conditions.push(format!("kc.repo_id = ?{}", params.len() + 1));
-        params.push(Box::new(repo.clone()));
-    }
-    if let Some(ref agent_id) = body.agent_id {
-        conditions.push(format!("kc.assigned_agent_id = ?{}", params.len() + 1));
-        params.push(Box::new(agent_id.clone()));
-    }
+    let (mut conditions, params) = build_card_filters(
+        "kc",
+        body.repo.as_ref(),
+        body.agent_id.as_ref(),
+        body.issue_numbers.as_ref(),
+    );
+    conditions.insert(0, format!("kc.status IN ({})", enqueueable));
 
     let where_clause = conditions.join(" AND ");
     let sql = format!(
@@ -2145,7 +2285,7 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
 
     // Trigger dispatch of next pending entry
     if resumed > 0 {
-        let (status, body) = activate(
+        let (_status, body) = activate(
             State(state),
             Json(ActivateBody {
                 repo: None,

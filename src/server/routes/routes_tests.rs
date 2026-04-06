@@ -2364,6 +2364,32 @@ async fn force_transition_rejects_wrong_channel() {
 }
 
 #[tokio::test]
+async fn batch_transition_rejects_wrong_channel() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_card_with_status(&db, "card-bt-auth", "backlog");
+    set_pmd_channel(&db, "pmd-chan-123");
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/batch-transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "wrong-channel")
+                .body(Body::from(
+                    r#"{"card_ids":["card-bt-auth"],"status":"ready"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn force_transition_succeeds_with_correct_channel() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -2390,6 +2416,111 @@ async fn force_transition_succeeds_with_correct_channel() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["forced"], true);
+}
+
+#[tokio::test]
+async fn batch_transition_returns_per_card_results_and_transitions_targets() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_card_with_status(&db, "card-bt-1", "backlog");
+    set_pmd_channel(&db, "pmd-chan-123");
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/batch-transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(
+                    r#"{"card_ids":["card-bt-1","missing-card"],"status":"ready"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["card_id"], "card-bt-1");
+    assert_eq!(results[0]["ok"], true);
+    assert_eq!(results[0]["to"], "ready");
+    assert_eq!(results[1]["card_id"], "missing-card");
+    assert_eq!(results[1]["ok"], false);
+
+    let conn = db.lock().unwrap();
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-bt-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "ready");
+}
+
+#[tokio::test]
+async fn batch_transition_resolves_issue_numbers_to_cards() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    set_pmd_channel(&db, "pmd-chan-123");
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, github_issue_number, created_at, updated_at
+            ) VALUES (
+                'card-bt-issue', 'Batch Transition Issue', 'backlog', 'medium', 3277, datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/batch-transition")
+                .header("content-type", "application/json")
+                .header("x-channel-id", "pmd-chan-123")
+                .body(Body::from(
+                    r#"{"issue_numbers":[3277,3999],"status":"ready"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["issue_number"], 3999);
+    assert_eq!(results[0]["ok"], false);
+    assert_eq!(results[1]["card_id"], "card-bt-issue");
+    assert_eq!(results[1]["issue_number"], 3277);
+    assert_eq!(results[1]["ok"], true);
+
+    let conn = db.lock().unwrap();
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-bt-issue'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "ready");
 }
 
 #[tokio::test]
@@ -3883,6 +4014,93 @@ async fn parallel_generate_creates_correct_thread_groups() {
     // #6 depends on #5, #7 depends on #5 and #6 — so #6 before #7
     assert_eq!(chain_issues[2], 6, "#6 depends on #5, must be third");
     assert_eq!(chain_issues[3], 7, "#7 depends on #5 and #6, must be last");
+}
+
+#[tokio::test]
+async fn auto_queue_generate_issue_numbers_filters_cards_and_promotes_backlog() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-generate-327");
+    seed_repo(&db, "test-repo");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id, github_issue_number, created_at, updated_at
+            ) VALUES (
+                'card-gen-327-ready', 'Generate Ready #327', 'ready', 'high', 'agent-generate-327', 'test-repo', 3271, datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id, github_issue_number, created_at, updated_at
+            ) VALUES (
+                'card-gen-327-backlog', 'Generate Backlog #327', 'backlog', 'medium', 'agent-generate-327', 'test-repo', 3272, datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id, github_issue_number, created_at, updated_at
+            ) VALUES (
+                'card-gen-327-extra', 'Generate Extra', 'ready', 'urgent', 'agent-generate-327', 'test-repo', 3999, datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "agent-generate-327",
+                        "issue_numbers": [3271, 3272],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    let queued_issues: Vec<i64> = entries
+        .iter()
+        .filter_map(|entry| entry["github_issue_number"].as_i64())
+        .collect();
+    assert_eq!(entries.len(), 2);
+    assert!(queued_issues.contains(&3271));
+    assert!(queued_issues.contains(&3272));
+    assert!(!queued_issues.contains(&3999));
+
+    let conn = db.lock().unwrap();
+    let backlog_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-gen-327-backlog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        backlog_status, "ready",
+        "selected backlog card must be promoted before queue generation"
+    );
 }
 
 #[tokio::test]
