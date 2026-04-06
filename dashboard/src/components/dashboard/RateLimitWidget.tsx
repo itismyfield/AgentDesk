@@ -200,53 +200,51 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                   </span>
                 ) : null}
               </div>
-              {/* Buckets grid — fixed 2 columns */}
-              <div className="flex-1 grid grid-cols-2 gap-x-2 sm:gap-x-3">
+              {/* Buckets — flat row, refresh absolute below */}
+              <div className="flex-1 grid grid-cols-2 gap-x-4 sm:gap-x-5">
                 {provider.buckets.map((bucket) => {
                   const colors = getColors(provider.provider, bucket.level);
                   const remaining = formatTimeRemaining(bucket.resets_at);
                   return (
-                    <div key={bucket.id} className="flex flex-col gap-0">
-                      <div className="flex items-center gap-1.5 sm:gap-2">
-                        <span
-                          className="text-xs sm:text-xs font-bold shrink-0"
-                          style={{ color: colors.text, minWidth: 18 }}
-                        >
-                          {bucket.label}
-                        </span>
-                        <div className="flex-1" style={{ minWidth: 60 }}>
-                          <div
-                            className="relative rounded-full overflow-hidden"
-                            style={{
-                              height: 10,
-                              background: "rgba(255,255,255,0.12)",
-                              border: "1px solid rgba(255,255,255,0.08)",
-                            }}
-                          >
-                            <div
-                              className="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-                              style={{
-                                width: `${Math.max(Math.min(bucket.utilization, 100), 2)}%`,
-                                background: colors.bar,
-                                boxShadow: `0 0 ${bucket.level !== "normal" ? "8" : "4"}px ${colors.glow}`,
-                              }}
-                            />
-                          </div>
-                        </div>
-                        <span
-                          className="text-xs sm:text-xs font-mono font-bold shrink-0"
+                    <div key={bucket.id} className="relative flex items-center gap-1.5 sm:gap-2">
+                      <span
+                        className="text-xs font-bold shrink-0"
+                        style={{ color: colors.text, minWidth: 18 }}
+                      >
+                        {bucket.label}
+                      </span>
+                      <div className="flex-1" style={{ minWidth: 60 }}>
+                        <div
+                          className="relative rounded-full overflow-hidden"
                           style={{
-                            color: colors.text,
-                            textShadow: bucket.level === "danger" ? `0 0 6px ${colors.glow}` : "none",
+                            height: 10,
+                            background: "rgba(255,255,255,0.12)",
+                            border: "1px solid rgba(255,255,255,0.08)",
                           }}
                         >
-                          {bucket.utilization}%
-                        </span>
+                          <div
+                            className="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
+                            style={{
+                              width: `${Math.max(Math.min(bucket.utilization, 100), 2)}%`,
+                              background: colors.bar,
+                              boxShadow: `0 0 ${bucket.level !== "normal" ? "8" : "4"}px ${colors.glow}`,
+                            }}
+                          />
+                        </div>
                       </div>
+                      <span
+                        className="text-xs font-mono font-bold shrink-0"
+                        style={{
+                          color: colors.text,
+                          textShadow: bucket.level === "danger" ? `0 0 6px ${colors.glow}` : "none",
+                        }}
+                      >
+                        {bucket.utilization}%
+                      </span>
                       {remaining && (
                         <span
-                          className="text-[7px] sm:text-xs ml-[24px] sm:ml-[26px]"
-                          style={{ color: "var(--th-text-muted)", marginTop: -1 }}
+                          className="absolute whitespace-nowrap text-[8px]"
+                          style={{ color: "var(--th-text-muted)", top: "calc(100% + 1px)", left: 0, lineHeight: 1 }}
                         >
                           ↻ {remaining}
                         </span>
