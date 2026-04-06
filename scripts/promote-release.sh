@@ -206,7 +206,7 @@ if [[ "${1:-}" != "--skip-review" ]]; then
 fi
 
 # Safety check: dev must be healthy
-DEV_PORT="${AGENTDESK_DEV_PORT:-$ADK_DEFAULT_PORT}"
+DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
 if ! curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${DEV_PORT}/api/health" | grep -q '"status":"healthy"'; then
     echo "✗ Dev is not healthy — aborting promotion"
     exit 1

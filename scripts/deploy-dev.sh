@@ -289,7 +289,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST.plist"
 sleep 3
 
 # 5. Health check
-DEV_PORT="${AGENTDESK_DEV_PORT:-$ADK_DEFAULT_PORT}"
+DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
 if curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${DEV_PORT}/api/health" | grep -q '"status":"healthy"'; then
     echo "✓ Dev is healthy on :${DEV_PORT}"
 else
