@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Application, Container, Graphics, Text, Texture } from "pixi.js";
 import type { Agent, AuditLogEntry, Department, KanbanCard, RoundTableMeeting, Task, SubAgent } from "../types";
 type ThemeMode = "dark" | "light";
@@ -101,6 +101,15 @@ export default function OfficeView({
   onSelectDepartment,
   customDeptThemes,
 }: OfficeViewProps) {
+  // ── Mobile detection (skip Pixi on small viewports) ──
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 639px)").matches);
+  useEffect(() => {
+    const mql = window.matchMedia("(max-width: 639px)");
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mql.addEventListener("change", handler);
+    return () => mql.removeEventListener("change", handler);
+  }, []);
+
   // ── Refs for BuildOfficeSceneContext ──
   const containerRef = useRef<HTMLDivElement | null>(null);
   const appRef = useRef<Application | null>(null);
@@ -316,6 +325,7 @@ export default function OfficeView({
     activeMeeting,
     customDeptThemes,
     currentTheme: theme,
+    disabled: isMobile,
   });
 
   const isKo = language === "ko";
