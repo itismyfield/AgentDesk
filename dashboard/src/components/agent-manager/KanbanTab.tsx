@@ -70,7 +70,12 @@ interface KanbanTabProps {
     payload?: { reason?: string | null },
   ) => Promise<void>;
   onDeleteCard: (id: string) => Promise<void>;
+  onPatchDeferDod: (
+    id: string,
+    payload: Parameters<typeof api.patchKanbanDeferDod>[1],
+  ) => Promise<void>;
   externalStatusFocus?: "review" | "blocked" | "requested" | "stalled" | null;
+  onClearPulseFocus?: () => void;
 }
 
 const TIMELINE_KIND_STYLE: Record<string, { bg: string; text: string }> = {
@@ -94,7 +99,9 @@ export default function KanbanTab({
   onRetryCard,
   onRedispatchCard,
   onDeleteCard,
+  onPatchDeferDod,
   externalStatusFocus,
+  onClearPulseFocus,
 }: KanbanTabProps) {
   const [repoSources, setRepoSources] = useState<KanbanRepoSource[]>([]);
   const [repoInput, setRepoInput] = useState("");
@@ -141,6 +148,7 @@ export default function KanbanTab({
   const [stalledSelected, setStalledSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [deferredDodPopup, setDeferredDodPopup] = useState(false);
+  const [verifyingDeferredDodIds, setVerifyingDeferredDodIds] = useState<Set<string>>(new Set());
   const [assignBeforeReady, setAssignBeforeReady] = useState<{ cardId: string; agentId: string } | null>(null);
   const [cancelConfirm, setCancelConfirm] = useState<{ cardIds: string[]; source: "bulk" | "single" } | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
@@ -376,18 +384,15 @@ export default function KanbanTab({
     if (externalStatusFocus === "review") {
       setCardTypeFilter("review");
       setMobileColumnStatus("review");
-      return;
-    }
-    if (externalStatusFocus === "blocked") {
+    } else if (externalStatusFocus === "blocked") {
       setMobileColumnStatus("blocked");
-      return;
-    }
-    if (externalStatusFocus === "requested") {
+    } else if (externalStatusFocus === "requested") {
       setMobileColumnStatus("requested");
-      return;
+    } else {
+      setMobileColumnStatus("in_progress");
     }
-    setMobileColumnStatus("in_progress");
-  }, [externalStatusFocus]);
+    onClearPulseFocus?.();
+  }, [externalStatusFocus, onClearPulseFocus]);
 
   const getAgentLabel = (agentId: string | null | undefined) => {
     if (!agentId) return tr("미할당", "Unassigned");
@@ -506,7 +511,7 @@ export default function KanbanTab({
       if (pulseStatusFilter === "requested" && card.status !== "requested") return false;
       if (
         pulseStatusFilter === "stalled"
-        && !(card.status === "in_progress" && Boolean(card.started_at) && Date.now() - (card.started_at ?? 0) > STALE_IN_PROGRESS_MS)
+        && !(card.status === "in_progress" && Boolean(card.started_at) && Date.now() - ((card.started_at ?? 0) < 1e12 ? (card.started_at ?? 0) * 1000 : (card.started_at ?? 0)) > STALE_IN_PROGRESS_MS)
       ) {
         return false;
       }
@@ -1330,9 +1335,26 @@ export default function KanbanTab({
                     <label key={item.id} className="flex items-start gap-2 text-xs cursor-pointer">
                       <input
                         type="checkbox"
-                        checked={false}
+                        checked={verifyingDeferredDodIds.has(item.id)}
+                        disabled={verifyingDeferredDodIds.has(item.id)}
                         onChange={async () => {
-                          await api.patchKanbanDeferDod(item.cardId, { verify: item.id });
+                          setActionError(null);
+                          setVerifyingDeferredDodIds((prev) => {
+                            const next = new Set(prev);
+                            next.add(item.id);
+                            return next;
+                          });
+                          try {
+                            await onPatchDeferDod(item.cardId, { verify: item.id });
+                          } catch (error) {
+                            setActionError(error instanceof Error ? error.message : tr("DoD 검증에 실패했습니다.", "Failed to verify deferred DoD."));
+                          } finally {
+                            setVerifyingDeferredDodIds((prev) => {
+                              const next = new Set(prev);
+                              next.delete(item.id);
+                              return next;
+                            });
+                          }
                         }}
                         className="mt-0.5"
                       />
