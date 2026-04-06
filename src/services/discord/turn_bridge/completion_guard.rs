@@ -261,29 +261,67 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete(
     changed > 0
 }
 
-fn lookup_card_issue_number(db: Option<&crate::db::Db>, card_id: Option<&str>) -> Option<i64> {
-    let db = db?;
-    let card_id = card_id?;
-    db.separate_conn()
-        .ok()?
-        .query_row(
-            "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
-            [card_id],
-            |row| row.get::<_, Option<i64>>(0),
+/// Context needed to resolve the correct completed commit for a dispatch.
+struct DispatchCompletionHints {
+    issue_number: Option<i64>,
+    dispatch_created_at: Option<String>,
+}
+
+fn lookup_dispatch_completion_hints(
+    db: Option<&crate::db::Db>,
+    dispatch_id: &str,
+    card_id: Option<&str>,
+) -> DispatchCompletionHints {
+    let conn = db.and_then(|db| db.separate_conn().ok());
+    let issue_number = conn.as_ref().and_then(|conn| {
+        card_id.and_then(|cid| {
+            conn.query_row(
+                "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+                [cid],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten()
+        })
+    });
+    let dispatch_created_at = conn.as_ref().and_then(|conn| {
+        conn.query_row(
+            "SELECT created_at FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get::<_, Option<String>>(0),
         )
         .ok()
         .flatten()
+    });
+    DispatchCompletionHints {
+        issue_number,
+        dispatch_created_at,
+    }
 }
 
 fn work_dispatch_completion_context(
     adk_cwd: Option<&str>,
-    issue_number: Option<i64>,
+    hints: &DispatchCompletionHints,
 ) -> Option<serde_json::Value> {
     let cwd = adk_cwd.filter(|p| std::path::Path::new(p).is_dir())?;
-    // Prefer the most recent commit that references this card's issue number.
-    // Falls back to plain HEAD when no issue number is known or no match found.
-    let completed_commit = issue_number
-        .and_then(|n| crate::services::platform::shell::git_latest_commit_for_issue(cwd, n))
+    // 1) Best: find a commit since dispatch start, preferring issue-scoped match
+    // 2) Fallback: issue grep on recent commits (no time scope)
+    // 3) Last resort: plain HEAD
+    let completed_commit = hints
+        .dispatch_created_at
+        .as_deref()
+        .and_then(|since| {
+            crate::services::platform::shell::git_best_commit_for_dispatch(
+                cwd,
+                since,
+                hints.issue_number,
+            )
+        })
+        .or_else(|| {
+            hints
+                .issue_number
+                .and_then(|n| crate::services::platform::shell::git_latest_commit_for_issue(cwd, n))
+        })
         .or_else(|| crate::services::platform::git_head_commit(cwd))?;
     let mut obj = serde_json::Map::new();
     obj.insert(
@@ -307,9 +345,9 @@ fn completion_result_with_context(
     source: &str,
     needs_reconcile: bool,
     adk_cwd: Option<&str>,
-    issue_number: Option<i64>,
+    hints: &DispatchCompletionHints,
 ) -> serde_json::Value {
-    let mut result = work_dispatch_completion_context(adk_cwd, issue_number)
+    let mut result = work_dispatch_completion_context(adk_cwd, hints)
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     if let Some(obj) = result.as_object_mut() {
         obj.insert(
@@ -413,8 +451,12 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
 
     // Direct finalize_dispatch with retry — single completion authority (#143)
     if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
-        let issue_number = lookup_card_issue_number(Some(db), snapshot.kanban_card_id.as_deref());
-        let completion_context = work_dispatch_completion_context(adk_cwd, issue_number);
+        let hints = lookup_dispatch_completion_hints(
+            Some(db),
+            dispatch_id,
+            snapshot.kanban_card_id.as_deref(),
+        );
+        let completion_context = work_dispatch_completion_context(adk_cwd, &hints);
         for attempt in 1..=3u8 {
             match crate::dispatch::finalize_dispatch(
                 db,
@@ -446,7 +488,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         // All retries exhausted — DB fallback via pool, then runtime-root file
         let fallback_ok = db.separate_conn().ok().map_or(false, |conn| {
             let result_json =
-                completion_result_with_context("turn_bridge_db_fallback", true, adk_cwd, issue_number)
+                completion_result_with_context("turn_bridge_db_fallback", true, adk_cwd, &hints)
                     .to_string();
             let changed = conn.execute(
                 "UPDATE task_dispatches SET status = 'completed', \
@@ -476,7 +518,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         let url = local_api_url(shared.api_port, &format!("/api/dispatches/{dispatch_id}"));
         let payload = serde_json::json!({
             "status": "completed",
-            "result": completion_result_with_context("turn_bridge_explicit", false, adk_cwd, None),
+            "result": completion_result_with_context("turn_bridge_explicit", false, adk_cwd, &DispatchCompletionHints { issue_number: None, dispatch_created_at: None }),
         });
         for attempt in 1..=3u8 {
             match reqwest::Client::new()

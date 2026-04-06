@@ -160,6 +160,52 @@ pub fn git_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option<
         })
 }
 
+/// Find the best commit for a dispatch that started at `since_iso` (ISO-8601).
+///
+/// Strategy (most reliable first):
+/// 1. If `issue_number` is set, find the newest commit **after** `since_iso`
+///    whose subject contains `(#issue_number)`.
+/// 2. Otherwise, find the newest commit after `since_iso` (any subject).
+/// 3. If nothing was committed since `since_iso`, return `None` so the caller
+///    can fall back to `git_head_commit`.
+///
+/// `since_iso` is inclusive (`--after`).  Searches at most 50 recent commits.
+pub fn git_best_commit_for_dispatch(
+    repo_dir: &str,
+    since_iso: &str,
+    issue_number: Option<i64>,
+) -> Option<String> {
+    let output = Command::new("git")
+        .args(["log", "--format=%H %s", "--after", since_iso, "-50"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    // 1) Issue-scoped match within the time window
+    if let Some(issue_number) = issue_number {
+        let pattern = format!("(#{})", issue_number);
+        if let Some(sha) = lines
+            .iter()
+            .find(|line| line.contains(&pattern))
+            .and_then(|line| line.split_whitespace().next())
+        {
+            return Some(sha.to_string());
+        }
+    }
+
+    // 2) Newest commit in the time window (first line = most recent)
+    lines
+        .first()
+        .and_then(|line| line.split_whitespace().next())
+        .map(str::to_string)
+}
+
 /// Get the current branch name from a git directory (repo or worktree).
 pub fn git_branch_name(dir: &str) -> Option<String> {
     Command::new("git")
