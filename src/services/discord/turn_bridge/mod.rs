@@ -61,6 +61,61 @@ pub(super) struct TurnBridgeContext {
     pub(super) inflight_state: InflightTurnState,
 }
 
+fn extract_skill_id_from_tool_use(name: &str, input: &str) -> Option<String> {
+    if name != "Skill" {
+        return None;
+    }
+
+    serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("skill")
+                .and_then(|skill| skill.as_str())
+                .map(str::trim)
+                .filter(|skill| !skill.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+fn resolve_skill_usage_agent_id(
+    conn: &rusqlite::Connection,
+    session_key: Option<&str>,
+    role_binding: Option<&RoleBinding>,
+) -> Option<String> {
+    session_key
+        .and_then(|key| {
+            conn.query_row(
+                "SELECT agent_id FROM sessions WHERE session_key = ?1",
+                [key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+        })
+        .or_else(|| {
+            role_binding
+                .map(|binding| binding.role_id.trim().to_string())
+                .filter(|role_id| !role_id.is_empty())
+        })
+}
+
+fn record_skill_usage(
+    db: &crate::db::Db,
+    skill_id: &str,
+    session_key: Option<&str>,
+    role_binding: Option<&RoleBinding>,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| format!("db lock failed: {e}"))?;
+    let agent_id = resolve_skill_usage_agent_id(&conn, session_key, role_binding);
+    conn.execute(
+        "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
+        rusqlite::params![skill_id, agent_id, session_key],
+    )
+    .map_err(|e| format!("insert skill_usage failed: {e}"))?;
+    Ok(())
+}
+
 pub(super) fn spawn_turn_bridge(
     http: Arc<serenity::Http>,
     shared_owned: Arc<SharedData>,
@@ -218,6 +273,22 @@ pub(super) fn spawn_turn_bridge(
                             has_post_tool_text = false;
                             inflight_state.any_tool_used = true;
                             inflight_state.has_post_tool_text = false;
+                            if let Some(skill_id) = extract_skill_id_from_tool_use(&name, &input) {
+                                if let Some(db) = shared_owned.db.as_ref() {
+                                    if let Err(e) = record_skill_usage(
+                                        db,
+                                        &skill_id,
+                                        adk_session_key.as_deref(),
+                                        role_binding.as_ref(),
+                                    ) {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        eprintln!(
+                                            "  [{ts}] ⚠ Failed to record skill usage for {}: {}",
+                                            skill_id, e
+                                        );
+                                    }
+                                }
+                            }
                             let summary = format_tool_input(&name, &input);
                             let display_summary = if summary.trim().is_empty() {
                                 "…".to_string()
@@ -594,6 +665,7 @@ pub(super) fn spawn_turn_bridge(
                 &shared_owned,
                 dispatch_id.as_deref(),
                 adk_cwd.as_deref(),
+                Some(&full_response),
             )
             .await;
         } else if transport_error && !cancelled {
