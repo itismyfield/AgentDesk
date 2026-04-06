@@ -57,6 +57,10 @@ interface OfficeTickerData {
   meetingPresence?: MeetingPresence[];
 }
 
+function hasTint(value: unknown): value is { tint: number } {
+  return typeof value === "object" && value !== null && Reflect.has(value, "tint") && typeof Reflect.get(value, "tint") === "number";
+}
+
 export interface OfficeTickerContext {
   tickRef: MutableRefObject<number>;
   keysRef: MutableRefObject<Record<string, boolean>>;
@@ -197,7 +201,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
         sprite.position.set(headX + TARGET_CHAR_H - 6, bedCenterY);
         sprite.alpha = 0.85;
         const child0 = sprite.children[0];
-        if (child0 && "tint" in child0) (child0 as any).tint = 0xff6666;
+        if (hasTint(child0)) child0.tint = 0xff6666;
         if (deskG) deskG.visible = false;
 
         if (bedG) {
@@ -246,7 +250,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
         sprite.rotation = 0;
         sprite.alpha = 1;
         const child0 = sprite.children[0];
-        if (child0 && "tint" in child0) (child0 as any).tint = 0xff9999;
+        if (hasTint(child0)) child0.tint = 0xff9999;
         if (deskG) deskG.visible = true;
         if (bedG) bedG.visible = false;
         if (blanketG) blanketG.visible = false;
@@ -269,7 +273,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
         sprite.rotation = 0;
         sprite.alpha = 1;
         const child0 = sprite.children[0];
-        if (child0 && "tint" in child0) (child0 as any).tint = 0xffffff;
+        if (hasTint(child0)) child0.tint = 0xffffff;
         if (deskG) deskG.visible = true;
         if (bedG) bedG.visible = false;
         if (blanketG) blanketG.visible = false;
@@ -292,7 +296,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
         sprite.rotation = 0;
         sprite.alpha = 0.45 + Math.sin(tick * 0.06) * 0.1;
         const child0 = sprite.children[0];
-        if (child0 && "tint" in child0) (child0 as any).tint = 0xffaaaa;
+        if (hasTint(child0)) child0.tint = 0xffaaaa;
         if (deskG) deskG.visible = true;
         if (bedG) bedG.visible = false;
         if (blanketG) blanketG.visible = false;
@@ -300,7 +304,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
         sprite.rotation = 0;
         sprite.alpha = isOfflineAgent ? 0.3 : 1;
         const child0 = sprite.children[0];
-        if (child0 && "tint" in child0) (child0 as any).tint = isOfflineAgent ? 0x888899 : 0xffffff;
+        if (hasTint(child0)) child0.tint = isOfflineAgent ? 0x888899 : 0xffffff;
         if (deskG) deskG.visible = true;
         if (bedG) bedG.visible = false;
         if (blanketG) blanketG.visible = false;

@@ -23,6 +23,8 @@ interface AgentManagerViewProps {
   onDepartmentsChange: () => void;
   sessions?: DispatchedSession[];
   onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
+  activeTab?: Tab;
+  onTabChange?: (tab: Tab) => void;
 }
 
 type Tab = "agents" | "departments" | "dispatch";
@@ -36,6 +38,8 @@ export default function AgentManagerView({
   onDepartmentsChange,
   sessions,
   onAssign,
+  activeTab,
+  onTabChange,
 }: AgentManagerViewProps) {
   const locale = language;
   const isKo = locale.startsWith("ko");
@@ -45,7 +49,14 @@ export default function AgentManagerView({
   );
 
   // ── Tab state ──
-  const [tab, setTab] = useState<Tab>("agents");
+  const [internalTab, setInternalTab] = useState<Tab>("agents");
+  const tab = activeTab ?? internalTab;
+  const handleTabChange = useCallback((nextTab: Tab) => {
+    if (activeTab === undefined) {
+      setInternalTab(nextTab);
+    }
+    onTabChange?.(nextTab);
+  }, [activeTab, onTabChange]);
 
   // ── Agent tab state ──
   const [deptTab, setDeptTab] = useState("all");
@@ -273,7 +284,7 @@ export default function AgentManagerView({
       {/* Tab switch */}
       <div className="flex gap-1" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
         <button
-          onClick={() => setTab("agents")}
+          onClick={() => handleTabChange("agents")}
           className={`px-4 py-2 text-sm font-medium transition-colors ${
             tab === "agents" ? "text-blue-400 border-b-2 border-blue-400" : ""
           }`}
@@ -282,7 +293,7 @@ export default function AgentManagerView({
           {tr("직원", "Agents")} ({agents.length})
         </button>
         <button
-          onClick={() => setTab("departments")}
+          onClick={() => handleTabChange("departments")}
           className={`px-4 py-2 text-sm font-medium transition-colors ${
             tab === "departments" ? "text-blue-400 border-b-2 border-blue-400" : ""
           }`}
@@ -292,7 +303,7 @@ export default function AgentManagerView({
         </button>
         {sessions && onAssign && (
           <button
-            onClick={() => setTab("dispatch")}
+            onClick={() => handleTabChange("dispatch")}
             className={`px-4 py-2 text-sm font-medium transition-colors ${
               tab === "dispatch" ? "text-blue-400 border-b-2 border-blue-400" : ""
             }`}

@@ -48,6 +48,8 @@ const CommandPalette = lazy(() => import("./components/CommandPalette"));
 
 type ViewMode = "office" | "pulse" | "kanban" | "more";
 type MoreTab = "control" | "meetings" | "settings";
+type ControlTab = "agents" | "departments" | "dispatch";
+type KanbanPulseFocus = "review" | "blocked" | "requested" | "stalled";
 
 interface ShellRoute {
   id: ViewMode;
@@ -244,6 +246,8 @@ interface AppShellProps {
 function AppShell({ wsConnected, notifications, dismissNotification }: AppShellProps) {
   const [view, setView] = useState<ViewMode>("office");
   const [moreTab, setMoreTab] = useState<MoreTab>("control");
+  const [controlTab, setControlTab] = useState<ControlTab>("agents");
+  const [kanbanPulseFocus, setKanbanPulseFocus] = useState<KanbanPulseFocus | null>(null);
   const [showOfficeManager, setShowOfficeManager] = useState(false);
   const [officeInfoAgent, setOfficeInfoAgent] = useState<Agent | null>(null);
   const [showCmdPalette, setShowCmdPalette] = useState(false);
@@ -324,10 +328,32 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
         setMoreTab("settings");
       } else {
         setMoreTab("control");
+        setControlTab("agents");
       }
     },
     [handleNavigate],
   );
+
+  const openPulseKanbanSignal = useCallback((signal: KanbanPulseFocus) => {
+    setKanbanPulseFocus(signal);
+    setView("kanban");
+  }, []);
+
+  const openDispatchSessions = useCallback(() => {
+    setControlTab("dispatch");
+    setMoreTab("control");
+    setView("more");
+  }, []);
+
+  const openMeetingsView = useCallback(() => {
+    setMoreTab("meetings");
+    setView("more");
+  }, []);
+
+  const openSettingsView = useCallback(() => {
+    setMoreTab("settings");
+    setView("more");
+  }, []);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -432,8 +458,14 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
               <DashboardPageView
                 stats={stats}
                 agents={agents}
+                sessions={visibleDispatchedSessions}
+                meetings={roundTableMeetings}
                 settings={settings}
                 onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                onOpenKanbanSignal={openPulseKanbanSignal}
+                onOpenDispatchSessions={openDispatchSessions}
+                onOpenMeetings={openMeetingsView}
+                onOpenSettings={openSettingsView}
               />
             )}
 
@@ -473,6 +505,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                     await api.deleteKanbanCard(id);
                     setKanbanCards((prev) => prev.filter((card) => card.id !== id));
                   }}
+                  externalStatusFocus={kanbanPulseFocus}
                 />
               </div>
             )}
@@ -481,6 +514,8 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
               <MoreView
                 tab={moreTab}
                 onTabChange={setMoreTab}
+                controlTab={controlTab}
+                onControlTabChange={setControlTab}
                 isKo={isKo}
                 language={settings.language}
                 officeId={selectedOfficeId}
@@ -645,6 +680,8 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
 interface MoreViewProps {
   tab: MoreTab;
   onTabChange: (tab: MoreTab) => void;
+  controlTab: ControlTab;
+  onControlTabChange: (tab: ControlTab) => void;
   isKo: boolean;
   language: CompanySettings["language"];
   officeId: string | null;
@@ -665,6 +702,8 @@ interface MoreViewProps {
 function MoreView({
   tab,
   onTabChange,
+  controlTab,
+  onControlTabChange,
   isKo,
   language,
   officeId,
@@ -795,6 +834,8 @@ function MoreView({
             onDepartmentsChange={onDepartmentsChange}
             sessions={sessions}
             onAssign={onAssign}
+            activeTab={controlTab}
+            onTabChange={onControlTabChange}
           />
         )}
         {tab === "meetings" && <MeetingMinutesView meetings={meetings} onRefresh={onRefreshMeetings} />}

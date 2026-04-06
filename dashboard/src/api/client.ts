@@ -30,7 +30,7 @@ export function onApiError(listener: ApiErrorListener | null): void {
 }
 
 function isRetryable(status: number): boolean {
-  return status === 0 || status === 408 || status === 429 || status >= 500;
+  return status === 408 || status === 429 || status >= 500;
 }
 
 async function request<T>(url: string, opts?: RequestInit): Promise<T> {
