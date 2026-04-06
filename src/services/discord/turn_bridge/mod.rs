@@ -1,5 +1,8 @@
 mod completion_guard;
+mod context_window;
 mod recovery_text;
+mod retry_state;
+mod stale_resume;
 mod tmux_runtime;
 
 #[cfg(test)]
@@ -16,7 +19,7 @@ use crate::utils::format::tail_with_ellipsis;
 // Re-exports for pub(super) items used by sibling modules in the discord package
 pub(super) use completion_guard::guard_review_dispatch_completion;
 pub(super) use completion_guard::runtime_db_fallback_complete;
-pub(super) use recovery_text::result_event_has_stale_resume_error;
+pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::stale_inflight_message;
 
@@ -25,16 +28,16 @@ pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
 use completion_guard::{complete_work_dispatch_on_turn_end, fail_dispatch_with_retry};
-use recovery_text::{
-    auto_retry_with_history, clear_local_session_state, handle_gemini_retry_boundary,
-    output_file_has_stale_resume_error_after_offset, reset_session_for_auto_retry,
-    resolve_done_response, stream_error_has_stale_resume_error,
+use context_window::{persisted_context_tokens, resolve_done_response};
+use recovery_text::auto_retry_with_history;
+use retry_state::{
+    clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
+};
+use stale_resume::{
+    output_file_has_stale_resume_error_after_offset, stream_error_has_stale_resume_error,
     stream_error_requires_terminal_session_reset,
 };
-use tmux_runtime::{
-    is_dcserver_restart_command, persisted_context_tokens, should_resume_watcher_after_turn,
-    total_context_tokens,
-};
+use tmux_runtime::{is_dcserver_restart_command, should_resume_watcher_after_turn};
 
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
@@ -691,87 +694,6 @@ pub(super) fn spawn_turn_bridge(
             shared_owned.api_port,
         )
         .await;
-
-        // ─── Auto-compact: DISABLED — token counting still unreliable (224% after restart).
-        // #227 re-enabled but measurement is still wrong. Keep disabled until root cause fixed.
-        #[cfg(unix)]
-        if false && dispatch_id.is_none() && !is_prompt_too_long {
-            let total_tokens =
-                total_context_tokens(accumulated_input_tokens, accumulated_output_tokens);
-            let ctx_cfg = super::adk_session::fetch_context_thresholds(shared_owned.api_port).await;
-            let pct = (total_tokens * 100) / ctx_cfg.context_window.max(1);
-            // Cooldown: skip if compact was sent recently (5 min)
-            let compact_cooldown_ok = shared_owned.db.as_ref().map_or(true, |db| {
-                db.lock().ok().map_or(true, |conn| {
-                    let cooldown_key = format!("auto_compact_cooldown:{}", channel_id.get());
-                    let last: Option<String> = conn
-                        .query_row(
-                            "SELECT value FROM kv_meta WHERE key = ?1",
-                            [&cooldown_key],
-                            |row| row.get(0),
-                        )
-                        .ok();
-                    last.and_then(|v| v.parse::<i64>().ok()).map_or(true, |ts| {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
-                        now - ts > 300 // 5 min cooldown
-                    })
-                })
-            });
-            if pct >= ctx_cfg.compact_pct && compact_cooldown_ok {
-                if let Some(ref tmux_name) = inflight_state.tmux_session_name {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ⚡ Auto-compact: {tmux_name} at {pct}% ({total_tokens} tokens)"
-                    );
-                    let name = tmux_name.to_string();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        crate::services::platform::tmux::send_keys(&name, &["/compact", "Enter"])
-                    })
-                    .await;
-                    // Notify agent channel via notify bot
-                    {
-                        let api_port = shared_owned.api_port;
-                        let ch = channel_id.get();
-                        let msg = format!(
-                            "⚡ 컨텍스트 자동 compact 실행 ({}% — {} tokens)",
-                            pct, total_tokens
-                        );
-                        tokio::spawn(async move {
-                            let url = crate::config::local_api_url(api_port, "/api/send");
-                            let _ = reqwest::Client::new()
-                                .post(&url)
-                                .json(&serde_json::json!({
-                                    "target": format!("channel:{ch}"),
-                                    "content": msg,
-                                    "bot": "notify",
-                                    "source": "system",
-                                }))
-                                .send()
-                                .await;
-                        });
-                    }
-                    // Set cooldown timestamp
-                    if let Some(ref db) = shared_owned.db {
-                        if let Ok(conn) = db.lock() {
-                            let cooldown_key =
-                                format!("auto_compact_cooldown:{}", channel_id.get());
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            conn.execute(
-                                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                                rusqlite::params![cooldown_key, now.to_string()],
-                            )
-                            .ok();
-                        }
-                    }
-                }
-            }
-        }
 
         let can_chain_locally =
             serenity_ctx.is_some() && request_owner.is_some() && token.is_some();
