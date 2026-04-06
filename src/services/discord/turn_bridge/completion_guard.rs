@@ -120,6 +120,21 @@ pub(in crate::services::discord) fn extract_explicit_review_verdict(
     }
 }
 
+pub(in crate::services::discord) fn extract_explicit_work_outcome(
+    full_response: &str,
+) -> Option<&'static str> {
+    let pattern = regex::Regex::new(r"(?im)^\s*(?:outcome|결과)\s*:\s*\**\s*(noop)\b").ok()?;
+    let outcome = pattern
+        .captures(full_response)?
+        .get(1)?
+        .as_str()
+        .to_ascii_lowercase();
+    match outcome.as_str() {
+        "noop" => Some("noop"),
+        _ => None,
+    }
+}
+
 pub(super) fn build_verdict_payload(
     dispatch_id: &str,
     verdict: &str,
@@ -232,10 +247,7 @@ pub(in crate::services::discord) async fn guard_review_dispatch_completion(
 /// Opens a fresh connection to the on-disk DB (bypassing the Db pool) and writes
 /// a status + reconciliation marker so onTick can run the hook chain later.
 /// Returns `true` if the UPDATE affected at least one row.
-pub(in crate::services::discord) fn runtime_db_fallback_complete(
-    dispatch_id: &str,
-    source: &str,
-) -> bool {
+fn runtime_db_fallback_complete_with_result(dispatch_id: &str, result: &serde_json::Value) -> bool {
     let Some(root) = crate::cli::agentdesk_runtime_root() else {
         return false;
     };
@@ -243,7 +255,7 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete(
     let Ok(conn) = rusqlite::Connection::open(&db_path) else {
         return false;
     };
-    let result_json = format!("{{\"completion_source\":\"{source}\",\"needs_reconcile\":true}}");
+    let result_json = result.to_string();
     let changed = conn
         .execute(
             "UPDATE task_dispatches SET status = 'completed', result = ?1, \
@@ -259,6 +271,19 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete(
         .ok();
     }
     changed > 0
+}
+
+pub(in crate::services::discord) fn runtime_db_fallback_complete(
+    dispatch_id: &str,
+    source: &str,
+) -> bool {
+    runtime_db_fallback_complete_with_result(
+        dispatch_id,
+        &serde_json::json!({
+            "completion_source": source,
+            "needs_reconcile": true,
+        }),
+    )
 }
 
 /// Extract the last git commit SHA from agent turn output.
@@ -423,6 +448,43 @@ fn completion_result_with_context(
     result
 }
 
+fn noop_completion_context(
+    adk_cwd: Option<&str>,
+    full_response: Option<&str>,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "work_outcome".to_string(),
+        serde_json::Value::String("noop".to_string()),
+    );
+    obj.insert(
+        "completed_without_changes".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    if let Some(response) = full_response {
+        let trimmed = response.trim();
+        if !trimmed.is_empty() {
+            obj.insert(
+                "notes".to_string(),
+                serde_json::Value::String(truncate_str(trimmed, 4000).to_string()),
+            );
+        }
+    }
+    if let Some(cwd) = adk_cwd.filter(|p| std::path::Path::new(p).is_dir()) {
+        obj.insert(
+            "completed_worktree_path".to_string(),
+            serde_json::Value::String(cwd.to_string()),
+        );
+        if let Some(branch) = crate::services::platform::shell::git_branch_name(cwd) {
+            obj.insert(
+                "completed_branch".to_string(),
+                serde_json::Value::String(branch),
+            );
+        }
+    }
+    serde_json::Value::Object(obj)
+}
+
 /// Unlike review dispatches (which auto-complete on session idle), these types
 /// require an explicit PATCH so the pipeline can advance deterministically.
 /// Fail a dispatch with retry on PATCH failure.
@@ -512,14 +574,20 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         _ => return,
     }
 
+    let explicit_work_outcome = turn_output.and_then(extract_explicit_work_outcome);
+
     // Direct finalize_dispatch with retry — single completion authority (#143)
     if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
         // Extract commit SHA directly from agent output (most reliable method)
-        let output_commit = turn_output.and_then(|output| {
-            adk_cwd
-                .filter(|p| std::path::Path::new(p).is_dir())
-                .and_then(|cwd| extract_commit_sha_from_output(output, cwd))
-        });
+        let output_commit = if explicit_work_outcome == Some("noop") {
+            None
+        } else {
+            turn_output.and_then(|output| {
+                adk_cwd
+                    .filter(|p| std::path::Path::new(p).is_dir())
+                    .and_then(|cwd| extract_commit_sha_from_output(output, cwd))
+            })
+        };
         if let Some(ref sha) = output_commit {
             tracing::info!(
                 "[turn_bridge] Extracted commit {} from agent output for dispatch {}",
@@ -533,13 +601,22 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             snapshot.kanban_card_id.as_deref(),
         );
         hints.output_commit = output_commit;
-        let completion_context = work_dispatch_completion_context(adk_cwd, &hints);
+        let completion_context = if explicit_work_outcome == Some("noop") {
+            Some(noop_completion_context(adk_cwd, turn_output))
+        } else {
+            work_dispatch_completion_context(adk_cwd, &hints)
+        };
+        let completion_source = if explicit_work_outcome == Some("noop") {
+            "turn_bridge_explicit_noop"
+        } else {
+            "turn_bridge_explicit"
+        };
         for attempt in 1..=3u8 {
             match crate::dispatch::finalize_dispatch(
                 db,
                 engine,
                 dispatch_id,
-                "turn_bridge_explicit",
+                completion_source,
                 completion_context.as_ref(),
             ) {
                 Ok(_) => {
@@ -564,9 +641,20 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         }
         // All retries exhausted — DB fallback via pool, then runtime-root file
         let fallback_ok = db.separate_conn().ok().map_or(false, |conn| {
-            let result_json =
+            let fallback_result = if explicit_work_outcome == Some("noop") {
+                let mut result = noop_completion_context(adk_cwd, turn_output);
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert(
+                        "completion_source".to_string(),
+                        serde_json::Value::String("turn_bridge_db_fallback_noop".to_string()),
+                    );
+                    obj.insert("needs_reconcile".to_string(), serde_json::Value::Bool(true));
+                }
+                result
+            } else {
                 completion_result_with_context("turn_bridge_db_fallback", true, adk_cwd, &hints)
-                    .to_string();
+            };
+            let result_json = fallback_result.to_string();
             let changed = conn.execute(
                 "UPDATE task_dispatches SET status = 'completed', \
                  result = ?1, \
@@ -582,7 +670,23 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             changed > 0
         });
         if !fallback_ok {
-            let ok = runtime_db_fallback_complete(dispatch_id, "turn_bridge_db_fallback");
+            let fallback_result = if explicit_work_outcome == Some("noop") {
+                let mut result = noop_completion_context(adk_cwd, turn_output);
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert(
+                        "completion_source".to_string(),
+                        serde_json::Value::String("turn_bridge_db_fallback_noop".to_string()),
+                    );
+                    obj.insert("needs_reconcile".to_string(), serde_json::Value::Bool(true));
+                }
+                result
+            } else {
+                serde_json::json!({
+                    "completion_source": "turn_bridge_db_fallback",
+                    "needs_reconcile": true,
+                })
+            };
+            let ok = runtime_db_fallback_complete_with_result(dispatch_id, &fallback_result);
             if !ok {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 eprintln!(
@@ -593,9 +697,30 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
     } else {
         // Db/Engine not available — fall back to API PATCH with retry
         let url = local_api_url(shared.api_port, &format!("/api/dispatches/{dispatch_id}"));
+        let api_result = if explicit_work_outcome == Some("noop") {
+            let mut result = noop_completion_context(adk_cwd, turn_output);
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert(
+                    "completion_source".to_string(),
+                    serde_json::Value::String("turn_bridge_explicit_noop".to_string()),
+                );
+            }
+            result
+        } else {
+            completion_result_with_context(
+                "turn_bridge_explicit",
+                false,
+                adk_cwd,
+                &DispatchCompletionHints {
+                    issue_number: None,
+                    dispatch_created_at: None,
+                    output_commit: None,
+                },
+            )
+        };
         let payload = serde_json::json!({
             "status": "completed",
-            "result": completion_result_with_context("turn_bridge_explicit", false, adk_cwd, &DispatchCompletionHints { issue_number: None, dispatch_created_at: None, output_commit: None }),
+            "result": api_result,
         });
         for attempt in 1..=3u8 {
             match reqwest::Client::new()
@@ -631,7 +756,23 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             }
         }
         // API retries exhausted — runtime-root DB fallback
-        if !runtime_db_fallback_complete(dispatch_id, "turn_bridge_db_fallback") {
+        let runtime_result = if explicit_work_outcome == Some("noop") {
+            let mut result = noop_completion_context(adk_cwd, turn_output);
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert(
+                    "completion_source".to_string(),
+                    serde_json::Value::String("turn_bridge_db_fallback_noop".to_string()),
+                );
+                obj.insert("needs_reconcile".to_string(), serde_json::Value::Bool(true));
+            }
+            result
+        } else {
+            serde_json::json!({
+                "completion_source": "turn_bridge_db_fallback",
+                "needs_reconcile": true,
+            })
+        };
+        if !runtime_db_fallback_complete_with_result(dispatch_id, &runtime_result) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
                 "  [{ts}] 🔴 CRITICAL: all completion paths exhausted for dispatch {dispatch_id} — dispatch stranded"

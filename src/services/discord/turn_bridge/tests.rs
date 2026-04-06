@@ -1,5 +1,6 @@
 use super::completion_guard::{
-    build_verdict_payload, extract_explicit_review_verdict, extract_review_decision,
+    build_verdict_payload, extract_explicit_review_verdict, extract_explicit_work_outcome,
+    extract_review_decision,
 };
 use super::recovery_text::{
     clear_local_session_state, contains_stale_resume_error_text, handle_gemini_retry_boundary,
@@ -435,6 +436,24 @@ fn verdict_fallback_payload_truncates_long_feedback() {
     assert_eq!(payload["provider"], "claude");
     let feedback = payload["feedback"].as_str().unwrap();
     assert!(feedback.len() <= 4003); // 4000 + "..." ellipsis
+}
+
+#[test]
+fn work_outcome_parser_accepts_explicit_noop_marker() {
+    assert_eq!(
+        extract_explicit_work_outcome("OUTCOME: noop\n변경 불필요 — 이미 반영됨"),
+        Some("noop")
+    );
+}
+
+#[test]
+fn work_outcome_parser_rejects_non_explicit_noop_mentions() {
+    assert_eq!(
+        extract_explicit_work_outcome(
+            "이번 턴은 noop에 가까워 보이지만 먼저 코드 확인이 필요합니다."
+        ),
+        None
+    );
 }
 
 // ========== resolve_done_response tests ==========

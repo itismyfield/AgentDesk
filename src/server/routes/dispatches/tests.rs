@@ -127,6 +127,7 @@ fn implementation_dispatch_message_stays_compact() {
             "[Implement feature #24](<https://github.com/itismyfield/AgentDesk/issues/24>)"
         )
     );
+    assert!(message.contains("`OUTCOME: noop`"));
     assert!(!message.contains("검토 전용"));
     // Implementation dispatches should NOT include verdict instructions
     assert!(!message.contains("review-verdict"));

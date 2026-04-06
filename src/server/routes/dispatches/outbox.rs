@@ -484,6 +484,17 @@ pub(super) fn format_dispatch_message(
             message.push_str(&issue_link);
         }
         message
+    } else if matches!(dispatch_type, Some("implementation") | Some("rework")) {
+        let mut message = if !issue_link.is_empty() {
+            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")
+        } else {
+            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}")
+        };
+        message.push_str(
+            "\n\n구현이 불필요하다고 판단되면 응답 첫 줄에 반드시 `OUTCOME: noop`를 적고 근거를 설명하세요.\n\
+             이 marker가 있으면 일반 완료 대신 non-implementation terminal path로 처리됩니다.",
+        );
+        message
     } else if !issue_link.is_empty() {
         format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")
     } else {

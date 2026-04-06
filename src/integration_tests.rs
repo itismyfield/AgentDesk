@@ -2190,6 +2190,70 @@ mod tests {
     }
 
     #[test]
+    fn scenario_332_implementation_noop_completion_skips_review_and_finishes_done() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_card(&db, "card-332", "in_progress");
+        seed_dispatch(&db, "impl-332", "card-332", "implementation", "pending");
+
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            "impl-332",
+            &serde_json::json!({
+                "completion_source": "test_harness",
+                "work_outcome": "noop",
+                "completed_without_changes": true,
+                "notes": "spec already satisfied"
+            }),
+        );
+        assert!(
+            result.is_ok(),
+            "complete_dispatch should succeed: {:?}",
+            result.err()
+        );
+
+        assert_eq!(
+            get_card_status(&db, "card-332"),
+            "done",
+            "#332: explicit noop outcome must finish implementation card as done"
+        );
+
+        let conn = db.lock().unwrap();
+        let review_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-332' AND dispatch_type = 'review' \
+                 AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            review_count, 0,
+            "#332: noop completion must not create a follow-up review dispatch"
+        );
+
+        let metadata_json: String = conn
+            .query_row(
+                "SELECT metadata FROM kanban_cards WHERE id = 'card-332'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(metadata["work_resolution_status"], "noop");
+        assert_eq!(metadata["work_resolution_result"]["work_outcome"], "noop");
+        assert_eq!(
+            metadata["work_resolution_result"]["completed_without_changes"],
+            true
+        );
+    }
+
+    #[test]
     fn scenario_208_on_tick_creates_codex_rework_and_dedups_review() {
         let _gh = install_mock_gh(
             r#"
