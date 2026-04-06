@@ -15,24 +15,94 @@ import type {
 export type { AuditLogEntry, KanbanCard, KanbanRepoSource } from "../types";
 
 const BASE = "";
+const REQUEST_TIMEOUT_MS = 15_000;
+const MAX_RETRIES = 2;
+const INITIAL_BACKOFF_MS = 500;
 
-async function request<T>(
-  url: string,
-  opts?: RequestInit,
-): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, {
-    credentials: "include",
-    ...opts,
-    headers: {
-      "Content-Type": "application/json",
-      ...opts?.headers,
-    },
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: "unknown" }));
-    throw new Error(err.error || `HTTP ${res.status}`);
+// ── GET deduplication ──
+const inflightGets = new Map<string, Promise<unknown>>();
+
+// ── Global error listener for toast integration ──
+type ApiErrorListener = (url: string, error: Error) => void;
+let apiErrorListener: ApiErrorListener | null = null;
+export function onApiError(listener: ApiErrorListener | null): void {
+  apiErrorListener = listener;
+}
+
+function isRetryable(status: number): boolean {
+  return status === 0 || status === 408 || status === 429 || status >= 500;
+}
+
+async function request<T>(url: string, opts?: RequestInit): Promise<T> {
+  const method = opts?.method?.toUpperCase() ?? "GET";
+  const isGet = method === "GET";
+
+  if (isGet) {
+    const existing = inflightGets.get(url);
+    if (existing) return existing as Promise<T>;
   }
-  return res.json();
+
+  const execute = async (): Promise<T> => {
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        const delay = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const res = await fetch(`${BASE}${url}`, {
+          credentials: "include",
+          ...opts,
+          signal: controller.signal,
+          headers: {
+            "Content-Type": "application/json",
+            ...opts?.headers,
+          },
+        });
+        clearTimeout(timer);
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: "unknown" }));
+          const error = new Error(err.error || `HTTP ${res.status}`);
+          if (isGet && isRetryable(res.status) && attempt < MAX_RETRIES) {
+            lastError = error;
+            continue;
+          }
+          throw error;
+        }
+        return await res.json();
+      } catch (error) {
+        clearTimeout(timer);
+        const resolvedError = error instanceof Error ? error : new Error(String(error));
+        if (resolvedError.name === "AbortError") {
+          lastError = new Error(`Request timeout: ${url}`);
+          if (isGet && attempt < MAX_RETRIES) continue;
+        } else if (
+          isGet &&
+          attempt < MAX_RETRIES &&
+          !resolvedError.message.startsWith("HTTP ")
+        ) {
+          lastError = resolvedError;
+          continue;
+        }
+        throw lastError ?? resolvedError;
+      }
+    }
+    throw lastError ?? new Error(`Request failed: ${url}`);
+  };
+
+  const promise = execute().finally(() => {
+    if (isGet) inflightGets.delete(url);
+  });
+
+  if (isGet) inflightGets.set(url, promise);
+
+  return promise.catch((error) => {
+    const resolvedError = error instanceof Error ? error : new Error(String(error));
+    apiErrorListener?.(url, resolvedError);
+    throw resolvedError;
+  });
 }
 
 // Auth
@@ -1049,8 +1119,22 @@ export async function reorderAutoQueueEntries(
   });
 }
 
-export async function resetAutoQueue(): Promise<{ ok: boolean; deleted_entries: number; completed_runs: number }> {
-  return request("/api/auto-queue/reset", { method: "POST" });
+export interface AutoQueueResetScope {
+  runId?: string | null;
+  repo?: string | null;
+  agentId?: string | null;
+}
+
+export async function resetAutoQueue(
+  scope: AutoQueueResetScope = {},
+): Promise<{ ok: boolean; deleted_entries: number; completed_runs: number }> {
+  const params = new URLSearchParams();
+  if (scope.runId) params.set("run_id", scope.runId);
+  if (scope.repo) params.set("repo", scope.repo);
+  if (scope.agentId) params.set("agent_id", scope.agentId);
+  const query = params.toString();
+  const path = query ? `/api/auto-queue/reset?${query}` : "/api/auto-queue/reset";
+  return request(path, { method: "POST" });
 }
 
 // ── Pipeline Config Hierarchy (#135) ──

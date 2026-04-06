@@ -401,7 +401,11 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     setError(null);
     try {
       suppressedRunIdRef.current = null;
-      await api.resetAutoQueue();
+      await api.resetAutoQueue({
+        runId: status?.run?.id ?? null,
+        repo: selectedRepo || null,
+        agentId: selectedAgentId || null,
+      });
       const result = await api.generateAutoQueue(selectedRepo || null, selectedAgentId, generateMode) as Record<string, unknown>;
       if (result.entries && Array.isArray(result.entries) && result.entries.length === 0) {
         const counts = result.counts as Record<string, number> | undefined;
@@ -428,7 +432,11 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     setNoReadyCards(false);
     suppressedRunIdRef.current = status?.run?.id ?? null;
     try {
-      await api.resetAutoQueue();
+      await api.resetAutoQueue({
+        runId: status?.run?.id ?? null,
+        repo: selectedRepo || null,
+        agentId: selectedAgentId || null,
+      });
       resetPanelState();
     } catch (e) {
       suppressedRunIdRef.current = null;

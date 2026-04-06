@@ -2460,6 +2460,133 @@ async fn auto_queue_reset_completes_generated_and_pending_runs() {
     assert_eq!(remaining_entries, 0);
 }
 
+#[tokio::test]
+async fn auto_queue_reset_respects_repo_and_agent_scope() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-scope-a");
+    seed_agent(&db, "agent-scope-b");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-reset-scope-match",
+        1713,
+        "ready",
+        "agent-scope-a",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-reset-scope-other-agent",
+        1714,
+        "ready",
+        "agent-scope-b",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, created_at, updated_at
+            ) VALUES (
+                'card-reset-scope-other-repo', 'Issue #1715', 'ready', 'medium',
+                'agent-scope-a', 'other-repo', 1715, datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('run-reset-scope-match', 'test-repo', 'agent-scope-a', 'generated')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('run-reset-scope-other-agent', 'test-repo', 'agent-scope-b', 'generated')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
+             VALUES ('run-reset-scope-other-repo', 'other-repo', 'agent-scope-a', 'generated')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-reset-scope-match', 'run-reset-scope-match', 'card-reset-scope-match', 'agent-scope-a', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-reset-scope-other-agent', 'run-reset-scope-other-agent', 'card-reset-scope-other-agent', 'agent-scope-b', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank) \
+             VALUES ('entry-reset-scope-other-repo', 'run-reset-scope-other-repo', 'card-reset-scope-other-repo', 'agent-scope-a', 'pending', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/reset?repo=test-repo&agent_id=agent-scope-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["deleted_entries"], 1);
+    assert_eq!(json["completed_runs"], 1);
+
+    let conn = db.lock().unwrap();
+    let matching_run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-reset-scope-match'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let other_agent_run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-reset-scope-other-agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let other_repo_run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-reset-scope-other-repo'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let remaining_entries: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auto_queue_entries", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(matching_run_status, "completed");
+    assert_eq!(other_agent_run_status, "generated");
+    assert_eq!(other_repo_run_status, "generated");
+    assert_eq!(remaining_entries, 2);
+}
+
 /// #162: A card in 'requested' state, assigned to the same agent, must not
 /// be blocked by the busy-agent guard when that card itself is the dispatch target.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

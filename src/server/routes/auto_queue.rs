@@ -37,6 +37,13 @@ pub struct StatusQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ResetQuery {
+    pub repo: Option<String>,
+    pub agent_id: Option<String>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ReorderBody {
     #[serde(rename = "orderedIds")]
     pub ordered_ids: Vec<String>,
@@ -1602,8 +1609,11 @@ pub async fn update_run(
 }
 
 /// POST /api/auto-queue/reset
-/// Clear all entries and complete all non-terminal runs.
-pub async fn reset(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+/// Clear scoped entries and complete matching non-terminal runs.
+pub async fn reset(
+    State(state): State<AppState>,
+    Query(query): Query<ResetQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -1615,16 +1625,87 @@ pub async fn reset(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
     };
     ensure_tables(&conn);
 
-    let deleted_entries = conn
-        .execute("DELETE FROM auto_queue_entries", [])
-        .unwrap_or(0);
-    let completed_runs = conn
-        .execute(
-            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
-             WHERE status IN ('generated', 'pending', 'active', 'paused')",
-            [],
-        )
-        .unwrap_or(0);
+    let scoped = query.run_id.is_some() || query.repo.is_some() || query.agent_id.is_some();
+    let active_statuses = "('generated', 'pending', 'active', 'paused')";
+
+    let (deleted_entries, completed_runs) = if scoped {
+        let affected_run_ids: Vec<String> = if let Some(run_id) = query.run_id {
+            vec![run_id]
+        } else {
+            let mut sql =
+                format!("SELECT id FROM auto_queue_runs WHERE status IN {active_statuses}");
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            if let Some(repo) = query.repo {
+                sql.push_str(&format!(" AND repo = ?{}", params.len() + 1));
+                params.push(Box::new(repo));
+            }
+            if let Some(agent_id) = query.agent_id {
+                sql.push_str(&format!(" AND agent_id = ?{}", params.len() + 1));
+                params.push(Box::new(agent_id));
+            }
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|value| value.as_ref()).collect();
+            let mut stmt = match conn.prepare(&sql) {
+                Ok(stmt) => stmt,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{e}")})),
+                    );
+                }
+            };
+            stmt.query_map(params_ref.as_slice(), |row| row.get::<_, String>(0))
+                .ok()
+                .map(|rows| rows.filter_map(|row| row.ok()).collect())
+                .unwrap_or_default()
+        };
+
+        if affected_run_ids.is_empty() {
+            (0, 0)
+        } else {
+            let placeholders = (1..=affected_run_ids.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let params: Vec<Box<dyn rusqlite::types::ToSql>> = affected_run_ids
+                .iter()
+                .cloned()
+                .map(|run_id| Box::new(run_id) as Box<dyn rusqlite::types::ToSql>)
+                .collect();
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|value| value.as_ref()).collect();
+            let deleted_entries = conn
+                .execute(
+                    &format!("DELETE FROM auto_queue_entries WHERE run_id IN ({placeholders})"),
+                    params_ref.as_slice(),
+                )
+                .unwrap_or(0);
+            let completed_runs = conn
+                .execute(
+                    &format!(
+                        "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
+                         WHERE status IN {active_statuses} AND id IN ({placeholders})"
+                    ),
+                    params_ref.as_slice(),
+                )
+                .unwrap_or(0);
+            (deleted_entries, completed_runs)
+        }
+    } else {
+        let deleted_entries = conn
+            .execute("DELETE FROM auto_queue_entries", [])
+            .unwrap_or(0);
+        let completed_runs = conn
+            .execute(
+                &format!(
+                    "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') \
+                     WHERE status IN {active_statuses}"
+                ),
+                [],
+            )
+            .unwrap_or(0);
+        (deleted_entries, completed_runs)
+    };
 
     (
         StatusCode::OK,
