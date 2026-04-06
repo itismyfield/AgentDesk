@@ -171,7 +171,7 @@ function KanbanPill({ label, value, accent }: { label: string; value: number; ac
 }
 
 function formatTimeAgo(ts: number, isKo: boolean): string {
-  const diff = Math.floor((Date.now() - ts * 1000) / 1000);
+  const diff = Math.floor((Date.now() - ts) / 1000);
   if (diff < 60) return isKo ? "방금 전" : "just now";
   if (diff < 3600) {
     const m = Math.floor(diff / 60);

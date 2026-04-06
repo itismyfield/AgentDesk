@@ -261,6 +261,11 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
   const [showMobileMore, setShowMobileMore] = useState(false);
   const isMobile = useIsMobile();
 
+  // Reset mobile-more overlay when viewport switches to desktop
+  useEffect(() => {
+    if (!isMobile) setShowMobileMore(false);
+  }, [isMobile]);
+
   const { settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr } = useSettings();
   const {
     offices,
