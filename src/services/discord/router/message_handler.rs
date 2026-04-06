@@ -81,6 +81,21 @@ pub(in crate::services::discord) async fn handle_text_message(
                         .canonicalize()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|_| ws_path.clone());
+                    // Resolve channel name from Discord API before worktree
+                    // creation so the path uses the real name, not "unknown".
+                    let (ch_name_api, cat_name) = resolve_channel_category(ctx, channel_id).await;
+                    let ch_name = match super::super::resolve_thread_parent(&ctx.http, channel_id)
+                        .await
+                    {
+                        Some((_parent_id, parent_name)) => {
+                            let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
+                            Some(super::super::synthetic_thread_channel_name(
+                                &parent, channel_id,
+                            ))
+                        }
+                        None => ch_name_api,
+                    };
+
                     // Check worktree: always use worktree for thread sessions,
                     // or when conflict detected with another session on same path.
                     let wt_info = {
@@ -120,22 +135,6 @@ pub(in crate::services::discord) async fn handle_text_message(
                         .as_ref()
                         .map(|wt| wt.worktree_path.clone())
                         .unwrap_or_else(|| canonical.clone());
-                    let (ch_name_resolved, cat_name) =
-                        resolve_channel_category(ctx, channel_id).await;
-                    // For thread channels, build a stable channel_name from the
-                    // parent channel name so resolve_agent_id_from_channel_name
-                    // can match it (same logic as bootstrap_thread_session).
-                    let ch_name = match super::super::resolve_thread_parent(&ctx.http, channel_id)
-                        .await
-                    {
-                        Some((_parent_id, parent_name)) => {
-                            let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
-                            Some(super::super::synthetic_thread_channel_name(
-                                &parent, channel_id,
-                            ))
-                        }
-                        None => ch_name_resolved,
-                    };
                     {
                         let mut data = shared.core.lock().await;
                         let session =
