@@ -97,8 +97,8 @@ const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(in crate::services::discord) use bot_init::*;
 pub(crate) use bot_init::{
-    retry_failed_dm_notifications, run_bot, send_file_to_channel, send_message_to_channel,
-    send_message_to_user,
+    RunBotContext, retry_failed_dm_notifications, run_bot, send_file_to_channel,
+    send_message_to_channel, send_message_to_user,
 };
 pub(in crate::services::discord) use queue_io::*;
 pub(crate) use restart_ctrl::extend_watchdog_deadline;
@@ -172,9 +172,11 @@ mod tests {
 
     #[test]
     fn user_is_authorized_allows_owner_and_explicit_users() {
-        let mut settings = DiscordBotSettings::default();
-        settings.owner_user_id = Some(42);
-        settings.allowed_user_ids = vec![7];
+        let settings = DiscordBotSettings {
+            owner_user_id: Some(42),
+            allowed_user_ids: vec![7],
+            ..Default::default()
+        };
 
         assert!(user_is_authorized(&settings, 42));
         assert!(user_is_authorized(&settings, 7));
@@ -183,9 +185,11 @@ mod tests {
 
     #[test]
     fn user_is_authorized_allows_everyone_when_flag_enabled() {
-        let mut settings = DiscordBotSettings::default();
-        settings.owner_user_id = Some(42);
-        settings.allow_all_users = true;
+        let settings = DiscordBotSettings {
+            owner_user_id: Some(42),
+            allow_all_users: true,
+            ..Default::default()
+        };
 
         assert!(user_is_authorized(&settings, 42));
         assert!(user_is_authorized(&settings, 99));
@@ -273,10 +277,12 @@ mod tests {
 
     #[test]
     fn handoff_routing_guard_rejects_wrong_agent_settings() {
-        let mut settings = DiscordBotSettings::default();
-        settings.provider = ProviderKind::Codex;
-        settings.agent = Some("openclaw-maker".to_string());
-        settings.allowed_channel_ids = vec![1488022491992424448];
+        let settings = DiscordBotSettings {
+            provider: ProviderKind::Codex,
+            agent: Some("openclaw-maker".to_string()),
+            allowed_channel_ids: vec![1488022491992424448],
+            ..Default::default()
+        };
 
         let result = validate_bot_channel_routing(
             &settings,

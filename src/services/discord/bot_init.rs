@@ -1,5 +1,15 @@
 use super::*;
 
+pub(crate) struct RunBotContext {
+    pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) health_registry: Arc<health::HealthRegistry>,
+    pub(crate) api_port: u16,
+    pub(crate) db: Option<crate::db::Db>,
+    pub(crate) engine: Option<crate::engine::PolicyEngine>,
+}
+
 async fn execute_handoff_turns(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -370,16 +380,16 @@ pub(super) fn scan_skills(
                 };
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.extension().map(|e| e == "md").unwrap_or(false) {
-                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                            let name = stem.to_string();
-                            if seen.insert(name.clone()) {
-                                let desc = fs::read_to_string(&path)
-                                    .ok()
-                                    .map(|content| extract_skill_description(&content))
-                                    .unwrap_or_else(|| format!("Skill: {}", name));
-                                skills.push((name, desc));
-                            }
+                    if path.extension().map(|e| e == "md").unwrap_or(false)
+                        && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    {
+                        let name = stem.to_string();
+                        if seen.insert(name.clone()) {
+                            let desc = fs::read_to_string(&path)
+                                .ok()
+                                .map(|content| extract_skill_description(&content))
+                                .unwrap_or_else(|| format!("Skill: {}", name));
+                            skills.push((name, desc));
                         }
                     }
                 }
@@ -406,10 +416,10 @@ fn skill_dir_fingerprint(provider: &ProviderKind) -> (usize, u64) {
     let mut max_mtime = 0u64;
 
     let mut dirs = collect_provider_skill_roots(provider, None);
-    if provider_supports_directory_skills(provider) {
-        if let Some(root) = crate::config::runtime_root() {
-            dirs.push(crate::runtime_layout::managed_skills_root(&root));
-        }
+    if provider_supports_directory_skills(provider)
+        && let Some(root) = crate::config::runtime_root()
+    {
+        dirs.push(crate::runtime_layout::managed_skills_root(&root));
     }
 
     fn walk_mtime(dir: &Path, count: &mut usize, max_mtime: &mut u64) {
@@ -422,15 +432,15 @@ fn skill_dir_fingerprint(provider: &ProviderKind) -> (usize, u64) {
                 walk_mtime(&path, count, max_mtime);
             } else if path.extension().map(|e| e == "md").unwrap_or(false) {
                 *count += 1;
-                if let Ok(meta) = fs::metadata(&path) {
-                    if let Ok(mt) = meta.modified() {
-                        let epoch = mt
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        if epoch > *max_mtime {
-                            *max_mtime = epoch;
-                        }
+                if let Ok(meta) = fs::metadata(&path)
+                    && let Ok(mt) = meta.modified()
+                {
+                    let epoch = mt
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if epoch > *max_mtime {
+                        *max_mtime = epoch;
                     }
                 }
             }
@@ -461,15 +471,15 @@ fn skill_dir_fingerprint_with_projects(
                 walk_mtime(&path, count, max_mtime);
             } else if path.extension().map(|e| e == "md").unwrap_or(false) {
                 *count += 1;
-                if let Ok(meta) = fs::metadata(&path) {
-                    if let Ok(mt) = meta.modified() {
-                        let epoch = mt
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        if epoch > *max_mtime {
-                            *max_mtime = epoch;
-                        }
+                if let Ok(meta) = fs::metadata(&path)
+                    && let Ok(mt) = meta.modified()
+                {
+                    let epoch = mt
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if epoch > *max_mtime {
+                        *max_mtime = epoch;
                     }
                 }
             }
@@ -524,15 +534,15 @@ fn collect_provider_skill_roots(
     project_path: Option<&str>,
 ) -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        if let Some(path) = provider_home_skill_dir(provider, &home) {
-            roots.push(path);
-        }
+    if let Some(home) = dirs::home_dir()
+        && let Some(path) = provider_home_skill_dir(provider, &home)
+    {
+        roots.push(path);
     }
-    if let Some(project_path) = project_path {
-        if let Some(path) = provider_project_skill_dir(provider, project_path) {
-            roots.push(path);
-        }
+    if let Some(project_path) = project_path
+        && let Some(path) = provider_project_skill_dir(provider, project_path)
+    {
+        roots.push(path);
     }
     roots
 }
@@ -603,19 +613,18 @@ fn resolve_codex_skill_file(path: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// Entry point: start the Discord bot
-pub(crate) async fn run_bot(
-    token: &str,
-    provider: ProviderKind,
-    global_active: Arc<std::sync::atomic::AtomicUsize>,
-    global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
-    shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
-    health_registry: Arc<health::HealthRegistry>,
-    api_port: u16,
-    db: Option<crate::db::Db>,
-    engine: Option<crate::engine::PolicyEngine>,
-) {
+pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext) {
     // Initialize debug logging from environment variable
     claude::init_debug_from_env();
+    let RunBotContext {
+        global_active,
+        global_finalizing,
+        shutdown_remaining,
+        health_registry,
+        api_port,
+        db,
+        engine,
+    } = context;
 
     let mut bot_settings = load_bot_settings(token);
     bot_settings.provider = provider.clone();
@@ -822,14 +831,17 @@ pub(crate) async fn run_bot(
                         tokio::time::sleep(DEFERRED_RESTART_POLL_INTERVAL).await;
                         // Detect restart_pending marker and set the in-memory flag
                         // so the router queues new messages instead of starting turns.
-                        if !shared_for_deferred.restart_pending.load(Ordering::Relaxed) {
-                            if let Some(root) = crate::agentdesk_runtime_root() {
-                                if root.join("restart_pending").exists() {
-                                    shared_for_deferred.restart_pending.store(true, Ordering::SeqCst);
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!("  [{ts}] ⏸ DRAIN: restart_pending detected, entering drain mode — new turns blocked");
-                                }
-                            }
+                        if !shared_for_deferred.restart_pending.load(Ordering::Relaxed)
+                            && let Some(root) = crate::agentdesk_runtime_root()
+                            && root.join("restart_pending").exists()
+                        {
+                            shared_for_deferred
+                                .restart_pending
+                                .store(true, Ordering::SeqCst);
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!(
+                                "  [{ts}] ⏸ DRAIN: restart_pending detected, entering drain mode — new turns blocked"
+                            );
                         }
                         // Use process-global counters so we wait for ALL providers
                         let g_active = shared_for_deferred.global_active.load(Ordering::Relaxed);
@@ -964,23 +976,23 @@ pub(crate) async fn run_bot(
                         // Mark all channels that recovery touched as "recently handled"
                         // by inserting a recovery_handled marker in kv_meta.
                         // restore_tmux_watchers checks this and skips those channels.
-                        if let Some(ref db) = shared_for_tmux2.db {
-                            if let Ok(conn) = db.lock() {
-                                let recovery_channels: Vec<u64> = shared_for_tmux2
-                                    .recovering_channels
-                                    .iter()
-                                    .map(|entry| entry.key().get())
-                                    .collect();
-                                for ch in &recovery_channels {
-                                    conn.execute(
-                                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                                        rusqlite::params![
-                                            format!("recovery_handled_channel:{ch}"),
-                                            chrono::Utc::now().timestamp().to_string(),
-                                        ],
-                                    )
-                                    .ok();
-                                }
+                        if let Some(ref db) = shared_for_tmux2.db
+                            && let Ok(conn) = db.lock()
+                        {
+                            let recovery_channels: Vec<u64> = shared_for_tmux2
+                                .recovering_channels
+                                .iter()
+                                .map(|entry| entry.key().get())
+                                .collect();
+                            for ch in &recovery_channels {
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                                    rusqlite::params![
+                                        format!("recovery_handled_channel:{ch}"),
+                                        chrono::Utc::now().timestamp().to_string(),
+                                    ],
+                                )
+                                .ok();
                             }
                         }
 
@@ -988,14 +1000,14 @@ pub(crate) async fn run_bot(
                         cleanup_orphan_tmux_sessions(&shared_for_tmux2).await;
 
                         // Clean up recovery markers
-                        if let Some(ref db) = shared_for_tmux2.db {
-                            if let Ok(conn) = db.lock() {
-                                conn.execute(
-                                    "DELETE FROM kv_meta WHERE key LIKE 'recovery_handled_channel:%'",
-                                    [],
-                                )
-                                .ok();
-                            }
+                        if let Some(ref db) = shared_for_tmux2.db
+                            && let Ok(conn) = db.lock()
+                        {
+                            conn.execute(
+                                "DELETE FROM kv_meta WHERE key LIKE 'recovery_handled_channel:%'",
+                                [],
+                            )
+                            .ok();
                         }
                     }
 
@@ -1303,14 +1315,12 @@ pub(crate) async fn run_bot(
                         std::sync::atomic::Ordering::Relaxed,
                     )
                     .is_ok()
-                {
-                    if shared_for_signal
+                    && shared_for_signal
                         .shutdown_remaining
                         .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
                         == 1
-                    {
-                        std::process::exit(0);
-                    }
+                {
+                    std::process::exit(0);
                 }
             }
         }
@@ -1415,7 +1425,7 @@ pub(super) async fn try_handle_pending_dm_reply(
                 // Record failure in context so readConsumed can detect it
                 let db3 = info.db.clone();
                 let reply_id = info.id;
-                let err_msg = format!("{e}");
+                let err_msg = e.to_string();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Ok(conn) = db3.separate_conn() {
                         let _ = conn.execute(
@@ -1760,10 +1770,10 @@ pub(super) async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
         let mut data = shared.core.lock().await;
         for (ch, _) in &expired {
             // Clean up worktree if session had one
-            if let Some(session) = data.sessions.get(ch) {
-                if let Some(ref wt) = session.worktree {
-                    cleanup_git_worktree(wt);
-                }
+            if let Some(session) = data.sessions.get(ch)
+                && let Some(ref wt) = session.worktree
+            {
+                cleanup_git_worktree(wt);
             }
             data.sessions.remove(ch);
             if data.cancel_tokens.remove(ch).is_some() {
@@ -2087,49 +2097,49 @@ pub(super) async fn auto_restore_session(
         }
     }
 
-    if let Some(last_path) = last_path {
-        if session_path_is_usable(&last_path, saved_remote.as_deref()) {
-            // Session ID is restored from DB (sessions.claude_session_id column)
-            // which is already loaded into DiscordSession.session_id at startup.
-            let session = data
-                .sessions
-                .entry(channel_id)
-                .or_insert_with(|| DiscordSession {
-                    session_id: None,
-                    current_path: None,
-                    history: Vec::new(),
-                    pending_uploads: Vec::new(),
-                    cleared: false,
-                    channel_id: Some(channel_id.get()),
-                    channel_name: restore_ch_name.clone(),
-                    category_name: cat_name.clone(),
-                    remote_profile_name: saved_remote.clone(),
+    if let Some(last_path) = last_path
+        && session_path_is_usable(&last_path, saved_remote.as_deref())
+    {
+        // Session ID is restored from DB (sessions.claude_session_id column)
+        // which is already loaded into DiscordSession.session_id at startup.
+        let session = data
+            .sessions
+            .entry(channel_id)
+            .or_insert_with(|| DiscordSession {
+                session_id: None,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                channel_id: Some(channel_id.get()),
+                channel_name: restore_ch_name.clone(),
+                category_name: cat_name.clone(),
+                remote_profile_name: saved_remote.clone(),
 
-                    last_active: tokio::time::Instant::now(),
-                    worktree: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
 
-                    born_generation: runtime_store::load_generation(),
-                });
-            session.channel_id = Some(channel_id.get());
-            session.last_active = tokio::time::Instant::now();
-            session.channel_name = restore_ch_name.clone();
-            session.category_name = cat_name.clone();
-            if session.remote_profile_name.is_none() {
-                session.remote_profile_name = saved_remote.clone();
-            }
-            session.current_path = Some(last_path.clone());
-            drop(data);
-
-            // Rescan skills with project path
-            let new_skills = scan_skills(&provider, Some(&last_path));
-            *shared.skills_cache.write().await = new_skills;
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            let remote_info = saved_remote
-                .as_ref()
-                .map(|n| format!(" (remote: {})", n))
-                .unwrap_or_default();
-            println!("  [{ts}] ↻ Auto-restored session: {last_path}{remote_info}");
+                born_generation: runtime_store::load_generation(),
+            });
+        session.channel_id = Some(channel_id.get());
+        session.last_active = tokio::time::Instant::now();
+        session.channel_name = restore_ch_name.clone();
+        session.category_name = cat_name.clone();
+        if session.remote_profile_name.is_none() {
+            session.remote_profile_name = saved_remote.clone();
         }
+        session.current_path = Some(last_path.clone());
+        drop(data);
+
+        // Rescan skills with project path
+        let new_skills = scan_skills(&provider, Some(&last_path));
+        *shared.skills_cache.write().await = new_skills;
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        let remote_info = saved_remote
+            .as_ref()
+            .map(|n| format!(" (remote: {})", n))
+            .unwrap_or_default();
+        println!("  [{ts}] ↻ Auto-restored session: {last_path}{remote_info}");
     }
 }
 
@@ -2383,18 +2393,16 @@ fn enrich_role_map_with_channel_ids() {
         .and_then(|v| v.as_object_mut())
     {
         for (name, ch_id) in &mappings {
-            if let Some(entry) = by_name.get_mut(name) {
-                if let Some(obj) = entry.as_object_mut() {
-                    obj.insert("channelId".to_string(), serde_json::json!(ch_id));
-                    changed = true;
-                }
+            if let Some(entry) = by_name.get_mut(name)
+                && let Some(obj) = entry.as_object_mut()
+            {
+                obj.insert("channelId".to_string(), serde_json::json!(ch_id));
+                changed = true;
             }
         }
     }
 
-    if changed {
-        if let Ok(pretty) = serde_json::to_string_pretty(&json) {
-            let _ = runtime_store::atomic_write(&path, &pretty);
-        }
+    if changed && let Ok(pretty) = serde_json::to_string_pretty(&json) {
+        let _ = runtime_store::atomic_write(&path, &pretty);
     }
 }
