@@ -554,8 +554,10 @@ pub async fn get_pending_dispatch_for_thread(
              WHERE td.status IN ('pending', 'dispatched') \
              AND td.dispatch_type IN ('implementation', 'rework') \
              AND r.unified_thread = 1 AND r.status = 'active' \
-             AND (r.unified_thread_channel_id = ?1 \
-                  OR INSTR(COALESCE(r.unified_thread_id, ''), ?1) > 0) \
+             AND (td.thread_id = ?1 \
+                  OR r.unified_thread_channel_id = ?1 \
+                  OR EXISTS(SELECT 1 FROM json_each(r.unified_thread_id) \
+                            WHERE json_each.value = ?1)) \
              ORDER BY td.created_at DESC LIMIT 1",
             [thread_id],
             |row| row.get(0),
