@@ -518,7 +518,7 @@ fn legacy_prompt_fallback_path(path: &Path) -> Option<PathBuf> {
 /// Scans config/memories/long-term/{role_id}/ for .md files and extracts
 /// name + description from YAML frontmatter (or first heading as fallback).
 /// Returns None if directory doesn't exist or has no .md files.
-pub(super) fn load_longterm_memory_catalog(role_id: &str) -> Option<String> {
+pub(crate) fn load_longterm_memory_catalog(role_id: &str) -> Option<String> {
     let memory_dir = super::runtime_store::long_term_memory_root()?.join(role_id);
     if !memory_dir.is_dir() {
         let root = super::runtime_store::agentdesk_root()?;

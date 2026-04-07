@@ -5,7 +5,7 @@ use super::runtime_store::shared_agent_knowledge_path;
 /// Read shared_knowledge.md from the managed SAK path.
 /// Returns the file content wrapped in a [Shared Agent Knowledge] section,
 /// or None if the file doesn't exist or is empty.
-pub(super) fn load_shared_knowledge() -> Option<String> {
+pub(crate) fn load_shared_knowledge() -> Option<String> {
     let path = shared_agent_knowledge_path()?;
     let content = fs::read_to_string(&path).ok()?;
     let trimmed = content.trim();
