@@ -5,7 +5,7 @@ use super::runtime_store::shared_agent_knowledge_path;
 /// Read shared_knowledge.md from the managed SAK path.
 /// Returns the file content wrapped in a [Shared Agent Knowledge] section,
 /// or None if the file doesn't exist or is empty.
-pub(super) fn load_shared_knowledge() -> Option<String> {
+pub(crate) fn load_shared_knowledge() -> Option<String> {
     let path = shared_agent_knowledge_path()?;
     let content = fs::read_to_string(&path).ok()?;
     let trimmed = content.trim();
@@ -23,7 +23,9 @@ mod tests {
     where
         F: FnOnce(&std::path::Path),
     {
-        let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let _guard = super::super::runtime_store::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join(".adk");
         let sak_dir = root

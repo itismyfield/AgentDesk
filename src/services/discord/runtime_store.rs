@@ -116,7 +116,7 @@ pub(super) fn save_all_last_message_ids(provider: &str, ids: &std::collections::
 /// Shared mutex for tests that manipulate AGENTDESK_ROOT_DIR env var.
 /// All test modules must use this to avoid env var races.
 #[cfg(test)]
-pub(super) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
@@ -137,7 +137,7 @@ mod tests {
     /// Acquire the shared env lock to avoid races between tests that mutate
     /// AGENTDESK_ROOT_DIR.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        test_env_lock().lock().unwrap()
+        test_env_lock().lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]

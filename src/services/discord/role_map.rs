@@ -4,7 +4,7 @@ use poise::serenity_prelude::ChannelId;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::role_map_path;
-use super::settings::{PeerAgentInfo, RoleBinding};
+use super::settings::{MemoryConfigOverride, PeerAgentInfo, RoleBinding, resolve_memory_settings};
 use crate::services::provider::ProviderKind;
 
 /// Expand `~` or `~/` prefix to the user's home directory.
@@ -46,6 +46,14 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
         .get("peerAgents")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let memory_override = obj.get("memory").and_then(|raw| {
+        serde_json::from_value::<MemoryConfigOverride>(raw.clone())
+            .map_err(|err| {
+                eprintln!("  [memory] Warning: invalid role_map memory block: {err}");
+                err
+            })
+            .ok()
+    });
     Some(RoleBinding {
         role_id,
         prompt_file,
@@ -53,6 +61,7 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
         model,
         reasoning_effort,
         peer_agents_enabled,
+        memory: resolve_memory_settings(None, memory_override.as_ref()),
     })
 }
 
@@ -274,4 +283,79 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         summary_agent,
         available_agents,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn with_temp_root<F>(f: F)
+    where
+        F: FnOnce(&TempDir),
+    {
+        let _guard = super::super::runtime_store::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join(".adk");
+        std::fs::create_dir_all(&root).unwrap();
+        let prev = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
+        f(&temp);
+        match prev {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+    }
+
+    fn write_role_map(dir: &std::path::Path, content: &str) {
+        let settings_dir = dir.join(".adk").join("config");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        std::fs::write(settings_dir.join("role_map.json"), content).unwrap();
+    }
+
+    #[test]
+    fn test_resolve_role_binding_reads_memory_block_from_role_map() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(
+                temp_home.path(),
+                r#"{
+  "byChannelId": {
+    "123": {
+      "roleId": "codex",
+      "promptFile": "~/prompts/codex.md",
+      "provider": "codex",
+      "memory": {
+        "backend": "mem0",
+        "recall_timeout_ms": 50,
+        "capture_timeout_ms": 8000,
+        "mem0": {
+          "profile": "strict",
+          "ingestion": {
+            "infer": true,
+            "custom_instructions": "Remember deployment facts"
+          }
+        }
+      }
+    }
+  }
+}"#,
+            );
+
+            let binding = resolve_role_binding(ChannelId::new(123), None).unwrap();
+            assert_eq!(
+                binding.memory.backend,
+                super::super::settings::MemoryBackendKind::Mem0
+            );
+            assert_eq!(binding.memory.recall_timeout_ms, 100);
+            assert_eq!(binding.memory.capture_timeout_ms, 8000);
+            assert_eq!(binding.memory.mem0.profile, "strict");
+            assert_eq!(binding.memory.mem0.ingestion.infer, Some(true));
+            assert_eq!(
+                binding.memory.mem0.ingestion.custom_instructions.as_deref(),
+                Some("Remember deployment facts")
+            );
+        });
+    }
 }

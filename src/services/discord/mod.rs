@@ -17,7 +17,7 @@ mod role_map;
 mod router;
 pub mod runtime_store;
 pub(crate) mod settings;
-mod shared_memory;
+pub(crate) mod shared_memory;
 #[cfg(unix)]
 mod tmux;
 mod turn_bridge;
@@ -56,7 +56,7 @@ use handoff::{clear_handoff, load_handoffs, update_handoff_state};
 use inflight::{
     InflightTurnState, clear_inflight_state, load_inflight_states, save_inflight_state,
 };
-use prompt_builder::{DispatchProfile, build_system_prompt};
+use prompt_builder::build_system_prompt;
 use recovery::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use router::{handle_event, handle_text_message};
@@ -65,13 +65,14 @@ use settings::{
     RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings, resolve_role_binding,
     save_bot_settings, validate_bot_channel_routing,
 };
-use shared_memory::load_shared_knowledge;
 #[cfg(unix)]
 use tmux::{
     cleanup_orphan_tmux_sessions, reap_dead_tmux_sessions, restore_tmux_watchers,
     tmux_output_watcher,
 };
 use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};
+
+pub(crate) use prompt_builder::DispatchProfile;
 
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
@@ -961,6 +962,7 @@ async fn execute_handoff_turns(
     if handoffs.is_empty() {
         return;
     }
+    let settings_snapshot = shared.settings.read().await.clone();
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!(
         "  [{ts}] 📎 Found {} handoff record(s) to process",
@@ -990,6 +992,30 @@ async fn execute_handoff_turns(
                 record.channel_id, record.state
             );
             clear_handoff(provider, record.channel_id);
+            continue;
+        }
+
+        let is_dm = matches!(
+            channel_id.to_channel(http).await,
+            Ok(serenity::model::channel::Channel::Private(_))
+        );
+        let (eff_id, eff_name) =
+            if let Some((pid, pname)) = resolve_thread_parent(http, channel_id).await {
+                (pid, pname.or(record.channel_name.clone()))
+            } else {
+                (channel_id, record.channel_name.clone())
+            };
+        if let Err(reason) = validate_bot_channel_routing(
+            &settings_snapshot,
+            provider,
+            eff_id,
+            eff_name.as_deref(),
+            is_dm,
+        ) {
+            println!(
+                "  [{ts}] ⏭ Skipping handoff for channel {} — {reason}",
+                record.channel_id
+            );
             continue;
         }
 
@@ -3409,6 +3435,10 @@ mod tests {
         is_synthetic_thread_channel_name, session_path_is_usable, synthetic_thread_channel_name,
         user_is_authorized,
     };
+    use crate::services::discord::settings::{
+        BotChannelRoutingGuardFailure, validate_bot_channel_routing,
+    };
+    use crate::services::provider::ProviderKind;
 
     #[test]
     fn synthetic_thread_channel_name_round_trips() {
@@ -3488,5 +3518,23 @@ mod tests {
     #[test]
     fn session_path_is_usable_for_remote_nonlocal_path() {
         assert!(session_path_is_usable("~/repo", Some("mac-mini")));
+    }
+
+    #[test]
+    fn handoff_routing_guard_rejects_wrong_agent_settings() {
+        let mut settings = DiscordBotSettings::default();
+        settings.provider = ProviderKind::Codex;
+        settings.agent = Some("openclaw-maker".to_string());
+        settings.allowed_channel_ids = vec![1488022491992424448];
+
+        let result = validate_bot_channel_routing(
+            &settings,
+            &ProviderKind::Codex,
+            ChannelId::new(1488022491992424448),
+            Some("agentdesk-spark"),
+            false,
+        );
+
+        assert_eq!(result, Err(BotChannelRoutingGuardFailure::AgentMismatch));
     }
 }

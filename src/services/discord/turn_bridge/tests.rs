@@ -9,14 +9,66 @@ use super::retry_state::{
     clear_local_session_state, handle_gemini_retry_boundary, reset_gemini_retry_attempt_state,
     should_reset_gemini_retry_attempt_state,
 };
+use super::spawn_memory_capture_task;
 use super::stale_resume::{
     contains_stale_resume_error_text, output_file_has_stale_resume_error_after_offset,
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
+use crate::services::discord::ChannelId;
 use crate::services::discord::InflightTurnState;
+use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
+use crate::services::memory::CaptureRequest;
 use crate::services::provider::ProviderKind;
 use std::io::Write;
+use std::time::{Duration, Instant};
+
+async fn spawn_hanging_http_server() -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    });
+    (format!("http://{}", addr), handle)
+}
+
+fn set_mem0_env(
+    base_url: &str,
+) -> (
+    std::sync::MutexGuard<'static, ()>,
+    Option<std::ffi::OsString>,
+    Option<std::ffi::OsString>,
+) {
+    let guard = crate::services::discord::runtime_store::test_env_lock()
+        .lock()
+        .unwrap();
+    let prev_api_key = std::env::var_os("MEM0_API_KEY");
+    let prev_base_url = std::env::var_os("MEM0_BASE_URL");
+    unsafe {
+        std::env::set_var("MEM0_API_KEY", "test-key");
+        std::env::set_var("MEM0_BASE_URL", base_url);
+    }
+    (guard, prev_api_key, prev_base_url)
+}
+
+fn restore_mem0_env(
+    prev_api_key: Option<std::ffi::OsString>,
+    prev_base_url: Option<std::ffi::OsString>,
+) {
+    match prev_api_key {
+        Some(value) => unsafe { std::env::set_var("MEM0_API_KEY", value) },
+        None => unsafe { std::env::remove_var("MEM0_API_KEY") },
+    }
+    match prev_base_url {
+        Some(value) => unsafe { std::env::set_var("MEM0_BASE_URL", value) },
+        None => unsafe { std::env::remove_var("MEM0_BASE_URL") },
+    }
+}
 
 #[test]
 fn chained_batch_mid_turn_keeps_watcher_paused() {
@@ -43,6 +95,44 @@ fn persisted_context_tokens_uses_input_only() {
 #[test]
 fn total_context_tokens_saturates_on_overflow() {
     assert_eq!(total_context_tokens(u64::MAX, 1), u64::MAX);
+}
+
+#[tokio::test]
+async fn memory_capture_task_is_backgrounded_and_timeout_isolated() {
+    let (base_url, server_handle) = spawn_hanging_http_server().await;
+    let (_guard, prev_api_key, prev_base_url) = set_mem0_env(&base_url);
+
+    let start = Instant::now();
+    let handle = spawn_memory_capture_task(
+        ChannelId::new(42),
+        ResolvedMemorySettings {
+            backend: MemoryBackendKind::Mem0,
+            capture_timeout_ms: 25,
+            ..ResolvedMemorySettings::default()
+        },
+        CaptureRequest {
+            provider: ProviderKind::Codex,
+            role_id: "codex".to_string(),
+            channel_id: 42,
+            session_id: "run-42".to_string(),
+            dispatch_id: None,
+            user_text: "user".to_string(),
+            assistant_text: "assistant".to_string(),
+        },
+    );
+
+    assert!(
+        start.elapsed() < Duration::from_millis(10),
+        "spawning capture should not block the response-finalization path"
+    );
+
+    tokio::time::timeout(Duration::from_millis(300), handle)
+        .await
+        .expect("capture task should finish within timeout")
+        .expect("capture task should not panic");
+
+    server_handle.abort();
+    restore_mem0_env(prev_api_key, prev_base_url);
 }
 
 #[test]

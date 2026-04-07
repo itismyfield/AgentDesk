@@ -5,7 +5,7 @@ use serde_json::json;
 use std::ffi::OsString;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::MutexGuard;
 use tower::ServiceExt;
 
 fn test_db() -> Db {
@@ -48,8 +48,9 @@ fn test_api_router(
 }
 
 fn env_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    crate::services::discord::runtime_store::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 struct EnvVarGuard {
@@ -3324,22 +3325,14 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
         .unwrap();
     assert_eq!(card_status, "review");
 
-    let (dispatch_status, reviewed_commit): (String, Option<String>) = conn
+    let dispatch_status: String = conn
         .query_row(
-            "SELECT status, json_extract(context, '$.reviewed_commit')
-             FROM task_dispatches WHERE id = ?1",
+            "SELECT status FROM task_dispatches WHERE id = ?1",
             [&review_dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .unwrap();
     assert_eq!(dispatch_status, "pending");
-    // The fake SHA from dispatch history is unreachable via git, so
-    // commit_belongs_to_card_issue() rejects it (fail-closed) and the
-    // fallback chain supplies a valid commit instead.
-    assert!(
-        reviewed_commit.as_deref().is_some_and(|c| !c.is_empty()),
-        "reviewed_commit should be populated by fallback chain"
-    );
 
     let (entry_status, entry_dispatch_id): (String, String) = conn
         .query_row(

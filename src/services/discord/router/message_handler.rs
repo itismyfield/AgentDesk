@@ -1,6 +1,57 @@
 use super::super::*;
+use crate::services::memory::{
+    RecallRequest, RecallResponse, build_memory_backend, resolve_memory_role_id,
+    resolve_memory_session_id,
+};
 #[cfg(unix)]
 use crate::services::tmux_common::tmux_exact_target;
+
+#[derive(Debug, PartialEq, Eq)]
+struct MemoryInjectionPlan<'a> {
+    shared_knowledge_for_context: Option<&'a str>,
+    shared_knowledge_for_system_prompt: Option<&'a str>,
+    external_recall_for_context: Option<&'a str>,
+    longterm_catalog_for_system_prompt: Option<&'a str>,
+}
+
+fn build_memory_injection_plan<'a>(
+    provider: &ProviderKind,
+    has_session_id: bool,
+    dispatch_profile: DispatchProfile,
+    memory_recall: &'a RecallResponse,
+) -> MemoryInjectionPlan<'a> {
+    let should_inject_shared_knowledge =
+        !has_session_id && dispatch_profile == DispatchProfile::Full;
+    let shared_knowledge_for_context =
+        if should_inject_shared_knowledge && !matches!(provider, ProviderKind::Claude) {
+            memory_recall.shared_knowledge.as_deref()
+        } else {
+            None
+        };
+    let shared_knowledge_for_system_prompt =
+        if should_inject_shared_knowledge && matches!(provider, ProviderKind::Claude) {
+            memory_recall.shared_knowledge.as_deref()
+        } else {
+            None
+        };
+    let external_recall_for_context = if dispatch_profile == DispatchProfile::Full {
+        memory_recall.external_recall.as_deref()
+    } else {
+        None
+    };
+    let longterm_catalog_for_system_prompt = if dispatch_profile == DispatchProfile::Full {
+        memory_recall.longterm_catalog.as_deref()
+    } else {
+        None
+    };
+
+    MemoryInjectionPlan {
+        shared_knowledge_for_context,
+        shared_knowledge_for_system_prompt,
+        external_recall_for_context,
+        longterm_catalog_for_system_prompt,
+    }
+}
 
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
@@ -437,25 +488,87 @@ pub(in crate::services::discord) async fn handle_text_message(
         provider
     };
 
+    // Derive dispatch prompt profile before memory recall so ReviewLite can
+    // skip heavy memory work consistently across local/mem0 backends.
+    let dispatch_profile = DispatchProfile::from_dispatch_type(
+        dispatch_id_for_thread
+            .as_ref()
+            .and_then(|_| dispatch_type_str.as_deref()),
+    );
+
+    reset_provider_session_if_pending(shared, channel_id, &provider).await;
+    let prompt_prep_started = std::time::Instant::now();
+
+    // Resolve channel/tmux session name from current session state. We need the
+    // persisted provider session_id before recall so Mem0 can scope search by run_id.
+    let (channel_name, tmux_session_name) = {
+        let data = shared.core.lock().await;
+        let channel_name = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|s| s.channel_name.clone());
+        let tmux_session_name = channel_name
+            .as_ref()
+            .map(|name| provider.build_tmux_session_name(name));
+        (channel_name, tmux_session_name)
+    };
+    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
+    let mut session_id = session_id;
+    if session_id.is_none() {
+        if let Some(ref key) = adk_session_key {
+            let restored = super::super::adk_session::fetch_provider_session_id(
+                key,
+                &provider,
+                shared.api_port,
+            )
+            .await;
+            if restored.is_some() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
+                    key
+                );
+                let mut data = shared.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.session_id = restored.clone();
+                }
+            }
+            session_id = restored;
+        }
+    }
+
+    let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
+    let memory_backend = build_memory_backend(&memory_settings);
+    let memory_recall = memory_backend
+        .recall(RecallRequest {
+            provider: provider.clone(),
+            role_id: resolve_memory_role_id(role_binding.as_ref()),
+            channel_id: channel_id.get(),
+            session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
+            dispatch_profile,
+            user_text: user_text.to_string(),
+        })
+        .await;
+    for warning in &memory_recall.warnings {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!(
+            "  [{ts}] [memory] recall warning for channel {}: {}",
+            channel_id.get(),
+            warning
+        );
+    }
+
     // Prepend pending file uploads
     let mut context_chunks = Vec::new();
+    let memory_injection_plan = build_memory_injection_plan(
+        &provider,
+        session_id.is_some(),
+        dispatch_profile,
+        &memory_recall,
+    );
     if !pending_uploads.is_empty() {
         context_chunks.push(pending_uploads.join("\n"));
     }
-    // Load SAK early — Claude gets it in the system prompt (for caching),
-    // non-Claude providers get it as a first-turn user message (no cache benefit).
-    let is_review_lite = matches!(
-        dispatch_type_str.as_deref(),
-        Some("review") | Some("review-decision")
-    );
-    let shared_knowledge_content = if !is_review_lite {
-        load_shared_knowledge()
-    } else {
-        None
-    };
-    // Non-Claude SAK injection is deferred until after session recovery
-    // (see below, after fetch_provider_session_id) to avoid duplicate injection
-    // when dcserver restarts and restores an existing session from DB.
     if let Some(ref reply_ctx) = reply_context {
         context_chunks.push(reply_ctx.clone());
     }
@@ -465,8 +578,14 @@ pub(in crate::services::discord) async fn handle_text_message(
     if session_id.is_some() {
         context_chunks.push(super::super::prompt_builder::build_followup_turn_system_reminder());
     }
+    if let Some(knowledge) = memory_injection_plan.shared_knowledge_for_context {
+        context_chunks.push(knowledge.to_string());
+    }
+    if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
+        context_chunks.push(external_recall.to_string());
+    }
     context_chunks.push(sanitized_input);
-    let mut context_prompt = context_chunks.join("\n\n");
+    let context_prompt = context_chunks.join("\n\n");
 
     // Build disabled tools notice
     let default_tools: std::collections::HashSet<&str> =
@@ -525,20 +644,10 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     };
 
-    // Derive dispatch prompt profile: review/rework dispatches get a lighter prompt.
-    let dispatch_profile = DispatchProfile::from_dispatch_type(
-        dispatch_id_for_thread
-            .as_ref()
-            .and_then(|_| dispatch_type_str.as_deref()),
-    );
-
-    // Claude: pass SAK to build_system_prompt for stable cache prefix placement.
-    // Non-Claude: SAK was already pushed to context_chunks above.
-    let sak_for_system = if matches!(provider, ProviderKind::Claude) {
-        shared_knowledge_content.as_deref()
-    } else {
-        None
-    };
+    // Claude keeps SAK in the system prompt for prefix-cache stability.
+    // Non-Claude providers receive SAK in the user context instead.
+    let sak_for_system = memory_injection_plan.shared_knowledge_for_system_prompt;
+    let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
 
     let system_prompt_owned = build_system_prompt(
         &discord_context,
@@ -552,6 +661,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         dispatch_profile,
         dispatch_type_str.as_deref(),
         sak_for_system,
+        longterm_catalog_for_prompt,
     );
     if sak_for_system.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -561,6 +671,33 @@ pub(in crate::services::discord) async fn handle_text_message(
             channel_id.get()
         );
     }
+    let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
+    let memory_backend_label = match memory_settings.backend {
+        settings::MemoryBackendKind::Local => "local",
+        settings::MemoryBackendKind::Mem0 => "mem0",
+    };
+    let provider_label = match &provider {
+        ProviderKind::Claude => "claude",
+        ProviderKind::Codex => "codex",
+        ProviderKind::Gemini => "gemini",
+        ProviderKind::Qwen => "qwen",
+        ProviderKind::Unsupported(_) => "unsupported",
+    };
+    let dispatch_profile_label = match dispatch_profile {
+        DispatchProfile::Full => "full",
+        DispatchProfile::ReviewLite => "review_lite",
+    };
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!(
+        "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} memory_profile={} reused_session={} duration_ms={}",
+        channel_id.get(),
+        provider_label,
+        dispatch_profile_label,
+        memory_backend_label,
+        memory_settings.mem0.profile,
+        session_id.is_some(),
+        prompt_prep_duration_ms
+    );
 
     // Create cancel token — with second check to close the TOCTOU race window.
     // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
@@ -782,61 +919,6 @@ pub(in crate::services::discord) async fn handle_text_message(
                     .cloned()
             })
     };
-
-    reset_provider_session_if_pending(shared, channel_id, &provider).await;
-
-    // Resolve channel/tmux session name from current session state
-    let (channel_name, tmux_session_name) = {
-        let data = shared.core.lock().await;
-        let channel_name = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|s| s.channel_name.clone());
-        let tmux_session_name = channel_name
-            .as_ref()
-            .map(|name| provider.build_tmux_session_name(name));
-        (channel_name, tmux_session_name)
-    };
-    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
-
-    // If in-memory session_id is None (e.g. after dcserver restart),
-    // try to restore it from the DB's persisted provider session_id.
-    let session_id = if session_id.is_none() {
-        if let Some(ref key) = adk_session_key {
-            let restored = super::super::adk_session::fetch_provider_session_id(
-                key,
-                &provider,
-                shared.api_port,
-            )
-            .await;
-            if restored.is_some() {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
-                    key
-                );
-                // Also update in-memory session so subsequent turns don't re-fetch
-                let mut data = shared.core.lock().await;
-                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.session_id = restored.clone();
-                }
-            }
-            restored
-        } else {
-            None
-        }
-    } else {
-        session_id
-    };
-
-    // Non-Claude first turn: inject SAK as user context (no Anthropic cache benefit).
-    // Deferred to here (after session recovery from DB) so that a dcserver restart
-    // doesn't duplicate SAK into a resumed session.
-    if !matches!(provider, ProviderKind::Claude) && session_id.is_none() {
-        if let Some(ref knowledge) = shared_knowledge_content {
-            context_prompt = format!("{}\n\n{}", knowledge, context_prompt);
-        }
-    }
 
     let adk_session_name = channel_name.clone();
     let adk_session_info = derive_adk_session_info(
@@ -2393,6 +2475,8 @@ async fn reset_provider_session_if_pending(
 #[cfg(test)]
 mod tests {
     use super::super::super::DiscordSession;
+    use super::*;
+    use crate::services::memory::RecallResponse;
 
     fn make_session(
         current_path: Option<String>,
@@ -2411,6 +2495,15 @@ mod tests {
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: 0,
+        }
+    }
+
+    fn sample_recall() -> RecallResponse {
+        RecallResponse {
+            shared_knowledge: Some("[Shared Knowledge]".to_string()),
+            longterm_catalog: Some("- notes.md".to_string()),
+            external_recall: Some("[External Recall]".to_string()),
+            warnings: Vec::new(),
         }
     }
 
@@ -2442,5 +2535,72 @@ mod tests {
         // Remote sessions keep their CWD even when it is non-local to this machine.
         assert!(session.validated_path("test-channel").is_some());
         assert!(session.current_path.is_some());
+    }
+
+    #[test]
+    fn memory_injection_plan_routes_shared_knowledge_by_provider() {
+        let recall = sample_recall();
+
+        let claude = build_memory_injection_plan(
+            &ProviderKind::Claude,
+            false,
+            DispatchProfile::Full,
+            &recall,
+        );
+        assert_eq!(claude.shared_knowledge_for_context, None);
+        assert_eq!(
+            claude.shared_knowledge_for_system_prompt,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(
+            claude.external_recall_for_context,
+            Some("[External Recall]")
+        );
+        assert_eq!(
+            claude.longterm_catalog_for_system_prompt,
+            Some("- notes.md")
+        );
+
+        let codex = build_memory_injection_plan(
+            &ProviderKind::Codex,
+            false,
+            DispatchProfile::Full,
+            &recall,
+        );
+        assert_eq!(
+            codex.shared_knowledge_for_context,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(codex.shared_knowledge_for_system_prompt, None);
+        assert_eq!(codex.external_recall_for_context, Some("[External Recall]"));
+        assert_eq!(codex.longterm_catalog_for_system_prompt, Some("- notes.md"));
+    }
+
+    #[test]
+    fn memory_injection_plan_keeps_review_lite_minimal() {
+        let recall = sample_recall();
+        let plan = build_memory_injection_plan(
+            &ProviderKind::Codex,
+            false,
+            DispatchProfile::ReviewLite,
+            &recall,
+        );
+
+        assert_eq!(plan.shared_knowledge_for_context, None);
+        assert_eq!(plan.shared_knowledge_for_system_prompt, None);
+        assert_eq!(plan.external_recall_for_context, None);
+        assert_eq!(plan.longterm_catalog_for_system_prompt, None);
+    }
+
+    #[test]
+    fn memory_injection_plan_skips_shared_knowledge_when_session_exists() {
+        let recall = sample_recall();
+        let plan =
+            build_memory_injection_plan(&ProviderKind::Codex, true, DispatchProfile::Full, &recall);
+
+        assert_eq!(plan.shared_knowledge_for_context, None);
+        assert_eq!(plan.shared_knowledge_for_system_prompt, None);
+        assert_eq!(plan.external_recall_for_context, Some("[External Recall]"));
+        assert_eq!(plan.longterm_catalog_for_system_prompt, Some("- notes.md"));
     }
 }

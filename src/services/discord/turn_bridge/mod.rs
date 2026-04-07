@@ -11,6 +11,9 @@ mod tests;
 use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
+use crate::services::memory::{
+    CaptureRequest, build_memory_backend, resolve_memory_role_id, resolve_memory_session_id,
+};
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
@@ -38,6 +41,25 @@ use stale_resume::{
     stream_error_requires_terminal_session_reset,
 };
 use tmux_runtime::{is_dcserver_restart_command, should_resume_watcher_after_turn};
+
+pub(super) fn spawn_memory_capture_task(
+    channel_id: ChannelId,
+    capture_memory_settings: settings::ResolvedMemorySettings,
+    capture_request: CaptureRequest,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let backend = build_memory_backend(&capture_memory_settings);
+        let result = backend.capture(capture_request).await;
+        for warning in result.warnings {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!(
+                "  [{ts}] [memory] capture warning for channel {}: {}",
+                channel_id.get(),
+                warning
+            );
+        }
+    })
+}
 
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
@@ -1286,6 +1308,25 @@ pub(super) fn spawn_turn_bridge(
                     eprintln!("  [{ts}] ⚠ failed to persist session transcript: {e}");
                 }
             }
+        }
+
+        if should_persist_transcript {
+            let capture_memory_settings =
+                settings::memory_settings_for_binding(role_binding.as_ref());
+            let capture_request = CaptureRequest {
+                provider: provider.clone(),
+                role_id: resolve_memory_role_id(role_binding.as_ref()),
+                channel_id: channel_id.get(),
+                session_id: resolve_memory_session_id(
+                    session_id_to_persist.as_deref(),
+                    channel_id.get(),
+                ),
+                dispatch_id: dispatch_id.clone(),
+                user_text: user_text_owned.clone(),
+                assistant_text: full_response.clone(),
+            };
+            let _capture_task =
+                spawn_memory_capture_task(channel_id, capture_memory_settings, capture_request);
         }
 
         // Clear restart report BEFORE clearing inflight state (which removes

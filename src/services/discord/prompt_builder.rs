@@ -1,6 +1,6 @@
 use super::settings::{
-    discord_token_hash, load_longterm_memory_catalog, load_review_tuning_guidance,
-    load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
+    discord_token_hash, load_review_tuning_guidance, load_role_prompt, load_shared_prompt,
+    render_peer_agent_guidance,
 };
 use super::*;
 
@@ -35,7 +35,7 @@ pub(crate) fn build_followup_turn_system_reminder() -> String {
 /// `Full` includes everything (used for implementation dispatches and normal turns).
 /// `ReviewLite` strips peer agents, long-term memory, and skills to reduce token cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DispatchProfile {
+pub(crate) enum DispatchProfile {
     /// Full system prompt — all sections included (implementation, normal turns)
     Full,
     /// Minimal prompt for review/review-decision dispatches.
@@ -66,6 +66,7 @@ pub(super) fn build_system_prompt(
     profile: DispatchProfile,
     dispatch_type: Option<&str>,
     shared_knowledge: Option<&str>,
+    longterm_catalog: Option<&str>,
 ) -> String {
     let mut system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
@@ -182,7 +183,7 @@ pub(super) fn build_system_prompt(
 
         // ReviewLite: skip long-term memory and peer agents to save tokens
         if profile == DispatchProfile::Full {
-            if let Some(catalog) = load_longterm_memory_catalog(&binding.role_id) {
+            if let Some(catalog) = longterm_catalog {
                 system_prompt_owned.push_str(
                     "\n\n[Long-term Memory]\n\
                      Available memory files for this agent. Use the Read tool to load full content when needed:\n",
@@ -250,6 +251,7 @@ mod tests {
             DispatchProfile::Full,
             None, // dispatch_type
             None, // shared_knowledge
+            None, // longterm_catalog
         )
     }
 
@@ -362,6 +364,7 @@ mod tests {
             DispatchProfile::Full,
             None,
             None,
+            None,
         );
         let without_skills = build_system_prompt(
             "ctx",
@@ -374,6 +377,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review"),
+            None,
             None,
         );
         assert!(with_skills.contains("Available skills"));
@@ -399,6 +403,7 @@ mod tests {
             DispatchProfile::ReviewLite,
             Some("review"),
             None,
+            None,
         );
 
         assert!(!prompt.contains("[Context Compression]"));
@@ -416,6 +421,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            memory: Default::default(),
         };
         let review_prompt = build_system_prompt(
             "ctx",
@@ -429,6 +435,7 @@ mod tests {
             DispatchProfile::ReviewLite,
             Some("review"),
             None,
+            None,
         );
         let decision_prompt = build_system_prompt(
             "ctx",
@@ -441,6 +448,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review-decision"),
+            None,
             None,
         );
         // review should NOT contain decision API
@@ -463,6 +471,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
+            memory: Default::default(),
         };
 
         let prompt = build_system_prompt(
@@ -477,8 +486,42 @@ mod tests {
             DispatchProfile::Full,
             None,
             None,
+            None,
         );
 
         assert!(!prompt.contains("[Peer Agent Directory]"));
+    }
+
+    #[test]
+    fn test_full_prompt_renders_supplied_longterm_catalog() {
+        use super::super::settings::RoleBinding;
+
+        let binding = RoleBinding {
+            role_id: "spark".to_string(),
+            prompt_file: "/nonexistent".to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+            memory: Default::default(),
+        };
+
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            Some(&binding),
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            Some("- facts.md: deployment notes"),
+        );
+
+        assert!(prompt.contains("[Long-term Memory]"));
+        assert!(prompt.contains("facts.md"));
     }
 }
