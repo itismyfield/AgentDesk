@@ -175,7 +175,12 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
         ),
         // Dispatches
         ep("GET", "/api/dispatches", "dispatches", "List dispatches"),
-        ep("POST", "/api/dispatches", "dispatches", "Create dispatch"),
+        ep(
+            "POST",
+            "/api/dispatches",
+            "dispatches",
+            "Create dispatch (supports optional skip_outbox for bookkeeping-only dispatches)",
+        ),
         ep(
             "GET",
             "/api/dispatches/{id}",
