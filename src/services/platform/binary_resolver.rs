@@ -613,11 +613,12 @@ fn join_paths_lossy(paths: Vec<PathBuf>) -> Option<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     fn env_guard() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        crate::services::discord::runtime_store::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[cfg(unix)]

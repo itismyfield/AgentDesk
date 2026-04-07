@@ -345,11 +345,12 @@ mod tests {
         save_to_path,
     };
     use std::path::PathBuf;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        crate::services::discord::runtime_store::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]

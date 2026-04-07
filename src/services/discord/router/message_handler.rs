@@ -4,10 +4,6 @@ use crate::services::memory::{
     resolve_memory_session_id,
 };
 
-const DISCORD_FORMATTING_REMINDER: &str = "<system-reminder>\n\
-     Discord formatting: minimize code blocks, keep messages concise.\n\
-     </system-reminder>";
-
 #[derive(Debug, PartialEq, Eq)]
 struct MemoryInjectionPlan<'a> {
     shared_knowledge_for_context: Option<&'a str>,
@@ -23,7 +19,7 @@ fn build_memory_injection_plan<'a>(
     memory_recall: &'a RecallResponse,
 ) -> MemoryInjectionPlan<'a> {
     let should_inject_shared_knowledge =
-        !has_session_id && dispatch_profile == DispatchProfile::Full;
+        dispatch_profile == DispatchProfile::Full && !has_session_id;
     let shared_knowledge_for_context =
         if should_inject_shared_knowledge && !matches!(provider, ProviderKind::Claude) {
             memory_recall.shared_knowledge.as_deref()
@@ -31,7 +27,7 @@ fn build_memory_injection_plan<'a>(
             None
         };
     let shared_knowledge_for_system_prompt =
-        if should_inject_shared_knowledge && matches!(provider, ProviderKind::Claude) {
+        if dispatch_profile == DispatchProfile::Full && matches!(provider, ProviderKind::Claude) {
             memory_recall.shared_knowledge.as_deref()
         } else {
             None
@@ -498,10 +494,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
-    super::super::commands::reset_provider_session_if_pending(
-        &ctx.http, shared, &provider, channel_id,
-    )
-    .await;
+    reset_provider_session_if_pending(shared, channel_id, &provider).await;
     let prompt_prep_started = std::time::Instant::now();
 
     // Resolve channel/tmux session name from current session state. We need the
@@ -2364,20 +2357,48 @@ Any other message is sent to {p}.
     Ok(false)
 }
 
+/// Private helper: reset provider session if a model change is pending.
+async fn reset_provider_session_if_pending(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    provider: &ProviderKind,
+) {
+    if shared
+        .model_session_reset_pending
+        .remove(&channel_id)
+        .is_none()
+    {
+        return;
+    }
+
+    let channel_name = {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.session_id = None;
+            session.channel_name.clone()
+        } else {
+            None
+        }
+    };
+
+    if provider.uses_managed_tmux_backend() {
+        if let Some(name) = channel_name.as_deref() {
+            crate::services::claude::terminate_local_session(
+                &provider.build_tmux_session_name(name),
+            );
+        }
+    }
+
+    if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
+        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::DiscordSession;
     use super::*;
     use crate::services::memory::RecallResponse;
-
-    fn sample_recall() -> RecallResponse {
-        RecallResponse {
-            shared_knowledge: Some("[Shared Knowledge]".to_string()),
-            longterm_catalog: Some("- notes.md".to_string()),
-            external_recall: Some("[External Recall]".to_string()),
-            warnings: Vec::new(),
-        }
-    }
 
     fn make_session(
         current_path: Option<String>,
@@ -2396,6 +2417,15 @@ mod tests {
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: 0,
+        }
+    }
+
+    fn sample_recall() -> RecallResponse {
+        RecallResponse {
+            shared_knowledge: Some("[Shared Knowledge]".to_string()),
+            longterm_catalog: Some("- notes.md".to_string()),
+            external_recall: Some("[External Recall]".to_string()),
+            warnings: Vec::new(),
         }
     }
 
@@ -2477,6 +2507,25 @@ mod tests {
     }
 
     #[test]
+    fn memory_injection_plan_keeps_shared_knowledge_for_claude_resumed_sessions() {
+        let recall = sample_recall();
+        let plan = build_memory_injection_plan(
+            &ProviderKind::Claude,
+            true,
+            DispatchProfile::Full,
+            &recall,
+        );
+
+        assert_eq!(plan.shared_knowledge_for_context, None);
+        assert_eq!(
+            plan.shared_knowledge_for_system_prompt,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(plan.external_recall_for_context, Some("[External Recall]"));
+        assert_eq!(plan.longterm_catalog_for_system_prompt, Some("- notes.md"));
+    }
+
+    #[test]
     fn session_path_is_usable_for_existing_local_path() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = make_session(Some(dir.path().to_str().unwrap().to_string()), None);
@@ -2490,7 +2539,6 @@ mod tests {
         drop(dir);
         let mut session = make_session(Some(missing_path), None);
         assert!(session.validated_path("test-channel").is_none());
-        // Verify current_path and worktree were cleared
         assert!(session.current_path.is_none());
         assert!(session.worktree.is_none());
     }
@@ -2501,7 +2549,6 @@ mod tests {
         let missing_path = dir.path().to_str().unwrap().to_string();
         drop(dir);
         let mut session = make_session(Some(missing_path), Some("mac-mini".to_string()));
-        // Remote sessions keep their CWD even when it is non-local to this machine.
         assert!(session.validated_path("test-channel").is_some());
         assert!(session.current_path.is_some());
     }

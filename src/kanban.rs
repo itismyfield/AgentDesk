@@ -1739,8 +1739,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn deploy_pipeline_uses_card_scoped_worktree_instead_of_latest_session_cwd() {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _env_guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _env_guard = crate::services::discord::runtime_store::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let temp = TempDir::new().unwrap();
         let policies_dir = temp.path().join("policies");
@@ -1772,7 +1773,8 @@ mod tests {
 
         let db = test_db();
         let engine = test_engine_with_dir(&db, &policies_dir);
-        seed_card_with_repo(&db, "card-deploy-301", "review", "repo-1");
+        let card_id = format!("dep{:05}-card", std::process::id() % 100000);
+        seed_card_with_repo(&db, &card_id, "review", "repo-1");
 
         let correct_worktree = temp.path().join("worktrees").join("card-301");
         let wrong_worktree = temp.path().join("worktrees").join("other-card");
@@ -1791,18 +1793,18 @@ mod tests {
             conn.execute(
                 "UPDATE kanban_cards
                  SET pipeline_stage_id = ?1, blocked_reason = 'deploy:waiting', updated_at = datetime('now')
-                 WHERE id = 'card-deploy-301'",
-                [stage_id],
+                 WHERE id = ?2",
+                rusqlite::params![stage_id, card_id],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO task_dispatches (
                     id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result, created_at, updated_at
                  ) VALUES (
-                    'dispatch-card-deploy-301', 'card-deploy-301', 'agent-1', 'implementation', 'completed',
-                    'Implementation Done', ?1, '{}', datetime('now'), datetime('now')
+                    'dispatch-card-deploy-301', ?1, 'agent-1', 'implementation', 'completed',
+                    'Implementation Done', ?2, '{}', datetime('now'), datetime('now')
                  )",
-                rusqlite::params![serde_json::json!({
+                rusqlite::params![card_id, serde_json::json!({
                     "worktree_path": correct_worktree.display().to_string(),
                     "worktree_branch": "feat/301-correct-worktree"
                 })
@@ -1827,8 +1829,8 @@ mod tests {
         let blocked_reason: String = {
             let conn = db.lock().unwrap();
             conn.query_row(
-                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-deploy-301'",
-                [],
+                "SELECT blocked_reason FROM kanban_cards WHERE id = ?1",
+                [&card_id],
                 |row| row.get(0),
             )
             .unwrap()

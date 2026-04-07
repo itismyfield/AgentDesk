@@ -30,6 +30,7 @@ impl MemoryBackend for LocalMemoryBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_layout::{long_term_memory_root, shared_agent_knowledge_path};
     use crate::services::discord::DispatchProfile;
     use crate::services::provider::ProviderKind;
     use tempfile::TempDir;
@@ -41,14 +42,14 @@ mod tests {
     ) {
         let guard = crate::services::discord::runtime_store::test_env_lock()
             .lock()
-            .unwrap();
+            .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let root = temp.path().join(".adk");
-        let shared = root.join("shared_agent_memory");
-        let role_mem = root.join("role-context").join("codex.memory");
-        std::fs::create_dir_all(&shared).unwrap();
+        let shared = shared_agent_knowledge_path(&root);
+        let role_mem = long_term_memory_root(&root).join("codex");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
         std::fs::create_dir_all(&role_mem).unwrap();
-        std::fs::write(shared.join("shared_knowledge.md"), "Remember this").unwrap();
+        std::fs::write(&shared, "Remember this").unwrap();
         std::fs::write(
             role_mem.join("facts.md"),
             "---\ndescription: Test facts\n---\n# Facts\ncontent",

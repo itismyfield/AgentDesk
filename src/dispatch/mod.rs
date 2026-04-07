@@ -1955,7 +1955,10 @@ mod tests {
         seed_card(&db, "card-no-channel", "ready");
         let conn = db.separate_conn().unwrap();
         conn.execute(
-            "UPDATE agents SET discord_channel_id = NULL WHERE id = 'agent-1'",
+            "UPDATE agents
+             SET discord_channel_id = NULL,
+                 discord_channel_alt = NULL
+             WHERE id = 'agent-1'",
             [],
         )
         .unwrap();

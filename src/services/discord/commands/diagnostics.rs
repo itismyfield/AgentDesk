@@ -9,7 +9,7 @@ use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::inflight::load_inflight_states;
 use super::super::metrics;
 use super::super::runtime_store;
-use super::super::{check_auth, Context, CoreState, Error, PendingQueueItem, SharedData};
+use super::super::{Context, CoreState, Error, PendingQueueItem, SharedData, check_auth};
 use crate::services::claude;
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]

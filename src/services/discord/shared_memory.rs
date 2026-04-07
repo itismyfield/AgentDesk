@@ -23,7 +23,9 @@ mod tests {
     where
         F: FnOnce(&std::path::Path),
     {
-        let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let _guard = super::super::runtime_store::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join(".adk");
         let sak_dir = root

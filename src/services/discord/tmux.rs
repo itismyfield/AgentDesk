@@ -1,5 +1,5 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
@@ -15,7 +15,7 @@ use super::formatting::{format_tool_input, normalize_empty_lines, send_long_mess
 use super::settings::{
     channel_supports_provider, resolve_role_binding, validate_bot_channel_routing,
 };
-use super::{rate_limit_wait, SharedData, TmuxWatcherHandle, DISCORD_MSG_LIMIT};
+use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};
 
 /// #226: Atomically claim a channel for watcher creation using DashMap::entry().
 /// Returns true if the claim succeeded (caller should spawn the watcher).
@@ -2220,7 +2220,7 @@ async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        process_watcher_lines, resolve_restart_handoff_scope, RestartHandoffScope, WatcherToolState,
+        RestartHandoffScope, WatcherToolState, process_watcher_lines, resolve_restart_handoff_scope,
     };
     use crate::services::claude::StreamLineState;
     use crate::services::discord::inflight::InflightTurnState;

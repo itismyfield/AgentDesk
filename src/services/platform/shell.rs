@@ -139,6 +139,35 @@ pub fn git_head_commit(repo_dir: &str) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
+/// List tracked paths with local modifications in a git repo/worktree.
+///
+/// Untracked files are ignored because they do not participate in commit
+/// resolution until they are added.
+pub fn git_tracked_change_paths(repo_dir: &str) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let paths = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_end();
+            if trimmed.len() < 4 {
+                return None;
+            }
+            let path = trimmed[3..]
+                .rsplit_once(" -> ")
+                .map(|(_, new_path)| new_path)
+                .unwrap_or(&trimmed[3..])
+                .trim();
+            (!path.is_empty()).then(|| path.to_string())
+        })
+        .collect::<Vec<_>>();
+    Some(paths)
+}
+
 /// Find the most recent commit whose subject matches `(#issue_number)`.
 ///
 /// Searches the last 20 commits to avoid expensive log scans.  Returns `None`
@@ -724,5 +753,40 @@ mod tests {
 
         let found = find_latest_commit_for_issue(repo_dir, 269).unwrap();
         assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn git_tracked_change_paths_returns_empty_for_clean_repo() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        let paths = git_tracked_change_paths(repo_dir).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn git_tracked_change_paths_ignores_untracked_and_reports_modified_files() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let tracked = repo.path().join("tracked.txt");
+        let untracked = repo.path().join("untracked.txt");
+
+        std::fs::write(&tracked, "v1\n").unwrap();
+        Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add tracked fixture"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+
+        std::fs::write(&tracked, "v2\n").unwrap();
+        std::fs::write(&untracked, "scratch\n").unwrap();
+
+        let paths = git_tracked_change_paths(repo_dir).unwrap();
+        assert_eq!(paths, vec!["tracked.txt".to_string()]);
     }
 }

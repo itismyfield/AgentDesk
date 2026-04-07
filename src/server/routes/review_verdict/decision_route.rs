@@ -16,14 +16,14 @@ fn test_worktree_commit_override_slot() -> &'static std::sync::Mutex<Option<Opti
 }
 
 #[cfg(test)]
-pub(super) fn set_test_worktree_commit_override(commit: Option<String>) {
+pub(crate) fn set_test_worktree_commit_override(commit: Option<String>) {
     if let Ok(mut slot) = test_worktree_commit_override_slot().lock() {
         *slot = Some(commit);
     }
 }
 
 #[cfg(test)]
-pub(super) fn clear_test_worktree_commit_override() {
+pub(crate) fn clear_test_worktree_commit_override() {
     if let Ok(mut slot) = test_worktree_commit_override_slot().lock() {
         *slot = None;
     }
@@ -41,6 +41,55 @@ fn current_issue_worktree_commit(issue_num: i64) -> Option<String> {
 
     let repo_dir = crate::services::platform::resolve_repo_dir().unwrap_or_default();
     crate::services::platform::find_worktree_for_issue(&repo_dir, issue_num).map(|wt| wt.commit)
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ActiveAcceptFollowups {
+    review: i64,
+    rework: i64,
+    review_decision: i64,
+}
+
+impl ActiveAcceptFollowups {
+    fn has_followup(self) -> bool {
+        self.review > 0 || self.rework > 0
+    }
+}
+
+fn active_accept_followups(db: &crate::db::Db, card_id: &str) -> ActiveAcceptFollowups {
+    db.lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT \
+                     COALESCE(SUM(CASE WHEN dispatch_type = 'review' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0), \
+                     COALESCE(SUM(CASE WHEN dispatch_type = 'rework' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0), \
+                     COALESCE(SUM(CASE WHEN dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched') THEN 1 ELSE 0 END), 0) \
+                 FROM task_dispatches \
+                 WHERE kanban_card_id = ?1",
+                [card_id],
+                |row| {
+                    Ok(ActiveAcceptFollowups {
+                        review: row.get(0)?,
+                        rework: row.get(1)?,
+                        review_decision: row.get(2)?,
+                    })
+                },
+            )
+            .ok()
+        })
+        .unwrap_or_default()
+}
+
+fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
+    db.lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT status FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,18 +275,6 @@ pub async fn submit_review_decision(
                         .unwrap_or_else(|| effective_pipeline.initial_state().to_string())
                 });
 
-            // Consume review-decision dispatch FIRST — frees the duplicate dispatch guard
-            // so the rework dispatch can be created (create_dispatch_core rejects when
-            // any pending/dispatched dispatch already exists for the card).
-            if let Some(ref rd_id) = pending_rd_id {
-                crate::dispatch::mark_dispatch_completed(
-                    &state.db,
-                    rd_id,
-                    &json!({"decision": "accept", "completion_source": "review_decision_api"}),
-                )
-                .ok();
-            }
-
             // #246: Check if the agent already committed new work during the
             // review-decision turn. If the worktree HEAD differs from the
             // reviewed_commit of the last review, skip rework and go straight
@@ -297,11 +334,14 @@ pub async fn submit_review_decision(
                 }
             };
 
+            let mut accept_failures = Vec::new();
+
             // #246: If agent already committed new work, skip rework and re-enter
             // review via a two-step transition (rework_target → review) so that
             // OnReviewEnter fires naturally (increments review_round, sets
             // review_status, creates review dispatch via review-automation.js).
-            let direct_review_created = if skip_rework {
+            let direct_review_attempted = skip_rework;
+            let mut direct_review_created = if skip_rework {
                 // Find the review state from the pipeline (gated transition from rework_target)
                 let review_state = effective_pipeline
                     .transitions
@@ -314,110 +354,245 @@ pub async fn submit_review_decision(
 
                 if let Some(ref review_st) = review_state {
                     // Step 1: Transition to rework_target (e.g., in_progress)
-                    let step1_ok = crate::kanban::transition_status_with_opts(
+                    match crate::kanban::transition_status_with_opts(
                         &state.db,
                         &state.engine,
                         &body.card_id,
                         &rework_target,
                         "review_decision_accept_skip_rework_step1",
                         true,
-                    )
-                    .is_ok();
-
-                    if step1_ok {
-                        // Step 2: Transition to review — fires OnReviewEnter
-                        match crate::kanban::transition_status_with_opts(
-                            &state.db,
-                            &state.engine,
-                            &body.card_id,
-                            review_st,
-                            "review_decision_accept_skip_rework_step2",
-                            true,
-                        ) {
-                            Ok(_) => {
-                                tracing::info!(
-                                    "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
-                                    body.card_id,
-                                    card_status_now,
-                                    rework_target,
-                                    review_st
-                                );
-                                true
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
-                                    review_st,
-                                    body.card_id
-                                );
-                                false
-                            }
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            // Create rework dispatch (original path, or fallback if direct review failed)
-            let rework_dispatch_created = if !direct_review_created && !skip_rework {
-                // Transition card to rework target (e.g., in_progress)
-                if let Err(e) = crate::kanban::transition_status_with_opts(
-                    &state.db,
-                    &state.engine,
-                    &body.card_id,
-                    &rework_target,
-                    "review_decision_accept",
-                    true,
-                ) {
-                    tracing::warn!(
-                        "[review-decision] #195 Transition to rework target failed for card {}: {e}",
-                        body.card_id
-                    );
-                }
-
-                if let Some(ref agent_id) = card_agent_id {
-                    let rework_title = format!(
-                        "[Rework] {}",
-                        card_title.as_deref().unwrap_or(&body.card_id)
-                    );
-                    match crate::dispatch::create_dispatch_core(
-                        &state.db,
-                        &body.card_id,
-                        agent_id,
-                        "rework",
-                        &rework_title,
-                        &json!({}),
                     ) {
-                        Ok((dispatch_id, _, _reused)) => {
-                            tracing::info!(
-                                "[review-decision] #195 Rework dispatch created: card={} dispatch={}",
-                                body.card_id,
-                                dispatch_id
-                            );
-                            true
+                        Ok(_) => {
+                            // Step 2: Transition to review — fires OnReviewEnter
+                            match crate::kanban::transition_status_with_opts(
+                                &state.db,
+                                &state.engine,
+                                &body.card_id,
+                                review_st,
+                                "review_decision_accept_skip_rework_step2",
+                                true,
+                            ) {
+                                Ok(_) => {
+                                    let followups =
+                                        active_accept_followups(&state.db, &body.card_id);
+                                    if followups.review > 0 {
+                                        tracing::info!(
+                                            "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
+                                            body.card_id,
+                                            card_status_now,
+                                            rework_target,
+                                            review_st
+                                        );
+                                        true
+                                    } else {
+                                        accept_failures.push(format!(
+                                        "direct review transition reached {} but no active review dispatch was created",
+                                        review_st
+                                    ));
+                                        tracing::warn!(
+                                            "[review-decision] #339 Direct review re-entry for card {} reached {} but no active review dispatch exists",
+                                            body.card_id,
+                                            review_st
+                                        );
+                                        false
+                                    }
+                                }
+                                Err(e) => {
+                                    accept_failures.push(format!(
+                                        "direct review step2 transition to {} failed: {e}",
+                                        review_st
+                                    ));
+                                    tracing::warn!(
+                                        "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
+                                        review_st,
+                                        body.card_id
+                                    );
+                                    false
+                                }
+                            }
                         }
                         Err(e) => {
+                            accept_failures.push(format!(
+                                "direct review step1 transition to {} failed: {e}",
+                                rework_target
+                            ));
                             tracing::warn!(
-                                "[review-decision] #195 Rework dispatch creation failed for card {}: {e}",
+                                "[review-decision] #339 Step 1 transition to {} failed for card {} during direct review: {e}",
+                                rework_target,
                                 body.card_id
                             );
                             false
                         }
                     }
                 } else {
-                    tracing::warn!(
-                        "[review-decision] #195 No agent assigned to card {} — cannot create rework dispatch",
-                        body.card_id
-                    );
+                    accept_failures.push(format!(
+                        "skip_rework requested but no review state could be resolved from rework target {}",
+                        rework_target
+                    ));
                     false
                 }
             } else {
                 false
+            };
+
+            // Create rework dispatch on the normal accept path, or as a fallback when
+            // direct review re-entry fails / produces no active review dispatch.
+            if !direct_review_created {
+                let card_status_before_rework = current_card_status(&state.db, &body.card_id);
+                let rework_transition_ready = card_status_before_rework.as_deref()
+                    == Some(rework_target.as_str())
+                    || match crate::kanban::transition_status_with_opts(
+                        &state.db,
+                        &state.engine,
+                        &body.card_id,
+                        &rework_target,
+                        "review_decision_accept",
+                        true,
+                    ) {
+                        Ok(_) => true,
+                        Err(e) => {
+                            accept_failures.push(format!(
+                                "transition to rework target {} failed: {e}",
+                                rework_target
+                            ));
+                            tracing::warn!(
+                                "[review-decision] #195 Transition to rework target failed for card {}: {e}",
+                                body.card_id
+                            );
+                            false
+                        }
+                    };
+
+                if rework_transition_ready {
+                    if let Some(ref agent_id) = card_agent_id {
+                        let rework_title = format!(
+                            "[Rework] {}",
+                            card_title.as_deref().unwrap_or(&body.card_id)
+                        );
+                        match crate::dispatch::create_dispatch_core(
+                            &state.db,
+                            &body.card_id,
+                            agent_id,
+                            "rework",
+                            &rework_title,
+                            &json!({}),
+                        ) {
+                            Ok((dispatch_id, _, _reused)) => {
+                                tracing::info!(
+                                    "[review-decision] #195 Rework dispatch created: card={} dispatch={}",
+                                    body.card_id,
+                                    dispatch_id
+                                );
+                            }
+                            Err(e) => {
+                                accept_failures
+                                    .push(format!("rework dispatch creation failed: {e}"));
+                                tracing::warn!(
+                                    "[review-decision] #195 Rework dispatch creation failed for card {}: {e}",
+                                    body.card_id
+                                );
+                            }
+                        }
+                    } else {
+                        accept_failures.push(format!(
+                            "no assigned agent for rework dispatch on card {}",
+                            body.card_id
+                        ));
+                        tracing::warn!(
+                            "[review-decision] #195 No agent assigned to card {} — cannot create rework dispatch",
+                            body.card_id
+                        );
+                    }
+                }
+            }
+
+            let followups = active_accept_followups(&state.db, &body.card_id);
+            direct_review_created = followups.review > 0;
+            let rework_dispatch_created = followups.rework > 0;
+
+            if !followups.has_followup() {
+                let card_status_after = current_card_status(&state.db, &body.card_id);
+                tracing::error!(
+                    card_id = %body.card_id,
+                    pending_rd_id = pending_rd_id.as_deref().unwrap_or(""),
+                    card_status_before = %card_status_now,
+                    card_status_after = card_status_after.as_deref().unwrap_or("(unknown)"),
+                    rework_target = %rework_target,
+                    skip_rework,
+                    direct_review_attempted,
+                    direct_review_created,
+                    rework_dispatch_created,
+                    active_review = followups.review,
+                    active_rework = followups.rework,
+                    active_review_decision = followups.review_decision,
+                    failures = ?accept_failures,
+                    "[review-decision] #339 accept failed closed: no follow-up dispatch created"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": "review-decision accept failed: no follow-up dispatch created",
+                        "card_id": body.card_id,
+                        "pending_dispatch_id": pending_rd_id,
+                        "skip_rework": skip_rework,
+                        "card_status_before": card_status_now,
+                        "card_status_after": card_status_after,
+                        "rework_target": rework_target,
+                        "followups": {
+                            "review": followups.review,
+                            "rework": followups.rework,
+                            "review_decision": followups.review_decision,
+                        },
+                        "failures": accept_failures,
+                    })),
+                );
+            }
+
+            if let Some(ref rd_id) = pending_rd_id {
+                match crate::dispatch::mark_dispatch_completed(
+                    &state.db,
+                    rd_id,
+                    &json!({"decision": "accept", "completion_source": "review_decision_api"}),
+                ) {
+                    Ok(1) => {}
+                    Ok(_) => {
+                        let live_dispatches = active_accept_followups(&state.db, &body.card_id);
+                        tracing::error!(
+                            card_id = %body.card_id,
+                            pending_rd_id = %rd_id,
+                            active_review = live_dispatches.review,
+                            active_rework = live_dispatches.rework,
+                            active_review_decision = live_dispatches.review_decision,
+                            "[review-decision] #339 accept created a follow-up dispatch but failed to finalize the pending review-decision"
+                        );
+                        return (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "error": "failed to finalize pending review-decision after follow-up dispatch creation",
+                                "card_id": body.card_id,
+                                "pending_dispatch_id": rd_id,
+                            })),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            card_id = %body.card_id,
+                            pending_rd_id = %rd_id,
+                            active_review = followups.review,
+                            active_rework = followups.rework,
+                            error = %e,
+                            "[review-decision] #339 accept created a follow-up dispatch but mark_dispatch_completed errored"
+                        );
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({
+                                "error": format!("failed to finalize pending review-decision: {e}"),
+                                "card_id": body.card_id,
+                                "pending_dispatch_id": rd_id,
+                            })),
+                        );
+                    }
+                }
             };
 
             // Clear suggestion_pending_at (always) and review_status (rework path only).

@@ -391,7 +391,6 @@ fn work_dispatch_completion_context(
     // 1) Agent's own commit extracted from turn output (most reliable — direct evidence)
     // 2) Time-scoped: newest commit since dispatch start, preferring issue-number match
     // 3) Issue grep: recent commits matching (#issue_number)
-    // 4) Plain HEAD (last resort)
     let completed_commit = hints
         .output_commit
         .clone()
@@ -408,8 +407,7 @@ fn work_dispatch_completion_context(
             hints
                 .issue_number
                 .and_then(|n| crate::services::platform::shell::git_latest_commit_for_issue(cwd, n))
-        })
-        .or_else(|| crate::services::platform::git_head_commit(cwd))?;
+        })?;
     let mut obj = serde_json::Map::new();
     obj.insert(
         "completed_worktree_path".to_string(),
@@ -446,6 +444,25 @@ fn completion_result_with_context(
         }
     }
     result
+}
+
+fn summarize_tracked_change_paths(paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let preview = paths.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    let remaining = paths.len().saturating_sub(5);
+    Some(if remaining > 0 {
+        format!("{preview} (+{remaining} more)")
+    } else {
+        preview
+    })
+}
+
+fn tracked_change_summary(adk_cwd: Option<&str>) -> Option<String> {
+    let cwd = adk_cwd.filter(|p| std::path::Path::new(p).is_dir())?;
+    let paths = crate::services::platform::shell::git_tracked_change_paths(cwd)?;
+    summarize_tracked_change_paths(&paths)
 }
 
 fn noop_completion_context(
@@ -485,8 +502,8 @@ fn noop_completion_context(
     serde_json::Value::Object(obj)
 }
 
-/// Unlike review dispatches (which auto-complete on session idle), these types
-/// require an explicit PATCH so the pipeline can advance deterministically.
+/// Review and review-decision dispatches stay pending until their explicit
+/// API submissions arrive. Work dispatches use explicit PATCH/finalize flows.
 /// Fail a dispatch with retry on PATCH failure.
 pub(super) async fn fail_dispatch_with_retry(
     api_port: u16,
@@ -575,9 +592,25 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
     }
 
     let explicit_work_outcome = turn_output.and_then(extract_explicit_work_outcome);
+    let tracked_changes = tracked_change_summary(adk_cwd);
 
     // Direct finalize_dispatch with retry — single completion authority (#143)
     if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+        if explicit_work_outcome == Some("noop") {
+            if let Some(ref changes) = tracked_changes {
+                let reason = format!(
+                    "OUTCOME: noop rejected because tracked changes remain in the worktree: {changes}. Commit or discard them before completing the dispatch."
+                );
+                tracing::warn!(
+                    "[turn_bridge] Rejecting noop completion for dispatch {}: {}",
+                    dispatch_id,
+                    reason
+                );
+                fail_dispatch_with_retry(shared.api_port, Some(dispatch_id), &reason).await;
+                return;
+            }
+        }
+
         // Extract commit SHA directly from agent output (most reliable method)
         let output_commit = if explicit_work_outcome == Some("noop") {
             None
@@ -604,7 +637,29 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         let completion_context = if explicit_work_outcome == Some("noop") {
             Some(noop_completion_context(adk_cwd, turn_output))
         } else {
-            work_dispatch_completion_context(adk_cwd, &hints)
+            match work_dispatch_completion_context(adk_cwd, &hints) {
+                Some(ctx) => Some(ctx),
+                None => {
+                    let reason = if let Some(ref changes) = tracked_changes {
+                        format!(
+                            "No attributable commit detected for {} dispatch {}. Tracked changes remain in the worktree: {}. Create a commit before finishing the dispatch.",
+                            snapshot.dispatch_type, dispatch_id, changes
+                        )
+                    } else {
+                        format!(
+                            "No attributable commit detected for {} dispatch {}. Create a commit before finishing the dispatch.",
+                            snapshot.dispatch_type, dispatch_id
+                        )
+                    };
+                    tracing::warn!(
+                        "[turn_bridge] Rejecting completion without commit for dispatch {}: {}",
+                        dispatch_id,
+                        reason
+                    );
+                    fail_dispatch_with_retry(shared.api_port, Some(dispatch_id), &reason).await;
+                    return;
+                }
+            }
         };
         let completion_source = if explicit_work_outcome == Some("noop") {
             "turn_bridge_explicit_noop"
@@ -778,5 +833,103 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 "  [{ts}] 🔴 CRITICAL: all completion paths exhausted for dispatch {dispatch_id} — dispatch stranded"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn run_git(repo_dir: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_dir)
+            .output()
+            .unwrap_or_else(|err| panic!("git {:?} failed to start: {err}", args));
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn init_repo_with_initial_commit() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        let repo_dir = repo.path();
+        run_git(repo_dir, &["init"]);
+        run_git(repo_dir, &["config", "user.name", "AgentDesk Test"]);
+        run_git(repo_dir, &["config", "user.email", "agentdesk@example.com"]);
+        std::fs::write(repo_dir.join("tracked.txt"), "v1\n").unwrap();
+        run_git(repo_dir, &["add", "tracked.txt"]);
+        run_git(repo_dir, &["commit", "-m", "initial"]);
+        repo
+    }
+
+    #[test]
+    fn summarize_tracked_change_paths_limits_preview() {
+        let summary = summarize_tracked_change_paths(&[
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+            "e".to_string(),
+            "f".to_string(),
+        ]);
+        assert_eq!(summary.as_deref(), Some("a, b, c, d, e (+1 more)"));
+    }
+
+    #[test]
+    fn tracked_change_summary_reports_only_tracked_modifications() {
+        let repo = init_repo_with_initial_commit();
+        let repo_dir = repo.path();
+        std::fs::write(repo_dir.join("tracked.txt"), "v2\n").unwrap();
+        std::fs::write(repo_dir.join("scratch.txt"), "untracked\n").unwrap();
+
+        let summary = tracked_change_summary(repo_dir.to_str());
+        assert_eq!(summary.as_deref(), Some("tracked.txt"));
+    }
+
+    #[test]
+    fn work_dispatch_completion_context_requires_attributable_commit() {
+        let repo = init_repo_with_initial_commit();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        let context = work_dispatch_completion_context(
+            Some(repo_dir),
+            &DispatchCompletionHints {
+                issue_number: None,
+                dispatch_created_at: None,
+                output_commit: None,
+            },
+        );
+
+        assert!(context.is_none());
+    }
+
+    #[test]
+    fn work_dispatch_completion_context_uses_output_commit_when_available() {
+        let repo = init_repo_with_initial_commit();
+        let repo_dir = repo.path();
+        let head = run_git(repo_dir, &["rev-parse", "HEAD"]);
+
+        let context = work_dispatch_completion_context(
+            repo_dir.to_str(),
+            &DispatchCompletionHints {
+                issue_number: None,
+                dispatch_created_at: None,
+                output_commit: Some(head.clone()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(context["completed_commit"].as_str(), Some(head.as_str()));
+        assert_eq!(
+            context["completed_worktree_path"].as_str(),
+            repo_dir.to_str()
+        );
     }
 }

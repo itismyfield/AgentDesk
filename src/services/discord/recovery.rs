@@ -310,10 +310,10 @@ pub(super) async fn restore_inflight_turns(
                 let user_msg_id = MessageId::new(state.user_msg_id);
                 super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
                 super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
-                // Complete the dispatch if this was a dispatch turn — the normal
-                // completion path was lost when dcserver restarted.
-                // #142: Check dispatch type — implementation/rework need explicit completion,
-                // review can use idle auto-complete.
+                // Complete the dispatch if this was a work dispatch turn — the
+                // normal completion path was lost when dcserver restarted.
+                // #142: implementation/rework need explicit completion. Review
+                // and review-decision stay pending until their API handlers run.
                 // #222: DB lookup first, text parsing as fallback for unified threads.
                 let recovered_dispatch_id =
                     lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id)
@@ -827,9 +827,9 @@ pub(super) async fn restore_inflight_turns(
                         }
                     }
                     Some(_) => {
-                        // Non-work dispatches (review, review-decision) need their
-                        // own completion flow — clear inflight but leave dispatch
-                        // status for the appropriate handler (see follow-up #xxx).
+                        // Non-work dispatches (review, review-decision) need
+                        // their own explicit API completion flow. Clear inflight
+                        // but leave dispatch status untouched.
                         dispatch_completed = true;
                     }
                     None => {
@@ -1480,7 +1480,9 @@ mod tests {
 
     #[test]
     fn missing_session_recovery_saves_handoff_for_followup_turn() {
-        let _lock = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let _lock = super::super::runtime_store::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("agentdesk-root");
         std::fs::create_dir_all(root.join("runtime")).unwrap();

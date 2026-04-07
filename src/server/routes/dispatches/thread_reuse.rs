@@ -519,16 +519,24 @@ pub async fn get_pending_dispatch_for_thread(
     };
 
     // Find the latest pending/dispatched dispatch whose card is linked to this
-    // thread via channel_thread_map (JSON contains the thread_id) or
-    // active_thread_id. This must cover review/review-decision as well as work
-    // dispatches because reused threads often omit a fresh DISPATCH: prefix.
+    // thread via thread_id (direct match), active_thread_id, or
+    // channel_thread_map JSON values. This must cover review/review-decision
+    // as well as work dispatches because reused threads often omit a fresh
+    // DISPATCH: prefix.
+    //
+    // #355: Use td.thread_id as primary match, and json_each for
+    // channel_thread_map to avoid matching JSON keys (parent channel IDs).
+    // INSTR was matching parent channel IDs, causing thread dispatch
+    // reminders to leak into parent channel turns.
     let dispatch_id: Option<String> = conn
         .query_row(
             "SELECT td.id FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.status IN ('pending', 'dispatched') \
-             AND (kc.active_thread_id = ?1 \
-                  OR INSTR(COALESCE(kc.channel_thread_map, ''), ?1) > 0) \
+             AND (td.thread_id = ?1 \
+                  OR kc.active_thread_id = ?1 \
+                  OR EXISTS(SELECT 1 FROM json_each(kc.channel_thread_map) \
+                            WHERE json_each.value = ?1)) \
              ORDER BY td.created_at DESC LIMIT 1",
             [thread_id],
             |row| row.get(0),
@@ -546,8 +554,10 @@ pub async fn get_pending_dispatch_for_thread(
              WHERE td.status IN ('pending', 'dispatched') \
              AND td.dispatch_type IN ('implementation', 'rework') \
              AND r.unified_thread = 1 AND r.status = 'active' \
-             AND (r.unified_thread_channel_id = ?1 \
-                  OR INSTR(COALESCE(r.unified_thread_id, ''), ?1) > 0) \
+             AND (td.thread_id = ?1 \
+                  OR r.unified_thread_channel_id = ?1 \
+                  OR EXISTS(SELECT 1 FROM json_each(r.unified_thread_id) \
+                            WHERE json_each.value = ?1)) \
              ORDER BY td.created_at DESC LIMIT 1",
             [thread_id],
             |row| row.get(0),

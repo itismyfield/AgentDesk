@@ -137,7 +137,7 @@ mod tests {
     /// Acquire the shared env lock to avoid races between tests that mutate
     /// AGENTDESK_ROOT_DIR.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        test_env_lock().lock().unwrap()
+        test_env_lock().lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
