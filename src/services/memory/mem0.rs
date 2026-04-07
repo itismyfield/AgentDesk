@@ -215,7 +215,7 @@ impl Mem0Backend {
             .await
             .map_err(|err| format!("mem0 add request failed: {err}"))?;
 
-        if response.status() != StatusCode::OK {
+        if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             return Err(format!("mem0 add failed with {status}: {body}"));
@@ -860,6 +860,31 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("timed out"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_mem0_capture_accepts_202_success() {
+        let (base_url, server_handle) = spawn_fixed_response_server("202 Accepted", "{}").await;
+        let (_guard, prev_api_key, prev_base_url) = set_mem0_env(&base_url);
+        let backend = Mem0Backend::new(mem0_settings());
+
+        let result = backend
+            .capture(CaptureRequest {
+                provider: ProviderKind::Codex,
+                role_id: "codex".to_string(),
+                channel_id: 1,
+                session_id: "run-1".to_string(),
+                dispatch_id: None,
+                user_text: "user".to_string(),
+                assistant_text: "assistant".to_string(),
+            })
+            .await;
+
+        server_handle.abort();
+        restore_mem0_env(prev_api_key, prev_base_url);
+
+        assert!(!result.skipped);
+        assert!(result.warnings.is_empty());
     }
 
     #[tokio::test]

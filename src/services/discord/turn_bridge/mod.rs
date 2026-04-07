@@ -1310,21 +1310,24 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
-        let capture_memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
-        let capture_request = CaptureRequest {
-            provider: provider.clone(),
-            role_id: resolve_memory_role_id(role_binding.as_ref()),
-            channel_id: channel_id.get(),
-            session_id: resolve_memory_session_id(
-                session_id_to_persist.as_deref(),
-                channel_id.get(),
-            ),
-            dispatch_id: dispatch_id.clone(),
-            user_text: user_text_owned.clone(),
-            assistant_text: full_response.clone(),
-        };
-        let _capture_task =
-            spawn_memory_capture_task(channel_id, capture_memory_settings, capture_request);
+        if should_persist_transcript {
+            let capture_memory_settings =
+                settings::memory_settings_for_binding(role_binding.as_ref());
+            let capture_request = CaptureRequest {
+                provider: provider.clone(),
+                role_id: resolve_memory_role_id(role_binding.as_ref()),
+                channel_id: channel_id.get(),
+                session_id: resolve_memory_session_id(
+                    session_id_to_persist.as_deref(),
+                    channel_id.get(),
+                ),
+                dispatch_id: dispatch_id.clone(),
+                user_text: user_text_owned.clone(),
+                assistant_text: full_response.clone(),
+            };
+            let _capture_task =
+                spawn_memory_capture_task(channel_id, capture_memory_settings, capture_request);
+        }
 
         // Clear restart report BEFORE clearing inflight state (which removes
         // the cancel token) to prevent the flush loop from processing the
