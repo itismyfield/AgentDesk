@@ -40,9 +40,7 @@ mod tests {
         TempDir,
         Option<std::ffi::OsString>,
     ) {
-        let guard = crate::services::discord::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = crate::services::discord::runtime_store::lock_test_env();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join(".adk");
         let shared = shared_agent_knowledge_path(&root);
@@ -86,12 +84,10 @@ mod tests {
             recall.shared_knowledge.as_deref(),
             Some("[Shared Agent Knowledge]\nRemember this")
         );
-        assert!(
-            recall
-                .longterm_catalog
-                .as_deref()
-                .is_some_and(|catalog| catalog.contains("facts.md"))
-        );
+        assert!(recall
+            .longterm_catalog
+            .as_deref()
+            .is_some_and(|catalog| catalog.contains("facts.md")));
         assert!(recall.external_recall.is_none());
     }
 

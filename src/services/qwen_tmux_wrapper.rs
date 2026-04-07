@@ -1,11 +1,11 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use serde_json::{Value, json};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 
-use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
+use crate::services::tmux_wrapper::{render_for_terminal, InputMode};
 
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 
@@ -24,6 +24,19 @@ struct TurnNormalizationState {
     last_session_id: Option<String>,
     init_emitted_for_session: Option<String>,
     partial_blocks: HashMap<usize, PartialBlockState>,
+}
+
+#[derive(Debug)]
+enum TurnReadEvent {
+    Line(String),
+    ReadError(String),
+    Eof,
+}
+
+#[derive(Debug)]
+struct TurnFailure {
+    message: String,
+    retryable: bool,
 }
 
 pub fn run(
@@ -222,9 +235,47 @@ fn run_turn(
     session_id: &mut Option<String>,
     settings_override: Option<&crate::services::qwen::QwenSystemSettingsOverride>,
 ) -> Result<(), String> {
+    let mut resume_strategy =
+        crate::services::qwen::normalize_resume_strategy(session_id.as_deref(), working_dir)?;
+
+    for attempt in 0..=crate::services::qwen::QWEN_MAX_SESSION_RETRIES {
+        match run_turn_once(
+            output,
+            qwen_bin,
+            qwen_model,
+            working_dir,
+            prompt,
+            session_id,
+            settings_override,
+            &resume_strategy,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(err)
+                if err.retryable && attempt < crate::services::qwen::QWEN_MAX_SESSION_RETRIES =>
+            {
+                *session_id = None;
+                resume_strategy = crate::services::qwen::QwenResumeStrategy::Fresh;
+            }
+            Err(err) => return Err(err.message),
+        }
+    }
+
+    Ok(())
+}
+
+fn run_turn_once(
+    output: &mut std::fs::File,
+    qwen_bin: &str,
+    qwen_model: Option<&str>,
+    working_dir: &str,
+    prompt: &str,
+    session_id: &mut Option<String>,
+    settings_override: Option<&crate::services::qwen::QwenSystemSettingsOverride>,
+    resume_strategy: &crate::services::qwen::QwenResumeStrategy,
+) -> Result<(), TurnFailure> {
     emit_status("[sending...]");
 
-    let args = build_turn_args(prompt, qwen_model, session_id.as_deref());
+    let args = crate::services::qwen::build_stream_exec_args(prompt, qwen_model, resume_strategy);
     let mut command = Command::new(qwen_bin);
     crate::services::platform::augment_exec_path(&mut command, qwen_bin);
     command
@@ -239,25 +290,27 @@ fn run_turn(
             settings_override.path(),
         );
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Failed to start Qwen: {}", e))?;
+    let mut child = command.spawn().map_err(|e| TurnFailure {
+        message: format!("Failed to start Qwen: {}", e),
+        retryable: false,
+    })?;
 
     let child_pid = child.id();
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Failed to capture Qwen stdout".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "Failed to capture Qwen stderr".to_string())?;
+    let stdout = child.stdout.take().ok_or_else(|| TurnFailure {
+        message: "Failed to capture Qwen stdout".to_string(),
+        retryable: false,
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| TurnFailure {
+        message: "Failed to capture Qwen stderr".to_string(),
+        retryable: false,
+    })?;
     let stderr_handle = std::thread::spawn(move || {
         let mut buf = String::new();
         let mut reader = BufReader::new(stderr);
         let _ = std::io::Read::read_to_string(&mut reader, &mut buf);
         buf
     });
+    let stdout_events = spawn_turn_stream_reader(stdout);
 
     let mut state = TurnNormalizationState {
         last_session_id: session_id.clone(),
@@ -265,33 +318,73 @@ fn run_turn(
         ..TurnNormalizationState::default()
     };
     let mut saw_result = false;
+    let mut idle_ticks = 0;
 
-    let reader = BufReader::new(stdout);
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("Failed to read Qwen output: {}", e))?;
-        for normalized in normalize_qwen_line(&line, &mut state) {
-            if let Some(id) = extract_init_session_id(&normalized) {
-                *session_id = Some(id);
+    loop {
+        match stdout_events.recv_timeout(crate::services::qwen::QWEN_STREAM_IDLE_TIMEOUT) {
+            Ok(TurnReadEvent::Line(line)) => {
+                idle_ticks = 0;
+                for normalized in normalize_qwen_line(&line, &mut state) {
+                    if let Some(id) = extract_init_session_id(&normalized) {
+                        *session_id = Some(id);
+                    }
+                    if is_result_line(&normalized) {
+                        saw_result = true;
+                    }
+                    emit_json_line(output, normalized).map_err(|err| TurnFailure {
+                        message: err,
+                        retryable: false,
+                    })?;
+                }
             }
-            if is_result_line(&normalized) {
-                saw_result = true;
+            Ok(TurnReadEvent::ReadError(message)) => {
+                crate::services::process::kill_pid_tree(child_pid);
+                let _ = child.wait();
+                let _ = stderr_handle.join().unwrap_or_default();
+                return Err(TurnFailure {
+                    message,
+                    retryable: true,
+                });
             }
-            emit_json_line(output, normalized)?;
+            Ok(TurnReadEvent::Eof) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                if saw_result {
+                    break;
+                }
+                idle_ticks += 1;
+                if idle_ticks >= crate::services::qwen::QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY {
+                    crate::services::process::kill_pid_tree(child_pid);
+                    let _ = child.wait();
+                    let _ = stderr_handle.join().unwrap_or_default();
+                    return Err(TurnFailure {
+                        message: format!(
+                            "Qwen stream produced no output for {} seconds",
+                            crate::services::qwen::QWEN_STREAM_IDLE_TIMEOUT.as_secs()
+                                * crate::services::qwen::QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY as u64
+                        ),
+                        retryable: true,
+                    });
+                }
+            }
         }
     }
 
     crate::services::process::kill_pid_tree(child_pid);
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let wait = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to wait for Qwen: {}", e))?;
+    let wait = child.wait_with_output().map_err(|e| TurnFailure {
+        message: format!("Failed to wait for Qwen: {}", e),
+        retryable: false,
+    })?;
     let stderr = stderr_handle.join().unwrap_or_default();
 
     if !wait.status.success() && !saw_result {
         let message = derive_wrapper_error_message(&stderr, wait.status.code());
         emit_result_error(output, &message);
-        return Err(message);
+        return Err(TurnFailure {
+            message,
+            retryable: false,
+        });
     }
 
     if !saw_result {
@@ -301,33 +394,56 @@ fn run_turn(
             stderr.trim().to_string()
         };
         emit_result_error(output, &message);
-        return Err(message);
+        return Err(TurnFailure {
+            message,
+            retryable: true,
+        });
     }
 
     Ok(())
 }
 
-fn build_turn_args(prompt: &str, model: Option<&str>, session_id: Option<&str>) -> Vec<String> {
-    let mut args = Vec::new();
-    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
-        args.push("--model".to_string());
-        args.push(model.to_string());
-    }
-    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
-        args.push("--resume".to_string());
-        args.push(session_id.to_string());
-    } else {
-        args.push("--continue".to_string());
-    }
-    args.push("-p".to_string());
-    args.push(prompt.to_string());
-    args.push("--output-format".to_string());
-    args.push("stream-json".to_string());
-    args.push("--include-partial-messages".to_string());
-    args.push("-y".to_string());
-    args.push("--sandbox".to_string());
-    args.push("false".to_string());
-    args
+#[cfg(test)]
+fn build_turn_args(
+    prompt: &str,
+    model: Option<&str>,
+    session_id: Option<&str>,
+    working_dir: &str,
+) -> Result<Vec<String>, String> {
+    let resume_strategy =
+        crate::services::qwen::normalize_resume_strategy(session_id, working_dir)?;
+    Ok(crate::services::qwen::build_stream_exec_args(
+        prompt,
+        model,
+        &resume_strategy,
+    ))
+}
+
+fn spawn_turn_stream_reader<R: std::io::Read + Send + 'static>(
+    stdout: R,
+) -> mpsc::Receiver<TurnReadEvent> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(TurnReadEvent::Line(line)).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(TurnReadEvent::ReadError(format!(
+                        "Failed to read Qwen output: {}",
+                        err
+                    )));
+                    return;
+                }
+            }
+        }
+        let _ = tx.send(TurnReadEvent::Eof);
+    });
+    rx
 }
 
 fn normalize_qwen_line(line: &str, state: &mut TurnNormalizationState) -> Vec<Value> {
@@ -769,6 +885,48 @@ fn emit_json_line(output: &mut std::fs::File, value: Value) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::{build_turn_args, decode_external_prompt, normalize_qwen_line};
+    use crate::services::qwen::qwen_project_cache_key;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn with_temp_qwen_home<F>(f: F)
+    where
+        F: FnOnce(&TempDir, &TempDir),
+    {
+        let _guard = crate::services::discord::runtime_store::lock_test_env();
+        let temp_home = TempDir::new().unwrap();
+        let temp_project = TempDir::new().unwrap();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+
+        unsafe {
+            std::env::set_var("HOME", temp_home.path());
+            std::env::set_var("USERPROFILE", temp_home.path());
+        }
+
+        f(&temp_home, &temp_project);
+
+        match prev_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match prev_userprofile {
+            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
+        }
+    }
+
+    fn create_prior_qwen_chat_cache(temp_home: &TempDir, working_dir: &TempDir) {
+        let chats_dir = temp_home
+            .path()
+            .join(".qwen")
+            .join("projects")
+            .join(qwen_project_cache_key(working_dir.path().to_str().unwrap()))
+            .join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+        fs::write(chats_dir.join("turn-1.jsonl"), "{\"type\":\"result\"}\n").unwrap();
+    }
 
     #[test]
     fn test_decode_external_prompt_keeps_plain_line() {
@@ -798,20 +956,52 @@ mod tests {
     }
 
     #[test]
-    fn build_turn_args_uses_continue_without_resume_token() {
-        let args = build_turn_args("hello", Some("qwen-max"), None);
-        assert!(args.windows(2).any(|pair| pair == ["--model", "qwen-max"]));
-        assert!(args.iter().any(|arg| arg == "--continue"));
-        assert!(!args.iter().any(|arg| arg == "--resume"));
+    fn build_turn_args_uses_fresh_without_resume_token_or_prior_cache() {
+        with_temp_qwen_home(|_temp_home, working_dir| {
+            let args = build_turn_args(
+                "hello",
+                Some("qwen-max"),
+                None,
+                working_dir.path().to_str().unwrap(),
+            )
+            .unwrap();
+            assert!(args.windows(2).any(|pair| pair == ["--model", "qwen-max"]));
+            assert!(!args.iter().any(|arg| arg == "--continue"));
+            assert!(!args.iter().any(|arg| arg == "--resume"));
+        });
+    }
+
+    #[test]
+    fn build_turn_args_uses_continue_with_prior_cache() {
+        with_temp_qwen_home(|temp_home, working_dir| {
+            create_prior_qwen_chat_cache(temp_home, working_dir);
+            let args = build_turn_args(
+                "hello",
+                Some("qwen-max"),
+                None,
+                working_dir.path().to_str().unwrap(),
+            )
+            .unwrap();
+            assert!(args.windows(2).any(|pair| pair == ["--model", "qwen-max"]));
+            assert!(args.iter().any(|arg| arg == "--continue"));
+            assert!(!args.iter().any(|arg| arg == "--resume"));
+        });
     }
 
     #[test]
     fn build_turn_args_prefers_resume_token_when_present() {
-        let args = build_turn_args("hello", None, Some("session-123"));
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--resume", "session-123"])
-        );
-        assert!(!args.iter().any(|arg| arg == "--continue"));
+        with_temp_qwen_home(|_temp_home, working_dir| {
+            let args = build_turn_args(
+                "hello",
+                None,
+                Some("session-123"),
+                working_dir.path().to_str().unwrap(),
+            )
+            .unwrap();
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--resume", "session-123"]));
+            assert!(!args.iter().any(|arg| arg == "--continue"));
+        });
     }
 }

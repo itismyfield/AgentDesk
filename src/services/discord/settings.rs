@@ -11,7 +11,6 @@ use poise::serenity_prelude as serenity;
 use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::provider::ProviderKind;
 
-use super::DiscordBotSettings;
 use super::formatting::normalize_allowed_tools;
 use super::org_schema;
 use super::role_map::{
@@ -22,6 +21,7 @@ use super::role_map::{
     resolve_workspace as resolve_workspace_from_role_map,
 };
 use super::runtime_store::{bot_settings_path, discord_uploads_root};
+use super::DiscordBotSettings;
 
 fn json_u64(value: &serde_json::Value) -> Option<u64> {
     value
@@ -168,7 +168,11 @@ fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u6
             value
         );
     }
-    if clamped == 0 { default } else { clamped }
+    if clamped == 0 {
+        default
+    } else {
+        clamped
+    }
 }
 
 fn resolve_memory_backend(raw: Option<&str>) -> MemoryBackendKind {
@@ -1037,9 +1041,7 @@ mod tests {
     where
         F: FnOnce(&TempDir),
     {
-        let _guard = super::super::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = super::super::runtime_store::lock_test_env();
         let temp_home = TempDir::new().unwrap();
         let root = temp_home.path().join(".adk");
         fs::create_dir_all(&root).unwrap();

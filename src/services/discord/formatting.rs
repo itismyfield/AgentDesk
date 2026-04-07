@@ -3,7 +3,7 @@ use serenity::{ChannelId, CreateMessage, EditMessage, MessageId};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{DISCORD_MSG_LIMIT, SharedData, rate_limit_wait};
+use super::{rate_limit_wait, SharedData, DISCORD_MSG_LIMIT};
 use crate::services::provider::ProviderKind;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -94,7 +94,11 @@ where
 
 /// Format a risk badge for display
 pub(super) fn risk_badge(destructive: bool) -> &'static str {
-    if destructive { "⚠️" } else { "" }
+    if destructive {
+        "⚠️"
+    } else {
+        ""
+    }
 }
 
 /// Claude Code built-in slash commands
@@ -220,9 +224,10 @@ pub(super) fn format_skills_notice(provider: &ProviderKind, skills: &[(String, S
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_tool_name, convert_markdown_tables, filter_codex_tool_logs,
+        canonical_tool_name, convert_markdown_tables, filter_codex_tool_logs, format_skills_notice,
         normalize_allowed_tools,
     };
+    use crate::services::provider::ProviderKind;
 
     #[test]
     fn test_canonical_tool_name_is_case_insensitive() {
@@ -339,9 +344,6 @@ mod tests {
 
     #[test]
     fn test_format_skills_notice_adds_progressive_disclosure_guidance() {
-        use super::format_skills_notice;
-        use crate::services::provider::ProviderKind;
-
         let notice = format_skills_notice(
             &ProviderKind::Codex,
             &[(
@@ -358,6 +360,18 @@ mod tests {
     }
 
     #[test]
+    fn test_format_skills_notice_mentions_qwen_local_skills() {
+        let notice = format_skills_notice(
+            &ProviderKind::Qwen,
+            &[("deploy".to_string(), "Ship the current branch".to_string())],
+        );
+
+        assert!(notice.contains("Available local Qwen skills"));
+        assert!(notice.contains("`SKILL.md`"));
+        assert!(notice.contains("/deploy: Ship the current branch"));
+    }
+
+    #[test]
     fn test_split_message_short_passthrough() {
         use super::split_message;
 
@@ -369,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_split_message_long_produces_multiple_chunks() {
-        use super::{DISCORD_MSG_LIMIT, split_message};
+        use super::{split_message, DISCORD_MSG_LIMIT};
 
         // Create a message longer than the Discord limit
         let long_msg: String = "A".repeat(DISCORD_MSG_LIMIT + 500);

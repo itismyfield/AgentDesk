@@ -1,4 +1,4 @@
-use super::handoff::{HandoffRecord, save_handoff};
+use super::handoff::{save_handoff, HandoffRecord};
 use super::settings::{resolve_role_binding, validate_bot_channel_routing};
 use super::turn_bridge::stale_inflight_message;
 use super::*;
@@ -1481,9 +1481,7 @@ mod tests {
 
     #[test]
     fn missing_session_recovery_saves_handoff_for_followup_turn() {
-        let _lock = super::super::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::runtime_store::lock_test_env();
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("agentdesk-root");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
@@ -1538,11 +1536,9 @@ mod tests {
         assert!(handoffs[0].intent.contains("중단된 응답"));
         assert!(handoffs[0].context.contains("원래 사용자 요청"));
         assert!(handoffs[0].context.contains("partial 응답"));
-        assert!(
-            handoffs[0]
-                .context
-                .contains("이어서 원인과 대응을 설명하겠습니다")
-        );
+        assert!(handoffs[0]
+            .context
+            .contains("이어서 원인과 대응을 설명하겠습니다"));
     }
 
     #[test]

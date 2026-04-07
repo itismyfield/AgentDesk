@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::org_schema_path;
-use super::settings::{MemoryConfigOverride, PeerAgentInfo, RoleBinding, resolve_memory_settings};
+use super::settings::{resolve_memory_settings, MemoryConfigOverride, PeerAgentInfo, RoleBinding};
 use crate::services::provider::ProviderKind;
 
 // ─── YAML Schema Types ──────────────────────────────────────────────────────
@@ -360,9 +360,7 @@ mod tests {
     where
         F: FnOnce(&TempDir),
     {
-        let _guard = super::super::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = super::super::runtime_store::lock_test_env();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join(".adk");
         fs::create_dir_all(&root).unwrap();

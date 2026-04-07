@@ -15,9 +15,9 @@ use super::stale_resume::{
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
+use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
 use crate::services::discord::ChannelId;
 use crate::services::discord::InflightTurnState;
-use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
 use crate::services::memory::CaptureRequest;
 use crate::services::provider::ProviderKind;
 use std::io::Write;
@@ -44,9 +44,7 @@ fn set_mem0_env(
     Option<std::ffi::OsString>,
     Option<std::ffi::OsString>,
 ) {
-    let guard = crate::services::discord::runtime_store::test_env_lock()
-        .lock()
-        .unwrap();
+    let guard = crate::services::discord::runtime_store::lock_test_env();
     let prev_api_key = std::env::var_os("MEM0_API_KEY");
     let prev_base_url = std::env::var_os("MEM0_BASE_URL");
     unsafe {

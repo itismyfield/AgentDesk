@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use poise::CreateReply;
 use poise::serenity_prelude as serenity;
+use poise::CreateReply;
 
 use super::super::model_catalog::provider_supports_model_override;
-use super::super::{Context, Error, SharedData, check_auth};
+use super::super::{check_auth, Context, Error, SharedData};
 use super::config::{
     build_model_picker_components_from_snapshot, build_model_picker_embed_from_snapshot,
     current_working_dir, effective_model_snapshot, remember_model_picker_pending,
@@ -25,7 +25,13 @@ async fn build_model_picker_view(
     let snapshot = effective_model_snapshot(shared, target_channel_id).await;
     let working_dir = current_working_dir(shared, target_channel_id).await;
     let pending_model = snapshot.override_model.as_deref();
-    let embed = build_model_picker_embed_from_snapshot(&snapshot, provider, pending_model, None);
+    let embed = build_model_picker_embed_from_snapshot(
+        &snapshot,
+        provider,
+        pending_model,
+        None,
+        working_dir.as_deref(),
+    );
     let components = build_model_picker_components_from_snapshot(
         &snapshot,
         target_channel_id,

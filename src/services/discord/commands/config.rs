@@ -5,11 +5,11 @@ use poise::serenity_prelude as serenity;
 
 use super::super::formatting::{canonical_tool_name, risk_badge, send_long_message_ctx, tool_info};
 use super::super::model_catalog::{
-    SOURCE_DISPATCH_ROLE, SOURCE_PROVIDER_DEFAULT, SOURCE_ROLE_MAP, SOURCE_RUNTIME_OVERRIDE,
-    is_default_picker_value,
+    is_default_picker_value, SOURCE_DISPATCH_ROLE, SOURCE_PROVIDER_DEFAULT, SOURCE_ROLE_MAP,
+    SOURCE_RUNTIME_OVERRIDE,
 };
 use super::super::settings::{resolve_role_binding, save_bot_settings};
-use super::super::{Context, Error, SharedData, check_auth, check_owner};
+use super::super::{check_auth, check_owner, Context, Error, SharedData};
 use super::model_ui::{
     build_model_picker_options, build_model_picker_summary_lines, has_pending_model_change,
 };
@@ -372,13 +372,16 @@ pub(in crate::services::discord) fn build_model_picker_embed_from_snapshot(
     provider: &ProviderKind,
     pending_model: Option<&str>,
     notice: Option<&str>,
+    working_dir: Option<&str>,
 ) -> serenity::CreateEmbed {
     let lines = build_model_picker_summary_lines(
         provider,
         &snapshot.effective,
+        snapshot.source,
         pending_model,
         snapshot.override_model.as_deref(),
         notice,
+        working_dir,
     );
     serenity::CreateEmbed::new()
         .title("Model Picker")
@@ -703,7 +706,7 @@ pub(in crate::services::discord) async fn cmd_allowall(
 #[cfg(test)]
 mod tests {
     use crate::services::discord::model_catalog::{
-        DEFAULT_PICKER_VALUE, known_models, validate_model_input,
+        known_models, validate_model_input, DEFAULT_PICKER_VALUE,
     };
 
     use super::super::model_ui::{
@@ -978,12 +981,10 @@ mod tests {
             gpt_54.description,
             "Frontier coding baseline | API $2.5/$15"
         );
-        assert!(
-            options
-                .iter()
-                .any(|entry| entry.label == "GPT-5.3-Codex-Spark"
-                    && entry.description == "Text-only preview | No API")
-        );
+        assert!(options
+            .iter()
+            .any(|entry| entry.label == "GPT-5.3-Codex-Spark"
+                && entry.description == "Text-only preview | No API"));
     }
 
     #[test]
@@ -1071,11 +1072,9 @@ mod tests {
             PROVIDER_DEFAULT_SOURCE,
             None,
         );
-        assert!(
-            options
-                .iter()
-                .any(|entry| entry.value == "sonnet" && entry.label == "Sonnet 4.6")
-        );
+        assert!(options
+            .iter()
+            .any(|entry| entry.value == "sonnet" && entry.label == "Sonnet 4.6"));
         assert!(options.iter().any(|entry| entry.value == "sonnet[1m]"
             && entry.label == "Sonnet 4.6 1M"
             && entry.description == "1M context window | Sonnet 4.6 alias"));
@@ -1092,6 +1091,8 @@ mod tests {
         let lines = build_model_picker_summary_lines(
             &ProviderKind::Gemini,
             "gemini-3-flash-preview",
+            ROLE_MAP_SOURCE,
+            None,
             None,
             None,
             None,
@@ -1111,8 +1112,10 @@ mod tests {
         let lines = build_model_picker_summary_lines(
             &ProviderKind::Codex,
             "gpt-5.4",
+            ROLE_MAP_SOURCE,
             Some("gpt-5.4-mini"),
             Some("gpt-5.4"),
+            None,
             None,
         );
         assert_eq!(lines[2], "현재 작업 상태 : `gpt-5.4-mini` 저장 대기");
