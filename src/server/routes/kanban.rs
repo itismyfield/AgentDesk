@@ -106,6 +106,68 @@ pub struct AssignIssueBody {
     pub assignee_agent_id: String,
 }
 
+fn load_retry_dispatch_spec(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> Option<(String, String, String)> {
+    let card_row: (Option<String>, String, Option<String>) = conn
+        .query_row(
+            "SELECT assigned_agent_id, title, latest_dispatch_id FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok()?;
+
+    let (card_agent_id, card_title, latest_dispatch_id) = card_row;
+    let latest_dispatch = latest_dispatch_id
+        .as_deref()
+        .and_then(|dispatch_id| {
+            conn.query_row(
+                "SELECT to_agent_id, dispatch_type, title FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .ok()
+        })
+        .or_else(|| {
+            conn.query_row(
+                "SELECT to_agent_id, dispatch_type, title
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+             ORDER BY datetime(created_at) DESC, rowid DESC
+             LIMIT 1",
+                [card_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .ok()
+        });
+
+    let (dispatch_agent_id, dispatch_type, dispatch_title) =
+        latest_dispatch.unwrap_or((None, None, None));
+
+    let effective_agent_id = dispatch_agent_id.or(card_agent_id).unwrap_or_default();
+    let effective_dispatch_type = dispatch_type
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "implementation".to_string());
+    let effective_title = dispatch_title
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(card_title);
+
+    Some((effective_agent_id, effective_dispatch_type, effective_title))
+}
+
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/kanban-cards
@@ -661,6 +723,17 @@ pub async fn retry_card(
             );
         }
 
+        let (stored_agent_id, retry_dispatch_type, retry_title) =
+            match load_retry_dispatch_spec(&conn, &id) {
+                Some(spec) => spec,
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": "card not found"})),
+                    );
+                }
+            };
+
         conn.execute_batch("BEGIN").ok();
 
         // Cancel existing pending/dispatched dispatch
@@ -743,28 +816,24 @@ pub async fn retry_card(
         }
         // Note: status → 'requested' is handled by create_dispatch() below
 
-        // Get card info for dispatch creation
-        let (card_title, card_id_owned) = (
-            conn.query_row(
-                "SELECT title FROM kanban_cards WHERE id = ?1",
-                [&id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap_or_default(),
-            id.clone(),
-        );
+        let dispatch_agent_id = if agent_id_for_dispatch.is_empty() {
+            stored_agent_id
+        } else {
+            agent_id_for_dispatch
+        };
+        let card_id_owned = id.clone();
         drop(conn);
 
         // Create dispatch directly (bypass policy to avoid from===requested skip)
-        if !agent_id_for_dispatch.is_empty() {
+        if !dispatch_agent_id.is_empty() {
             let _retry_result = crate::dispatch::create_dispatch(
                 &state.db,
                 &state.engine,
                 &card_id_owned,
-                &agent_id_for_dispatch,
-                "implementation",
-                &card_title,
-                &json!({"retry": true}),
+                &dispatch_agent_id,
+                &retry_dispatch_type,
+                &retry_title,
+                &json!({"retry": true, "preserved_dispatch_type": retry_dispatch_type.clone()}),
             );
         }
     } // drop conn lock
@@ -800,6 +869,16 @@ pub async fn redispatch_card(
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        let (agent_id, dispatch_type, dispatch_title) = match load_retry_dispatch_spec(&conn, &id) {
+            Some(spec) => spec,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "card not found"})),
                 );
             }
         };
@@ -860,14 +939,6 @@ pub async fn redispatch_card(
             );
         }
 
-        // Get agent + title for direct dispatch creation
-        let (agent_id, card_title): (String, String) = conn
-            .query_row(
-                "SELECT COALESCE(assigned_agent_id, ''), title FROM kanban_cards WHERE id = ?1",
-                [&id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap_or_default();
         let card_id_owned = id.clone();
         drop(conn);
 
@@ -878,9 +949,9 @@ pub async fn redispatch_card(
                 &state.engine,
                 &card_id_owned,
                 &agent_id,
-                "implementation",
-                &card_title,
-                &json!({"redispatch": true}),
+                &dispatch_type,
+                &dispatch_title,
+                &json!({"redispatch": true, "preserved_dispatch_type": dispatch_type.clone()}),
             );
         }
     }

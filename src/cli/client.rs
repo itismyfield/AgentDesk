@@ -112,6 +112,69 @@ fn runtime_config_payload(value: Value) -> Result<Value, String> {
     }
 }
 
+fn dispatch_context_string_field(dispatch: Option<&Value>, key: &str) -> Option<String> {
+    dispatch
+        .and_then(|value| value.get("context"))
+        .and_then(|context| context.get(key))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn build_cli_advance_completion_result(card: &Value, pending_dispatch: Option<&Value>) -> Value {
+    let issue_number = card.get("github_issue_number").and_then(Value::as_i64);
+
+    let mut completed_worktree_path =
+        dispatch_context_string_field(pending_dispatch, "worktree_path");
+    let mut completed_branch = dispatch_context_string_field(pending_dispatch, "branch");
+    let mut completed_commit = dispatch_context_string_field(pending_dispatch, "completed_commit")
+        .or_else(|| dispatch_context_string_field(pending_dispatch, "reviewed_commit"));
+
+    if completed_worktree_path.is_none() {
+        if let Some(issue_number) = issue_number {
+            if let Some(repo_dir) = crate::services::platform::resolve_repo_dir() {
+                if let Some(worktree) =
+                    crate::services::platform::find_worktree_for_issue(&repo_dir, issue_number)
+                {
+                    completed_worktree_path = Some(worktree.path);
+                    completed_branch.get_or_insert(worktree.branch);
+                    completed_commit.get_or_insert(worktree.commit);
+                }
+            }
+        }
+    }
+
+    if completed_worktree_path.is_none() {
+        completed_worktree_path = crate::services::platform::resolve_repo_dir();
+    }
+    if completed_branch.is_none() {
+        completed_branch = completed_worktree_path
+            .as_deref()
+            .and_then(crate::services::platform::shell::git_branch_name);
+    }
+    if completed_commit.is_none() {
+        completed_commit = completed_worktree_path
+            .as_deref()
+            .and_then(crate::services::platform::git_head_commit);
+    }
+
+    let mut result = serde_json::Map::new();
+    result.insert("status".to_string(), Value::String("done".to_string()));
+    result.insert(
+        "completion_source".to_string(),
+        Value::String("cli_advance".to_string()),
+    );
+    if let Some(path) = completed_worktree_path {
+        result.insert("completed_worktree_path".to_string(), Value::String(path));
+    }
+    if let Some(branch) = completed_branch {
+        result.insert("completed_branch".to_string(), Value::String(branch));
+    }
+    if let Some(commit) = completed_commit {
+        result.insert("completed_commit".to_string(), Value::String(commit));
+    }
+    Value::Object(result)
+}
+
 fn summarize_discord_health(health: &Value) -> String {
     if let Some(providers) = health.get("providers").and_then(Value::as_array) {
         let total = providers.len();
@@ -464,10 +527,14 @@ pub fn cmd_advance(issue_number: &str) -> Result<(), String> {
     if let Some(d) = pending {
         let did = d["id"].as_str().unwrap_or("");
         println!("Completing dispatch {did}...");
+        let completion_result = build_cli_advance_completion_result(card, Some(d));
         request_json(
             "PATCH",
             &format!("/api/dispatches/{did}"),
-            Some(&serde_json::json!({"status": "completed", "result": {"status": "done", "completion_source": "cli_advance"}}).to_string()),
+            Some(
+                &serde_json::json!({"status": "completed", "result": completion_result})
+                    .to_string(),
+            ),
         )?;
     } else {
         println!("No pending implementation/rework dispatch found.");
@@ -734,8 +801,53 @@ pub fn cmd_terminations(
 
 #[cfg(test)]
 mod tests {
-    use super::{render_cards_table, runtime_config_payload};
+    use super::{build_cli_advance_completion_result, render_cards_table, runtime_config_payload};
     use serde_json::json;
+    use std::ffi::OsString;
+    use std::process::Command;
+    use std::sync::MutexGuard;
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        crate::services::discord::runtime_store::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn run_git(repo_dir: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn runtime_config_payload_uses_current_envelope() {
@@ -761,5 +873,63 @@ mod tests {
         assert!(rendered.contains("#90"));
         assert!(rendered.contains("feat: AgentDesk CLI client"));
         assert!(!rendered.contains("description"));
+    }
+
+    #[test]
+    fn cli_advance_completion_result_prefers_dispatch_worktree_context() {
+        let _lock = env_lock();
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("README.md"), "hello\n").unwrap();
+        run_git(repo.path(), &["add", "README.md"]);
+        run_git(repo.path(), &["commit", "-m", "feat: seed (#331)"]);
+
+        let result = build_cli_advance_completion_result(
+            &json!({"github_issue_number": 331}),
+            Some(&json!({
+                "context": {
+                    "worktree_path": repo.path().to_string_lossy().to_string(),
+                    "branch": "feature/331-review"
+                }
+            })),
+        );
+
+        assert_eq!(
+            result["completed_worktree_path"],
+            repo.path().to_string_lossy().to_string()
+        );
+        assert_eq!(result["completed_branch"], "feature/331-review");
+        assert_eq!(
+            result["completed_commit"],
+            crate::services::platform::git_head_commit(&repo.path().to_string_lossy()).unwrap()
+        );
+    }
+
+    #[test]
+    fn cli_advance_completion_result_falls_back_to_repo_dir() {
+        let _lock = env_lock();
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("README.md"), "hello\n").unwrap();
+        run_git(repo.path(), &["add", "README.md"]);
+        run_git(repo.path(), &["commit", "-m", "feat: seed (#340)"]);
+        let _repo_env = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
+
+        let result =
+            build_cli_advance_completion_result(&json!({"github_issue_number": 340}), None);
+
+        assert_eq!(
+            result["completed_worktree_path"],
+            repo.path().to_string_lossy().to_string()
+        );
+        assert_eq!(result["completed_branch"], "main");
+        assert_eq!(
+            result["completed_commit"],
+            crate::services::platform::git_head_commit(&repo.path().to_string_lossy()).unwrap()
+        );
     }
 }

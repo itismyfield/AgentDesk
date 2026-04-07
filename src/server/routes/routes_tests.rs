@@ -4031,6 +4031,187 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
 }
 
 #[tokio::test]
+async fn retry_preserves_review_dispatch_type() {
+    let (_repo, _repo_guard) = setup_test_repo();
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-review-retry");
+    seed_repo(&db, "test-repo");
+    ensure_auto_queue_tables(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, latest_dispatch_id, created_at, updated_at
+            ) VALUES (
+                'card-review-retry', 'Issue #331 retry', 'review', 'medium', 'agent-review-retry', 'test-repo',
+                331, 'dispatch-review-old', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                created_at, updated_at
+            ) VALUES (
+                'dispatch-review-old', 'card-review-retry', 'agent-review-retry', 'review', 'pending',
+                '[Review] Issue #331 retry', datetime('now', '-10 minutes'), datetime('now', '-10 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-review-retry/retry")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["card"]["latest_dispatch_type"], "review");
+
+    let conn = db.lock().unwrap();
+    let old_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-review-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_status, "cancelled");
+
+    let latest_dispatch_id: String = conn
+        .query_row(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-review-retry'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(latest_dispatch_id, "dispatch-review-old");
+
+    let (dispatch_type, status, title): (String, String, String) = conn
+        .query_row(
+            "SELECT dispatch_type, status, title FROM task_dispatches WHERE id = ?1",
+            [&latest_dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(dispatch_type, "review");
+    assert_eq!(status, "pending");
+    assert_eq!(title, "[Review] Issue #331 retry");
+}
+
+#[tokio::test]
+async fn redispatch_preserves_review_dispatch_type() {
+    let (_repo, _repo_guard) = setup_test_repo();
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-review-redispatch");
+    seed_repo(&db, "test-repo");
+    ensure_auto_queue_tables(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, latest_dispatch_id, review_status, created_at, updated_at
+            ) VALUES (
+                'card-review-redispatch', 'Issue #331 redispatch', 'review', 'medium', 'agent-review-redispatch', 'test-repo',
+                331, 'dispatch-review-redispatch-old', 'queued', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                created_at, updated_at
+            ) VALUES (
+                'dispatch-review-redispatch-old', 'card-review-redispatch', 'agent-review-redispatch', 'review', 'dispatched',
+                '[Review] Issue #331 redispatch', datetime('now', '-10 minutes'), datetime('now', '-10 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/kanban-cards/card-review-redispatch/redispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"reason":"requeue review"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["card"]["latest_dispatch_type"], "review");
+
+    let conn = db.lock().unwrap();
+    let old_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-review-redispatch-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_status, "cancelled");
+
+    let latest_dispatch_id: String = conn
+        .query_row(
+            "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-review-redispatch'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(latest_dispatch_id, "dispatch-review-redispatch-old");
+
+    let (dispatch_type, status, title, review_status): (String, String, String, Option<String>) =
+        conn.query_row(
+            "SELECT td.dispatch_type, td.status, td.title, kc.review_status
+             FROM task_dispatches td
+             JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id
+             WHERE td.id = ?1",
+            [&latest_dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(dispatch_type, "review");
+    assert_eq!(status, "pending");
+    assert_eq!(title, "[Review] Issue #331 redispatch");
+    assert!(
+        review_status.is_none(),
+        "redispatch should clear stale review_status before creating the new review dispatch"
+    );
+}
+
+#[tokio::test]
 async fn auto_queue_enqueue_rejects_backlog_card() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
