@@ -62,9 +62,53 @@ pub(super) async fn build_adk_session_key(
             .map(|name| provider.build_tmux_session_name(name))
     }?;
 
-    let hostname = crate::services::platform::hostname_short();
+    Some(build_namespaced_session_key(
+        &shared.token_hash,
+        provider,
+        &tmux_name,
+    ))
+}
 
-    Some(format!("{}:{}", hostname, tmux_name))
+pub(in crate::services::discord) fn build_namespaced_session_key(
+    token_hash: &str,
+    provider: &ProviderKind,
+    tmux_name: &str,
+) -> String {
+    let hostname = crate::services::platform::hostname_short();
+    format!(
+        "{}/{}/{}:{}",
+        provider.as_str(),
+        token_hash,
+        hostname,
+        tmux_name
+    )
+}
+
+pub(in crate::services::discord) fn build_legacy_session_key(tmux_name: &str) -> String {
+    let hostname = crate::services::platform::hostname_short();
+    format!("{}:{}", hostname, tmux_name)
+}
+
+pub(in crate::services::discord) fn build_session_key_candidates(
+    token_hash: &str,
+    provider: &ProviderKind,
+    tmux_name: &str,
+) -> [String; 2] {
+    [
+        build_namespaced_session_key(token_hash, provider, tmux_name),
+        build_legacy_session_key(tmux_name),
+    ]
+}
+
+fn legacy_session_key_from_namespaced(session_key: &str) -> Option<String> {
+    let mut parts = session_key.splitn(3, '/');
+    let _provider = parts.next()?;
+    let _token_hash = parts.next()?;
+    let legacy = parts.next()?.trim();
+    if legacy.is_empty() {
+        return None;
+    }
+    Some(legacy.to_string())
 }
 
 pub(super) fn derive_adk_session_info(
@@ -183,6 +227,14 @@ pub(super) async fn delete_adk_session(session_key: &str, api_port: u16) {
         }
         _ => {}
     }
+
+    if let Some(legacy_key) = legacy_session_key_from_namespaced(session_key) {
+        let _ = reqwest::Client::new()
+            .delete(&url)
+            .query(&[("session_key", legacy_key.as_str())])
+            .send()
+            .await;
+    }
 }
 
 /// Clear the stored provider session_id from DB for a given session_key.
@@ -210,6 +262,18 @@ pub(super) async fn clear_provider_session_id(session_key: &str, api_port: u16) 
             eprintln!("  [{ts}] ⚠ clear_provider_session_id error: {e}");
         }
         _ => {}
+    }
+
+    if let Some(legacy_key) = legacy_session_key_from_namespaced(session_key) {
+        let legacy_body = serde_json::json!({ "session_key": legacy_key });
+        let _ = reqwest::Client::new()
+            .post(local_api_url(
+                api_port,
+                "/api/dispatched-sessions/clear-session-id",
+            ))
+            .json(&legacy_body)
+            .send()
+            .await;
     }
 }
 
@@ -250,6 +314,19 @@ pub(super) async fn save_provider_session_id(
 /// Fetch the stored provider session_id from DB for a given session_key.
 /// Reads the legacy `claude_session_id` field for compatibility.
 pub(super) async fn fetch_provider_session_id(
+    session_key: &str,
+    provider: &ProviderKind,
+    api_port: u16,
+) -> Option<String> {
+    if let Some(found) = fetch_provider_session_id_once(session_key, provider, api_port).await {
+        return Some(found);
+    }
+
+    let legacy_key = legacy_session_key_from_namespaced(session_key)?;
+    fetch_provider_session_id_once(&legacy_key, provider, api_port).await
+}
+
+async fn fetch_provider_session_id_once(
     session_key: &str,
     provider: &ProviderKind,
     api_port: u16,
@@ -608,15 +685,35 @@ mod tests {
 
     #[test]
     fn test_build_adk_session_key_format() {
-        // build_adk_session_key is async and needs SharedData, so test the format
-        // by verifying the components: "hostname:tmux-session"
-        // We test the sub-components instead:
         use crate::services::provider::ProviderKind;
         let tmux_name = ProviderKind::Claude.build_tmux_session_name("my-channel");
-        let hostname = "mac-mini";
-        let key = format!("{}:{}", hostname, tmux_name);
+        let key = super::build_namespaced_session_key("hash123", &ProviderKind::Claude, &tmux_name);
+        assert!(key.starts_with("claude/hash123/"));
         assert!(key.contains(':'));
-        assert!(key.starts_with("mac-mini:AgentDesk-claude-"));
+        assert!(key.ends_with(&tmux_name));
+    }
+
+    #[test]
+    fn test_build_session_key_candidates_include_legacy_tail() {
+        use crate::services::provider::ProviderKind;
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name("agentdesk-main");
+        let candidates =
+            super::build_session_key_candidates("tokenxyz", &ProviderKind::Codex, &tmux_name);
+        assert!(candidates[0].starts_with("codex/tokenxyz/"));
+        assert_eq!(candidates[1], super::build_legacy_session_key(&tmux_name));
+    }
+
+    #[test]
+    fn test_legacy_session_key_from_namespaced_round_trip() {
+        let key = "codex/tokenxyz/host123:AgentDesk-codex-main";
+        assert_eq!(
+            super::legacy_session_key_from_namespaced(key),
+            Some("host123:AgentDesk-codex-main".to_string())
+        );
+        assert_eq!(
+            super::legacy_session_key_from_namespaced("host123:legacy"),
+            None
+        );
     }
 
     #[test]

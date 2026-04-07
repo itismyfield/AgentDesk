@@ -9,7 +9,7 @@ use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::inflight::load_inflight_states;
 use super::super::metrics;
 use super::super::runtime_store;
-use super::super::{Context, CoreState, Error, PendingQueueItem, SharedData, check_auth};
+use super::super::{check_auth, Context, CoreState, Error, PendingQueueItem, SharedData};
 use crate::services::claude;
 use crate::services::provider::ProviderKind;
 #[cfg(unix)]
@@ -111,6 +111,17 @@ pub(in crate::services::discord) async fn build_health_report(
     };
     let tmux_session_name =
         session_channel_name.map(|name| provider.build_tmux_session_name(&name));
+    let queue_namespace = format!("{}/{}", provider.as_str(), shared.token_hash);
+    let session_key_text = tmux_session_name
+        .as_ref()
+        .map(|session_name| {
+            super::super::adk_session::build_namespaced_session_key(
+                &shared.token_hash,
+                provider,
+                session_name,
+            )
+        })
+        .unwrap_or_else(|| "(none)".to_string());
     let tmux_alive = if let Some(ref session_name) = tmux_session_name {
         if tmux_session_has_live_pane(session_name) {
             "alive"
@@ -146,8 +157,10 @@ pub(in crate::services::discord) async fn build_health_report(
 
 **This Channel**
 - state: `{}`
+- namespace: `{}`
 - path: `{}`
 - session_id: `{}`
+- session_key: `{}`
 - tmux: `{}`
 - bridge: active `{}`, watcher `{}`, inflight `{}`
 - queue: interventions `{}`, uploads `{}`
@@ -164,8 +177,10 @@ pub(in crate::services::discord) async fn build_health_report(
         recovering_count,
         inflight_count,
         channel_state,
+        queue_namespace,
         current_path_text,
         session_id_short,
+        truncate_str(&session_key_text, 96),
         tmux_alive,
         if active_request { "yes" } else { "no" },
         if channel_watcher { "yes" } else { "no" },
@@ -229,6 +244,17 @@ pub(in crate::services::discord) async fn build_status_report(
     };
     let tmux_session_name =
         session_channel_name.map(|name| provider.build_tmux_session_name(&name));
+    let queue_namespace = format!("{}/{}", provider.as_str(), shared.token_hash);
+    let session_key_text = tmux_session_name
+        .as_ref()
+        .map(|session_name| {
+            super::super::adk_session::build_namespaced_session_key(
+                &shared.token_hash,
+                provider,
+                session_name,
+            )
+        })
+        .unwrap_or_else(|| "(none)".to_string());
     let tmux_alive = if let Some(ref session_name) = tmux_session_name {
         if tmux_session_has_live_pane(session_name) {
             "alive"
@@ -261,9 +287,11 @@ pub(in crate::services::discord) async fn build_status_report(
         "\
 **Channel Status**
 - provider: `{}`
+- namespace: `{}`
 - state: `{}`
 - path: `{}`
 - session_id: `{}`
+- session_key: `{}`
 - remote: `{}`
 - tmux: `{}`
 - owner: {}
@@ -271,9 +299,11 @@ pub(in crate::services::discord) async fn build_status_report(
 - history: items `{}`, cleared `{}`
 ",
         provider.as_str(),
+        queue_namespace,
         channel_state,
         path_text,
         session_id_short,
+        truncate_str(&session_key_text, 96),
         remote_text,
         tmux_alive,
         owner_text,
@@ -383,6 +413,7 @@ pub(in crate::services::discord) async fn build_inflight_report(
 fn build_queue_report_sync(
     data: &CoreState,
     provider: &ProviderKind,
+    token_hash: &str,
     current_channel: ChannelId,
     show_all: bool,
 ) -> String {
@@ -436,15 +467,19 @@ fn build_queue_report_sync(
         }
     }
 
-    // Disk-persisted queues (scoped to current_channel unless show_all)
+    // Disk-persisted queues — read from token_hash namespace (P1-3)
     if let Some(root) = runtime_store::discord_pending_queue_root() {
-        let dir = root.join(provider.as_str());
-        if dir.is_dir() {
+        let ns_dir = root.join(provider.as_str()).join(token_hash);
+        lines.push(format!(
+            "  Disk namespace: `{provider}/{token_hash}`",
+            provider = provider.as_str()
+        ));
+        if ns_dir.is_dir() {
             let mut disk_count = 0usize;
             let target_file = if show_all {
                 None
             } else {
-                Some(dir.join(format!("{}.json", current_channel)))
+                Some(ns_dir.join(format!("{}.json", current_channel)))
             };
             let paths: Vec<std::path::PathBuf> = if let Some(ref tf) = target_file {
                 if tf.is_file() {
@@ -452,7 +487,7 @@ fn build_queue_report_sync(
                 } else {
                     vec![]
                 }
-            } else if let Ok(entries) = std::fs::read_dir(&dir) {
+            } else if let Ok(entries) = std::fs::read_dir(&ns_dir) {
                 entries
                     .flatten()
                     .map(|e| e.path())
@@ -476,11 +511,20 @@ fn build_queue_report_sync(
                                 .and_then(|mt| std::time::SystemTime::now().duration_since(mt).ok())
                                 .map(|d| format!(" (saved ~{}s ago)", d.as_secs()))
                                 .unwrap_or_default();
+                            let has_routing = items.iter().any(|i| i.channel_id.is_some());
+                            let has_override =
+                                items.iter().any(|i| i.override_channel_id.is_some());
+                            let routing_tag = match (has_routing, has_override) {
+                                (true, true) => " [routing+override]",
+                                (true, false) => " [routing]",
+                                _ => " [no routing snapshot]",
+                            };
                             lines.push(format!(
-                                "  **Disk** #{} — {} item(s){}",
+                                "  **Disk** #{} — {} item(s){}{}",
                                 ch_name,
                                 items.len(),
-                                age_str
+                                age_str,
+                                routing_tag
                             ));
                             for (i, item) in items.iter().enumerate().take(3) {
                                 let preview = truncate_str(&item.text, 60);
@@ -504,6 +548,25 @@ fn build_queue_report_sync(
         } else {
             lines.push("  Disk: (no directory)".to_string());
         }
+        let legacy_dir = root.join(provider.as_str());
+        if legacy_dir.is_dir() {
+            let legacy_files: Vec<_> = std::fs::read_dir(&legacy_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| {
+                    let path = entry.path();
+                    path.is_file() && path.extension().map(|ext| ext == "json").unwrap_or(false)
+                })
+                .collect();
+            if !legacy_files.is_empty() {
+                lines.push(format!(
+                    "  ⚠ **Legacy queue files** ({} file(s)) found at `{}/` — predates bot-identity namespacing, will NOT be restored.",
+                    legacy_files.len(),
+                    provider.as_str()
+                ));
+            }
+        }
     }
 
     lines.join("\n")
@@ -516,7 +579,13 @@ pub(in crate::services::discord) async fn build_queue_report(
     show_all: bool,
 ) -> String {
     let data = shared.core.lock().await;
-    build_queue_report_sync(&data, provider, current_channel, show_all)
+    build_queue_report_sync(
+        &data,
+        provider,
+        &shared.token_hash,
+        current_channel,
+        show_all,
+    )
 }
 
 /// /metrics — Show turn metrics summary

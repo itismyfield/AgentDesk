@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
@@ -15,7 +15,7 @@ use super::formatting::{format_tool_input, normalize_empty_lines, send_long_mess
 use super::settings::{
     channel_supports_provider, resolve_role_binding, validate_bot_channel_routing,
 };
-use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};
+use super::{rate_limit_wait, SharedData, TmuxWatcherHandle, DISCORD_MSG_LIMIT};
 
 /// #226: Atomically claim a channel for watcher creation using DashMap::entry().
 /// Returns true if the claim succeeded (caller should spawn the watcher).
@@ -1746,17 +1746,22 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             if session.current_path.is_none() {
                 // Try DB cwd first — preserves worktree paths from previous session
                 let tmux_name = provider.build_tmux_session_name(channel_name);
-                let hostname = crate::services::platform::hostname_short();
-                let session_key = format!("{}:{}", hostname, tmux_name);
+                let session_keys = super::adk_session::build_session_key_candidates(
+                    &shared.token_hash,
+                    &provider,
+                    &tmux_name,
+                );
                 let db_cwd: Option<String> = shared.db.as_ref().and_then(|db| {
                     db.lock().ok().and_then(|conn| {
-                        conn.query_row(
-                            "SELECT cwd FROM sessions WHERE session_key = ?1",
-                            [&session_key],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .ok()
-                        .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir())
+                        session_keys.iter().find_map(|session_key| {
+                            conn.query_row(
+                                "SELECT cwd FROM sessions WHERE session_key = ?1",
+                                [session_key],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .ok()
+                            .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir())
+                        })
                     })
                 });
                 if let (Some(configured), Some(restored)) =
@@ -1864,8 +1869,11 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 
         for dc in &dead_cleanups {
             let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
-            let hostname = crate::services::platform::hostname_short();
-            let session_key = format!("{}:{}", hostname, tmux_name);
+            let session_key = super::adk_session::build_namespaced_session_key(
+                &shared.token_hash,
+                &provider,
+                &tmux_name,
+            );
 
             super::adk_session::post_adk_session_status(
                 Some(&session_key),
@@ -2082,8 +2090,11 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         // Dead session with no watcher — report idle to DB and kill
         let tmux_name =
             provider.build_tmux_session_name(channel_name.as_deref().unwrap_or("unknown"));
-        let hostname = crate::services::platform::hostname_short();
-        let session_key = format!("{}:{}", hostname, tmux_name);
+        let session_key = super::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            &provider,
+            &tmux_name,
+        );
 
         // Check if this is a thread session (channel name contains -t{15+digit})
         let is_thread = channel_name
@@ -2209,7 +2220,7 @@ async fn process_unified_thread_kill_signals(shared: &Arc<SharedData>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        RestartHandoffScope, WatcherToolState, process_watcher_lines, resolve_restart_handoff_scope,
+        process_watcher_lines, resolve_restart_handoff_scope, RestartHandoffScope, WatcherToolState,
     };
     use crate::services::claude::StreamLineState;
     use crate::services::discord::inflight::InflightTurnState;
