@@ -1506,9 +1506,9 @@ mod tests {
             &stream_tx,
             None,
             &mut state,
-            Duration::from_millis(1),  // poll_timeout
+            Duration::from_millis(1),   // poll_timeout
             Duration::from_millis(100), // idle_watchdog (never reached)
-            Duration::from_millis(3),  // startup_watchdog: short for test
+            Duration::from_millis(3),   // startup_watchdog: short for test
             || true,                    // process has exited
         );
 
@@ -1519,7 +1519,10 @@ mod tests {
                     "expected startup watchdog message, got: {message}"
                 );
             }
-            other => panic!("expected RetrySession from startup watchdog, got {:?}", other),
+            other => panic!(
+                "expected RetrySession from startup watchdog, got {:?}",
+                other
+            ),
         }
         assert!(!state.meaningful_progress_seen);
     }
@@ -1547,7 +1550,7 @@ mod tests {
             Duration::from_millis(1),
             Duration::from_millis(100),
             Duration::from_millis(3), // startup_watchdog fires early but process alive
-            || false,                  // process still alive → keep waiting
+            || false,                 // process still alive → keep waiting
         );
 
         // Should be Cancelled (not RetrySession) because process is alive.

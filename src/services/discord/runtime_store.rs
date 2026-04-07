@@ -126,10 +126,7 @@ pub(super) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let unique = uuid::Uuid::new_v4().simple();
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = path.with_file_name(format!(".{}.{}.tmp", file_name, unique));
     let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
     file.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
