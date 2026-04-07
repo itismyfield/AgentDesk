@@ -29,9 +29,9 @@ mod turn_bridge;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -39,7 +39,7 @@ use tokio::sync::Mutex;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateAttachment, CreateMessage, EditMessage, MessageId, UserId};
 
-use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
+use crate::services::agent_protocol::{StreamMessage, DEFAULT_ALLOWED_TOOLS};
 use crate::services::claude;
 use crate::services::codex;
 use crate::services::gemini;
@@ -48,17 +48,17 @@ use crate::services::qwen;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
 
 use adk_session::{
-    build_adk_session_key, derive_adk_session_info, lookup_pending_dispatch_for_thread,
-    parse_dispatch_id, post_adk_session_status,
+    build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
+    lookup_pending_dispatch_for_thread, parse_dispatch_id, post_adk_session_status,
 };
 use formatting::{
-    BUILTIN_SKILLS, add_reaction_raw, extract_skill_description, format_for_discord,
-    format_skills_notice, format_tool_input, normalize_empty_lines, remove_reaction_raw,
-    send_long_message_raw, truncate_str,
+    add_reaction_raw, extract_skill_description, format_for_discord, format_skills_notice,
+    format_tool_input, normalize_empty_lines, remove_reaction_raw, send_long_message_raw,
+    truncate_str, BUILTIN_SKILLS,
 };
 use handoff::{clear_handoff, load_handoffs, update_handoff_state};
 use inflight::{
-    InflightTurnState, clear_inflight_state, load_inflight_states, save_inflight_state,
+    clear_inflight_state, load_inflight_states, save_inflight_state, InflightTurnState,
 };
 use prompt_builder::build_system_prompt;
 use recovery::restore_inflight_turns;
@@ -66,15 +66,15 @@ use restart_report::flush_restart_reports;
 use router::{handle_event, handle_text_message};
 use runtime_store::worktrees_root;
 use settings::{
-    RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings, resolve_role_binding,
-    save_bot_settings, validate_bot_channel_routing,
+    channel_upload_dir, cleanup_old_uploads, load_bot_settings, resolve_role_binding,
+    save_bot_settings, validate_bot_channel_routing, RoleBinding,
 };
 #[cfg(unix)]
 use tmux::{
     cleanup_orphan_tmux_sessions, reap_dead_tmux_sessions, restore_tmux_watchers,
     tmux_output_watcher,
 };
-use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};
+use turn_bridge::{spawn_turn_bridge, tmux_runtime_paths, TurnBridgeContext};
 
 pub(crate) use prompt_builder::DispatchProfile;
 
@@ -2354,7 +2354,7 @@ pub async fn run_bot(
     tokio::spawn(async move {
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{SignalKind, signal};
+            use tokio::signal::unix::{signal, SignalKind};
             if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                 sigterm.recv().await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2984,7 +2984,6 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     }
     // Collect session_keys for audit before removing from memory
     let expired_keys: Vec<(ChannelId, String)> = {
-        let hostname = crate::services::platform::hostname_short();
         let provider = shared.settings.read().await.provider.clone();
         let data = shared.core.lock().await;
         expired
@@ -2993,7 +2992,14 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
                 data.sessions.get(ch).and_then(|s| {
                     s.channel_name.as_ref().map(|name| {
                         let tmux_name = provider.build_tmux_session_name(name);
-                        (*ch, format!("{}:{}", hostname, tmux_name))
+                        (
+                            *ch,
+                            adk_session::build_namespaced_session_key(
+                                &shared.token_hash,
+                                &provider,
+                                &tmux_name,
+                            ),
+                        )
                     })
                 })
             })
@@ -3297,17 +3303,21 @@ pub(super) async fn auto_restore_session(
         // use a synthetic "{parent}-t{thread_id}" channel name.
         let db_cwd: Option<String> = restore_ch_name.as_ref().and_then(|ch| {
             let tmux_name = provider.build_tmux_session_name(ch);
-            let hostname = crate::services::platform::hostname_short();
-            let session_key = format!("{}:{}", hostname, tmux_name);
+            let session_keys =
+                build_session_key_candidates(&shared.token_hash, &provider, &tmux_name);
             shared.db.as_ref().and_then(|db| {
                 db.lock().ok().and_then(|conn| {
-                    conn.query_row(
-                        "SELECT cwd FROM sessions WHERE session_key = ?1",
-                        [&session_key],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .ok()
-                    .filter(|p| !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref()))
+                    session_keys.iter().find_map(|session_key| {
+                        conn.query_row(
+                            "SELECT cwd FROM sessions WHERE session_key = ?1",
+                            [session_key],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok()
+                        .filter(|p| {
+                            !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref())
+                        })
+                    })
                 })
             })
         });
@@ -3695,7 +3705,7 @@ mod tests {
     };
     use crate::services::discord::runtime_store::test_env_lock;
     use crate::services::discord::settings::{
-        BotChannelRoutingGuardFailure, validate_bot_channel_routing,
+        validate_bot_channel_routing, BotChannelRoutingGuardFailure,
     };
     use crate::services::provider::CancelToken;
     use crate::services::provider::ProviderKind;
