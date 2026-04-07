@@ -499,7 +499,6 @@ pub(super) async fn catch_up_missed_messages(
 /// Runs after tmux watcher restore and pending queue restore, but before
 /// restart report flush. Skips channels that already have pending queue messages
 /// (user intent takes priority over automatic follow-up).
-
 pub(super) async fn kickoff_idle_queues(
     ctx: &serenity::Context,
     shared: &Arc<SharedData>,

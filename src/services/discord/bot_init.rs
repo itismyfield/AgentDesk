@@ -341,7 +341,6 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
 /// turn running. This bridges the gap where restored pending queues or
 /// handoff injections sit idle because no turn-completion event triggers
 /// the dequeue chain.
-
 pub(super) fn scan_skills(
     provider: &ProviderKind,
     project_path: Option<&str>,

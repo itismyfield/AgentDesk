@@ -3,7 +3,6 @@
 /// These functions detect "no conversation found" errors that occur when a
 /// Claude session has expired or been invalidated, so the caller can trigger
 /// a fresh retry.
-
 pub(super) fn contains_stale_resume_error_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("no conversation found") || lower.contains("error: no conversation")
