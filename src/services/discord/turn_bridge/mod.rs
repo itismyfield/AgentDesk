@@ -1402,7 +1402,6 @@ pub(super) fn spawn_turn_bridge(
                                     "  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}"
                                 );
                             }
-                            _ => {}
                         }
                     }
 
@@ -1525,31 +1524,12 @@ pub(super) fn spawn_turn_bridge(
                         watcher.paused.store(false, Ordering::Relaxed);
                     }
                 }
-                // Deferred drain: wait briefly then kickoff idle queues using cached context
-                let shared_for_drain = shared_owned.clone();
-                let provider_for_drain = provider.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if let (Some(ctx), Some(tok)) = (
-                        shared_for_drain.cached_serenity_ctx.get(),
-                        shared_for_drain.cached_bot_token.get(),
-                    ) {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] 🚀 Deferred drain: kicking off idle queues");
-                        super::kickoff_idle_queues(
-                            ctx,
-                            &shared_for_drain,
-                            tok,
-                            &provider_for_drain,
-                        )
-                        .await;
-                    } else {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
-                            "  [{ts}] ⚠ Deferred drain: still no cached context, queued messages remain pending"
-                        );
-                    }
-                });
+                super::schedule_deferred_idle_queue_kickoff(
+                    shared_owned.clone(),
+                    provider.clone(),
+                    channel_id,
+                    "turn bridge queued backlog",
+                );
             }
         }
 

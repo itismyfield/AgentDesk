@@ -221,6 +221,7 @@ pub(super) struct DiscordSession {
     /// If this session runs in a git worktree, store the info here
     pub(super) worktree: Option<WorktreeInfo>,
     /// Restart generation at which this session was created/restored.
+    #[allow(dead_code)]
     pub(super) born_generation: u64,
 }
 
@@ -518,6 +519,35 @@ fn enqueue_intervention(queue: &mut Vec<Intervention>, intervention: Interventio
         queue.drain(0..overflow);
     }
     true
+}
+
+fn channel_has_pending_soft_queue(
+    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
+    channel_id: ChannelId,
+) -> bool {
+    let mut remove_queue = false;
+    let has_pending = if let Some(queue) = intervention_queue.get_mut(&channel_id) {
+        let has_pending = has_soft_intervention(queue);
+        remove_queue = queue.is_empty();
+        has_pending
+    } else {
+        false
+    };
+    if remove_queue {
+        intervention_queue.remove(&channel_id);
+    }
+    has_pending
+}
+
+pub(super) fn watcher_should_kickoff_idle_queue(
+    has_active_turn: bool,
+    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
+    channel_id: ChannelId,
+) -> bool {
+    if has_active_turn {
+        return false;
+    }
+    channel_has_pending_soft_queue(intervention_queue, channel_id)
 }
 
 pub(super) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> bool {
@@ -1382,6 +1412,34 @@ async fn kickoff_idle_queues(
             requeue_intervention_front(queue, intervention);
         }
     }
+}
+
+pub(super) fn schedule_deferred_idle_queue_kickoff(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if let (Some(ctx), Some(tok)) = (
+            shared.cached_serenity_ctx.get(),
+            shared.cached_bot_token.get(),
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] 🚀 Deferred drain: kicking off idle queues for channel {} ({reason})",
+                channel_id
+            );
+            kickoff_idle_queues(ctx, &shared, tok, &provider).await;
+        } else {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] ⚠ Deferred drain: missing cached context for channel {} ({reason})",
+                channel_id
+            );
+        }
+    });
 }
 
 /// Scan for provider-specific skills available to this bot.
@@ -2594,6 +2652,7 @@ pub async fn retry_failed_dm_notifications(db: &crate::db::Db) {
     }
 }
 
+#[allow(dead_code)]
 struct ConsumedDmReply {
     id: i64,
     source_agent: String,
@@ -3429,16 +3488,21 @@ fn enrich_role_map_with_channel_ids() {
 
 #[cfg(test)]
 mod tests {
-    use super::ChannelId;
+    use super::{ChannelId, MessageId, UserId};
     use super::{
-        DiscordBotSettings, allows_nonlocal_session_path, choose_restore_channel_name,
+        DiscordBotSettings, Intervention, InterventionMode, allows_nonlocal_session_path,
+        channel_has_pending_soft_queue, choose_restore_channel_name,
         is_synthetic_thread_channel_name, session_path_is_usable, synthetic_thread_channel_name,
-        user_is_authorized,
+        user_is_authorized, watcher_should_kickoff_idle_queue,
     };
     use crate::services::discord::settings::{
         BotChannelRoutingGuardFailure, validate_bot_channel_routing,
     };
+    use crate::services::provider::CancelToken;
     use crate::services::provider::ProviderKind;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn synthetic_thread_channel_name_round_trips() {
@@ -3518,6 +3582,74 @@ mod tests {
     #[test]
     fn session_path_is_usable_for_remote_nonlocal_path() {
         assert!(session_path_is_usable("~/repo", Some("mac-mini")));
+    }
+
+    #[test]
+    fn channel_has_pending_soft_queue_detects_live_backlog() {
+        let channel_id = ChannelId::new(12345);
+        let mut queues = HashMap::new();
+        queues.insert(
+            channel_id,
+            vec![Intervention {
+                author_id: UserId::new(42),
+                message_id: MessageId::new(7),
+                text: "pending".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+            }],
+        );
+
+        assert!(channel_has_pending_soft_queue(&mut queues, channel_id));
+        assert!(queues.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn channel_has_pending_soft_queue_prunes_expired_entries() {
+        let channel_id = ChannelId::new(12345);
+        let mut queues = HashMap::new();
+        queues.insert(
+            channel_id,
+            vec![Intervention {
+                author_id: UserId::new(42),
+                message_id: MessageId::new(7),
+                text: "stale".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now() - (super::INTERVENTION_TTL + Duration::from_secs(1)),
+            }],
+        );
+
+        assert!(!channel_has_pending_soft_queue(&mut queues, channel_id));
+        assert!(!queues.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn watcher_should_kickoff_idle_queue_requires_idle_channel() {
+        let channel_id = ChannelId::new(12345);
+        let mut queues = HashMap::new();
+        queues.insert(
+            channel_id,
+            vec![Intervention {
+                author_id: UserId::new(42),
+                message_id: MessageId::new(7),
+                text: "pending".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+            }],
+        );
+
+        assert!(watcher_should_kickoff_idle_queue(
+            false,
+            &mut queues,
+            channel_id
+        ));
+
+        let mut busy_cancel_tokens = HashMap::new();
+        busy_cancel_tokens.insert(channel_id, Arc::new(CancelToken::new()));
+        assert!(!watcher_should_kickoff_idle_queue(
+            busy_cancel_tokens.contains_key(&channel_id),
+            &mut queues,
+            channel_id
+        ));
     }
 
     #[test]

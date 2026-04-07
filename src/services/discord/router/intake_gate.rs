@@ -33,42 +33,6 @@ pub(super) fn is_model_picker_component_custom_id(
     super::super::commands::parse_model_picker_custom_id(custom_id, fallback_channel_id).is_some()
 }
 
-async fn reset_provider_session_if_pending(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) {
-    if shared
-        .model_session_reset_pending
-        .remove(&channel_id)
-        .is_none()
-    {
-        return;
-    }
-
-    let channel_name = {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.session_id = None;
-            session.channel_name.clone()
-        } else {
-            None
-        }
-    };
-
-    if provider.uses_managed_tmux_backend() {
-        if let Some(name) = channel_name.as_deref() {
-            crate::services::claude::terminate_local_session(
-                &provider.build_tmux_session_name(name),
-            );
-        }
-    }
-
-    if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
-        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
-    }
-}
-
 pub(in crate::services::discord) async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -622,6 +586,60 @@ pub(in crate::services::discord) async fn handle_event(
                         )
                         .await;
                 }
+                return Ok(());
+            }
+
+            // Idle backlog guard: if older queued messages are still pending on an
+            // otherwise-idle channel, keep FIFO order by queuing this message behind
+            // them and re-triggering idle queue kickoff instead of letting this turn
+            // jump ahead.
+            let queued_behind_idle_backlog = {
+                let mut d = data.shared.core.lock().await;
+                if d.cancel_tokens.contains_key(&channel_id)
+                    || !channel_has_pending_soft_queue(&mut d.intervention_queue, channel_id)
+                {
+                    None
+                } else {
+                    let inserted = {
+                        let queue = d.intervention_queue.entry(channel_id).or_default();
+                        enqueue_intervention(
+                            queue,
+                            Intervention {
+                                author_id: user_id,
+                                message_id: new_message.id,
+                                text: text.to_string(),
+                                mode: InterventionMode::Soft,
+                                created_at: Instant::now(),
+                            },
+                        )
+                    };
+                    if inserted {
+                        if let Some(q) = d.intervention_queue.get(&channel_id) {
+                            save_channel_queue(&data.provider, channel_id, q);
+                        }
+                    }
+                    Some(inserted)
+                }
+            };
+            if let Some(inserted) = queued_behind_idle_backlog {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                if inserted {
+                    println!(
+                        "  [{ts}] 📬 IDLE-QUEUE: queued message from [{user_name}] in channel {} behind pending backlog",
+                        channel_id
+                    );
+                    add_reaction(ctx, channel_id, new_message.id, '📬').await;
+                    data.shared
+                        .last_message_ids
+                        .insert(channel_id, new_message.id.get());
+                } else {
+                    println!(
+                        "  [{ts}] ↪ IDLE-QUEUE: duplicate message from [{user_name}] already pending in channel {}",
+                        channel_id
+                    );
+                }
+                super::super::kickoff_idle_queues(ctx, &data.shared, &data.token, &data.provider)
+                    .await;
                 return Ok(());
             }
 
