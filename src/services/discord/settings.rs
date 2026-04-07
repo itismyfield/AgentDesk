@@ -16,6 +16,7 @@ use super::formatting::normalize_allowed_tools;
 use super::org_schema;
 use super::role_map::{
     is_known_agent as is_known_agent_from_role_map,
+    list_registered_channel_bindings as list_registered_channel_bindings_from_role_map,
     load_peer_agents as load_peer_agents_from_role_map,
     load_shared_prompt_path as load_shared_prompt_path_from_role_map,
     resolve_role_binding as resolve_role_binding_from_role_map,
@@ -77,6 +78,13 @@ pub(crate) struct RoleBinding {
     /// Whether this role may see peer-agent handoff guidance in the system prompt.
     pub peer_agents_enabled: bool,
     pub memory: ResolvedMemorySettings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegisteredChannelBinding {
+    pub channel_id: u64,
+    pub owner_provider: ProviderKind,
+    pub fallback_name: Option<String>,
 }
 
 const DEFAULT_MEMORY_RECALL_TIMEOUT_MS: u64 = 500;
@@ -492,6 +500,23 @@ pub(super) fn resolve_role_binding(
         }
     }
     resolve_role_binding_from_role_map(channel_id, channel_name)
+}
+
+pub(crate) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
+    let mut merged = std::collections::BTreeMap::<u64, RegisteredChannelBinding>::new();
+
+    for binding in list_registered_channel_bindings_from_role_map() {
+        merged.insert(binding.channel_id, binding);
+    }
+
+    if org_schema::org_schema_exists() {
+        for binding in org_schema::list_registered_channel_bindings() {
+            // Org schema is the canonical source when both configs define the same channel.
+            merged.insert(binding.channel_id, binding);
+        }
+    }
+
+    merged.into_values().collect()
 }
 
 /// Resolve workspace path from role_map.json (or org.yaml) for a given channel.
@@ -1053,11 +1078,11 @@ mod tests {
 
     use super::{
         BotChannelRoutingGuardFailure, bot_settings_allow_agent, bot_settings_allow_channel,
-        channel_supports_provider, discord_token_hash, load_bot_settings,
-        load_discord_bot_launch_configs, load_peer_agents, render_peer_agent_guidance,
-        resolve_memory_settings, resolve_role_binding, save_bot_settings,
-        validate_bot_channel_routing, validate_bot_channel_routing_with_provider_channel,
-        load_narrate_progress, validate_bot_channel_routing,
+        channel_supports_provider, discord_token_hash, list_registered_channel_bindings,
+        load_bot_settings, load_discord_bot_launch_configs, load_narrate_progress,
+        load_peer_agents, render_peer_agent_guidance, resolve_memory_settings,
+        resolve_role_binding, save_bot_settings, validate_bot_channel_routing,
+        validate_bot_channel_routing_with_provider_channel,
     };
 
     fn with_temp_home<F>(f: F)
@@ -1603,6 +1628,115 @@ mod tests {
                 false,
                 Some(&binding)
             ));
+        });
+    }
+
+    #[test]
+    fn test_list_registered_channel_bindings_falls_back_to_role_map_when_org_has_no_by_id() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("role_map.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "byChannelId": {
+                        "123": {
+                            "roleId": "family-routine",
+                            "promptFile": "/tmp/family-routine.prompt.md",
+                            "provider": "codex"
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: AgentDesk
+agents:
+  codex:
+    display_name: Codex
+    provider: codex
+channels:
+  by_name:
+    enabled: true
+    mappings:
+      test-channel:
+        agent: codex
+"#,
+            )
+            .unwrap();
+
+            let bindings = list_registered_channel_bindings();
+            assert_eq!(bindings.len(), 1);
+            assert_eq!(bindings[0].channel_id, 123);
+            assert_eq!(bindings[0].owner_provider, ProviderKind::Codex);
+        });
+    }
+
+    #[test]
+    fn test_list_registered_channel_bindings_merges_org_and_role_map_with_org_precedence() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("role_map.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "byChannelId": {
+                        "123": {
+                            "roleId": "legacy-codex",
+                            "promptFile": "/tmp/legacy-codex.prompt.md",
+                            "provider": "codex"
+                        },
+                        "456": {
+                            "roleId": "legacy-claude",
+                            "promptFile": "/tmp/legacy-claude.prompt.md",
+                            "provider": "claude"
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: AgentDesk
+agents:
+  org-gemini:
+    display_name: Org Gemini
+    provider: gemini
+  org-codex:
+    display_name: Org Codex
+    provider: codex
+channels:
+  by_id:
+    "123":
+      agent: org-gemini
+    "789":
+      agent: org-codex
+"#,
+            )
+            .unwrap();
+
+            let bindings = list_registered_channel_bindings();
+            assert_eq!(bindings.len(), 3);
+            assert_eq!(
+                bindings
+                    .iter()
+                    .map(|binding| (binding.channel_id, binding.owner_provider.clone()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (123, ProviderKind::Gemini),
+                    (456, ProviderKind::Claude),
+                    (789, ProviderKind::Codex),
+                ]
+            );
         });
     }
 

@@ -4,7 +4,10 @@ use poise::serenity_prelude::ChannelId;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::role_map_path;
-use super::settings::{MemoryConfigOverride, PeerAgentInfo, RoleBinding, resolve_memory_settings};
+use super::settings::{
+    MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
+    resolve_memory_settings,
+};
 use crate::services::provider::ProviderKind;
 
 /// Expand `~` or `~/` prefix to the user's home directory.
@@ -283,6 +286,35 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         summary_agent,
         available_agents,
     })
+}
+
+pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
+    let Some(json) = load_role_map_json() else {
+        return Vec::new();
+    };
+
+    let mut bindings = Vec::new();
+    if let Some(by_id) = json.get("byChannelId").and_then(|value| value.as_object()) {
+        for (channel_id_raw, entry) in by_id {
+            let Ok(channel_id) = channel_id_raw.parse::<u64>() else {
+                continue;
+            };
+            let Some(binding) = parse_role_binding(entry) else {
+                continue;
+            };
+            let Some(owner_provider) = binding.provider.filter(ProviderKind::is_supported) else {
+                continue;
+            };
+            bindings.push(RegisteredChannelBinding {
+                channel_id,
+                owner_provider,
+                fallback_name: None,
+            });
+        }
+    }
+
+    bindings.sort_by_key(|binding| binding.channel_id);
+    bindings
 }
 
 #[cfg(test)]

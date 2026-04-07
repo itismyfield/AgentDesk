@@ -355,17 +355,7 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str,
     let channel_id = ChannelId::new(channel_id_raw);
 
     // Validate source is a known agent role_id or internal system source
-    const INTERNAL_SOURCES: &[&str] = &[
-        "kanban-rules",
-        "triage-rules",
-        "review-automation",
-        "auto-queue",
-        "pipeline",
-        "system",
-        "timeouts",
-        "merge-automation",
-    ];
-    if !INTERNAL_SOURCES.contains(&source) && !super::settings::is_known_agent(source) {
+    if !is_allowed_send_source(source) {
         return (
             "403 Forbidden",
             format!(
@@ -437,6 +427,69 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str,
             )
         }
     }
+}
+
+fn is_allowed_send_source(source: &str) -> bool {
+    const INTERNAL_SOURCES: &[&str] = &[
+        "kanban-rules",
+        "triage-rules",
+        "review-automation",
+        "auto-queue",
+        "pipeline",
+        "system",
+        "timeouts",
+        "merge-automation",
+        "dashboard",
+    ];
+
+    INTERNAL_SOURCES.contains(&source) || super::settings::is_known_agent(source)
+}
+
+pub async fn fetch_channel_name(
+    registry: &HealthRegistry,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+) -> Option<String> {
+    let http = resolve_bot_http(registry, provider.as_str()).await.ok()?;
+    let channel = channel_id.to_channel(&*http).await.ok()?;
+    channel.guild().map(|guild_channel| guild_channel.name)
+}
+
+pub async fn start_direct_meeting(
+    registry: &HealthRegistry,
+    channel_id: ChannelId,
+    owner_provider: ProviderKind,
+    primary_provider: ProviderKind,
+    reviewer_provider: ProviderKind,
+    agenda: String,
+) -> Result<(), String> {
+    let http = resolve_bot_http(registry, owner_provider.as_str())
+        .await
+        .map_err(|(_, body)| body)?;
+
+    let shared = {
+        let providers = registry.providers.lock().await;
+        providers
+            .iter()
+            .find(|entry| entry.name == owner_provider.as_str())
+            .map(|entry| entry.shared.clone())
+            .ok_or_else(|| {
+                format!(
+                    r#"{{"ok":false,"error":"provider runtime not registered: {}"}}"#,
+                    owner_provider.as_str()
+                )
+            })?
+    };
+
+    super::meeting::spawn_direct_start(
+        http,
+        channel_id,
+        agenda,
+        primary_provider,
+        reviewer_provider,
+        shared,
+    )
+    .await
 }
 
 /// Handle POST /api/senddm — send a DM to a Discord user.
@@ -791,5 +844,15 @@ mod tests {
         assert!(result.is_ok());
         let (_, _, source) = result.unwrap();
         assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn dashboard_is_allowed_send_source() {
+        assert!(is_allowed_send_source("dashboard"));
+    }
+
+    #[test]
+    fn unknown_send_source_is_rejected() {
+        assert!(!is_allowed_send_source("totally-unknown-source"));
     }
 }

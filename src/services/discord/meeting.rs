@@ -2,7 +2,10 @@ use std::fs;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateMessage};
+use serenity::{
+    AutoArchiveDuration, ChannelId, ChannelType, CreateMessage,
+    builder::{CreateThread, EditThread},
+};
 
 use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
@@ -140,54 +143,38 @@ fn generate_meeting_id() -> String {
 /// Create a Discord thread (without a parent message) for a meeting.
 /// Returns the thread's ChannelId on success, or None on failure.
 async fn create_meeting_thread(
-    _http: &serenity::Http,
+    http: &serenity::Http,
     parent_channel_id: ChannelId,
     thread_name: &str,
 ) -> Option<ChannelId> {
-    let token = crate::credential::read_bot_token("announce")?;
-
-    let url = format!(
-        "https://discord.com/api/v10/channels/{}/threads",
-        parent_channel_id
-    );
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bot {}", token))
-        .json(&serde_json::json!({
-            "name": thread_name,
-            "type": 11, // PUBLIC_THREAD
-            "auto_archive_duration": 1440,
-        }))
-        .send()
+    match parent_channel_id
+        .create_thread(
+            http,
+            CreateThread::new(thread_name)
+                .kind(ChannelType::PublicThread)
+                .auto_archive_duration(AutoArchiveDuration::OneDay),
+        )
         .await
-        .ok()?;
-    if !resp.status().is_success() {
-        tracing::warn!("[meeting] Thread creation HTTP {}", resp.status());
-        return None;
+    {
+        Ok(thread) => Some(thread.id),
+        Err(error) => {
+            tracing::warn!("[meeting] Thread creation failed: {error}");
+            None
+        }
     }
-    let body: serde_json::Value = resp.json().await.ok()?;
-    let thread_id_str = body.get("id")?.as_str()?;
-    let thread_id_num: u64 = thread_id_str.parse().ok()?;
-    Some(ChannelId::new(thread_id_num))
 }
 
 /// Archive a meeting thread (set archived=true via Discord REST API).
-async fn archive_meeting_thread(thread_channel_id: ChannelId) {
-    let token = match crate::credential::read_bot_token("announce") {
-        Some(t) => t,
-        None => return,
-    };
-
-    let url = format!("https://discord.com/api/v10/channels/{}", thread_channel_id);
-    let client = reqwest::Client::new();
-    let _ = client
-        .patch(&url)
-        .header("Authorization", format!("Bot {}", token))
-        .json(&serde_json::json!({"archived": true}))
-        .send()
-        .await;
-    tracing::info!("[meeting] Archived thread {thread_channel_id}");
+async fn archive_meeting_thread(http: &serenity::Http, thread_channel_id: ChannelId) {
+    match thread_channel_id
+        .edit_thread(http, EditThread::new().archived(true))
+        .await
+    {
+        Ok(_) => tracing::info!("[meeting] Archived thread {thread_channel_id}"),
+        Err(error) => {
+            tracing::warn!("[meeting] Failed to archive thread {thread_channel_id}: {error}")
+        }
+    }
 }
 
 fn parse_json_array_fragment(text: &str) -> Result<Vec<String>, String> {
@@ -359,8 +346,28 @@ pub(super) async fn start_meeting(
     primary_provider: ProviderKind,
     shared: &Arc<SharedData>,
 ) -> Result<Option<String>, Error> {
-    let config = load_meeting_config().ok_or("Meeting config not found in role_map.json")?;
     let reviewer_provider = primary_provider.counterpart();
+    start_meeting_with_reviewer(
+        http,
+        channel_id,
+        agenda,
+        primary_provider,
+        reviewer_provider,
+        shared,
+    )
+    .await
+}
+
+pub(crate) async fn start_meeting_with_reviewer(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    agenda: &str,
+    primary_provider: ProviderKind,
+    reviewer_provider: ProviderKind,
+    shared: &Arc<SharedData>,
+) -> Result<Option<String>, Error> {
+    let config =
+        load_meeting_config().ok_or("Meeting config not found in org.yaml or role_map.json")?;
 
     let meeting_id = generate_meeting_id();
 
@@ -546,13 +553,69 @@ pub(super) async fn start_meeting(
 
     // Archive the meeting thread if one was created
     if msg_channel != channel_id {
-        archive_meeting_thread(msg_channel).await;
+        archive_meeting_thread(http, msg_channel).await;
     }
 
     // Clean up
     cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
 
     Ok(Some(meeting_id))
+}
+
+pub(crate) async fn spawn_direct_start(
+    http: Arc<serenity::Http>,
+    channel_id: ChannelId,
+    agenda: String,
+    primary_provider: ProviderKind,
+    reviewer_provider: ProviderKind,
+    shared: Arc<SharedData>,
+) -> Result<(), String> {
+    if primary_provider == reviewer_provider {
+        return Err("reviewer_provider must differ from primary_provider".to_string());
+    }
+
+    if load_meeting_config().is_none() {
+        return Err("Meeting config not found in org.yaml or role_map.json".to_string());
+    }
+
+    {
+        let core = shared.core.lock().await;
+        if core.active_meetings.contains_key(&channel_id) {
+            return Err("이 채널에서 이미 회의가 진행 중이야.".to_string());
+        }
+    }
+
+    tokio::spawn(async move {
+        match start_meeting_with_reviewer(
+            &*http,
+            channel_id,
+            &agenda,
+            primary_provider,
+            reviewer_provider,
+            &shared,
+        )
+        .await
+        {
+            Ok(Some(id)) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ✅ Meeting completed: {id}");
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ❌ Meeting error: {error}");
+                rate_limit_wait(&shared, channel_id).await;
+                let _ = channel_id
+                    .send_message(
+                        &*http,
+                        CreateMessage::new().content(format!("❌ 회의 오류: {}", error)),
+                    )
+                    .await;
+            }
+        }
+    });
+
+    Ok(())
 }
 
 /// Cancel a running meeting

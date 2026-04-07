@@ -73,10 +73,10 @@ use tmux::{
 };
 use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};
 
+pub(in crate::services::discord) use self::settings::validate_bot_channel_routing;
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };
-pub(in crate::services::discord) use self::settings::validate_bot_channel_routing;
 
 /// Discord message length limit
 pub(super) const DISCORD_MSG_LIMIT: usize = 2000;

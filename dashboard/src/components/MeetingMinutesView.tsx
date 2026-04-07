@@ -1,12 +1,18 @@
 import { useState, useEffect } from "react";
 import { useI18n } from "../i18n";
-import type { IssueCreationResult, ProposedIssue, RoundTableMeeting } from "../types";
+import type {
+  IssueCreationResult,
+  ProposedIssue,
+  RoundTableMeeting,
+  RoundTableMeetingChannelOption,
+} from "../types";
 import {
   createRoundTableIssues,
   discardAllRoundTableIssues,
   discardRoundTableIssue,
   deleteRoundTableMeeting,
   getGitHubRepos,
+  getRoundTableMeetingChannels,
   getRoundTableMeeting,
   startRoundTableMeeting,
   updateRoundTableMeetingIssueRepo,
@@ -85,9 +91,13 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
   const [agenda, setAgenda] = useState("");
   const [channelId, setChannelId] = useState(() => localStorage.getItem(STORAGE_KEY) || "");
   const [primaryProvider, setPrimaryProvider] = useState<string>("claude");
-  const [showChannelEdit, setShowChannelEdit] = useState(false);
+  const [reviewerProvider, setReviewerProvider] = useState<string>("");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [meetingChannels, setMeetingChannels] = useState<RoundTableMeetingChannelOption[]>([]);
+  const [channelQuery, setChannelQuery] = useState("");
+  const [loadingChannels, setLoadingChannels] = useState(false);
+  const [channelError, setChannelError] = useState<string | null>(null);
   const [githubRepos, setGithubRepos] = useState<GitHubRepoOption[]>([]);
   const [repoOwner, setRepoOwner] = useState<string>("");
   const [meetingRepoSelections, setMeetingRepoSelections] = useState<Record<string, string>>({});
@@ -99,6 +109,31 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
   useEffect(() => {
     if (channelId) localStorage.setItem(STORAGE_KEY, channelId);
   }, [channelId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setLoadingChannels(true);
+    getRoundTableMeetingChannels().then((channels) => {
+      if (cancelled) return;
+      setMeetingChannels(channels);
+      setLoadingChannels(false);
+      setChannelError(null);
+    }).catch((error) => {
+      if (cancelled) return;
+      setMeetingChannels([]);
+      setLoadingChannels(false);
+      setChannelError(
+        error instanceof Error
+          ? error.message
+          : t({ ko: "회의 채널 목록을 불러오지 못했습니다", en: "Failed to load meeting channels" }),
+      );
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -138,6 +173,36 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
       return changed ? next : prev;
     });
   }, [meetings]);
+
+  const selectedChannel = meetingChannels.find((channel) => channel.channel_id === channelId) ?? null;
+  const reviewerOptions = MEETING_PROVIDERS.filter(
+    (provider) => provider !== primaryProvider && provider !== selectedChannel?.owner_provider,
+  );
+  const filteredChannels = meetingChannels.filter((channel) => {
+    const query = channelQuery.trim().toLowerCase();
+    if (!query) return true;
+    return (
+      channel.channel_name.toLowerCase().includes(query)
+      || channel.channel_id.includes(query)
+      || channel.owner_provider.toLowerCase().includes(query)
+      || `${channel.channel_name} (${channel.channel_id})`.toLowerCase().includes(query)
+    );
+  });
+
+  useEffect(() => {
+    if (!selectedChannel) return;
+    setChannelQuery(`${selectedChannel.channel_name} (${selectedChannel.channel_id})`);
+  }, [selectedChannel?.channel_id]);
+
+  useEffect(() => {
+    if (reviewerOptions.length === 0) {
+      if (reviewerProvider) setReviewerProvider("");
+      return;
+    }
+    if (!reviewerOptions.includes(reviewerProvider as typeof MEETING_PROVIDERS[number])) {
+      setReviewerProvider(reviewerOptions[0]);
+    }
+  }, [primaryProvider, reviewerProvider, reviewerOptions.join(","), selectedChannel?.owner_provider]);
 
   const handleOpenDetail = async (m: RoundTableMeeting) => {
     try {
@@ -285,11 +350,16 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
   };
 
   const handleStartMeeting = async () => {
-    if (!agenda.trim() || !channelId.trim()) return;
+    if (!agenda.trim() || !channelId.trim() || !reviewerProvider.trim()) return;
     setStarting(true);
     setStartError(null);
     try {
-      await startRoundTableMeeting(agenda.trim(), channelId.trim(), primaryProvider);
+      await startRoundTableMeeting(
+        agenda.trim(),
+        channelId.trim(),
+        primaryProvider,
+        reviewerProvider,
+      );
       setAgenda("");
       setShowStartForm(false);
     } catch (e) {
@@ -414,36 +484,96 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
             {t({ ko: "회의 시작", en: "Start Meeting" })}
           </h3>
 
-          {/* Channel ID row */}
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "채널 ID", en: "Channel ID" })}
+          {/* Registered channel row */}
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "채널", en: "Channel" })}
             </label>
-            {showChannelEdit || !channelId ? (
-              <input
-                type="text"
-                value={channelId}
-                onChange={(e) => setChannelId(e.target.value)}
-                placeholder={t({ ko: "Discord 채널 ID", en: "Discord Channel ID" })}
-                className="flex-1 px-3 py-1.5 rounded-lg text-xs font-mono"
-                style={inputStyle}
-                onBlur={() => { if (channelId) setShowChannelEdit(false); }}
-                autoFocus
-              />
-            ) : (
-              <div className="flex items-center gap-2 flex-1">
-                <span className="text-xs font-mono" style={{ color: "var(--th-text-muted)" }}>
-                  {channelId}
-                </span>
+            <div className="flex-1 space-y-2">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={channelQuery}
+                  onChange={(e) => setChannelQuery(e.target.value)}
+                  placeholder={t({ ko: "등록된 회의 채널 검색", en: "Search registered meeting channel" })}
+                  className="flex-1 px-3 py-1.5 rounded-lg text-sm"
+                  style={inputStyle}
+                  autoFocus
+                />
                 <button
-                  onClick={() => setShowChannelEdit(true)}
-                  className="p-1 rounded hover:bg-surface-hover transition-colors"
-                  title={t({ ko: "채널 ID 변경", en: "Change Channel ID" })}
+                  onClick={() => void getRoundTableMeetingChannels().then((channels) => {
+                    setMeetingChannels(channels);
+                    setChannelError(null);
+                  }).catch((error) => {
+                    setChannelError(
+                      error instanceof Error
+                        ? error.message
+                        : t({ ko: "회의 채널 목록을 불러오지 못했습니다", en: "Failed to load meeting channels" }),
+                    );
+                  })}
+                  className="p-2 rounded-lg border transition-colors hover:bg-surface-subtle"
+                  style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
+                  title={t({ ko: "채널 목록 새로고침", en: "Refresh channel list" })}
                 >
-                  <Settings2 size={12} style={{ color: "var(--th-text-muted)" }} />
+                  <Settings2 size={14} />
                 </button>
               </div>
-            )}
+              <div
+                className="max-h-44 overflow-y-auto rounded-xl border p-2 space-y-1"
+                style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)" }}
+              >
+                {loadingChannels ? (
+                  <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    {t({ ko: "등록 채널 불러오는 중...", en: "Loading registered channels..." })}
+                  </div>
+                ) : filteredChannels.length === 0 ? (
+                  <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    {t({ ko: "조건에 맞는 등록 채널이 없습니다", en: "No registered channel matches the filter" })}
+                  </div>
+                ) : (
+                  filteredChannels.map((channel) => {
+                    const isSelected = channel.channel_id === channelId;
+                    return (
+                      <button
+                        key={channel.channel_id}
+                        onClick={() => setChannelId(channel.channel_id)}
+                        className="w-full rounded-lg border px-3 py-2 text-left transition-colors"
+                        style={{
+                          background: isSelected ? "rgba(245,158,11,0.12)" : "transparent",
+                          borderColor: isSelected ? "rgba(245,158,11,0.35)" : "var(--th-border)",
+                        }}
+                      >
+                        <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
+                          {channel.channel_name}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                          <span className="font-mono">{channel.channel_id}</span>
+                          <span
+                            className="rounded-full px-2 py-0.5"
+                            style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}
+                          >
+                            {t({ ko: `담당 ${PROVIDER_LABELS[channel.owner_provider] ?? channel.owner_provider}`, en: `Owner ${PROVIDER_LABELS[channel.owner_provider] ?? channel.owner_provider}` })}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+              {selectedChannel && (
+                <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                  {t({
+                    ko: `선택된 채널: ${selectedChannel.channel_name} (${selectedChannel.channel_id}) · 담당 ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
+                    en: `Selected channel: ${selectedChannel.channel_name} (${selectedChannel.channel_id}) · owner ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
+                  })}
+                </div>
+              )}
+              {channelError && (
+                <div className="text-xs px-3 py-1.5 rounded-lg" style={{ background: "rgba(239,68,68,0.1)", color: "#f87171" }}>
+                  {channelError}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Agenda input */}
@@ -477,7 +607,45 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               ))}
             </select>
             <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "반대 모델이 자동 교차검증", en: "Counter model auto cross-review" })}
+              {selectedChannel
+                ? t({
+                    ko: `채널 담당 봇은 ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider} 입니다`,
+                    en: `Channel owner bot is ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
+                  })
+                : t({ ko: "등록된 채널을 먼저 선택하세요", en: "Select a registered channel first" })}
+            </span>
+          </div>
+
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "리뷰 모델", en: "Reviewer" })}
+            </label>
+            <select
+              value={reviewerProvider}
+              onChange={(e) => setReviewerProvider(e.target.value)}
+              className="px-3 py-1.5 rounded-lg text-xs"
+              style={inputStyle}
+              disabled={reviewerOptions.length === 0}
+            >
+              {reviewerOptions.length === 0 ? (
+                <option value="">
+                  {t({ ko: "선택 가능한 리뷰 모델 없음", en: "No reviewer available" })}
+                </option>
+              ) : (
+                reviewerOptions.map((provider) => (
+                  <option key={provider} value={provider}>
+                    {PROVIDER_LABELS[provider] ?? provider.toUpperCase()}
+                  </option>
+                ))
+              )}
+            </select>
+            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+              {selectedChannel
+                ? t({
+                    ko: "리뷰 모델은 채널 담당 provider, 진행 모델과 달라야 합니다",
+                    en: "Reviewer must differ from channel owner provider and primary provider",
+                  })
+                : t({ ko: "채널 선택 후 리뷰 모델을 정하세요", en: "Pick reviewer after selecting a channel" })}
             </span>
           </div>
 
@@ -497,7 +665,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
             </button>
             <button
               onClick={handleStartMeeting}
-              disabled={starting || !agenda.trim() || !channelId.trim()}
+              disabled={starting || !agenda.trim() || !channelId.trim() || !reviewerProvider.trim()}
               className="px-4 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors disabled:opacity-40"
             >
               {starting ? t({ ko: "시작 중...", en: "Starting..." }) : t({ ko: "회의 시작", en: "Start Meeting" })}

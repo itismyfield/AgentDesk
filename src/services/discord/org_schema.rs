@@ -6,7 +6,10 @@ use serde::Deserialize;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::org_schema_path;
-use super::settings::{MemoryConfigOverride, PeerAgentInfo, RoleBinding, resolve_memory_settings};
+use super::settings::{
+    MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
+    resolve_memory_settings,
+};
 use crate::services::provider::ProviderKind;
 
 // ─── YAML Schema Types ──────────────────────────────────────────────────────
@@ -334,6 +337,46 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         summary_agent,
         available_agents,
     })
+}
+
+pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
+    let Some(schema) = load_org_schema() else {
+        return Vec::new();
+    };
+
+    let mut bindings = Vec::new();
+    if let Some(by_id) = schema
+        .channels
+        .as_ref()
+        .and_then(|channels| channels.by_id.as_ref())
+    {
+        for (channel_id_raw, binding) in by_id {
+            let Ok(channel_id) = channel_id_raw.parse::<u64>() else {
+                continue;
+            };
+            let owner_provider = binding
+                .provider
+                .as_deref()
+                .or_else(|| {
+                    schema
+                        .agents
+                        .get(&binding.agent)
+                        .and_then(|agent| agent.provider.as_deref())
+                })
+                .and_then(ProviderKind::from_str);
+            let Some(owner_provider) = owner_provider.filter(ProviderKind::is_supported) else {
+                continue;
+            };
+            bindings.push(RegisteredChannelBinding {
+                channel_id,
+                owner_provider,
+                fallback_name: None,
+            });
+        }
+    }
+
+    bindings.sort_by_key(|binding| binding.channel_id);
+    bindings
 }
 
 /// Look up the provider for a channel name suffix from org schema suffix_map.

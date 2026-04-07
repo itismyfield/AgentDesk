@@ -3,10 +3,12 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use poise::serenity_prelude::ChannelId;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::services::discord::{health, settings};
 use crate::services::provider::ProviderKind;
 
 // ── Body types ─────────────────────────────────────────────────
@@ -21,6 +23,7 @@ pub struct StartMeetingBody {
     pub agenda: Option<String>,
     pub channel_id: Option<String>,
     pub primary_provider: Option<String>,
+    pub reviewer_provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +104,59 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
     }
 
     (StatusCode::OK, Json(json!({"meetings": meetings})))
+}
+
+/// GET /api/round-table-meetings/channels
+pub async fn list_meeting_channels(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let bindings = settings::list_registered_channel_bindings();
+    let Some(registry) = state.health_registry.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "health registry unavailable"})),
+        );
+    };
+
+    let mut channels = Vec::new();
+    for binding in bindings {
+        let channel_id = ChannelId::new(binding.channel_id);
+        let channel_name =
+            health::fetch_channel_name(registry, channel_id, &binding.owner_provider)
+                .await
+                .or(binding.fallback_name.clone())
+                .unwrap_or_else(|| format!("channel-{}", binding.channel_id));
+
+        channels.push(json!({
+            "channel_id": binding.channel_id.to_string(),
+            "channel_name": channel_name,
+            "owner_provider": binding.owner_provider.as_str(),
+        }));
+    }
+
+    channels.sort_by(|left, right| {
+        let left_name = left
+            .get("channel_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let right_name = right
+            .get("channel_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        left_name.cmp(right_name).then_with(|| {
+            left.get("channel_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("channel_id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default(),
+                )
+        })
+    });
+
+    (StatusCode::OK, Json(json!({"channels": channels})))
 }
 
 /// GET /api/round-table-meetings/:id
@@ -552,12 +608,12 @@ pub async fn discard_all_issues(
 }
 
 /// POST /api/round-table-meetings/start
-/// Send meeting start request to Discord channel via announce bot.
+/// Start a meeting directly via the provider-bound runtime.
 pub async fn start_meeting(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(body): Json<StartMeetingBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let channel_id = match &body.channel_id {
+    let channel_id_raw = match &body.channel_id {
         Some(id) if !id.is_empty() => id.clone(),
         _ => {
             return (
@@ -566,47 +622,65 @@ pub async fn start_meeting(
             );
         }
     };
+    let channel_id_value = match channel_id_raw.parse::<u64>() {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "channel_id must be a numeric string"})),
+            );
+        }
+    };
+    let Some(owner_provider) = resolve_channel_owner_provider(channel_id_value) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "channel_id is not a registered meeting channel"})),
+        );
+    };
+    let Some(registry) = state.health_registry.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "health registry unavailable"})),
+        );
+    };
 
     let agenda = body.agenda.as_deref().unwrap_or("General discussion");
     let primary_provider = match parse_meeting_provider(body.primary_provider.as_deref()) {
+        Ok(provider) => provider.unwrap_or_else(|| owner_provider.clone()),
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        }
+    };
+    let reviewer_provider = match parse_required_meeting_provider(body.reviewer_provider.as_deref())
+    {
         Ok(provider) => provider,
         Err(error) => {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
         }
     };
-
-    // Send meeting start command to the channel via /api/send (same axum server)
-    let server_port = crate::config::load_graceful().server.port;
-
-    let message = build_meeting_start_command(agenda, primary_provider);
-    let client = reqwest::Client::new();
-    match client
-        .post(crate::config::local_api_url(server_port, "/api/send"))
-        .json(&json!({
-            "target": format!("channel:{channel_id}"),
-            "content": message,
-            "source": "dashboard",
-        }))
-        .send()
-        .await
+    if let Err(error) =
+        validate_reviewer_provider(&primary_provider, &reviewer_provider, &owner_provider)
     {
-        Ok(resp) if resp.status().is_success() => (
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+    }
+
+    match health::start_direct_meeting(
+        registry,
+        ChannelId::new(channel_id_value),
+        owner_provider,
+        primary_provider,
+        reviewer_provider,
+        agenda.to_string(),
+    )
+    .await
+    {
+        Ok(()) => (
             StatusCode::OK,
-            Json(json!({"ok": true, "message": "Meeting start command sent"})),
+            Json(json!({"ok": true, "message": "Meeting start scheduled"})),
         ),
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"ok": false, "error": format!("Discord send failed: {status} {body}")}),
-                ),
-            )
-        }
-        Err(e) => (
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "error": format!("Request failed: {e}")})),
+            Json(json!({"ok": false, "error": error})),
         ),
     }
 }
@@ -866,6 +940,31 @@ fn parse_meeting_provider(raw: Option<&str>) -> Result<Option<ProviderKind>, Str
         .ok_or_else(|| format!("invalid provider '{}'", value))
 }
 
+fn parse_required_meeting_provider(raw: Option<&str>) -> Result<ProviderKind, String> {
+    parse_meeting_provider(raw)?.ok_or_else(|| "reviewer_provider is required".to_string())
+}
+
+fn resolve_channel_owner_provider(channel_id: u64) -> Option<ProviderKind> {
+    settings::list_registered_channel_bindings()
+        .into_iter()
+        .find(|binding| binding.channel_id == channel_id)
+        .map(|binding| binding.owner_provider)
+}
+
+fn validate_reviewer_provider(
+    primary_provider: &ProviderKind,
+    reviewer_provider: &ProviderKind,
+    owner_provider: &ProviderKind,
+) -> Result<(), String> {
+    if reviewer_provider == owner_provider {
+        return Err("reviewer_provider must differ from channel owner provider".to_string());
+    }
+    if reviewer_provider == primary_provider {
+        return Err("reviewer_provider must differ from primary_provider".to_string());
+    }
+    Ok(())
+}
+
 fn build_meeting_start_command(agenda: &str, primary_provider: Option<ProviderKind>) -> String {
     match primary_provider {
         Some(provider) => format!("/meeting start --primary {} {}", provider.as_str(), agenda),
@@ -1096,6 +1195,42 @@ mod tests {
         assert_eq!(
             build_meeting_start_command("일반 안건", None),
             "/meeting start 일반 안건"
+        );
+    }
+
+    #[test]
+    fn validate_reviewer_provider_accepts_distinct_provider() {
+        assert_eq!(
+            validate_reviewer_provider(
+                &ProviderKind::Claude,
+                &ProviderKind::Codex,
+                &ProviderKind::Gemini,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_reviewer_provider_rejects_primary_provider_match() {
+        assert_eq!(
+            validate_reviewer_provider(
+                &ProviderKind::Claude,
+                &ProviderKind::Claude,
+                &ProviderKind::Gemini,
+            ),
+            Err("reviewer_provider must differ from primary_provider".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_reviewer_provider_rejects_owner_provider_match() {
+        assert_eq!(
+            validate_reviewer_provider(
+                &ProviderKind::Claude,
+                &ProviderKind::Gemini,
+                &ProviderKind::Gemini,
+            ),
+            Err("reviewer_provider must differ from channel owner provider".to_string())
         );
     }
 

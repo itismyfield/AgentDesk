@@ -6,6 +6,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use std::path::PathBuf;
+use std::sync::MutexGuard;
 use std::time::Duration;
 
 fn test_db() -> Db {
@@ -22,12 +23,21 @@ fn test_engine(db: &Db) -> PolicyEngine {
     PolicyEngine::new(&config, db.clone()).unwrap()
 }
 
-struct WorktreeCommitOverrideGuard;
+fn env_lock() -> MutexGuard<'static, ()> {
+    crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+struct WorktreeCommitOverrideGuard {
+    _lock: MutexGuard<'static, ()>,
+}
 
 impl WorktreeCommitOverrideGuard {
     fn set(commit: &str) -> Self {
+        let lock = env_lock();
         super::decision_route::set_test_worktree_commit_override(Some(commit.to_string()));
-        Self
+        Self { _lock: lock }
     }
 }
 

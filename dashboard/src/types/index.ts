@@ -324,6 +324,12 @@ export interface IssueCreationResult {
   attempted_at: number;
 }
 
+export interface RoundTableMeetingChannelOption {
+  channel_id: string;
+  channel_name: string;
+  owner_provider: string;
+}
+
 export interface RoundTableMeeting {
   id: string;
   agenda: string;

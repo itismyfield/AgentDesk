@@ -8,6 +8,7 @@ import type {
   DispatchedSession,
   DashboardStats,
   RoundTableMeeting,
+  RoundTableMeetingChannelOption,
   SkillCatalogEntry,
   TaskDispatch,
 } from "../types";
@@ -1010,6 +1011,15 @@ export async function getRoundTableMeeting(
   return request(`/api/round-table-meetings/${id}`);
 }
 
+export async function getRoundTableMeetingChannels(): Promise<
+  RoundTableMeetingChannelOption[]
+> {
+  const data = await request<{ channels: RoundTableMeetingChannelOption[] }>(
+    "/api/round-table-meetings/channels",
+  );
+  return data.channels;
+}
+
 export async function deleteRoundTableMeeting(
   id: string,
 ): Promise<{ ok: boolean }> {
@@ -1090,6 +1100,7 @@ export async function startRoundTableMeeting(
   agenda: string,
   channelId: string,
   primaryProvider?: string,
+  reviewerProvider?: string,
 ): Promise<{ ok: boolean }> {
   return request("/api/round-table-meetings/start", {
     method: "POST",
@@ -1097,6 +1108,7 @@ export async function startRoundTableMeeting(
       agenda,
       channel_id: channelId,
       primary_provider: primaryProvider ?? null,
+      reviewer_provider: reviewerProvider ?? null,
     }),
   });
 }
