@@ -537,168 +537,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     }
 
-    let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
-    let memory_backend = build_memory_backend(&memory_settings);
-    let memory_recall = memory_backend
-        .recall(RecallRequest {
-            provider: provider.clone(),
-            role_id: resolve_memory_role_id(role_binding.as_ref()),
-            channel_id: channel_id.get(),
-            session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
-            dispatch_profile,
-            user_text: user_text.to_string(),
-        })
-        .await;
-    for warning in &memory_recall.warnings {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!(
-            "  [{ts}] [memory] recall warning for channel {}: {}",
-            channel_id.get(),
-            warning
-        );
-    }
-
-    // Prepend pending file uploads
-    let mut context_chunks = Vec::new();
-    let memory_injection_plan = build_memory_injection_plan(
-        &provider,
-        session_id.is_some(),
-        dispatch_profile,
-        &memory_recall,
-    );
-    if !pending_uploads.is_empty() {
-        context_chunks.push(pending_uploads.join("\n"));
-    }
-    if let Some(ref reply_ctx) = reply_context {
-        context_chunks.push(reply_ctx.clone());
-    }
-    // Re-inject formatting + compaction reminder for interactive follow-up
-    // turns. System prompt is only sent at session creation; after context
-    // compaction these rules can be lost.
-    if session_id.is_some() {
-        context_chunks.push(super::super::prompt_builder::build_followup_turn_system_reminder());
-    }
-    if let Some(knowledge) = memory_injection_plan.shared_knowledge_for_context {
-        context_chunks.push(knowledge.to_string());
-    }
-    if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
-        context_chunks.push(external_recall.to_string());
-    }
-    context_chunks.push(sanitized_input);
-    let context_prompt = context_chunks.join("\n\n");
-
-    // Build disabled tools notice
-    let default_tools: std::collections::HashSet<&str> =
-        DEFAULT_ALLOWED_TOOLS.iter().copied().collect();
-    let allowed_set: std::collections::HashSet<&str> =
-        allowed_tools.iter().map(|s| s.as_str()).collect();
-    let disabled: Vec<&&str> = default_tools
-        .iter()
-        .filter(|t| !allowed_set.contains(**t))
-        .collect();
-    let disabled_notice = if disabled.is_empty() {
-        String::new()
-    } else {
-        let names: Vec<&str> = disabled.iter().map(|t| **t).collect();
-        format!(
-            "\n\nDISABLED TOOLS: The following tools have been disabled by the user: {}.\n\
-             You MUST NOT attempt to use these tools. \
-             If a user's request requires a disabled tool, do NOT proceed with the task. \
-             Instead, clearly inform the user which tool is needed and that it is currently disabled. \
-             Suggest they re-enable it with: /allowed +ToolName",
-            names.join(", ")
-        )
-    };
-
-    // Build skills notice for system prompt
-    let skills_notice = {
-        let skills = shared.skills_cache.read().await;
-        format_skills_notice(&provider, &skills)
-    };
-
-    // Build Discord context info
-    let discord_context = {
-        let data = shared.core.lock().await;
-        let session = data.sessions.get(&channel_id);
-        let ch_name = session.and_then(|s| s.channel_name.as_deref());
-        let cat_name = session.and_then(|s| s.category_name.as_deref());
-        match ch_name {
-            Some(name) => {
-                let cat_part = cat_name
-                    .map(|c| format!(" (category: {})", c))
-                    .unwrap_or_default();
-                format!(
-                    "Discord context: channel #{} (ID: {}){}, user: {} (ID: {})",
-                    name,
-                    channel_id.get(),
-                    cat_part,
-                    request_owner_name,
-                    request_owner.get()
-                )
-            }
-            None => format!(
-                "Discord context: DM, user: {} (ID: {})",
-                request_owner_name,
-                request_owner.get()
-            ),
-        }
-    };
-
-    // Claude keeps SAK in the system prompt for prefix-cache stability.
-    // Non-Claude providers receive SAK in the user context instead.
-    let sak_for_system = memory_injection_plan.shared_knowledge_for_system_prompt;
-    let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
-
-    let system_prompt_owned = build_system_prompt(
-        &discord_context,
-        &current_path,
-        channel_id,
-        token,
-        &disabled_notice,
-        &skills_notice,
-        role_binding.as_ref(),
-        reply_to_user_message,
-        dispatch_profile,
-        dispatch_type_str.as_deref(),
-        sak_for_system,
-        longterm_catalog_for_prompt,
-    );
-    if sak_for_system.is_some() {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
-            sak_for_system.unwrap().len(),
-            channel_id.get()
-        );
-    }
-    let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
-    let memory_backend_label = match memory_settings.backend {
-        settings::MemoryBackendKind::Local => "local",
-        settings::MemoryBackendKind::Mem0 => "mem0",
-    };
-    let provider_label = match &provider {
-        ProviderKind::Claude => "claude",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Gemini => "gemini",
-        ProviderKind::Qwen => "qwen",
-        ProviderKind::Unsupported(_) => "unsupported",
-    };
-    let dispatch_profile_label = match dispatch_profile {
-        DispatchProfile::Full => "full",
-        DispatchProfile::ReviewLite => "review_lite",
-    };
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
-        "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} memory_profile={} reused_session={} duration_ms={}",
-        channel_id.get(),
-        provider_label,
-        dispatch_profile_label,
-        memory_backend_label,
-        memory_settings.mem0.profile,
-        session_id.is_some(),
-        prompt_prep_duration_ms
-    );
-
     // Create cancel token — with second check to close the TOCTOU race window.
     // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
     // because the async gap between check and insert allows interleaving.
@@ -903,6 +741,168 @@ pub(in crate::services::discord) async fn handle_text_message(
             }
         });
     }
+
+    let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
+    let memory_backend = build_memory_backend(&memory_settings);
+    let memory_recall = memory_backend
+        .recall(RecallRequest {
+            provider: provider.clone(),
+            role_id: resolve_memory_role_id(role_binding.as_ref()),
+            channel_id: channel_id.get(),
+            session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
+            dispatch_profile,
+            user_text: user_text.to_string(),
+        })
+        .await;
+    for warning in &memory_recall.warnings {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!(
+            "  [{ts}] [memory] recall warning for channel {}: {}",
+            channel_id.get(),
+            warning
+        );
+    }
+
+    // Prepend pending file uploads
+    let mut context_chunks = Vec::new();
+    let memory_injection_plan = build_memory_injection_plan(
+        &provider,
+        session_id.is_some(),
+        dispatch_profile,
+        &memory_recall,
+    );
+    if !pending_uploads.is_empty() {
+        context_chunks.push(pending_uploads.join("\n"));
+    }
+    if let Some(ref reply_ctx) = reply_context {
+        context_chunks.push(reply_ctx.clone());
+    }
+    // Re-inject formatting + compaction reminder for interactive follow-up
+    // turns. System prompt is only sent at session creation; after context
+    // compaction these rules can be lost.
+    if session_id.is_some() {
+        context_chunks.push(super::super::prompt_builder::build_followup_turn_system_reminder());
+    }
+    if let Some(knowledge) = memory_injection_plan.shared_knowledge_for_context {
+        context_chunks.push(knowledge.to_string());
+    }
+    if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
+        context_chunks.push(external_recall.to_string());
+    }
+    context_chunks.push(sanitized_input);
+    let context_prompt = context_chunks.join("\n\n");
+
+    // Build disabled tools notice
+    let default_tools: std::collections::HashSet<&str> =
+        DEFAULT_ALLOWED_TOOLS.iter().copied().collect();
+    let allowed_set: std::collections::HashSet<&str> =
+        allowed_tools.iter().map(|s| s.as_str()).collect();
+    let disabled: Vec<&&str> = default_tools
+        .iter()
+        .filter(|t| !allowed_set.contains(**t))
+        .collect();
+    let disabled_notice = if disabled.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = disabled.iter().map(|t| **t).collect();
+        format!(
+            "\n\nDISABLED TOOLS: The following tools have been disabled by the user: {}.\n\
+             You MUST NOT attempt to use these tools. \
+             If a user's request requires a disabled tool, do NOT proceed with the task. \
+             Instead, clearly inform the user which tool is needed and that it is currently disabled. \
+             Suggest they re-enable it with: /allowed +ToolName",
+            names.join(", ")
+        )
+    };
+
+    // Build skills notice for system prompt
+    let skills_notice = {
+        let skills = shared.skills_cache.read().await;
+        format_skills_notice(&provider, &skills)
+    };
+
+    // Build Discord context info
+    let discord_context = {
+        let data = shared.core.lock().await;
+        let session = data.sessions.get(&channel_id);
+        let ch_name = session.and_then(|s| s.channel_name.as_deref());
+        let cat_name = session.and_then(|s| s.category_name.as_deref());
+        match ch_name {
+            Some(name) => {
+                let cat_part = cat_name
+                    .map(|c| format!(" (category: {})", c))
+                    .unwrap_or_default();
+                format!(
+                    "Discord context: channel #{} (ID: {}){}, user: {} (ID: {})",
+                    name,
+                    channel_id.get(),
+                    cat_part,
+                    request_owner_name,
+                    request_owner.get()
+                )
+            }
+            None => format!(
+                "Discord context: DM, user: {} (ID: {})",
+                request_owner_name,
+                request_owner.get()
+            ),
+        }
+    };
+
+    // Claude keeps SAK in the system prompt for prefix-cache stability.
+    // Non-Claude providers receive SAK in the user context instead.
+    let sak_for_system = memory_injection_plan.shared_knowledge_for_system_prompt;
+    let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
+
+    let system_prompt_owned = build_system_prompt(
+        &discord_context,
+        &current_path,
+        channel_id,
+        token,
+        &disabled_notice,
+        &skills_notice,
+        role_binding.as_ref(),
+        reply_to_user_message,
+        dispatch_profile,
+        dispatch_type_str.as_deref(),
+        sak_for_system,
+        longterm_catalog_for_prompt,
+    );
+    if sak_for_system.is_some() {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
+            sak_for_system.unwrap().len(),
+            channel_id.get()
+        );
+    }
+    let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
+    let memory_backend_label = match memory_settings.backend {
+        settings::MemoryBackendKind::Local => "local",
+        settings::MemoryBackendKind::Mem0 => "mem0",
+    };
+    let provider_label = match &provider {
+        ProviderKind::Claude => "claude",
+        ProviderKind::Codex => "codex",
+        ProviderKind::Gemini => "gemini",
+        ProviderKind::Qwen => "qwen",
+        ProviderKind::Unsupported(_) => "unsupported",
+    };
+    let dispatch_profile_label = match dispatch_profile {
+        DispatchProfile::Full => "full",
+        DispatchProfile::ReviewLite => "review_lite",
+    };
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!(
+        "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} memory_profile={} reused_session={} duration_ms={}",
+        channel_id.get(),
+        provider_label,
+        dispatch_profile_label,
+        memory_backend_label,
+        memory_settings.mem0.profile,
+        session_id.is_some(),
+        prompt_prep_duration_ms
+    );
 
     // Resolve remote profile for this channel
     let remote_profile = {
