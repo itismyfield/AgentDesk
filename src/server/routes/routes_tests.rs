@@ -1232,6 +1232,43 @@ async fn dispatch_create_with_skip_outbox_omits_notify_row() {
 }
 
 #[tokio::test]
+async fn api_docs_mentions_skip_outbox_for_dispatch_create() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(Request::builder().uri("/docs").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("docs must return endpoint array");
+    let dispatch_post = endpoints
+        .iter()
+        .find(|ep| {
+            ep["method"] == "POST"
+                && ep["path"] == "/api/dispatches"
+                && ep["category"] == "dispatches"
+        })
+        .expect("dispatch create endpoint must be documented");
+
+    let description = dispatch_post["description"]
+        .as_str()
+        .expect("dispatch docs description must be string");
+    assert!(
+        description.contains("skip_outbox"),
+        "dispatch create docs must mention skip_outbox option: {description}"
+    );
+}
+
+#[tokio::test]
 async fn resume_requested_creates_single_notify_backed_dispatch() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
