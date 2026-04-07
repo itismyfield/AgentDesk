@@ -503,13 +503,20 @@ pub(super) fn resolve_role_binding(
 }
 
 pub(crate) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
+    let mut merged = std::collections::BTreeMap::<u64, RegisteredChannelBinding>::new();
+
+    for binding in list_registered_channel_bindings_from_role_map() {
+        merged.insert(binding.channel_id, binding);
+    }
+
     if org_schema::org_schema_exists() {
-        let bindings = org_schema::list_registered_channel_bindings();
-        if !bindings.is_empty() {
-            return bindings;
+        for binding in org_schema::list_registered_channel_bindings() {
+            // Org schema is the canonical source when both configs define the same channel.
+            merged.insert(binding.channel_id, binding);
         }
     }
-    list_registered_channel_bindings_from_role_map()
+
+    merged.into_values().collect()
 }
 
 /// Resolve workspace path from role_map.json (or org.yaml) for a given channel.
@@ -1667,6 +1674,69 @@ channels:
             assert_eq!(bindings.len(), 1);
             assert_eq!(bindings[0].channel_id, 123);
             assert_eq!(bindings[0].owner_provider, ProviderKind::Codex);
+        });
+    }
+
+    #[test]
+    fn test_list_registered_channel_bindings_merges_org_and_role_map_with_org_precedence() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("role_map.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "byChannelId": {
+                        "123": {
+                            "roleId": "legacy-codex",
+                            "promptFile": "/tmp/legacy-codex.prompt.md",
+                            "provider": "codex"
+                        },
+                        "456": {
+                            "roleId": "legacy-claude",
+                            "promptFile": "/tmp/legacy-claude.prompt.md",
+                            "provider": "claude"
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: AgentDesk
+agents:
+  org-gemini:
+    display_name: Org Gemini
+    provider: gemini
+  org-codex:
+    display_name: Org Codex
+    provider: codex
+channels:
+  by_id:
+    "123":
+      agent: org-gemini
+    "789":
+      agent: org-codex
+"#,
+            )
+            .unwrap();
+
+            let bindings = list_registered_channel_bindings();
+            assert_eq!(bindings.len(), 3);
+            assert_eq!(
+                bindings
+                    .iter()
+                    .map(|binding| (binding.channel_id, binding.owner_provider.clone()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (123, ProviderKind::Gemini),
+                    (456, ProviderKind::Claude),
+                    (789, ProviderKind::Codex),
+                ]
+            );
         });
     }
 
