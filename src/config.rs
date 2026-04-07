@@ -350,7 +350,7 @@ mod tests {
     fn env_lock() -> MutexGuard<'static, ()> {
         crate::services::discord::runtime_store::test_env_lock()
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]

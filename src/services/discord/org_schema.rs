@@ -358,7 +358,9 @@ mod tests {
     where
         F: FnOnce(&TempDir),
     {
-        let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let _guard = super::super::runtime_store::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let root = temp.path().join(".adk");
         fs::create_dir_all(&root).unwrap();

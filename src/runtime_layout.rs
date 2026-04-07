@@ -1448,7 +1448,27 @@ fn remove_link_or_path(path: &Path) -> Result<(), String> {
     if meta.is_dir() && !meta.file_type().is_symlink() {
         fs::remove_dir_all(path).map_err(|e| format!("Failed to remove '{}': {e}", path.display()))
     } else {
-        fs::remove_file(path).map_err(|e| format!("Failed to remove '{}': {e}", path.display()))
+        #[cfg(windows)]
+        {
+            match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(file_err) if meta.file_type().is_symlink() => {
+                    fs::remove_dir(path).map_err(|dir_err| {
+                        format!(
+                            "Failed to remove '{}': {file_err}; fallback remove_dir also failed: {dir_err}",
+                            path.display()
+                        )
+                    })
+                }
+                Err(file_err) => {
+                    Err(format!("Failed to remove '{}': {file_err}", path.display()))
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            fs::remove_file(path).map_err(|e| format!("Failed to remove '{}': {e}", path.display()))
+        }
     }
 }
 
@@ -1479,7 +1499,7 @@ mod tests {
         fn install(home: &Path, runtime_root: &Path) -> Self {
             let lock = crate::services::discord::runtime_store::test_env_lock()
                 .lock()
-                .unwrap();
+                .unwrap_or_else(|e| e.into_inner());
             fs::create_dir_all(home).unwrap();
             set_test_home_dir_override(Some(home.to_path_buf()));
             let previous_runtime_root = std::env::var_os("AGENTDESK_ROOT_DIR");

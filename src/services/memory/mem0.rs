@@ -519,7 +519,7 @@ mod tests {
     ) {
         let guard = crate::services::discord::runtime_store::test_env_lock()
             .lock()
-            .unwrap();
+            .unwrap_or_else(|e| e.into_inner());
         let prev_api_key = std::env::var_os("MEM0_API_KEY");
         let prev_base_url = std::env::var_os("MEM0_BASE_URL");
         unsafe {
@@ -552,7 +552,7 @@ mod tests {
     ) {
         let guard = crate::services::discord::runtime_store::test_env_lock()
             .lock()
-            .unwrap();
+            .unwrap_or_else(|e| e.into_inner());
         let prev_api_key = std::env::var_os("MEM0_API_KEY");
         let prev_base_url = std::env::var_os("MEM0_BASE_URL");
         unsafe {
