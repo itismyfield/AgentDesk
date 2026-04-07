@@ -15,13 +15,12 @@ pub(super) fn enqueue_intervention(
 ) -> bool {
     prune_interventions(queue);
 
-    if let Some(last) = queue.last() {
-        if last.author_id == intervention.author_id
-            && last.text == intervention.text
-            && intervention.created_at.duration_since(last.created_at) <= INTERVENTION_DEDUP_WINDOW
-        {
-            return false;
-        }
+    if let Some(last) = queue.last()
+        && last.author_id == intervention.author_id
+        && last.text == intervention.text
+        && intervention.created_at.duration_since(last.created_at) <= INTERVENTION_DEDUP_WINDOW
+    {
+        return false;
     }
 
     queue.push(intervention);
@@ -515,18 +514,18 @@ pub(super) async fn kickoff_idle_queues(
             if data.cancel_tokens.contains_key(&channel_id) {
                 continue;
             }
-            if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
-                if let Some(intervention) = dequeue_next_soft_intervention(queue) {
-                    let has_more = has_soft_intervention(queue);
-                    // Write-through: update disk after dequeue
-                    if queue.is_empty() {
-                        save_channel_queue(provider, channel_id, &[]);
-                        data.intervention_queue.remove(&channel_id);
-                    } else {
-                        save_channel_queue(provider, channel_id, queue);
-                    }
-                    result.push((channel_id, intervention, has_more));
+            if let Some(queue) = data.intervention_queue.get_mut(&channel_id)
+                && let Some(intervention) = dequeue_next_soft_intervention(queue)
+            {
+                let has_more = has_soft_intervention(queue);
+                // Write-through: update disk after dequeue
+                if queue.is_empty() {
+                    save_channel_queue(provider, channel_id, &[]);
+                    data.intervention_queue.remove(&channel_id);
+                } else {
+                    save_channel_queue(provider, channel_id, queue);
                 }
+                result.push((channel_id, intervention, has_more));
             }
         }
         result
