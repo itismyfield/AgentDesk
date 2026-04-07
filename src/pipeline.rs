@@ -440,6 +440,63 @@ impl PipelineConfig {
         Some(path)
     }
 
+    /// Returns the free-only path from `from` to a specific target state.
+    ///
+    /// Returns `None` if the target is not reachable via free transitions.
+    /// Returns `Some(vec!["triage", "ready"])` for a `backlog → triage → ready` path.
+    pub fn free_path_to_state(&self, from: &str, target: &str) -> Option<Vec<String>> {
+        if from == target {
+            return Some(Vec::new());
+        }
+        if !self.is_valid_state(from) || !self.is_valid_state(target) {
+            return None;
+        }
+
+        let mut visited = std::collections::HashSet::new();
+        let mut parent: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(from.to_string());
+        visited.insert(from.to_string());
+        let mut found = false;
+
+        while let Some(cur) = queue.pop_front() {
+            for t in &self.transitions {
+                if t.from == cur
+                    && t.transition_type == TransitionType::Free
+                    && !visited.contains(&t.to)
+                {
+                    parent.insert(t.to.clone(), cur.clone());
+                    if t.to == target {
+                        found = true;
+                        break;
+                    }
+                    visited.insert(t.to.clone());
+                    queue.push_back(t.to.clone());
+                }
+            }
+            if found {
+                break;
+            }
+        }
+
+        if !found {
+            return None;
+        }
+
+        let mut path = vec![target.to_string()];
+        let mut cur = target.to_string();
+        while let Some(prev) = parent.get(&cur) {
+            if prev == from {
+                break;
+            }
+            path.push(prev.clone());
+            cur = prev.clone();
+        }
+        path.reverse();
+        Some(path)
+    }
+
     /// Check if a state requires a gated inbound transition (dispatch-entry states).
     /// These states should only be entered via dispatch API, not direct PATCH.
     pub fn requires_dispatch_entry(&self, state: &str) -> bool {

@@ -101,14 +101,19 @@ _tail_for_summary() {
 }
 
 _resolve_dashboard_source() {
-    if [ -d "$ADK_DEV/dashboard/dist" ] && [ -f "$ADK_DEV/dashboard/dist/index.html" ]; then
-        printf '%s\n' "$ADK_DEV/dashboard/dist"
-        return 0
-    fi
-    if [ -d "$REPO/dashboard/dist" ] && [ -f "$REPO/dashboard/dist/index.html" ]; then
-        printf '%s\n' "$REPO/dashboard/dist"
-        return 0
-    fi
+    # Dev dashboard may be a symlink (deploy-dashboard.sh dev uses ln -sfn).
+    # Resolve to the real path so cp -r copies actual files, not dangling links.
+    local candidate
+    for candidate in "$ADK_DEV/dashboard/dist" "$REPO/dashboard/dist"; do
+        if [ -d "$candidate" ]; then
+            local resolved
+            resolved="$(cd "$candidate" && pwd -P)"
+            if [ -f "$resolved/index.html" ]; then
+                printf '%s\n' "$resolved"
+                return 0
+            fi
+        fi
+    done
     return 1
 }
 
@@ -201,7 +206,7 @@ if [[ "${1:-}" != "--skip-review" ]]; then
 fi
 
 # Safety check: dev must be healthy
-DEV_PORT="${AGENTDESK_DEV_PORT:-$ADK_DEFAULT_PORT}"
+DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
 if ! curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${DEV_PORT}/api/health" | grep -q '"status":"healthy"'; then
     echo "✗ Dev is not healthy — aborting promotion"
     exit 1

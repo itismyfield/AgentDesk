@@ -353,6 +353,24 @@ var rules = {
       return;
     }
 
+    var workResult = {};
+    try { workResult = JSON.parse(dispatch.result || "{}"); } catch(e) {}
+    if ((dispatch.dispatch_type === "implementation" || dispatch.dispatch_type === "rework")
+        && workResult.work_outcome === "noop") {
+      var noopMeta = _loadCardMetadata(dispatch.kanban_card_id);
+      noopMeta.work_resolution_status = "noop";
+      noopMeta.work_resolution_result = workResult;
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET metadata = ?, blocked_reason = NULL WHERE id = ?",
+        [JSON.stringify(noopMeta), dispatch.kanban_card_id]
+      );
+      agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null, awaiting_dod_at: null});
+      agentdesk.reviewState.sync(card.id, "idle");
+      agentdesk.kanban.setStatus(card.id, "done", true);
+      agentdesk.log.info("[kanban] " + card.id + " " + dispatch.dispatch_type + " noop → done");
+      return;
+    }
+
     // Rework dispatches — skip gate, go directly to review
     if (dispatch.dispatch_type === "rework") {
       agentdesk.kanban.setStatus(card.id, reviewState);

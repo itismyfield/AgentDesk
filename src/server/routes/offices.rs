@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -36,6 +37,12 @@ pub struct UpdateOfficeAgentBody {
 #[derive(Debug, Deserialize)]
 pub struct BatchAddAgentsBody {
     pub agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderOfficeItem {
+    pub id: String,
+    pub sort_order: i32,
 }
 
 // ── Handlers ──────────────────────────────────────────────────
@@ -90,6 +97,58 @@ pub async fn list_offices(State(state): State<AppState>) -> (StatusCode, Json<se
     };
 
     (StatusCode::OK, Json(json!({"offices": offices})))
+}
+
+/// PATCH /api/offices/reorder
+pub async fn reorder_offices(
+    State(state): State<AppState>,
+    Json(body): Json<Vec<ReorderOfficeItem>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    if let Err(e) = conn.execute_batch("BEGIN TRANSACTION") {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("begin tx: {e}")})),
+        );
+    }
+
+    let mut updated = 0usize;
+    for item in &body {
+        match conn.execute(
+            "UPDATE offices SET sort_order = ?1 WHERE id = ?2",
+            params![item.sort_order, item.id],
+        ) {
+            Ok(n) => updated += n,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("update id={}: {e}", item.id)})),
+                );
+            }
+        }
+    }
+
+    if let Err(e) = conn.execute_batch("COMMIT") {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("commit: {e}")})),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "updated": updated})),
+    )
 }
 
 /// POST /api/offices

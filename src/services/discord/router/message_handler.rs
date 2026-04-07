@@ -136,6 +136,21 @@ pub(in crate::services::discord) async fn handle_text_message(
                         .canonicalize()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|_| ws_path.clone());
+                    // Resolve channel name from Discord API before worktree
+                    // creation so the path uses the real name, not "unknown".
+                    let (ch_name_api, cat_name) = resolve_channel_category(ctx, channel_id).await;
+                    let ch_name = match super::super::resolve_thread_parent(&ctx.http, channel_id)
+                        .await
+                    {
+                        Some((_parent_id, parent_name)) => {
+                            let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
+                            Some(super::super::synthetic_thread_channel_name(
+                                &parent, channel_id,
+                            ))
+                        }
+                        None => ch_name_api,
+                    };
+
                     // Check worktree: always use worktree for thread sessions,
                     // or when conflict detected with another session on same path.
                     let wt_info = {
@@ -175,22 +190,6 @@ pub(in crate::services::discord) async fn handle_text_message(
                         .as_ref()
                         .map(|wt| wt.worktree_path.clone())
                         .unwrap_or_else(|| canonical.clone());
-                    let (ch_name_resolved, cat_name) =
-                        resolve_channel_category(ctx, channel_id).await;
-                    // For thread channels, build a stable channel_name from the
-                    // parent channel name so resolve_agent_id_from_channel_name
-                    // can match it (same logic as bootstrap_thread_session).
-                    let ch_name = match super::super::resolve_thread_parent(&ctx.http, channel_id)
-                        .await
-                    {
-                        Some((_parent_id, parent_name)) => {
-                            let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
-                            Some(super::super::synthetic_thread_channel_name(
-                                &parent, channel_id,
-                            ))
-                        }
-                        None => ch_name_resolved,
-                    };
                     {
                         let mut data = shared.core.lock().await;
                         let session =
@@ -577,8 +576,11 @@ pub(in crate::services::discord) async fn handle_text_message(
     if let Some(ref reply_ctx) = reply_context {
         context_chunks.push(reply_ctx.clone());
     }
+    // Re-inject formatting + compaction reminder for interactive follow-up
+    // turns. System prompt is only sent at session creation; after context
+    // compaction these rules can be lost.
     if session_id.is_some() {
-        context_chunks.push(DISCORD_FORMATTING_REMINDER.to_string());
+        context_chunks.push(super::super::prompt_builder::build_followup_turn_system_reminder());
     }
     if let Some(knowledge) = memory_injection_plan.shared_knowledge_for_context {
         context_chunks.push(knowledge.to_string());
@@ -615,33 +617,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     // Build skills notice for system prompt
     let skills_notice = {
         let skills = shared.skills_cache.read().await;
-        if skills.is_empty() {
-            String::new()
-        } else {
-            let list: Vec<String> = skills
-                .iter()
-                .map(|(name, desc)| format!("  - /{}: {}", name, desc))
-                .collect();
-            match &provider {
-                ProviderKind::Claude => format!(
-                    "\n\nAvailable skills (invoke via the Skill tool):\n{}",
-                    list.join("\n")
-                ),
-                ProviderKind::Codex => format!(
-                    "\n\nAvailable local Codex skills (use them by name when relevant):\n{}",
-                    list.join("\n")
-                ),
-                ProviderKind::Gemini => format!(
-                    "\n\nAvailable local Gemini skills (use them by name when relevant):\n{}",
-                    list.join("\n")
-                ),
-                ProviderKind::Qwen => format!(
-                    "\n\nAvailable local Qwen skills (use them by name when relevant):\n{}",
-                    list.join("\n")
-                ),
-                ProviderKind::Unsupported(_) => String::new(),
-            }
-        }
+        format_skills_notice(&provider, &skills)
     };
 
     // Build Discord context info
@@ -2372,12 +2348,14 @@ Any other message is sent to {p}.
                     if args_str.is_empty() {
                         format!(
                             "Execute the skill `/{skill}` now. \
-                             Use the Skill tool with skill=\"{skill}\"."
+                             Use the Skill tool with skill=\"{skill}\". \
+                             Read files under `references/` only if the skill points to them or you need extra detail."
                         )
                     } else {
                         format!(
                             "Execute the skill `/{skill}` with arguments: {args_str}\n\
-                             Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\"."
+                             Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\". \
+                             Read files under `references/` only if the skill points to them or you need extra detail."
                         )
                     }
                 }
@@ -2385,12 +2363,12 @@ Any other message is sent to {p}.
                     if args_str.is_empty() {
                         format!(
                             "Use the local Codex skill `/{skill}` now. \
-                             Follow its SKILL.md instructions exactly and complete the task."
+                             Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
                         )
                     } else {
                         format!(
                             "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
-                             Follow its SKILL.md instructions exactly and adapt them to the request."
+                             Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
                         )
                     }
                 }
@@ -2398,12 +2376,12 @@ Any other message is sent to {p}.
                     if args_str.is_empty() {
                         format!(
                             "Use the local Gemini skill `/{skill}` now. \
-                             Follow its SKILL.md instructions exactly and complete the task."
+                             Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
                         )
                     } else {
                         format!(
                             "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
-                             Follow its SKILL.md instructions exactly and adapt them to the request."
+                             Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
                         )
                     }
                 }
@@ -2411,12 +2389,12 @@ Any other message is sent to {p}.
                     if args_str.is_empty() {
                         format!(
                             "Use the local Qwen skill `/{skill}` now. \
-                             Follow its SKILL.md instructions exactly and complete the task."
+                             Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
                         )
                     } else {
                         format!(
                             "Use the local Qwen skill `/{skill}` now with this user request: {args_str}\n\
-                             Follow its SKILL.md instructions exactly and adapt them to the request."
+                             Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
                         )
                     }
                 }
@@ -2625,7 +2603,8 @@ mod tests {
         let missing_path = dir.path().to_str().unwrap().to_string();
         drop(dir);
         let mut session = make_session(Some(missing_path), Some("mac-mini".to_string()));
-        // Remote sessions should also validate local paths (no bypass)
-        assert!(session.validated_path("test-channel").is_none());
+        // Remote sessions keep their CWD even when it is non-local to this machine.
+        assert!(session.validated_path("test-channel").is_some());
+        assert!(session.current_path.is_some());
     }
 }

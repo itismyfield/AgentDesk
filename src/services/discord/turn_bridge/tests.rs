@@ -1,16 +1,20 @@
 use super::completion_guard::{
-    build_verdict_payload, extract_explicit_review_verdict, extract_review_decision,
+    build_verdict_payload, extract_explicit_review_verdict, extract_explicit_work_outcome,
+    extract_review_decision,
 };
-use super::recovery_text::{
-    clear_local_session_state, contains_stale_resume_error_text, handle_gemini_retry_boundary,
-    output_file_has_stale_resume_error_after_offset, reset_gemini_retry_attempt_state,
-    resolve_done_response, result_event_has_stale_resume_error,
-    should_reset_gemini_retry_attempt_state, stream_error_requires_terminal_session_reset,
+use super::context_window::{
+    persisted_context_tokens, resolve_done_response, total_context_tokens,
 };
 use super::spawn_memory_capture_task;
-use super::tmux_runtime::{
-    persisted_context_tokens, should_resume_watcher_after_turn, total_context_tokens,
+use super::retry_state::{
+    clear_local_session_state, handle_gemini_retry_boundary, reset_gemini_retry_attempt_state,
+    should_reset_gemini_retry_attempt_state,
 };
+use super::stale_resume::{
+    contains_stale_resume_error_text, output_file_has_stale_resume_error_after_offset,
+    result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
+};
+use super::tmux_runtime::should_resume_watcher_after_turn;
 use crate::services::discord::ChannelId;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
@@ -525,6 +529,24 @@ fn verdict_fallback_payload_truncates_long_feedback() {
     assert_eq!(payload["provider"], "claude");
     let feedback = payload["feedback"].as_str().unwrap();
     assert!(feedback.len() <= 4003); // 4000 + "..." ellipsis
+}
+
+#[test]
+fn work_outcome_parser_accepts_explicit_noop_marker() {
+    assert_eq!(
+        extract_explicit_work_outcome("OUTCOME: noop\n변경 불필요 — 이미 반영됨"),
+        Some("noop")
+    );
+}
+
+#[test]
+fn work_outcome_parser_rejects_non_explicit_noop_mentions() {
+    assert_eq!(
+        extract_explicit_work_outcome(
+            "이번 턴은 noop에 가까워 보이지만 먼저 코드 확인이 필요합니다."
+        ),
+        None
+    );
 }
 
 // ========== resolve_done_response tests ==========

@@ -19,6 +19,14 @@
 //   Set kv: merge_request:{pr_number} = "{owner/repo}"
 //   OnTick5min picks it up and merges (no author check — explicit request)
 
+var CODEX_REVIEWERS = {
+  "chatgpt-codex-connector": true,
+  "chatgpt-codex-connector[bot]": true
+};
+var CODEX_REVIEW_TTL_SECONDS = 14 * 24 * 60 * 60;
+var CODEX_NOTIFICATION_TTL_SECONDS = 6 * 60 * 60;
+var CODEX_MAX_CONTEXT_COMMENTS = 5;
+
 var mergeAutomation = {
   name: "merge-automation",
   priority: 200,  // Run after all other policies
@@ -50,6 +58,7 @@ var mergeAutomation = {
   onTick5min: function() {
     if (!isEnabled()) return;
 
+    processCodexReviewSignals();
     processManualMergeRequests();
     cleanupMergedWorktrees();
     detectConflictingPrs();
@@ -62,11 +71,501 @@ function isEnabled() {
   return agentdesk.config.get("merge_automation_enabled") === "true";
 }
 
+function sanitizeKvKeyPart(value) {
+  return String(value || "").replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+function isCodexReviewer(login) {
+  if (!login) return false;
+  return !!CODEX_REVIEWERS[String(login).toLowerCase()];
+}
+
+function containsBlockingSeverity(text) {
+  return /\bP[12]\b/i.test(text || "");
+}
+
+function compactWhitespace(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function summarizeInlineText(text) {
+  var compact = compactWhitespace(text);
+  if (compact.length <= 180) return compact;
+  return compact.substring(0, 177) + "...";
+}
+
+function extractIssueNumberFromText(text) {
+  var match = String(text || "").match(/#(\d+)/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+function loadCardContext(cardId) {
+  var cards = agentdesk.db.query(
+    "SELECT id, status, assigned_agent_id, title, github_issue_number, active_thread_id, repo_id " +
+    "FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  return cards.length > 0 ? cards[0] : null;
+}
+
+function getReviewTargets(cardId) {
+  var cfg = agentdesk.pipeline.resolveForCard(cardId);
+  var terminalState = agentdesk.pipeline.terminalState(cfg);
+  var initialState = agentdesk.pipeline.kickoffState(cfg);
+  var inProgressState = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
+  var reviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
+  var reviewReworkTarget = agentdesk.pipeline.nextGatedTargetWithGate(reviewState, "review_rework", cfg) || inProgressState;
+  return {
+    cfg: cfg,
+    terminalState: terminalState,
+    initialState: initialState,
+    inProgressState: inProgressState,
+    reviewState: reviewState,
+    reviewReworkTarget: reviewReworkTarget
+  };
+}
+
+function listOpenPrs(repo) {
+  var prsJson = agentdesk.exec("gh", [
+    "pr", "list",
+    "--state", "open",
+    "--json", "number,headRefName,title,mergeable",
+    "--repo", repo
+  ]);
+  if (!prsJson || prsJson.indexOf("ERROR") === 0) return [];
+  try {
+    return JSON.parse(prsJson);
+  } catch (e) {
+    agentdesk.log.warn("[merge] Failed to parse open PR list for " + repo + ": " + e);
+    return [];
+  }
+}
+
+function fetchCodexReviews(repo, prNumber) {
+  var json = agentdesk.exec("gh", [
+    "api",
+    "repos/" + repo + "/pulls/" + prNumber + "/reviews"
+  ]);
+  if (!json || json.indexOf("ERROR") === 0) return [];
+
+  try {
+    var reviews = JSON.parse(json);
+    var filtered = [];
+    for (var i = 0; i < reviews.length; i++) {
+      var review = reviews[i] || {};
+      var login = review.user && review.user.login ? review.user.login : "";
+      if (!isCodexReviewer(login)) continue;
+      filtered.push({
+        id: String(review.id || ""),
+        state: review.state || "",
+        body: review.body || "",
+        submitted_at: review.submitted_at || "",
+        login: login
+      });
+    }
+    filtered.sort(function(a, b) {
+      if (a.submitted_at < b.submitted_at) return -1;
+      if (a.submitted_at > b.submitted_at) return 1;
+      if (a.id < b.id) return -1;
+      if (a.id > b.id) return 1;
+      return 0;
+    });
+    return filtered;
+  } catch (e) {
+    agentdesk.log.warn("[merge] Failed to parse Codex reviews for PR #" + prNumber + ": " + e);
+    return [];
+  }
+}
+
+function fetchCodexReviewThreads(repo, prNumber) {
+  var parts = String(repo || "").split("/");
+  if (parts.length !== 2) return [];
+
+  var query =
+    "query($owner:String!, $name:String!, $number:Int!) {" +
+    " repository(owner:$owner, name:$name) {" +
+    "  pullRequest(number:$number) {" +
+    "   reviewThreads(first:100) {" +
+    "    nodes {" +
+    "     id isResolved isOutdated " +
+    "     comments(first:100) {" +
+    "      nodes {" +
+    "       id body path line url " +
+    "       author { login } " +
+    "       pullRequestReview { id state author { login } }" +
+    "      }" +
+    "     }" +
+    "    }" +
+    "   }" +
+    "  }" +
+    " }" +
+    "}";
+
+  var json = agentdesk.exec("gh", [
+    "api", "graphql",
+    "-f", "query=" + query,
+    "-f", "owner=" + parts[0],
+    "-f", "name=" + parts[1],
+    "-F", "number=" + String(prNumber)
+  ]);
+  if (!json || json.indexOf("ERROR") === 0) return [];
+
+  try {
+    var parsed = JSON.parse(json);
+    var repository = ((parsed || {}).data || {}).repository || {};
+    var pullRequest = repository.pullRequest || {};
+    var reviewThreads = pullRequest.reviewThreads || {};
+    return reviewThreads.nodes || [];
+  } catch (e) {
+    agentdesk.log.warn("[merge] Failed to parse Codex review threads for PR #" + prNumber + ": " + e);
+    return [];
+  }
+}
+
+function buildCodexReviewSnapshot(repo, prNumber) {
+  var reviews = fetchCodexReviews(repo, prNumber);
+  if (!reviews.length) return null;
+
+  var latest = reviews[reviews.length - 1];
+  var threads = fetchCodexReviewThreads(repo, prNumber);
+  var blockingComments = [];
+  var blockingReviewIds = {};
+  var blockingFiles = [];
+  var seenFiles = {};
+
+  for (var i = 0; i < threads.length; i++) {
+    var thread = threads[i] || {};
+    if (thread.isResolved || thread.isOutdated) continue;
+
+    var comments = thread.comments && thread.comments.nodes ? thread.comments.nodes : [];
+    for (var j = 0; j < comments.length; j++) {
+      var comment = comments[j] || {};
+      var review = comment.pullRequestReview || {};
+      var reviewId = review.id ? String(review.id) : String(latest.id);
+      var login = (review.author && review.author.login) || (comment.author && comment.author.login) || "";
+      if (!isCodexReviewer(login)) continue;
+      if (!containsBlockingSeverity(comment.body)) continue;
+
+      var path = comment.path || "(unknown file)";
+      if (!seenFiles[path]) {
+        seenFiles[path] = true;
+        blockingFiles.push(path);
+      }
+      blockingReviewIds[reviewId] = true;
+      blockingComments.push({
+        reviewId: reviewId,
+        path: path,
+        line: comment.line != null ? String(comment.line) : "?",
+        body: summarizeInlineText(comment.body),
+        url: comment.url || ""
+      });
+    }
+  }
+
+  var triggerReviewId = String(latest.id);
+  if (blockingComments.length > 0) {
+    for (var r = reviews.length - 1; r >= 0; r--) {
+      var candidateId = String(reviews[r].id);
+      if (blockingReviewIds[candidateId]) {
+        triggerReviewId = candidateId;
+        break;
+      }
+    }
+  }
+
+  return {
+    latestReviewId: String(latest.id),
+    latestState: latest.state || "",
+    latestBody: summarizeInlineText(latest.body || ""),
+    latestSubmittedAt: latest.submitted_at || "",
+    blockingComments: blockingComments,
+    blockingFiles: blockingFiles,
+    triggerReviewId: triggerReviewId,
+    hasBlocking: blockingComments.length > 0
+  };
+}
+
+function codexReviewDedupKey(repo, prNumber, reviewId) {
+  return "codex_review_processed:" +
+    sanitizeKvKeyPart(repo) + ":" +
+    sanitizeKvKeyPart(prNumber) + ":" +
+    sanitizeKvKeyPart(reviewId);
+}
+
+function codexNotificationDedupKey(repo, prNumber, reviewId, kind) {
+  return "codex_review_notified:" +
+    sanitizeKvKeyPart(kind) + ":" +
+    sanitizeKvKeyPart(repo) + ":" +
+    sanitizeKvKeyPart(prNumber) + ":" +
+    sanitizeKvKeyPart(reviewId);
+}
+
+function mergeGuardDedupKey(repo, prNumber, reviewId) {
+  return "codex_merge_guard:" +
+    sanitizeKvKeyPart(repo) + ":" +
+    sanitizeKvKeyPart(prNumber) + ":" +
+    sanitizeKvKeyPart(reviewId);
+}
+
+function hasActiveReworkDispatch(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT COUNT(*) AS count FROM task_dispatches " +
+    "WHERE kanban_card_id = ? AND dispatch_type = 'rework' AND status IN ('pending', 'dispatched')",
+    [cardId]
+  );
+  return rows.length > 0 && Number(rows[0].count || 0) > 0;
+}
+
+function findCardForPr(repo, pr) {
+  var cached = agentdesk.db.query(
+    "SELECT key, value FROM kv_meta WHERE key LIKE 'pr:%' AND (expires_at IS NULL OR expires_at > datetime('now'))",
+    []
+  );
+  for (var i = 0; i < cached.length; i++) {
+    try {
+      var info = JSON.parse(cached[i].value || "{}");
+      if (String(info.number) !== String(pr.number)) continue;
+      if (info.repo && info.repo !== repo) continue;
+      var card = loadCardContext(cached[i].key.replace("pr:", ""));
+      if (card) return card;
+    } catch (e) {}
+  }
+
+  var issueNumber = extractIssueNumberFromText(pr.title);
+  if (issueNumber) {
+    var byIssue = agentdesk.db.query(
+      "SELECT id, status, assigned_agent_id, title, github_issue_number, active_thread_id, repo_id " +
+      "FROM kanban_cards WHERE github_issue_number = ? AND (repo_id = ? OR repo_id IS NULL) " +
+      "ORDER BY updated_at DESC LIMIT 1",
+      [issueNumber, repo]
+    );
+    if (byIssue.length > 0) return byIssue[0];
+  }
+
+  var branch = pr.headRefName || pr.branch || "";
+  if (branch) {
+    var dirSuffix = branch.replace(/^wt\//, "");
+    var sessions = agentdesk.db.query(
+      "SELECT agent_id FROM sessions WHERE cwd LIKE ? ORDER BY last_heartbeat DESC LIMIT 1",
+      ["%/worktrees/%" + dirSuffix + "%"]
+    );
+    if (sessions.length > 0 && sessions[0].agent_id) {
+      var byAgent = agentdesk.db.query(
+        "SELECT id, status, assigned_agent_id, title, github_issue_number, active_thread_id, repo_id " +
+        "FROM kanban_cards WHERE assigned_agent_id = ? AND status != 'archived' " +
+        "ORDER BY updated_at DESC LIMIT 1",
+        [sessions[0].agent_id]
+      );
+      if (byAgent.length > 0) return byAgent[0];
+    }
+  }
+
+  return null;
+}
+
+function resolveCodexNotificationTarget(card) {
+  if (!card) return null;
+
+  try {
+    var unified = agentdesk.db.query(
+      "SELECT r.unified_thread_channel_id FROM auto_queue_entries e " +
+      "JOIN auto_queue_runs r ON r.id = e.run_id " +
+      "WHERE e.kanban_card_id = ? AND r.unified_thread_channel_id IS NOT NULL " +
+      "ORDER BY r.created_at DESC LIMIT 1",
+      [card.id]
+    );
+    if (unified.length > 0 && unified[0].unified_thread_channel_id) {
+      return unified[0].unified_thread_channel_id;
+    }
+  } catch (e) {}
+
+  if (card.active_thread_id) return card.active_thread_id;
+
+  if (card.assigned_agent_id) {
+    var sessions = agentdesk.db.query(
+      "SELECT thread_channel_id FROM sessions WHERE agent_id = ? AND thread_channel_id IS NOT NULL " +
+      "ORDER BY last_heartbeat DESC LIMIT 1",
+      [card.assigned_agent_id]
+    );
+    if (sessions.length > 0 && sessions[0].thread_channel_id) {
+      return sessions[0].thread_channel_id;
+    }
+
+    var primary = agentdesk.agents.resolvePrimaryChannel(card.assigned_agent_id);
+    if (primary) return primary;
+  }
+
+  return null;
+}
+
+function buildCodexReviewMessage(pr, snapshot, reworkCreated, mergeGuarded) {
+  var lines = [];
+  if (snapshot.hasBlocking) {
+    lines.push("⚠️ PR #" + pr.number + " Codex 리뷰: unresolved P1/P2 " + snapshot.blockingComments.length + "건");
+    if (snapshot.blockingFiles.length > 0) {
+      lines.push("파일: " + snapshot.blockingFiles.join(", "));
+    }
+    for (var i = 0; i < snapshot.blockingComments.length && i < 3; i++) {
+      var c = snapshot.blockingComments[i];
+      lines.push("- " + c.path + ":" + c.line + " " + c.body);
+    }
+    if (snapshot.blockingComments.length > 3) {
+      lines.push("- 외 " + (snapshot.blockingComments.length - 3) + "건");
+    }
+    if (reworkCreated) {
+      lines.push("rework dispatch를 생성했습니다.");
+    } else if (mergeGuarded) {
+      lines.push("merge를 차단했습니다.");
+    }
+  } else {
+    lines.push("✅ PR #" + pr.number + " Codex 리뷰 통과");
+    lines.push("blocking inline comment 없음");
+  }
+  return lines.join("\n");
+}
+
+function notifyCodexReview(card, pr, snapshot, kind, reworkCreated, mergeGuarded) {
+  var target = resolveCodexNotificationTarget(card);
+  if (!target) return;
+
+  var dedupKey = codexNotificationDedupKey(pr.repo || "", pr.number, snapshot.triggerReviewId || snapshot.latestReviewId, kind);
+  if (agentdesk.kv.get(dedupKey)) return;
+
+  agentdesk.message.queue(
+    target,
+    buildCodexReviewMessage(pr, snapshot, reworkCreated, mergeGuarded),
+    "announce",
+    "merge-automation"
+  );
+  agentdesk.kv.set(dedupKey, "true", CODEX_NOTIFICATION_TTL_SECONDS);
+}
+
+function buildCodexReworkTitle(card, pr, snapshot) {
+  var issueNum = card.github_issue_number || "?";
+  var lines = [
+    "[Codex Rework] PR #" + pr.number + " #" + issueNum + " " + card.title,
+    "",
+    "Codex review found unresolved P1/P2 inline comments."
+  ];
+
+  if (snapshot.blockingFiles.length > 0) {
+    lines.push("Files: " + snapshot.blockingFiles.join(", "));
+  }
+
+  lines.push("Comments:");
+  for (var i = 0; i < snapshot.blockingComments.length && i < CODEX_MAX_CONTEXT_COMMENTS; i++) {
+    var comment = snapshot.blockingComments[i];
+    lines.push("- " + comment.path + ":" + comment.line + " — " + comment.body);
+  }
+  if (snapshot.blockingComments.length > CODEX_MAX_CONTEXT_COMMENTS) {
+    lines.push("- 외 " + (snapshot.blockingComments.length - CODEX_MAX_CONTEXT_COMMENTS) + "건");
+  }
+
+  return lines.join("\n");
+}
+
+function processCodexBlockingReview(card, pr, snapshot) {
+  if (!card || !card.assigned_agent_id || !snapshot.hasBlocking) return;
+
+  var dedupKey = codexReviewDedupKey(pr.repo, pr.number, snapshot.triggerReviewId);
+  if (agentdesk.kv.get(dedupKey)) return;
+
+  var targets = getReviewTargets(card.id);
+  var latestCard = loadCardContext(card.id);
+  if (!latestCard) return;
+
+  if (agentdesk.pipeline.isTerminal(latestCard.status, targets.cfg)) {
+    agentdesk.kanban.reopen(card.id, targets.reviewReworkTarget);
+    latestCard = loadCardContext(card.id) || latestCard;
+  }
+
+  var created = false;
+  if (!hasActiveReworkDispatch(card.id)) {
+    try {
+      agentdesk.dispatch.create(
+        card.id,
+        latestCard.assigned_agent_id,
+        "rework",
+        buildCodexReworkTitle(latestCard, pr, snapshot)
+      );
+      created = true;
+    } catch (e) {
+      agentdesk.log.warn("[merge] Failed to create Codex rework dispatch for PR #" + pr.number + ": " + e);
+    }
+  }
+
+  if (created || hasActiveReworkDispatch(card.id)) {
+    agentdesk.reviewState.sync(card.id, "rework_pending", { last_verdict: "rework" });
+    agentdesk.kanban.setReviewStatus(card.id, "rework_pending", { exclude_status: targets.terminalState });
+
+    var currentCard = loadCardContext(card.id);
+    if (currentCard && currentCard.status !== targets.reviewReworkTarget) {
+      agentdesk.kanban.setStatus(card.id, targets.reviewReworkTarget);
+    }
+
+    agentdesk.kv.set(dedupKey, "true", CODEX_REVIEW_TTL_SECONDS);
+    notifyCodexReview(latestCard, pr, snapshot, "blocking", created, false);
+  }
+}
+
+function processCodexPassReview(card, pr, snapshot) {
+  if (!card || snapshot.hasBlocking) return;
+  notifyCodexReview(card, pr, snapshot, "pass", false, false);
+}
+
+function processCodexReviewSignals() {
+  var repos = agentdesk.db.query("SELECT id FROM github_repos", []);
+  for (var r = 0; r < repos.length; r++) {
+    var repo = repos[r].id;
+    var prs = listOpenPrs(repo);
+    for (var i = 0; i < prs.length; i++) {
+      var pr = prs[i] || {};
+      pr.repo = repo;
+
+      var snapshot = buildCodexReviewSnapshot(repo, pr.number);
+      if (!snapshot) continue;
+
+      var card = findCardForPr(repo, pr);
+      if (!card) {
+        agentdesk.log.info("[merge] No card mapping for Codex-reviewed PR #" + pr.number + " in " + repo);
+        continue;
+      }
+
+      if (snapshot.hasBlocking) {
+        processCodexBlockingReview(card, pr, snapshot);
+      } else {
+        processCodexPassReview(card, pr, snapshot);
+      }
+    }
+  }
+}
+
 /**
  * Enable auto-merge on a PR (shared by auto and manual paths).
  * Returns true on success, false on failure.
  */
 function enableAutoMerge(prNumber, repo, trackingKey) {
+  var snapshot = buildCodexReviewSnapshot(repo, prNumber);
+  if (snapshot && snapshot.hasBlocking) {
+    agentdesk.log.warn("[merge] Blocking auto-merge for PR #" + prNumber + " due to unresolved Codex P1/P2 comments");
+    agentdesk.kv.set("merge_blocked:" + trackingKey, JSON.stringify({
+      pr_number: prNumber,
+      review_id: snapshot.triggerReviewId,
+      blocked_comments: snapshot.blockingComments.length,
+      timestamp: new Date().toISOString()
+    }), 86400);
+
+    var guardKey = mergeGuardDedupKey(repo, prNumber, snapshot.triggerReviewId);
+    if (!agentdesk.kv.get(guardKey)) {
+      var card = findCardForPr(repo, { number: prNumber, repo: repo, title: "", headRefName: "" });
+      if (card) {
+        notifyCodexReview(card, { number: prNumber, repo: repo }, snapshot, "merge-guard", false, true);
+      }
+      agentdesk.kv.set(guardKey, "true", CODEX_NOTIFICATION_TTL_SECONDS);
+    }
+    return false;
+  }
+
   var strategy = agentdesk.config.get("merge_strategy") || "squash";
   var result = agentdesk.exec("gh", [
     "pr", "merge", String(prNumber),

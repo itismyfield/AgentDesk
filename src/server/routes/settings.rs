@@ -134,6 +134,20 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         Some("60"),
     ),
     (
+        "context_compact_percent_codex",
+        "context",
+        "Codex 컨텍스트 compact 임계값 (%)",
+        "Codex Context Compact Threshold (%)",
+        None,
+    ),
+    (
+        "context_compact_percent_claude",
+        "context",
+        "Claude 컨텍스트 compact 임계값 (%)",
+        "Claude Context Compact Threshold (%)",
+        None,
+    ),
+    (
         "context_clear_percent",
         "context",
         "컨텍스트 clear 임계값 (%)",
@@ -338,4 +352,81 @@ pub async fn put_runtime_config(
     }
 
     (StatusCode::OK, Json(json!({"ok": true})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use crate::engine::PolicyEngine;
+    use crate::server::routes::AppState;
+    use std::path::PathBuf;
+
+    fn test_db() -> db::Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        db::schema::migrate(&conn).unwrap();
+        db::wrap_conn(conn)
+    }
+
+    fn test_engine(db: &db::Db) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        PolicyEngine::new(&config, db.clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_config_entries_includes_provider_specific_compact_percent_keys() {
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+
+        let (status, Json(body)) = get_config_entries(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let entries = body["entries"].as_array().expect("entries array");
+        let keys: std::collections::HashSet<&str> = entries
+            .iter()
+            .filter_map(|entry| entry["key"].as_str())
+            .collect();
+
+        assert!(keys.contains("context_compact_percent_codex"));
+        assert!(keys.contains("context_compact_percent_claude"));
+    }
+
+    #[tokio::test]
+    async fn patch_config_entries_accepts_provider_specific_compact_percent_keys() {
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+
+        let (patch_status, Json(patch_body)) = patch_config_entries(
+            State(state.clone()),
+            Json(json!({
+                "context_compact_percent_codex": "85",
+                "context_compact_percent_claude": "75",
+            })),
+        )
+        .await;
+        assert_eq!(patch_status, StatusCode::OK);
+        assert_eq!(patch_body["updated"], json!(2));
+        assert_eq!(patch_body["rejected"], json!([]));
+
+        let (get_status, Json(get_body)) = get_config_entries(State(state)).await;
+        assert_eq!(get_status, StatusCode::OK);
+
+        let entries = get_body["entries"].as_array().expect("entries array");
+        let values: std::collections::HashMap<&str, Option<&str>> = entries
+            .iter()
+            .filter_map(|entry| Some((entry["key"].as_str()?, entry["value"].as_str())))
+            .collect();
+
+        assert_eq!(
+            values.get("context_compact_percent_codex"),
+            Some(&Some("85"))
+        );
+        assert_eq!(
+            values.get("context_compact_percent_claude"),
+            Some(&Some("75"))
+        );
+    }
 }

@@ -462,6 +462,47 @@ pub fn cancel_dispatch_and_reset_auto_queue_on_conn(
     Ok(cancelled)
 }
 
+/// Cancel all live dispatches for a card without resetting auto-queue entries.
+///
+/// Used when PMD force-transitions a live card back to backlog/ready. In that
+/// case the current work should be abandoned rather than re-queued into the
+/// same active run.
+pub fn cancel_active_dispatches_for_card_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    reason: Option<&str>,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE sessions \
+         SET status = CASE WHEN status = 'working' THEN 'idle' ELSE status END, \
+             active_dispatch_id = NULL \
+         WHERE active_dispatch_id IN (
+             SELECT id FROM task_dispatches
+             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')
+         )",
+        [card_id],
+    )?;
+
+    if let Some(reason) = reason {
+        conn.execute(
+            "UPDATE task_dispatches \
+             SET status = 'cancelled', result = ?2, updated_at = datetime('now') \
+             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
+            rusqlite::params![
+                card_id,
+                json!({ "reason": reason, "completion_source": "force_transition" }).to_string()
+            ],
+        )
+    } else {
+        conn.execute(
+            "UPDATE task_dispatches \
+             SET status = 'cancelled', updated_at = datetime('now') \
+             WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
+            [card_id],
+        )
+    }
+}
+
 fn dispatch_uses_alt_channel(dispatch_type: &str) -> bool {
     matches!(dispatch_type, "review" | "e2e-test" | "consultation")
 }
@@ -1879,6 +1920,33 @@ mod tests {
             &json!({}),
         );
         assert!(result.is_err(), "core should reject done card dispatch");
+    }
+
+    #[test]
+    fn create_dispatch_core_rejects_missing_agent_before_insert() {
+        let db = test_db();
+        seed_card(&db, "card-missing-agent", "ready");
+
+        let result = create_dispatch_core(
+            &db,
+            "card-missing-agent",
+            "agent-missing",
+            "implementation",
+            "Should fail",
+            &json!({}),
+        );
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("agent 'agent-missing' not found"));
+
+        let conn = db.separate_conn().unwrap();
+        let dispatch_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-missing-agent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_count, 0, "missing agent must not persist rows");
     }
 
     #[test]

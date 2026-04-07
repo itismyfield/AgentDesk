@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{self, AgentDef as RuntimeAgentDef};
 use crate::db;
 use crate::db::agents::sync_agents_from_config;
+use crate::runtime_layout;
 use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::discord::org_writer::{self, OrgAgentUpdate, OrgChannelBindingUpdate};
 use crate::services::discord::runtime_store::org_schema_path_for_root;
@@ -251,12 +252,14 @@ pub(super) fn apply_import_plan(
     fs::create_dir_all(&backups_root)
         .map_err(|e| format!("Failed to create '{}': {e}", backups_root.display()))?;
 
-    let yaml_path = runtime_root.join("agentdesk.yaml");
+    runtime_layout::ensure_runtime_layout(runtime_root)?;
+
+    let yaml_path = runtime_layout::config_file_path(runtime_root);
     let org_yaml_path = org_schema_path_for_root(runtime_root);
     let bot_settings_path = runtime_root.join("config").join("bot_settings.json");
     let ai_sessions_root = runtime_root.join("ai_sessions");
-    let prompts_root = runtime_root.join("prompts").join("agents");
-    let role_context_root = runtime_root.join("role-context");
+    let prompts_root = runtime_layout::managed_agents_root(runtime_root);
+    let role_context_root = runtime_layout::long_term_memory_root(runtime_root);
     let workspaces_root = runtime_root.join("openclaw").join("workspaces");
     if !args.no_prompts {
         fs::create_dir_all(&prompts_root)
@@ -443,7 +446,7 @@ pub(super) fn apply_import_plan(
                     Some(prompt_path.display().to_string())
                 };
 
-                let memory_dir = role_context_root.join(format!("{}.memory", agent.final_role_id));
+                let memory_dir = role_context_root.join(&agent.final_role_id);
                 let memory_outputs = if args.no_memory || memory_already_done {
                     existing_manifest
                         .as_ref()
@@ -797,9 +800,7 @@ fn build_org_agent_updates(
                 None
             } else {
                 Some(
-                    runtime_root
-                        .join("prompts")
-                        .join("agents")
+                    runtime_layout::managed_agents_root(runtime_root)
                         .join(&agent.final_role_id)
                         .join("IDENTITY.md")
                         .display()
@@ -2669,9 +2670,7 @@ fn render_imported_prompt(
     args: &OpenClawMigrateArgs,
 ) -> String {
     let workspace = Path::new(&agent.workspace_source);
-    let memory_dir = runtime_root
-        .join("role-context")
-        .join(format!("{}.memory", agent.final_role_id));
+    let memory_dir = runtime_layout::long_term_memory_root(runtime_root).join(&agent.final_role_id);
     let workspace_dir = runtime_root
         .join("openclaw")
         .join("workspaces")

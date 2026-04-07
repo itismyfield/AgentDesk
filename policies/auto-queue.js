@@ -51,7 +51,9 @@ var autoQueue = {
       "ORDER BY CASE WHEN e.status = 'done' THEN 0 ELSE 1 END ASC, e.completed_at DESC LIMIT 1",
       [payload.card_id]
     );
-    if (doneEntries.length === 0) return;
+    if (!doneEntries || doneEntries.length === 0 || !doneEntries[0] || !doneEntries[0].run_id) {
+      return;
+    }
 
     var runId = doneEntries[0].run_id;
     var doneGroup = doneEntries[0].thread_group;

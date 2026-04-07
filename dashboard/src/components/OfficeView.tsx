@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Application, Container, Graphics, Text, Texture } from "pixi.js";
 import type { Agent, AuditLogEntry, Department, KanbanCard, RoundTableMeeting, Task, SubAgent } from "../types";
 type ThemeMode = "dark" | "light";
@@ -101,6 +101,15 @@ export default function OfficeView({
   onSelectDepartment,
   customDeptThemes,
 }: OfficeViewProps) {
+  // ── Mobile detection (skip Pixi on small viewports) ──
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 639px)").matches);
+  useEffect(() => {
+    const mql = window.matchMedia("(max-width: 639px)");
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mql.addEventListener("change", handler);
+    return () => mql.removeEventListener("change", handler);
+  }, []);
+
   // ── Refs for BuildOfficeSceneContext ──
   const containerRef = useRef<HTMLDivElement | null>(null);
   const appRef = useRef<Application | null>(null);
@@ -316,11 +325,15 @@ export default function OfficeView({
     activeMeeting,
     customDeptThemes,
     currentTheme: theme,
+    disabled: isMobile,
   });
+
+  const isKo = language === "ko";
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col sm:flex-row sm:gap-3">
       <div className="relative min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+        {/* Mobile: insight panel + agent status cards (no Pixi) */}
         <div className="sm:hidden">
           <OfficeInsightPanel
             agents={agents}
@@ -328,11 +341,13 @@ export default function OfficeView({
             auditLogs={auditLogs}
             kanbanCards={kanbanCards}
             onNavigateToKanban={onNavigateToKanban}
-            isKo={language === "ko"}
+            isKo={isKo}
             onSelectAgent={onSelectAgent}
           />
+          <MobileAgentStatusGrid agents={agents} isKo={isKo} onSelectAgent={onSelectAgent} />
         </div>
-        <div ref={containerRef} className="w-full min-h-full pb-40" style={{ imageRendering: "pixelated" }} />
+        {/* Desktop: Pixi canvas */}
+        <div ref={containerRef} className="hidden sm:block w-full min-h-full pb-40" style={{ imageRendering: "pixelated" }} />
       </div>
       <div className="hidden min-h-0 sm:block sm:h-full sm:w-[min(22rem,calc(100vw-1.5rem))] sm:shrink-0 sm:overflow-y-auto">
         <OfficeInsightPanel
@@ -341,10 +356,79 @@ export default function OfficeView({
           auditLogs={auditLogs}
           kanbanCards={kanbanCards}
           onNavigateToKanban={onNavigateToKanban}
-          isKo={language === "ko"}
+          isKo={isKo}
           onSelectAgent={onSelectAgent}
           docked
         />
+      </div>
+    </div>
+  );
+}
+
+// ── Mobile Office Lite: agent status cards ──
+
+const STATUS_COLORS: Record<string, string> = {
+  working: "#34d399",
+  idle: "#94a3b8",
+  break: "#fbbf24",
+  offline: "#64748b",
+};
+
+function MobileAgentStatusGrid({
+  agents,
+  isKo,
+  onSelectAgent,
+}: {
+  agents: Agent[];
+  isKo: boolean;
+  onSelectAgent?: (agent: Agent) => void;
+}) {
+  const sorted = [...agents].sort((a, b) => {
+    const order: Record<string, number> = { working: 0, break: 1, idle: 2, offline: 3 };
+    return (order[a.status] ?? 9) - (order[b.status] ?? 9);
+  });
+
+  return (
+    <div className="px-3 pb-6 mt-3">
+      <div className="text-xs font-semibold uppercase tracking-[0.24em] mb-2 px-1" style={{ color: "var(--th-text-muted)" }}>
+        {isKo ? "에이전트 현황" : "Agent Status"}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {sorted.map((agent) => (
+          <button
+            key={agent.id}
+            type="button"
+            onClick={() => onSelectAgent?.(agent)}
+            className="rounded-xl px-3 py-2.5 text-left"
+            style={{
+              background: "color-mix(in srgb, var(--th-card-bg) 86%, transparent)",
+              border: "1px solid var(--th-card-border)",
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-base">{agent.avatar_emoji}</span>
+              <span className="text-xs font-medium truncate" style={{ color: "var(--th-text-primary)" }}>
+                {agent.alias || agent.name_ko || agent.name}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 mt-1.5">
+              <span
+                className="w-2 h-2 rounded-full shrink-0"
+                style={{ background: STATUS_COLORS[agent.status] ?? STATUS_COLORS.offline }}
+              />
+              <span className="text-xs truncate" style={{ color: STATUS_COLORS[agent.status] ?? STATUS_COLORS.offline }}>
+                {agent.session_info || (isKo
+                  ? (agent.status === "working" ? "작업 중" : agent.status === "idle" ? "대기" : agent.status === "break" ? "휴식" : "오프라인")
+                  : agent.status.charAt(0).toUpperCase() + agent.status.slice(1))}
+              </span>
+            </div>
+            {agent.department_name_ko && (
+              <div className="text-xs mt-1 truncate" style={{ color: "var(--th-text-muted)" }}>
+                {isKo ? agent.department_name_ko : (agent.department_name || agent.department_name_ko)}
+              </div>
+            )}
+          </button>
+        ))}
       </div>
     </div>
   );

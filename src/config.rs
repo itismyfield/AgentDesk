@@ -209,13 +209,21 @@ impl Default for Config {
 }
 
 pub fn load() -> Result<Config> {
-    let path = std::env::var("AGENTDESK_CONFIG").unwrap_or_else(|_| "agentdesk.yaml".into());
+    let path = resolve_graceful_config_path(
+        std::env::var("AGENTDESK_CONFIG")
+            .ok()
+            .map(std::path::PathBuf::from),
+        runtime_root(),
+        std::env::current_dir().ok(),
+        dirs::home_dir(),
+    );
+    let path_display = path.display().to_string();
 
-    let contents =
-        std::fs::read_to_string(&path).with_context(|| format!("Failed to read config: {path}"))?;
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read config: {path_display}"))?;
 
     let config: Config = serde_yaml::from_str(&contents)
-        .with_context(|| format!("Failed to parse config: {path}"))?;
+        .with_context(|| format!("Failed to parse config: {path_display}"))?;
 
     // Ensure data dir exists
     std::fs::create_dir_all(&config.data.dir)?;
@@ -251,30 +259,52 @@ fn resolve_graceful_config_path(
     if let Some(path) = explicit {
         return path;
     }
-    if let Some(root) = runtime_root {
-        let path = root.join("agentdesk.yaml");
-        if path.exists() {
-            return path;
+    if let Some(root) = runtime_root.as_ref() {
+        for path in [
+            crate::runtime_layout::config_file_path(root),
+            crate::runtime_layout::legacy_config_file_path(root),
+        ] {
+            if path.exists() {
+                return path;
+            }
         }
     }
     if let Some(dir) = cwd {
-        let path = dir.join("agentdesk.yaml");
-        if path.exists() {
-            return path;
+        for path in [
+            dir.join("config").join("agentdesk.yaml"),
+            dir.join("agentdesk.yaml"),
+        ] {
+            if path.exists() {
+                return path;
+            }
         }
     }
     if let Some(home) = home_dir {
-        let path = home.join(".adk").join("release").join("agentdesk.yaml");
-        if path.exists() {
-            return path;
+        let release_root = home.join(".adk").join("release");
+        for path in [
+            crate::runtime_layout::config_file_path(&release_root),
+            crate::runtime_layout::legacy_config_file_path(&release_root),
+        ] {
+            if path.exists() {
+                return path;
+            }
         }
     }
-    std::path::PathBuf::from("agentdesk.yaml")
+    runtime_root
+        .map(|root| crate::runtime_layout::config_file_path(&root))
+        .unwrap_or_else(|| std::path::PathBuf::from("config").join("agentdesk.yaml"))
 }
 
 /// Load config gracefully — returns Config::default() if the file doesn't exist
 /// or fails to parse, instead of panicking.
-/// Searches: $AGENTDESK_CONFIG → $AGENTDESK_ROOT_DIR/agentdesk.yaml → CWD/agentdesk.yaml → ~/.adk/release/agentdesk.yaml
+/// Searches:
+/// $AGENTDESK_CONFIG →
+/// $AGENTDESK_ROOT_DIR/config/agentdesk.yaml →
+/// $AGENTDESK_ROOT_DIR/agentdesk.yaml →
+/// CWD/config/agentdesk.yaml →
+/// CWD/agentdesk.yaml →
+/// ~/.adk/release/config/agentdesk.yaml →
+/// ~/.adk/release/agentdesk.yaml
 pub fn load_graceful() -> Config {
     let path = resolve_graceful_config_path(
         std::env::var("AGENTDESK_CONFIG")
@@ -379,11 +409,25 @@ mod tests {
         let root = make_temp_dir("root-first");
         let cwd = make_temp_dir("cwd-second");
         let home = make_temp_dir("home-third");
-        std::fs::write(root.join("agentdesk.yaml"), "server:\n  port: 9001\n").unwrap();
-        std::fs::write(cwd.join("agentdesk.yaml"), "server:\n  port: 9002\n").unwrap();
-        std::fs::create_dir_all(home.join(".adk").join("release")).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::write(
-            home.join(".adk").join("release").join("agentdesk.yaml"),
+            root.join("config").join("agentdesk.yaml"),
+            "server:\n  port: 9001\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(cwd.join("config")).unwrap();
+        std::fs::write(
+            cwd.join("config").join("agentdesk.yaml"),
+            "server:\n  port: 9002\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join(".adk").join("release")).unwrap();
+        std::fs::create_dir_all(home.join(".adk").join("release").join("config")).unwrap();
+        std::fs::write(
+            home.join(".adk")
+                .join("release")
+                .join("config")
+                .join("agentdesk.yaml"),
             "server:\n  port: 9003\n",
         )
         .unwrap();
@@ -394,7 +438,7 @@ mod tests {
             Some(cwd.clone()),
             Some(home.clone()),
         );
-        assert_eq!(resolved, root.join("agentdesk.yaml"));
+        assert_eq!(resolved, root.join("config").join("agentdesk.yaml"));
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(cwd);
@@ -405,20 +449,40 @@ mod tests {
     fn resolve_graceful_config_path_prefers_cwd_before_release_home() {
         let cwd = make_temp_dir("cwd-before-release");
         let home = make_temp_dir("release-fallback");
-        std::fs::write(cwd.join("agentdesk.yaml"), "server:\n  port: 9101\n").unwrap();
-        std::fs::create_dir_all(home.join(".adk").join("release")).unwrap();
+        std::fs::create_dir_all(cwd.join("config")).unwrap();
         std::fs::write(
-            home.join(".adk").join("release").join("agentdesk.yaml"),
+            cwd.join("config").join("agentdesk.yaml"),
+            "server:\n  port: 9101\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join(".adk").join("release")).unwrap();
+        std::fs::create_dir_all(home.join(".adk").join("release").join("config")).unwrap();
+        std::fs::write(
+            home.join(".adk")
+                .join("release")
+                .join("config")
+                .join("agentdesk.yaml"),
             "server:\n  port: 9102\n",
         )
         .unwrap();
 
         let resolved =
             resolve_graceful_config_path(None, None, Some(cwd.clone()), Some(home.clone()));
-        assert_eq!(resolved, cwd.join("agentdesk.yaml"));
+        assert_eq!(resolved, cwd.join("config").join("agentdesk.yaml"));
 
         let _ = std::fs::remove_dir_all(cwd);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn resolve_graceful_config_path_falls_back_to_legacy_runtime_path() {
+        let root = make_temp_dir("legacy-runtime");
+        std::fs::write(root.join("agentdesk.yaml"), "server:\n  port: 9201\n").unwrap();
+
+        let resolved = resolve_graceful_config_path(None, Some(root.clone()), None, None);
+        assert_eq!(resolved, root.join("agentdesk.yaml"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -495,6 +559,6 @@ impl Settings {
     }
 
     pub fn config_dir() -> Option<std::path::PathBuf> {
-        runtime_root()
+        runtime_root().map(|root| crate::runtime_layout::config_dir(&root))
     }
 }

@@ -721,11 +721,11 @@ export default function KanbanTab({
               <button
                 key={source.id}
                 onClick={() => setSelectedRepo(source.repo)}
-                className="shrink-0 text-xs px-2.5 py-1.5 rounded-full border truncate max-w-[160px]"
+                className="shrink-0 text-xs font-medium px-2.5 py-1.5 rounded-full border truncate max-w-[160px]"
                 style={{
-                  borderColor: selectedRepo === source.repo ? "rgba(96,165,250,0.5)" : "rgba(148,163,184,0.22)",
-                  backgroundColor: selectedRepo === source.repo ? "rgba(59,130,246,0.18)" : "transparent",
-                  color: selectedRepo === source.repo ? "#bfdbfe" : "var(--th-text-muted)",
+                  borderColor: selectedRepo === source.repo ? "rgba(59,130,246,0.7)" : "rgba(148,163,184,0.3)",
+                  backgroundColor: selectedRepo === source.repo ? "rgba(59,130,246,0.15)" : "transparent",
+                  color: selectedRepo === source.repo ? "#2563eb" : "var(--th-text)",
                 }}
               >
                 {source.repo.split("/")[1] ?? source.repo}
@@ -739,11 +739,11 @@ export default function KanbanTab({
                   {repoSources.length > 1 && <span className="text-slate-600 mx-0.5">|</span>}
                   <button
                     onClick={() => setSelectedAgentId(null)}
-                    className="shrink-0 text-xs px-2.5 py-1.5 rounded-full border"
+                    className="shrink-0 text-xs font-medium px-2.5 py-1.5 rounded-full border"
                     style={{
-                      borderColor: !selectedAgentId ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                      backgroundColor: !selectedAgentId ? "rgba(139,92,246,0.18)" : "transparent",
-                      color: !selectedAgentId ? "#c4b5fd" : "var(--th-text-muted)",
+                      borderColor: !selectedAgentId ? "rgba(139,92,246,0.7)" : "rgba(148,163,184,0.3)",
+                      backgroundColor: !selectedAgentId ? "rgba(139,92,246,0.15)" : "transparent",
+                      color: !selectedAgentId ? "#6d28d9" : "var(--th-text)",
                     }}
                   >
                     {tr(`전체`, `All`)}
@@ -752,11 +752,11 @@ export default function KanbanTab({
                     <button
                       key={aid}
                       onClick={() => setSelectedAgentId(aid)}
-                      className="shrink-0 text-xs px-2.5 py-1.5 rounded-full border truncate max-w-[140px]"
+                      className="shrink-0 text-xs font-medium px-2.5 py-1.5 rounded-full border truncate max-w-[140px]"
                       style={{
-                        borderColor: selectedAgentId === aid ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                        backgroundColor: selectedAgentId === aid ? "rgba(139,92,246,0.18)" : "transparent",
-                        color: selectedAgentId === aid ? "#c4b5fd" : "var(--th-text-muted)",
+                        borderColor: selectedAgentId === aid ? "rgba(139,92,246,0.7)" : "rgba(148,163,184,0.3)",
+                        backgroundColor: selectedAgentId === aid ? "rgba(139,92,246,0.15)" : "transparent",
+                        color: selectedAgentId === aid ? "#6d28d9" : "var(--th-text)",
                       }}
                     >
                       {getAgentLabel(aid)} ({count})
@@ -768,10 +768,10 @@ export default function KanbanTab({
                 <select
                   value={selectedAgentId ?? ""}
                   onChange={(e) => setSelectedAgentId(e.target.value || null)}
-                  className="text-xs px-2.5 py-1.5 rounded-lg border bg-transparent min-w-0 max-w-[180px]"
+                  className="text-xs font-medium px-2.5 py-1.5 rounded-lg border bg-transparent min-w-0 max-w-[180px]"
                   style={{
-                    borderColor: selectedAgentId ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                    color: selectedAgentId ? "#c4b5fd" : "var(--th-text-muted)",
+                    borderColor: selectedAgentId ? "rgba(139,92,246,0.7)" : "rgba(148,163,184,0.3)",
+                    color: selectedAgentId ? "#6d28d9" : "var(--th-text)",
                   }}
                 >
                   <option value="">{tr(`전체`, `All`)}</option>
@@ -804,9 +804,9 @@ export default function KanbanTab({
               onClick={() => setSelectedRepo(source.repo)}
               className="shrink-0 text-xs px-3 py-2 rounded-full border truncate max-w-[180px]"
               style={{
-                borderColor: selectedRepo === source.repo ? "rgba(96,165,250,0.5)" : "rgba(148,163,184,0.22)",
-                backgroundColor: selectedRepo === source.repo ? "rgba(59,130,246,0.18)" : "transparent",
-                color: selectedRepo === source.repo ? "#bfdbfe" : "var(--th-text-muted)",
+                borderColor: selectedRepo === source.repo ? "rgba(59,130,246,0.6)" : "rgba(148,163,184,0.22)",
+                backgroundColor: selectedRepo === source.repo ? "rgba(59,130,246,0.25)" : "transparent",
+                color: selectedRepo === source.repo ? "#3b82f6" : "var(--th-text-muted)",
                 minHeight: 44,
               }}
             >
@@ -829,9 +829,9 @@ export default function KanbanTab({
                   onClick={() => setSelectedAgentId(null)}
                   className="shrink-0 text-xs px-3 py-2 rounded-full border"
                   style={{
-                    borderColor: !selectedAgentId ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                    backgroundColor: !selectedAgentId ? "rgba(139,92,246,0.18)" : "transparent",
-                    color: !selectedAgentId ? "#c4b5fd" : "var(--th-text-muted)",
+                    borderColor: !selectedAgentId ? "rgba(139,92,246,0.6)" : "rgba(148,163,184,0.22)",
+                    backgroundColor: !selectedAgentId ? "rgba(139,92,246,0.25)" : "transparent",
+                    color: !selectedAgentId ? "#7c3aed" : "var(--th-text-muted)",
                     minHeight: 44,
                   }}
                 >
@@ -843,9 +843,9 @@ export default function KanbanTab({
                     onClick={() => setSelectedAgentId(aid)}
                     className="shrink-0 text-xs px-3 py-2 rounded-full border truncate max-w-[160px]"
                     style={{
-                      borderColor: selectedAgentId === aid ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                      backgroundColor: selectedAgentId === aid ? "rgba(139,92,246,0.18)" : "transparent",
-                      color: selectedAgentId === aid ? "#c4b5fd" : "var(--th-text-muted)",
+                      borderColor: selectedAgentId === aid ? "rgba(139,92,246,0.6)" : "rgba(148,163,184,0.22)",
+                      backgroundColor: selectedAgentId === aid ? "rgba(139,92,246,0.25)" : "transparent",
+                      color: selectedAgentId === aid ? "#7c3aed" : "var(--th-text-muted)",
                       minHeight: 44,
                     }}
                   >
@@ -863,9 +863,9 @@ export default function KanbanTab({
                 onChange={(e) => setSelectedAgentId(e.target.value || null)}
                 className="text-xs px-3 py-2 rounded-lg border bg-transparent min-w-0 max-w-[220px]"
                 style={{
-                  borderColor: selectedAgentId ? "rgba(139,92,246,0.5)" : "rgba(148,163,184,0.22)",
-                  color: selectedAgentId ? "#c4b5fd" : "var(--th-text-muted)",
-                  backgroundColor: selectedAgentId ? "rgba(139,92,246,0.12)" : "transparent",
+                  borderColor: selectedAgentId ? "rgba(139,92,246,0.6)" : "rgba(148,163,184,0.22)",
+                  color: selectedAgentId ? "#7c3aed" : "var(--th-text-muted)",
+                  backgroundColor: selectedAgentId ? "rgba(139,92,246,0.2)" : "transparent",
                   minHeight: 44,
                 }}
               >

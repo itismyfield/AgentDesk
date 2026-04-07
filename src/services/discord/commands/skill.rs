@@ -234,12 +234,14 @@ pub(in crate::services::discord) async fn cmd_cc(
             if args_str.is_empty() {
                 format!(
                     "Execute the skill `/{skill}` now. \
-                     Use the Skill tool with skill=\"{skill}\"."
+                     Use the Skill tool with skill=\"{skill}\". \
+                     Read files under `references/` only if the skill points to them or you need extra detail."
                 )
             } else {
                 format!(
                     "Execute the skill `/{skill}` with arguments: {args_str}\n\
-                     Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\"."
+                     Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\". \
+                     Read files under `references/` only if the skill points to them or you need extra detail."
                 )
             }
         }
@@ -247,12 +249,12 @@ pub(in crate::services::discord) async fn cmd_cc(
             if args_str.is_empty() {
                 format!(
                     "Use the local Codex skill `/{skill}` now. \
-                     Follow its SKILL.md instructions exactly and complete the task."
+                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
                 )
             } else {
                 format!(
                     "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
-                    Follow its SKILL.md instructions exactly and adapt them to the request."
+                    Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
                 )
             }
         }
@@ -260,12 +262,12 @@ pub(in crate::services::discord) async fn cmd_cc(
             if args_str.is_empty() {
                 format!(
                     "Use the local Gemini skill `/{skill}` now. \
-                     Follow its SKILL.md instructions exactly and complete the task."
+                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
                 )
             } else {
                 format!(
                     "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
-                     Follow its SKILL.md instructions exactly and adapt them to the request."
+                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
                 )
             }
         }
@@ -273,12 +275,12 @@ pub(in crate::services::discord) async fn cmd_cc(
             if args_str.is_empty() {
                 format!(
                     "Use the local Qwen skill `/{skill}` now. \
-                     Follow its SKILL.md instructions exactly and complete the task."
+                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
                 )
             } else {
                 format!(
                     "Use the local Qwen skill `/{skill}` now with this user request: {args_str}\n\
-                     Follow its SKILL.md instructions exactly and adapt them to the request."
+                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
                 )
             }
         }

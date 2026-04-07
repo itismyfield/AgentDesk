@@ -49,8 +49,8 @@ use adk_session::{
 };
 use formatting::{
     BUILTIN_SKILLS, add_reaction_raw, extract_skill_description, format_for_discord,
-    format_tool_input, normalize_empty_lines, remove_reaction_raw, send_long_message_raw,
-    truncate_str,
+    format_skills_notice, format_tool_input, normalize_empty_lines, remove_reaction_raw,
+    send_long_message_raw, truncate_str,
 };
 use handoff::{clear_handoff, load_handoffs, update_handoff_state};
 use inflight::{
@@ -224,12 +224,20 @@ pub(super) struct DiscordSession {
     pub(super) born_generation: u64,
 }
 
+fn allows_nonlocal_session_path(remote_profile_name: Option<&str>) -> bool {
+    remote_profile_name.is_some_and(|name| !name.trim().is_empty())
+}
+
+fn session_path_is_usable(current_path: &str, remote_profile_name: Option<&str>) -> bool {
+    allows_nonlocal_session_path(remote_profile_name) || std::path::Path::new(current_path).is_dir()
+}
+
 impl DiscordSession {
     /// Validate `current_path` and return it if it exists on disk.
     /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
     pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
         let current_path = self.current_path.as_ref()?;
-        if std::path::Path::new(current_path).is_dir() {
+        if session_path_is_usable(current_path, self.remote_profile_name.as_deref()) {
             return Some(current_path.clone());
         }
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1381,6 +1389,10 @@ pub(super) fn scan_skills(
     provider: &ProviderKind,
     project_path: Option<&str>,
 ) -> Vec<(String, String)> {
+    if let Some(root) = crate::config::runtime_root() {
+        let _ = crate::runtime_layout::sync_managed_skills(&root);
+    }
+
     let mut skills: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -1391,13 +1403,7 @@ pub(super) fn scan_skills(
                 skills.push((name.to_string(), desc.to_string()));
             }
 
-            let mut dirs_to_scan: Vec<std::path::PathBuf> = Vec::new();
-            if let Some(home) = dirs::home_dir() {
-                dirs_to_scan.push(home.join(".claude").join("commands"));
-            }
-            if let Some(proj) = project_path {
-                dirs_to_scan.push(Path::new(proj).join(".claude").join("commands"));
-            }
+            let dirs_to_scan = collect_provider_skill_roots(provider, project_path);
 
             for dir in dirs_to_scan {
                 if !dir.is_dir() {
@@ -1423,200 +1429,12 @@ pub(super) fn scan_skills(
                 }
             }
         }
-        ProviderKind::Codex => {
-            let mut roots = Vec::new();
-            if let Some(home) = dirs::home_dir() {
-                roots.push(home.join(".codex").join("skills"));
-            }
-            if let Some(proj) = project_path {
-                roots.push(Path::new(proj).join(".codex").join("skills"));
-            }
-
-            for root in roots {
-                if !root.is_dir() {
-                    continue;
-                }
-                let Ok(entries) = fs::read_dir(&root) else {
-                    continue;
-                };
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    if let Some(skill_path) = resolve_codex_skill_file(&path) {
-                        if let Some(name) = skill_path
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .and_then(|s| s.to_str())
-                        {
-                            let name = name.to_string();
-                            if seen.insert(name.clone()) {
-                                let desc = fs::read_to_string(&skill_path)
-                                    .ok()
-                                    .map(|content| extract_skill_description(&content))
-                                    .unwrap_or_else(|| format!("Skill: {}", name));
-                                skills.push((name, desc));
-                            }
-                        }
-                        continue;
-                    }
-
-                    if path.is_dir() {
-                        let Ok(nested) = fs::read_dir(&path) else {
-                            continue;
-                        };
-                        for child in nested.filter_map(|e| e.ok()) {
-                            let child_path = child.path();
-                            let Some(skill_path) = resolve_codex_skill_file(&child_path) else {
-                                continue;
-                            };
-                            let Some(name) = skill_path
-                                .parent()
-                                .and_then(|p| p.file_name())
-                                .and_then(|s| s.to_str())
-                            else {
-                                continue;
-                            };
-                            let name = name.to_string();
-                            if seen.insert(name.clone()) {
-                                let desc = fs::read_to_string(&skill_path)
-                                    .ok()
-                                    .map(|content| extract_skill_description(&content))
-                                    .unwrap_or_else(|| format!("Skill: {}", name));
-                                skills.push((name, desc));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ProviderKind::Gemini => {
-            let mut roots = Vec::new();
-            if let Some(home) = dirs::home_dir() {
-                roots.push(home.join(".gemini").join("skills"));
-            }
-            if let Some(proj) = project_path {
-                roots.push(Path::new(proj).join(".gemini").join("skills"));
-            }
-
-            for root in roots {
-                if !root.is_dir() {
-                    continue;
-                }
-                let Ok(entries) = fs::read_dir(&root) else {
-                    continue;
-                };
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    if let Some(skill_path) = resolve_codex_skill_file(&path) {
-                        if let Some(name) = skill_path
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .and_then(|s| s.to_str())
-                        {
-                            let name = name.to_string();
-                            if seen.insert(name.clone()) {
-                                let desc = fs::read_to_string(&skill_path)
-                                    .ok()
-                                    .map(|content| extract_skill_description(&content))
-                                    .unwrap_or_else(|| format!("Skill: {}", name));
-                                skills.push((name, desc));
-                            }
-                        }
-                        continue;
-                    }
-
-                    if path.is_dir() {
-                        let Ok(nested) = fs::read_dir(&path) else {
-                            continue;
-                        };
-                        for child in nested.filter_map(|e| e.ok()) {
-                            let child_path = child.path();
-                            let Some(skill_path) = resolve_codex_skill_file(&child_path) else {
-                                continue;
-                            };
-                            let Some(name) = skill_path
-                                .parent()
-                                .and_then(|p| p.file_name())
-                                .and_then(|s| s.to_str())
-                            else {
-                                continue;
-                            };
-                            let name = name.to_string();
-                            if seen.insert(name.clone()) {
-                                let desc = fs::read_to_string(&skill_path)
-                                    .ok()
-                                    .map(|content| extract_skill_description(&content))
-                                    .unwrap_or_else(|| format!("Skill: {}", name));
-                                skills.push((name, desc));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ProviderKind::Qwen => {
-            let mut roots = Vec::new();
-            if let Some(home) = dirs::home_dir() {
-                roots.push(home.join(".qwen").join("skills"));
-            }
-            if let Some(proj) = project_path {
-                roots.push(Path::new(proj).join(".qwen").join("skills"));
-            }
-
-            for root in roots {
-                if !root.is_dir() {
-                    continue;
-                }
-                let Ok(entries) = fs::read_dir(&root) else {
-                    continue;
-                };
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    if let Some(skill_path) = resolve_codex_skill_file(&path) {
-                        if let Some(name) = skill_path
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .and_then(|s| s.to_str())
-                        {
-                            let name = name.to_string();
-                            if seen.insert(name.clone()) {
-                                let desc = fs::read_to_string(&skill_path)
-                                    .ok()
-                                    .map(|content| extract_skill_description(&content))
-                                    .unwrap_or_else(|| format!("Skill: {}", name));
-                                skills.push((name, desc));
-                            }
-                        }
-                        continue;
-                    }
-
-                    if path.is_dir() {
-                        let Ok(nested) = fs::read_dir(&path) else {
-                            continue;
-                        };
-                        for child in nested.filter_map(|e| e.ok()) {
-                            let child_path = child.path();
-                            let Some(skill_path) = resolve_codex_skill_file(&child_path) else {
-                                continue;
-                            };
-                            let Some(name) = skill_path
-                                .parent()
-                                .and_then(|p| p.file_name())
-                                .and_then(|s| s.to_str())
-                            else {
-                                continue;
-                            };
-                            let name = name.to_string();
-                            if seen.insert(name.clone()) {
-                                let desc = fs::read_to_string(&skill_path)
-                                    .ok()
-                                    .map(|content| extract_skill_description(&content))
-                                    .unwrap_or_else(|| format!("Skill: {}", name));
-                                skills.push((name, desc));
-                            }
-                        }
-                    }
-                }
-            }
+        ProviderKind::Codex | ProviderKind::Gemini | ProviderKind::Qwen => {
+            scan_directory_skills(
+                collect_provider_skill_roots(provider, project_path),
+                &mut seen,
+                &mut skills,
+            );
         }
         ProviderKind::Unsupported(_) => {}
     }
@@ -1631,37 +1449,12 @@ fn skill_dir_fingerprint(provider: &ProviderKind) -> (usize, u64) {
     let mut count = 0usize;
     let mut max_mtime = 0u64;
 
-    let dirs: Vec<std::path::PathBuf> = match provider {
-        ProviderKind::Claude => {
-            let mut v = Vec::new();
-            if let Some(home) = dirs::home_dir() {
-                v.push(home.join(".claude").join("commands"));
-            }
-            v
+    let mut dirs = collect_provider_skill_roots(provider, None);
+    if provider_supports_directory_skills(provider) {
+        if let Some(root) = crate::config::runtime_root() {
+            dirs.push(crate::runtime_layout::managed_skills_root(&root));
         }
-        ProviderKind::Codex => {
-            let mut v = Vec::new();
-            if let Some(home) = dirs::home_dir() {
-                v.push(home.join(".codex").join("skills"));
-            }
-            v
-        }
-        ProviderKind::Gemini => {
-            let mut v = Vec::new();
-            if let Some(home) = dirs::home_dir() {
-                v.push(home.join(".gemini").join("skills"));
-            }
-            v
-        }
-        ProviderKind::Qwen => {
-            let mut v = Vec::new();
-            if let Some(home) = dirs::home_dir() {
-                v.push(home.join(".qwen").join("skills"));
-            }
-            v
-        }
-        _ => vec![],
-    };
+    }
 
     fn walk_mtime(dir: &Path, count: &mut usize, max_mtime: &mut u64) {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -1728,12 +1521,8 @@ fn skill_dir_fingerprint_with_projects(
     }
 
     for path in project_paths {
-        let proj_dir = match provider {
-            ProviderKind::Claude => Path::new(path).join(".claude").join("commands"),
-            ProviderKind::Codex => Path::new(path).join(".codex").join("skills"),
-            ProviderKind::Gemini => Path::new(path).join(".gemini").join("skills"),
-            ProviderKind::Qwen => Path::new(path).join(".qwen").join("skills"),
-            _ => continue,
+        let Some(proj_dir) = provider_project_skill_dir(provider, path) else {
+            continue;
         };
         if proj_dir.is_dir() {
             walk_mtime(&proj_dir, &mut count, &mut max_mtime);
@@ -1741,6 +1530,110 @@ fn skill_dir_fingerprint_with_projects(
     }
 
     (count, max_mtime)
+}
+
+fn provider_supports_directory_skills(provider: &ProviderKind) -> bool {
+    matches!(
+        provider,
+        ProviderKind::Claude | ProviderKind::Codex | ProviderKind::Gemini | ProviderKind::Qwen
+    )
+}
+
+fn provider_home_skill_dir(provider: &ProviderKind, home: &Path) -> Option<std::path::PathBuf> {
+    match provider {
+        ProviderKind::Claude => Some(home.join(".claude").join("commands")),
+        ProviderKind::Codex => Some(home.join(".codex").join("skills")),
+        ProviderKind::Gemini => Some(home.join(".gemini").join("skills")),
+        ProviderKind::Qwen => Some(home.join(".qwen").join("skills")),
+        ProviderKind::Unsupported(_) => None,
+    }
+}
+
+fn provider_project_skill_dir(
+    provider: &ProviderKind,
+    project_path: &str,
+) -> Option<std::path::PathBuf> {
+    let project_root = Path::new(project_path);
+    match provider {
+        ProviderKind::Claude => Some(project_root.join(".claude").join("commands")),
+        ProviderKind::Codex => Some(project_root.join(".codex").join("skills")),
+        ProviderKind::Gemini => Some(project_root.join(".gemini").join("skills")),
+        ProviderKind::Qwen => Some(project_root.join(".qwen").join("skills")),
+        ProviderKind::Unsupported(_) => None,
+    }
+}
+
+fn collect_provider_skill_roots(
+    provider: &ProviderKind,
+    project_path: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        if let Some(path) = provider_home_skill_dir(provider, &home) {
+            roots.push(path);
+        }
+    }
+    if let Some(project_path) = project_path {
+        if let Some(path) = provider_project_skill_dir(provider, project_path) {
+            roots.push(path);
+        }
+    }
+    roots
+}
+
+fn scan_directory_skills(
+    roots: Vec<std::path::PathBuf>,
+    seen: &mut std::collections::HashSet<String>,
+    skills: &mut Vec<(String, String)>,
+) {
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            collect_directory_skill(&path, seen, skills);
+
+            if !path.is_dir() {
+                continue;
+            }
+            let Ok(nested) = fs::read_dir(&path) else {
+                continue;
+            };
+            for child in nested.filter_map(|e| e.ok()) {
+                collect_directory_skill(&child.path(), seen, skills);
+            }
+        }
+    }
+}
+
+fn collect_directory_skill(
+    path: &Path,
+    seen: &mut std::collections::HashSet<String>,
+    skills: &mut Vec<(String, String)>,
+) {
+    let Some(skill_path) = resolve_codex_skill_file(path) else {
+        return;
+    };
+    let Some(name) = skill_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+    else {
+        return;
+    };
+    let name = name.to_string();
+    if !seen.insert(name.clone()) {
+        return;
+    }
+    let desc = fs::read_to_string(&skill_path)
+        .ok()
+        .map(|content| extract_skill_description(&content))
+        .unwrap_or_else(|| format!("Skill: {}", name));
+    skills.push((name, desc));
 }
 
 fn resolve_codex_skill_file(path: &Path) -> Option<std::path::PathBuf> {
@@ -3177,11 +3070,10 @@ pub(super) async fn auto_restore_session(
 
     // Read settings first to get last_sessions/last_remotes info
     // DB cwd takes priority over yaml last_sessions (preserves worktree paths)
-    let (last_path, is_remote, saved_remote, provider) = {
+    let (last_path, saved_remote, provider) = {
         let settings = shared.settings.read().await;
         let channel_key = channel_id.get().to_string();
         let yaml_path = settings.last_sessions.get(&channel_key).cloned();
-        let is_remote = settings.last_remotes.contains_key(&channel_key);
         let saved_remote = settings.last_remotes.get(&channel_key).cloned();
         let provider = settings.provider.clone();
 
@@ -3200,13 +3092,13 @@ pub(super) async fn auto_restore_session(
                         |row| row.get::<_, String>(0),
                     )
                     .ok()
-                    .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir())
+                    .filter(|p| !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref()))
                 })
             })
         });
         let last_path = db_cwd.or(yaml_path);
 
-        (last_path, is_remote, saved_remote, provider)
+        (last_path, saved_remote, provider)
     };
 
     let mut data = shared.core.lock().await;
@@ -3224,7 +3116,7 @@ pub(super) async fn auto_restore_session(
     }
 
     if let Some(last_path) = last_path {
-        if is_remote || Path::new(&last_path).is_dir() {
+        if session_path_is_usable(&last_path, saved_remote.as_deref()) {
             // Session ID is restored from DB (sessions.claude_session_id column)
             // which is already loaded into DiscordSession.session_id at startup.
             let session = data
@@ -3539,8 +3431,9 @@ fn enrich_role_map_with_channel_ids() {
 mod tests {
     use super::ChannelId;
     use super::{
-        DiscordBotSettings, choose_restore_channel_name, is_synthetic_thread_channel_name,
-        synthetic_thread_channel_name, user_is_authorized,
+        DiscordBotSettings, allows_nonlocal_session_path, choose_restore_channel_name,
+        is_synthetic_thread_channel_name, session_path_is_usable, synthetic_thread_channel_name,
+        user_is_authorized,
     };
     use crate::services::discord::settings::{
         BotChannelRoutingGuardFailure, validate_bot_channel_routing,
@@ -3631,5 +3524,17 @@ mod tests {
         );
 
         assert_eq!(result, Err(BotChannelRoutingGuardFailure::AgentMismatch));
+    }
+
+    #[test]
+    fn allows_nonlocal_session_path_requires_remote_profile_name() {
+        assert!(allows_nonlocal_session_path(Some("mac-mini")));
+        assert!(!allows_nonlocal_session_path(Some("")));
+        assert!(!allows_nonlocal_session_path(None));
+    }
+
+    #[test]
+    fn session_path_is_usable_for_remote_nonlocal_path() {
+        assert!(session_path_is_usable("~/repo", Some("mac-mini")));
     }
 }

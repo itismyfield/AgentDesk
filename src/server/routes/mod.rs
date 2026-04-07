@@ -129,8 +129,14 @@ pub fn api_router(
             "/agents/{id}/dispatched-sessions",
             get(agents::agent_dispatched_sessions),
         )
+        .route("/agents/{id}/turn", get(agents::agent_turn))
+        .route("/agents/{id}/turn/stop", post(agents::stop_agent_turn))
         .route("/agents/{id}/timeline", get(agents::agent_timeline))
         .route("/sessions", get(agents_crud::list_sessions))
+        .route(
+            "/sessions/search",
+            get(dispatched_sessions::search_session_transcripts),
+        )
         .route("/policies", get(agents_crud::list_policies))
         // Auth
         .route("/auth/session", get(auth::get_session))
@@ -151,6 +157,10 @@ pub fn api_router(
         .route("/kanban-cards/{id}/assign", post(kanban::assign_card))
         .route("/kanban-cards/{id}/rereview", post(kanban::rereview_card))
         .route("/re-review", post(kanban::batch_rereview))
+        .route(
+            "/kanban-cards/batch-transition",
+            post(kanban::batch_transition),
+        )
         .route("/kanban-cards/{id}/reopen", post(kanban::reopen_card))
         .route(
             "/kanban-cards/{id}/force-transition",
@@ -265,6 +275,7 @@ pub fn api_router(
             "/offices",
             get(offices::list_offices).post(offices::create_office),
         )
+        .route("/offices/reorder", patch(offices::reorder_offices))
         .route(
             "/offices/{id}",
             patch(offices::update_office).delete(offices::delete_office),
@@ -341,6 +352,10 @@ pub fn api_router(
         )
         .route(
             "/sessions/force-kill",
+            post(dispatched_sessions::force_kill_session_legacy),
+        )
+        .route(
+            "/sessions/{session_key}/force-kill",
             post(dispatched_sessions::force_kill_session),
         )
         // Session termination events (#212)

@@ -61,6 +61,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN created_at INTEGER;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT;");
+    ensure_session_transcripts_schema(conn)?;
 
     // Office/department extended columns
     let _ = conn.execute_batch("ALTER TABLE offices ADD COLUMN name_ko TEXT;");
@@ -663,6 +664,124 @@ fn ensure_pipeline_stage(
     Ok(())
 }
 
+fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_transcripts (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            turn_id           TEXT NOT NULL UNIQUE,
+            session_key       TEXT,
+            channel_id        TEXT,
+            agent_id          TEXT,
+            provider          TEXT,
+            dispatch_id       TEXT,
+            user_message      TEXT NOT NULL DEFAULT '',
+            assistant_message TEXT NOT NULL DEFAULT '',
+            created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_transcripts_session_key
+            ON session_transcripts (session_key);
+        CREATE INDEX IF NOT EXISTS idx_session_transcripts_agent_id
+            ON session_transcripts (agent_id);
+        CREATE INDEX IF NOT EXISTS idx_session_transcripts_created_at
+            ON session_transcripts (created_at DESC);
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_transcripts_fts USING fts5(
+            session_transcript_id UNINDEXED,
+            content,
+            tokenize = 'unicode61'
+        );",
+    )?;
+    migrate_legacy_session_transcripts_agent_fk(conn)?;
+    Ok(())
+}
+
+fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> {
+    let table_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'session_transcripts'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let needs_rebuild = table_sql
+        .as_deref()
+        .map(|sql| sql.contains("REFERENCES agents"))
+        .unwrap_or(false);
+    if !needs_rebuild {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS session_transcripts_fts;
+         ALTER TABLE session_transcripts RENAME TO session_transcripts_legacy;
+         CREATE TABLE session_transcripts (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            turn_id           TEXT NOT NULL UNIQUE,
+            session_key       TEXT,
+            channel_id        TEXT,
+            agent_id          TEXT,
+            provider          TEXT,
+            dispatch_id       TEXT,
+            user_message      TEXT NOT NULL DEFAULT '',
+            assistant_message TEXT NOT NULL DEFAULT '',
+            created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+         );
+         INSERT INTO session_transcripts (
+            id,
+            turn_id,
+            session_key,
+            channel_id,
+            agent_id,
+            provider,
+            dispatch_id,
+            user_message,
+            assistant_message,
+            created_at
+         )
+         SELECT
+            id,
+            turn_id,
+            session_key,
+            channel_id,
+            agent_id,
+            provider,
+            dispatch_id,
+            user_message,
+            assistant_message,
+            created_at
+         FROM session_transcripts_legacy;
+         DROP TABLE session_transcripts_legacy;
+         CREATE INDEX IF NOT EXISTS idx_session_transcripts_session_key
+            ON session_transcripts (session_key);
+         CREATE INDEX IF NOT EXISTS idx_session_transcripts_agent_id
+            ON session_transcripts (agent_id);
+         CREATE INDEX IF NOT EXISTS idx_session_transcripts_created_at
+            ON session_transcripts (created_at DESC);
+         CREATE VIRTUAL TABLE session_transcripts_fts USING fts5(
+            session_transcript_id UNINDEXED,
+            content,
+            tokenize = 'unicode61'
+         );
+         INSERT INTO session_transcripts_fts (session_transcript_id, content)
+         SELECT
+            id,
+            CASE
+                WHEN TRIM(user_message) <> '' AND TRIM(assistant_message) <> ''
+                    THEN 'user:' || char(10) || user_message || char(10) || char(10)
+                        || 'assistant:' || char(10) || assistant_message
+                WHEN TRIM(user_message) <> ''
+                    THEN 'user:' || char(10) || user_message
+                WHEN TRIM(assistant_message) <> ''
+                    THEN 'assistant:' || char(10) || assistant_message
+                ELSE ''
+            END
+         FROM session_transcripts;",
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,5 +896,90 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn migrate_rebuilds_session_transcripts_without_agent_fk() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name) VALUES ('legacy-agent', 'Legacy Agent')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_transcripts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_id           TEXT NOT NULL UNIQUE,
+                session_key       TEXT,
+                channel_id        TEXT,
+                agent_id          TEXT REFERENCES agents(id),
+                provider          TEXT,
+                dispatch_id       TEXT,
+                user_message      TEXT NOT NULL DEFAULT '',
+                assistant_message TEXT NOT NULL DEFAULT '',
+                created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO session_transcripts (
+                turn_id,
+                session_key,
+                channel_id,
+                agent_id,
+                provider,
+                dispatch_id,
+                user_message,
+                assistant_message
+            ) VALUES (
+                'discord:legacy:1',
+                'host:legacy',
+                'legacy-channel',
+                'legacy-agent',
+                'codex',
+                'dispatch-legacy',
+                'legacy question',
+                'legacy answer'
+            );",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let table_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_transcripts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!table_sql.contains("REFERENCES agents"));
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_transcripts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_transcripts_fts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(fts_count, 1);
     }
 }

@@ -4,6 +4,33 @@ use super::settings::{
 };
 use super::*;
 
+const CONTEXT_COMPRESSION_SECTION_ORDER: &str = "`Goal`, `Progress`, `Decisions`, `Files`, `Next`";
+const STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE: &str =
+    "[이전 결과 — 3줄 요약: cargo test failed in src/foo.rs because ...]";
+
+fn context_compression_guidance() -> String {
+    format!(
+        "[Context Compression]\n\
+         When conversation compaction happens (`/compact`, automatic compaction, or equivalent summarization), \
+         rewrite prior context using these sections in order: {CONTEXT_COMPRESSION_SECTION_ORDER}.\n\
+         - Keep each section short, factual, and focused on the latest state.\n\
+         - Preserve unresolved blockers, assumptions, failures, and the latest user intent.\n\
+         - In `Files`, list only files that still matter and why they matter.\n\
+         - Replace stale tool chatter, raw logs, and old command output with placeholders like {STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE}.\n\
+         - Prefer outcomes and follow-up implications over verbatim output, and drop already-resolved repetition once summarized."
+    )
+}
+
+pub(crate) fn build_followup_turn_system_reminder() -> String {
+    format!(
+        "<system-reminder>\n\
+         Discord formatting: minimize code blocks, keep messages concise.\n\
+         If the session was compacted, treat the compacted summary as authoritative.\n\
+         Keep prior context organized as {CONTEXT_COMPRESSION_SECTION_ORDER}.\n\
+         Replace stale tool chatter, raw logs, and old command output with placeholders like {STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE} instead of replaying them verbatim.\n\
+         </system-reminder>"
+    )
+}
 /// Dispatch prompt profile — controls which system prompt sections are injected.
 /// `Full` includes everything (used for implementation dispatches and normal turns).
 /// `ReviewLite` strips peer agents, long-term memory, and skills to reduce token cost.
@@ -75,6 +102,10 @@ pub(super) fn build_system_prompt(
             skills_notice
         }
     );
+    if profile == DispatchProfile::Full {
+        system_prompt_owned.push_str("\n\n");
+        system_prompt_owned.push_str(&context_compression_guidance());
+    }
 
     if let Some(binding) = role_binding {
         // ReviewLite: inject minimal review rules instead of full shared prompt.
@@ -272,6 +303,25 @@ mod tests {
     }
 
     #[test]
+    fn test_build_system_prompt_includes_context_compression_guidance() {
+        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        assert!(output.contains("[Context Compression]"));
+        assert!(output.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
+        assert!(output.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
+    }
+
+    #[test]
+    fn test_followup_turn_reminder_reinjects_compaction_rules() {
+        let reminder = build_followup_turn_system_reminder();
+
+        assert!(reminder.contains("<system-reminder>"));
+        assert!(reminder.contains("Discord formatting: minimize code blocks"));
+        assert!(reminder.contains("treat the compacted summary as authoritative"));
+        assert!(reminder.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
+        assert!(reminder.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
+    }
+
+    #[test]
     fn test_dispatch_profile_from_dispatch_type() {
         assert_eq!(
             DispatchProfile::from_dispatch_type(None),
@@ -297,13 +347,18 @@ mod tests {
 
     #[test]
     fn test_review_lite_omits_skills() {
+        let skills_notice = "\n\nAvailable skills:\n\
+            The entries below are descriptions only, not the full skill body.\n\
+            If a skill is relevant or explicitly requested, load that skill's `SKILL.md` before acting.\n\
+            Read files under `references/` only when the `SKILL.md` points to them or you need extra detail.\n\
+              - /commit: Commit changes";
         let with_skills = build_system_prompt(
             "ctx",
             "/tmp",
             ChannelId::new(1),
             "tok",
             "",
-            "\n\nAvailable skills:\n  - /commit: Commit changes",
+            skills_notice,
             None,
             false,
             DispatchProfile::Full,
@@ -317,7 +372,7 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            "\n\nAvailable skills:\n  - /commit: Commit changes",
+            skills_notice,
             None,
             false,
             DispatchProfile::ReviewLite,
@@ -326,9 +381,33 @@ mod tests {
             None,
         );
         assert!(with_skills.contains("Available skills"));
+        assert!(with_skills.contains("descriptions only"));
+        assert!(with_skills.contains("`SKILL.md`"));
         assert!(!without_skills.contains("Available skills"));
+        assert!(!without_skills.contains("[Context Compression]"));
         // ReviewLite prompt should be shorter
         assert!(without_skills.len() < with_skills.len());
+    }
+
+    #[test]
+    fn test_review_lite_omits_context_compression_guidance() {
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            None,
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review"),
+            None,
+        );
+
+        assert!(!prompt.contains("[Context Compression]"));
+        assert!(!prompt.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
+        assert!(!prompt.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
     }
 
     #[test]

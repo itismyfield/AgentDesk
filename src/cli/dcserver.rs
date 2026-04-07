@@ -1015,6 +1015,27 @@ pub fn handle_dcserver(token: Option<String>) {
     // Also kill any stale processes (e.g. orphaned without lock)
     kill_existing_dcserver_processes();
 
+    if let Some(root) = agentdesk_runtime_root() {
+        match crate::runtime_layout::ensure_runtime_layout(&root) {
+            Ok(report) => {
+                if report.migrated {
+                    if let Some(backup) = report.backup_path {
+                        println!(
+                            "  ▸ Config migration : v2 complete (backup: {})",
+                            backup.display()
+                        );
+                    } else {
+                        println!("  ▸ Config migration : v2 complete");
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("  ✖ Failed to prepare runtime layout: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Write PID/version files
     if let Some(root) = agentdesk_runtime_root() {
         let runtime_dir = root.join("runtime");

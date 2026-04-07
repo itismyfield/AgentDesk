@@ -542,15 +542,13 @@ fn base_apply_writes_agentdesk_prompt_memory_workspace_and_audit() {
 
     apply::apply_import_plan(&plan, &source, &args, runtime.path()).unwrap();
 
-    let agentdesk_yaml = fs::read_to_string(runtime.path().join("agentdesk.yaml")).unwrap();
+    let agentdesk_yaml =
+        fs::read_to_string(crate::runtime_layout::config_file_path(runtime.path())).unwrap();
     assert!(agentdesk_yaml.contains("id: alpha"));
     assert!(agentdesk_yaml.contains("provider: codex"));
 
     let prompt = fs::read_to_string(
-        runtime
-            .path()
-            .join("prompts")
-            .join("agents")
+        crate::runtime_layout::managed_agents_root(runtime.path())
             .join("alpha")
             .join("IDENTITY.md"),
     )
@@ -561,10 +559,8 @@ fn base_apply_writes_agentdesk_prompt_memory_workspace_and_audit() {
     assert!(prompt.contains("AgentDesk Runtime References"));
     assert!(
         prompt.contains(
-            &runtime
-                .path()
-                .join("role-context")
-                .join("alpha.memory")
+            &crate::runtime_layout::long_term_memory_root(runtime.path())
+                .join("alpha")
                 .display()
                 .to_string()
         )
@@ -583,20 +579,16 @@ fn base_apply_writes_agentdesk_prompt_memory_workspace_and_audit() {
     assert!(prompt.contains(&workspace.display().to_string()));
 
     let memory_md = fs::read_to_string(
-        runtime
-            .path()
-            .join("role-context")
-            .join("alpha.memory")
+        crate::runtime_layout::long_term_memory_root(runtime.path())
+            .join("alpha")
             .join("MEMORY.md"),
     )
     .unwrap();
     assert!(memory_md.contains("# Memory"));
 
     let daily_md = fs::read_to_string(
-        runtime
-            .path()
-            .join("role-context")
-            .join("alpha.memory")
+        crate::runtime_layout::long_term_memory_root(runtime.path())
+            .join("alpha")
             .join("daily-2026-04-02.md"),
     )
     .unwrap();
@@ -1617,7 +1609,8 @@ fn unsupported_agents_stay_audit_visible_but_are_skipped_on_apply() {
 
     apply::apply_import_plan(&plan, &source, &args, runtime.path()).unwrap();
 
-    let agentdesk_yaml = fs::read_to_string(runtime.path().join("agentdesk.yaml")).unwrap();
+    let agentdesk_yaml =
+        fs::read_to_string(crate::runtime_layout::config_file_path(runtime.path())).unwrap();
     assert!(agentdesk_yaml.contains("id: alpha"));
     assert!(!agentdesk_yaml.contains("id: beta"));
 
