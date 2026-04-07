@@ -1606,7 +1606,7 @@ fn has_prior_qwen_chat_cache(working_dir: &str) -> bool {
 }
 
 fn qwen_chat_cache_dir_for_working_dir(working_dir: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+    let home = qwen_home_dir()?;
     Some(
         home.join(".qwen")
             .join("projects")
@@ -1628,12 +1628,29 @@ fn normalize_qwen_working_dir(working_dir: &str) -> PathBuf {
     std::fs::canonicalize(&expanded).unwrap_or(expanded)
 }
 
+fn qwen_home_dir() -> Option<PathBuf> {
+    std::env::var_os("QWEN_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(dirs::home_dir)
+}
+
 fn expand_home_dir(path: &str) -> PathBuf {
     if path == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(path));
+        return qwen_home_dir().unwrap_or_else(|| PathBuf::from(path));
     }
     if let Some(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = qwen_home_dir() {
             return home.join(stripped);
         }
     }
