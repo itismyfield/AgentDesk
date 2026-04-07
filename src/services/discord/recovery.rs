@@ -1,8 +1,5 @@
 use super::handoff::{HandoffRecord, save_handoff};
-use super::settings::{
-    resolve_role_binding, validate_bot_channel_routing,
-    validate_bot_channel_routing_with_provider_channel,
-};
+use super::settings::{resolve_role_binding, validate_bot_channel_routing_with_provider_channel};
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 #[cfg(unix)]

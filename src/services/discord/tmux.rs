@@ -13,7 +13,7 @@ use crate::services::tmux_diagnostics::{
 
 use super::formatting::{format_tool_input, normalize_empty_lines, send_long_message_raw};
 use super::settings::{
-    channel_supports_provider, resolve_role_binding, validate_bot_channel_routing,
+    channel_supports_provider, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
 use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};

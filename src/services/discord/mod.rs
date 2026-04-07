@@ -1169,7 +1169,7 @@ async fn execute_handoff_turns(
             if let Some((pid, pname)) = resolve_thread_parent(http, channel_id).await {
                 (pid, pname.or(record.channel_name.clone()))
             } else {
-                (channel_id, record.channel_name.clone())
+                record.channel_name.clone()
             };
         if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
             &settings_snapshot,

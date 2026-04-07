@@ -1057,6 +1057,7 @@ mod tests {
         load_discord_bot_launch_configs, load_narrate_progress, load_peer_agents,
         render_peer_agent_guidance, resolve_memory_settings, resolve_role_binding,
         save_bot_settings, validate_bot_channel_routing,
+        validate_bot_channel_routing_with_provider_channel,
     };
 
     fn with_temp_home<F>(f: F)
@@ -1792,6 +1793,60 @@ mod tests {
             result,
             Err(BotChannelRoutingGuardFailure::ChannelNotAllowed)
         );
+    }
+
+    #[test]
+    fn test_validate_bot_channel_routing_with_provider_channel_keeps_thread_binding() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: "Test Org"
+agents:
+  openclaw-maker:
+    display_name: "Maker"
+    provider: codex
+channels:
+  by_id:
+    '1470034105176424533':
+      agent: openclaw-maker
+      provider: codex
+"#,
+            )
+            .unwrap();
+
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings.provider = ProviderKind::Codex;
+            settings.agent = Some("openclaw-maker".to_string());
+            settings.allowed_channel_ids = vec![1470034105176424533];
+
+            let result = validate_bot_channel_routing_with_provider_channel(
+                &settings,
+                &ProviderKind::Codex,
+                ChannelId::new(1470034105176424533),
+                Some("openclaw-maker-thread"),
+                Some("agent-sandbox-lab"),
+                false,
+            );
+
+            assert_eq!(result, Ok(()));
+
+            let parent_result = validate_bot_channel_routing(
+                &settings,
+                &ProviderKind::Codex,
+                ChannelId::new(1470643507201839189),
+                Some("agent-sandbox-lab"),
+                false,
+            );
+
+            assert_eq!(
+                parent_result,
+                Err(BotChannelRoutingGuardFailure::ChannelNotAllowed)
+            );
+        });
     }
 
     #[test]
