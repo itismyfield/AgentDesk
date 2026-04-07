@@ -486,25 +486,6 @@ pub async fn hook_session(
     // #107: Normalize empty claude_session_id to None (SQL NULL) so stale empty
     // strings are never persisted — prevents invalid --resume attempts after restart.
     let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
-    let idle_auto_complete_dispatch = if status == "idle" {
-        body.dispatch_id.as_ref().and_then(|did| {
-            conn.query_row(
-                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
-                [did],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .ok()
-            .and_then(|(dtype, dstatus)| {
-                // Only review dispatches are auto-completed on idle.
-                // implementation/rework require explicit completion via
-                // PATCH /api/dispatches/:id (turn_bridge calls this at turn end).
-                (dtype == "review" && dstatus == "pending").then_some(did.clone())
-            })
-        })
-    } else {
-        None
-    };
-
     // Check if session exists before upsert to determine new vs update for WS event
     let is_new_session: bool = conn
         .query_row(
@@ -553,33 +534,7 @@ pub async fn hook_session(
             let dispatch_id = body.dispatch_id.clone();
             drop(conn);
 
-            if let Some(ref did) = idle_auto_complete_dispatch {
-                if let Err(e) = crate::dispatch::finalize_dispatch(
-                    &state.db,
-                    &state.engine,
-                    did,
-                    "session_idle",
-                    Some(&json!({ "auto_completed": true })),
-                ) {
-                    tracing::warn!(
-                        "[session] Failed to auto-complete dispatch {} on idle: {}",
-                        did,
-                        e
-                    );
-                } else {
-                    tracing::info!(
-                        "[session] Auto-completed dispatch {} on idle session update",
-                        did
-                    );
-                    // Send any follow-up dispatch (e.g. review dispatch) that was
-                    // created by hooks during complete_dispatch to Discord.
-                    super::dispatches::queue_dispatch_followup(&state.db, did);
-                }
-            }
-
             // Capture card status BEFORE hook fires.
-            // If idle auto-completion created a new review dispatch, `latest_dispatch_id`
-            // has already moved forward and this intentionally becomes `None`.
             let pre_hook_card: Option<(String, String)> = dispatch_id.as_ref().and_then(|did| {
                 let conn = state.db.lock().ok()?;
                 conn.query_row(
@@ -649,9 +604,9 @@ pub async fn hook_session(
             }
 
             // NOTE: The additional idle-specific re-fire of OnDispatchCompleted was removed.
-            // complete_dispatch() already fires OnDispatchCompleted + handle_completed_dispatch_followups
-            // is spawned from the auto-complete path above (line ~252). Re-firing here caused
-            // double hook execution → duplicate review-decision dispatches.
+            // Dispatch finalization already fires OnDispatchCompleted elsewhere in the
+            // pipeline. Re-firing here caused duplicate hook execution and duplicate
+            // review-decision dispatches.
 
             // #179: When session transitions to idle, trigger auto-queue to dispatch next entry.
             // This closes the chain gap where onCardTerminal hasn't fired yet (card still in review)
@@ -2031,7 +1986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_hook_auto_completes_pending_review_dispatch() {
+    async fn idle_hook_does_not_auto_complete_pending_review_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);
         let state = AppState::test_state(db.clone(), engine);
@@ -2115,13 +2070,9 @@ mod tests {
             )
             .unwrap();
 
-        // review dispatches are auto-completed on idle (989043b)
-        assert_eq!(dispatch_status, "completed");
-        assert!(
-            dispatch_result
-                .unwrap_or_default()
-                .contains("\"completion_source\":\"session_idle\"")
-        );
+        // review dispatches must stay pending until an explicit review-verdict arrives
+        assert_eq!(dispatch_status, "pending");
+        assert!(dispatch_result.is_none());
         assert_eq!(active_dispatch_id, None);
     }
 

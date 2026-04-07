@@ -201,9 +201,9 @@ var reviewAutomation = {
       return;
     }
 
-    // When a review dispatch is auto-completed on session idle without an explicit
-    // verdict, create a review-decision dispatch to the original agent so they
-    // check the review comments and decide the verdict (agent-in-the-loop).
+    // Legacy fallback: if a review dispatch somehow arrives completed without an
+    // explicit verdict, create a review-decision dispatch so the original agent
+    // can inspect the review comments and decide the outcome.
     if (!verdict && result.auto_completed) {
       var cards = agentdesk.db.query(
         "SELECT assigned_agent_id, title, github_issue_number, status FROM kanban_cards WHERE id = ?",
