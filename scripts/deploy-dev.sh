@@ -269,6 +269,7 @@ sudo "$FW" --unblockapp "$ADK_DEV/bin/agentdesk" 2>/dev/null || true
 
 # 3.6. Symlink dashboard dist
 mkdir -p "$ADK_DEV/dashboard"
+rm -rf "$ADK_DEV/dashboard/dist"
 ln -sfn "$REPO/dashboard/dist" "$ADK_DEV/dashboard/dist"
 
 # 3.7. Sync policies used by the dev runtime.
