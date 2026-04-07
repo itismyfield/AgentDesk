@@ -8,11 +8,11 @@ mod tmux_runtime;
 #[cfg(test)]
 mod tests;
 
-use super::handoff::{HandoffRecord, save_handoff};
-use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
+use super::handoff::{save_handoff, HandoffRecord};
+use super::restart_report::{clear_restart_report, save_restart_report, RestartCompletionReport};
 use super::*;
 use crate::services::memory::{
-    CaptureRequest, build_memory_backend, resolve_memory_role_id, resolve_memory_session_id,
+    build_memory_backend, resolve_memory_role_id, resolve_memory_session_id, CaptureRequest,
 };
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
@@ -753,8 +753,6 @@ pub(super) fn spawn_turn_bridge(
             shared_owned
                 .dispatch_thread_parents
                 .retain(|_, thread| *thread != channel_id);
-            // Clean up cross-channel role override for this thread.
-            shared_owned.dispatch_role_overrides.remove(&channel_id);
             let mut remove_queue = false;
             let has_pending = if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
                 let has_pending = super::has_soft_intervention(queue);
@@ -763,6 +761,11 @@ pub(super) fn spawn_turn_bridge(
             } else {
                 false
             };
+            // Keep the override while queued turns remain so review/reused-thread routing
+            // survives restart-preserve and same-runtime dequeue paths.
+            if !has_pending {
+                shared_owned.dispatch_role_overrides.remove(&channel_id);
+            }
             if remove_queue {
                 data.intervention_queue.remove(&channel_id);
             }
@@ -1458,57 +1461,65 @@ pub(super) fn spawn_turn_bridge(
             } else if let (Some(ctx), Some(owner), Some(tok)) =
                 (serenity_ctx.as_ref(), request_owner, token.as_deref())
             {
-                let (next_intervention, has_more_queued_turns) = {
-                    let mut data = shared_owned.core.lock().await;
-                    let mut remove_queue = false;
-                    let next = if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
-                        let next = super::dequeue_next_soft_intervention(queue);
-                        let has_more = super::has_soft_intervention(queue);
-                        remove_queue = queue.is_empty();
-                        (next, has_more)
-                    } else {
-                        (None, false)
-                    };
-                    // Write-through: update disk after dequeue
-                    if next.0.is_some() {
-                        if remove_queue {
-                            super::save_channel_queue(&provider, &shared_owned.token_hash, channel_id, &[]);
-                        } else if let Some(q) = data.intervention_queue.get(&channel_id) {
-                            super::save_channel_queue(&provider, &shared_owned.token_hash, channel_id, q);
-                        }
-                    }
-                    if remove_queue {
-                        data.intervention_queue.remove(&channel_id);
-                    }
-                    next
-                };
-
-                if let Some(intervention) = next_intervention {
+                let settings_snapshot = shared_owned.settings.read().await.clone();
+                if let Err(reason) = super::validate_live_channel_routing(
+                    ctx,
+                    &provider,
+                    &settings_snapshot,
+                    channel_id,
+                )
+                .await
+                {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] 📋 Processing next queued command");
-                    // Remove 📬 (queued) reaction before processing
-                    remove_reaction_raw(&http, channel_id, intervention.message_id, '📬').await;
-                    if let Err(e) = handle_text_message(
-                        ctx,
-                        channel_id,
-                        intervention.message_id,
-                        owner,
-                        &request_owner_name,
-                        &intervention.text,
-                        &shared_owned,
-                        tok,
-                        true,
-                        has_more_queued_turns,
-                        true,
-                        None,
-                    )
-                    .await
-                    {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}]   ⚠ queued command failed: {e}");
+                    println!(
+                        "  [{ts}] ⚠ QUEUE-GUARD: preserving queued command(s) for channel {} (reason={})",
+                        channel_id, reason
+                    );
+                } else {
+                    let next_intervention = {
                         let mut data = shared_owned.core.lock().await;
-                        let queue = data.intervention_queue.entry(channel_id).or_default();
-                        super::requeue_intervention_front(queue, intervention);
+                        super::take_next_soft_intervention_persisted(
+                            &provider,
+                            &shared_owned.token_hash,
+                            channel_id,
+                            &mut data.intervention_queue,
+                            &shared_owned.dispatch_role_overrides,
+                        )
+                    };
+
+                    if let Some((intervention, has_more_queued_turns)) = next_intervention {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!("  [{ts}] 📋 Processing next queued command");
+                        // Remove 📬 (queued) reaction before processing
+                        remove_reaction_raw(&http, channel_id, intervention.message_id, '📬').await;
+                        if let Err(e) = handle_text_message(
+                            ctx,
+                            channel_id,
+                            intervention.message_id,
+                            owner,
+                            &request_owner_name,
+                            &intervention.text,
+                            &shared_owned,
+                            tok,
+                            true,
+                            has_more_queued_turns,
+                            true,
+                            None,
+                        )
+                        .await
+                        {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!("  [{ts}]   ⚠ queued command failed: {e}");
+                            let mut data = shared_owned.core.lock().await;
+                            super::requeue_intervention_front_persisted(
+                                &provider,
+                                &shared_owned.token_hash,
+                                channel_id,
+                                &mut data.intervention_queue,
+                                &shared_owned.dispatch_role_overrides,
+                                intervention,
+                            );
+                        }
                     }
                 }
             } else {

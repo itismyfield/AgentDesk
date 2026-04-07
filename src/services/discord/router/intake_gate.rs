@@ -190,26 +190,14 @@ pub(in crate::services::discord) async fn handle_event(
             let user_id = new_message.author.id;
             let user_name = &new_message.author.name;
             let channel_id = new_message.channel_id;
-            let is_dm = new_message.guild_id.is_none();
-            let (channel_name, _) = resolve_channel_category(ctx, channel_id).await;
-            // For threads, inherit role binding from the parent channel
-            let (effective_channel_id, effective_channel_name) =
-                if let Some((parent_id, parent_name)) =
-                    resolve_thread_parent(&ctx.http, channel_id).await
-                {
-                    (parent_id, parent_name.or_else(|| channel_name.clone()))
-                } else {
-                    (channel_id, channel_name.clone())
-                };
+            let effective_channel_id = resolve_thread_parent(&ctx.http, channel_id)
+                .await
+                .map(|(parent_id, _)| parent_id)
+                .unwrap_or(channel_id);
             let settings_snapshot = { data.shared.settings.read().await.clone() };
-            if validate_bot_channel_routing(
-                &settings_snapshot,
-                &data.provider,
-                effective_channel_id,
-                effective_channel_name.as_deref(),
-                is_dm,
-            )
-            .is_err()
+            if validate_live_channel_routing(ctx, &data.provider, &settings_snapshot, channel_id)
+                .await
+                .is_err()
             {
                 return Ok(());
             }
@@ -373,7 +361,16 @@ pub(in crate::services::discord) async fn handle_event(
                             },
                         );
                         if let Some(q) = d.intervention_queue.get(&channel_id) {
-                            save_channel_queue(&data.provider, &data.shared.token_hash, channel_id, q);
+                            save_channel_queue(
+                                &data.provider,
+                                &data.shared.token_hash,
+                                channel_id,
+                                q,
+                                data.shared
+                                    .dispatch_role_overrides
+                                    .get(&channel_id)
+                                    .map(|r| r.value().get()),
+                            );
                         }
                         drop(d);
                         add_reaction(ctx, channel_id, new_message.id, '📬').await;
@@ -411,7 +408,16 @@ pub(in crate::services::discord) async fn handle_event(
                     };
                     if inserted {
                         if let Some(q) = d.intervention_queue.get(&channel_id) {
-                            save_channel_queue(&data.provider, &data.shared.token_hash, channel_id, q);
+                            save_channel_queue(
+                                &data.provider,
+                                &data.shared.token_hash,
+                                channel_id,
+                                q,
+                                data.shared
+                                    .dispatch_role_overrides
+                                    .get(&channel_id)
+                                    .map(|r| r.value().get()),
+                            );
                         }
                     }
                     drop(d);
@@ -453,7 +459,16 @@ pub(in crate::services::discord) async fn handle_event(
                     // so it survives SIGKILL, OOM kill, or crash.
                     if inserted {
                         if let Some(q) = d.intervention_queue.get(&channel_id) {
-                            save_channel_queue(&data.provider, &data.shared.token_hash, channel_id, q);
+                            save_channel_queue(
+                                &data.provider,
+                                &data.shared.token_hash,
+                                channel_id,
+                                q,
+                                data.shared
+                                    .dispatch_role_overrides
+                                    .get(&channel_id)
+                                    .map(|r| r.value().get()),
+                            );
                         }
                     }
 
@@ -512,7 +527,16 @@ pub(in crate::services::discord) async fn handle_event(
                 );
                 // Write-through: persist queue to disk (matches drain-mode contract)
                 if let Some(q) = d.intervention_queue.get(&channel_id) {
-                    save_channel_queue(&data.provider, &data.shared.token_hash, channel_id, q);
+                    save_channel_queue(
+                        &data.provider,
+                        &data.shared.token_hash,
+                        channel_id,
+                        q,
+                        data.shared
+                            .dispatch_role_overrides
+                            .get(&channel_id)
+                            .map(|r| r.value().get()),
+                    );
                 }
                 drop(d);
                 // Checkpoint: track last processed message
@@ -550,7 +574,16 @@ pub(in crate::services::discord) async fn handle_event(
 
                 // Write-through: persist this channel's queue to disk immediately
                 if let Some(q) = d.intervention_queue.get(&channel_id) {
-                    save_channel_queue(&data.provider, &data.shared.token_hash, channel_id, q);
+                    save_channel_queue(
+                        &data.provider,
+                        &data.shared.token_hash,
+                        channel_id,
+                        q,
+                        data.shared
+                            .dispatch_role_overrides
+                            .get(&channel_id)
+                            .map(|r| r.value().get()),
+                    );
                 }
                 drop(d);
 
