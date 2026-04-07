@@ -13,7 +13,8 @@ use crate::services::tmux_diagnostics::{
 
 use super::formatting::{format_tool_input, normalize_empty_lines, send_long_message_raw};
 use super::settings::{
-    channel_supports_provider, resolve_role_binding, validate_bot_channel_routing,
+    channel_supports_provider, resolve_role_binding,
+    validate_bot_channel_routing_with_provider_channel,
 };
 use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};
 
@@ -1583,17 +1584,18 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         );
         // Resolve thread parent so validation uses the same semantics
         // as normal message routing (router.rs).
-        let (eff_id, eff_name) =
-            if let Some((pid, pname)) = super::resolve_thread_parent(http, *channel_id).await {
-                (pid, pname.unwrap_or_else(|| channel_name.clone()))
+        let provider_channel_name =
+            if let Some((_pid, pname)) = super::resolve_thread_parent(http, *channel_id).await {
+                pname.unwrap_or_else(|| channel_name.clone())
             } else {
-                (*channel_id, channel_name.clone())
+                channel_name.clone()
             };
-        if let Err(reason) = validate_bot_channel_routing(
+        if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
             &settings_snapshot,
             &provider,
-            eff_id,
-            Some(&eff_name),
+            *channel_id,
+            Some(&channel_name),
+            Some(&provider_channel_name),
             is_dm,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");

@@ -122,7 +122,15 @@ pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
 }
 
 pub(super) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let unique = uuid::Uuid::new_v4().simple();
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let tmp = path.with_file_name(format!(".{}.{}.tmp", file_name, unique));
     let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
     file.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
@@ -262,5 +270,55 @@ mod tests {
         );
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    #[test]
+    fn test_atomic_write_creates_parent_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested").join("dir").join("file.txt");
+        // Parent directories do not exist yet — atomic_write must create them.
+        atomic_write(&path, "hello").expect("should succeed");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
+        // No stale .tmp file should remain.
+        let entries: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "only the final file should exist");
+    }
+
+    #[test]
+    fn test_atomic_write_concurrent_no_race() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = Arc::new(tmp.path().join("shared.txt"));
+        let mut handles = vec![];
+        for i in 0..8 {
+            let p = Arc::clone(&path);
+            handles.push(thread::spawn(move || {
+                atomic_write(&p, &i.to_string()).expect("concurrent write should succeed");
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Final content must be a valid single digit written by one of the threads.
+        let content = fs::read_to_string(&*path).unwrap();
+        let val: u8 = content.trim().parse().expect("should be a digit");
+        assert!(val < 8);
+        // No .tmp files should remain.
+        let leftovers: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.ends_with(".tmp"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "no .tmp files should remain");
     }
 }

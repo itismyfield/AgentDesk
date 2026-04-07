@@ -1,5 +1,5 @@
 use super::handoff::{HandoffRecord, save_handoff};
-use super::settings::{resolve_role_binding, validate_bot_channel_routing};
+use super::settings::{resolve_role_binding, validate_bot_channel_routing_with_provider_channel};
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 use crate::services::tmux_common::tmux_exact_target;
@@ -485,18 +485,19 @@ pub(super) async fn restore_inflight_turns(
                 });
                 // Resolve thread parent so validation uses the same semantics
                 // as normal message routing (router.rs).
-                let (eff_id, eff_name) = if let Some((pid, pname)) =
+                let provider_channel_name = if let Some((_pid, pname)) =
                     super::resolve_thread_parent(http, channel_id).await
                 {
-                    (pid, pname.or(effective_channel_name.clone()))
+                    pname.or(effective_channel_name.clone())
                 } else {
-                    (channel_id, effective_channel_name.clone())
+                    effective_channel_name.clone()
                 };
-                if let Err(reason) = validate_bot_channel_routing(
+                if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
                     &settings_snapshot,
                     provider,
-                    eff_id,
-                    eff_name.as_deref(),
+                    channel_id,
+                    effective_channel_name.as_deref(),
+                    provider_channel_name.as_deref(),
                     is_dm,
                 ) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -644,17 +645,18 @@ pub(super) async fn restore_inflight_turns(
         });
         // Resolve thread parent so validation uses the same semantics
         // as normal message routing (router.rs).
-        let (eff_id, eff_name) =
-            if let Some((pid, pname)) = super::resolve_thread_parent(http, channel_id).await {
-                (pid, pname.or(channel_name.clone()))
+        let provider_channel_name =
+            if let Some((_pid, pname)) = super::resolve_thread_parent(http, channel_id).await {
+                pname.or(channel_name.clone())
             } else {
-                (channel_id, channel_name.clone())
+                channel_name.clone()
             };
-        if let Err(reason) = validate_bot_channel_routing(
+        if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
             &settings_snapshot,
             provider,
-            eff_id,
-            eff_name.as_deref(),
+            channel_id,
+            channel_name.as_deref(),
+            provider_channel_name.as_deref(),
             is_dm,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
