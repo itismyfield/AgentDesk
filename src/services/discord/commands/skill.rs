@@ -4,8 +4,8 @@ use serenity::CreateMessage;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::router::handle_text_message;
 use super::super::turn_bridge::cancel_active_token;
-use super::super::{auto_restore_session, check_auth, Context, Error};
-use crate::services::provider::{cancel_requested, ProviderKind};
+use super::super::{Context, Error, auto_restore_session, check_auth};
+use crate::services::provider::{ProviderKind, cancel_requested};
 
 // Keep provider-specific skill wording in one helper so /cc and !cc stay aligned.
 

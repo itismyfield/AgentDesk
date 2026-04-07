@@ -1,4 +1,4 @@
-use super::handoff::{save_handoff, HandoffRecord};
+use super::handoff::{HandoffRecord, save_handoff};
 use super::settings::{resolve_role_binding, validate_bot_channel_routing};
 use super::turn_bridge::stale_inflight_message;
 use super::*;
@@ -1536,9 +1536,11 @@ mod tests {
         assert!(handoffs[0].intent.contains("중단된 응답"));
         assert!(handoffs[0].context.contains("원래 사용자 요청"));
         assert!(handoffs[0].context.contains("partial 응답"));
-        assert!(handoffs[0]
-            .context
-            .contains("이어서 원인과 대응을 설명하겠습니다"));
+        assert!(
+            handoffs[0]
+                .context
+                .contains("이어서 원인과 대응을 설명하겠습니다")
+        );
     }
 
     #[test]

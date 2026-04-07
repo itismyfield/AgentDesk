@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::services::memory::{
-    build_memory_backend, resolve_memory_role_id, resolve_memory_session_id, RecallRequest,
-    RecallResponse,
+    RecallRequest, RecallResponse, build_memory_backend, resolve_memory_role_id,
+    resolve_memory_session_id,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
 use std::sync::Arc;

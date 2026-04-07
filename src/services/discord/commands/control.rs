@@ -3,13 +3,13 @@ use serenity::CreateAttachment;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::services::provider::cancel_requested;
 use crate::services::provider::ProviderKind;
+use crate::services::provider::cancel_requested;
 
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::settings::cleanup_channel_uploads;
 use super::super::turn_bridge::cancel_active_token;
-use super::super::{check_auth, Context, Error, SharedData};
+use super::super::{Context, Error, SharedData, check_auth};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ManagedSessionClearBehavior {
@@ -319,8 +319,8 @@ pub(in crate::services::discord) async fn cmd_down(
 #[cfg(test)]
 mod tests {
     use super::{
-        managed_session_clear_behavior, managed_session_reset_behavior,
-        ManagedSessionClearBehavior, ManagedSessionResetBehavior,
+        ManagedSessionClearBehavior, ManagedSessionResetBehavior, managed_session_clear_behavior,
+        managed_session_reset_behavior,
     };
     use crate::services::provider::ProviderKind;
 

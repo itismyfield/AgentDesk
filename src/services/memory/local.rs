@@ -84,10 +84,12 @@ mod tests {
             recall.shared_knowledge.as_deref(),
             Some("[Shared Agent Knowledge]\nRemember this")
         );
-        assert!(recall
-            .longterm_catalog
-            .as_deref()
-            .is_some_and(|catalog| catalog.contains("facts.md")));
+        assert!(
+            recall
+                .longterm_catalog
+                .as_deref()
+                .is_some_and(|catalog| catalog.contains("facts.md"))
+        );
         assert!(recall.external_recall.is_none());
     }
 

@@ -958,16 +958,23 @@ export const VALID_GEMINI_MODELS = new Set([
         let catalog = build_gemini_model_catalog_from_models_js(raw).expect("catalog");
         assert_eq!(catalog[0].value, "auto-gemini-3");
         assert_eq!(catalog[0].label, "Auto (Gemini 3)");
-        assert!(catalog
-            .iter()
-            .any(|entry| entry.value == "gemini-3.1-pro-preview"));
-        assert!(catalog
-            .iter()
-            .any(|entry| entry.value == "gemini-3.1-flash-lite-preview"
-                && entry.picker_description() == "Preview flash-lite variant | Local CLI catalog"));
-        assert!(!catalog
-            .iter()
-            .any(|entry| entry.value == "gemini-obsolete-lite"));
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.value == "gemini-3.1-pro-preview")
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.value == "gemini-3.1-flash-lite-preview"
+                    && entry.picker_description()
+                        == "Preview flash-lite variant | Local CLI catalog")
+        );
+        assert!(
+            !catalog
+                .iter()
+                .any(|entry| entry.value == "gemini-obsolete-lite")
+        );
     }
 
     #[test]
@@ -1018,9 +1025,11 @@ export const VALID_GEMINI_MODELS = new Set([
             assert_eq!(default_model, "project-model");
 
             let catalog = super::resolved_models(&ProviderKind::Qwen, Some(working_dir));
-            assert!(catalog
-                .iter()
-                .any(|entry| entry.value == "user-model" && entry.label == "User Model"));
+            assert!(
+                catalog
+                    .iter()
+                    .any(|entry| entry.value == "user-model" && entry.label == "User Model")
+            );
             assert!(catalog.iter().any(|entry| entry.value == "project-model"
                 && entry.label == "Project Model"
                 && entry.picker_description() == "Project scoped model | Qwen settings (openai)"));

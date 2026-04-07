@@ -988,9 +988,7 @@ mod tests {
     use axum::{Router, extract::Path as AxumPath, routing::get};
 
     fn env_guard() -> MutexGuard<'static, ()> {
-        crate::services::discord::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::services::discord::runtime_store::lock_test_env()
     }
 
     #[cfg(unix)]

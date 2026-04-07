@@ -1,14 +1,14 @@
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -1821,10 +1821,10 @@ fn render_qwen_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        QWEN_CODE_SYSTEM_SETTINGS_ENV, QwenAttemptState, QwenResumeStrategy,
         build_stream_exec_args, compose_qwen_prompt, create_system_settings_override,
         extract_text_from_json_output, normalize_resume_strategy, process_qwen_json_event,
-        qwen_project_cache_key, resolve_allowed_core_tools, QwenAttemptState, QwenResumeStrategy,
-        QWEN_CODE_SYSTEM_SETTINGS_ENV,
+        qwen_project_cache_key, resolve_allowed_core_tools,
     };
     use crate::services::agent_protocol::StreamMessage;
     use serde_json::json;
@@ -1889,12 +1889,14 @@ mod tests {
             Some("qwen3-coder"),
             &QwenResumeStrategy::Resume("session-123".to_string()),
         );
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--resume", "session-123"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--model", "qwen3-coder"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "session-123"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--model", "qwen3-coder"])
+        );
         assert!(args.contains(&"--include-partial-messages".to_string()));
     }
 

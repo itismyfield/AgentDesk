@@ -4,7 +4,7 @@ use poise::serenity_prelude::ChannelId;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::role_map_path;
-use super::settings::{resolve_memory_settings, MemoryConfigOverride, PeerAgentInfo, RoleBinding};
+use super::settings::{MemoryConfigOverride, PeerAgentInfo, RoleBinding, resolve_memory_settings};
 use crate::services::provider::ProviderKind;
 
 /// Expand `~` or `~/` prefix to the user's home directory.

@@ -1,11 +1,11 @@
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use serde_json::{json, Value};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 
-use crate::services::tmux_wrapper::{render_for_terminal, InputMode};
+use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
 
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 
@@ -380,7 +380,6 @@ fn run_turn_once(
 
     if !wait.status.success() && !saw_result {
         let message = derive_wrapper_error_message(&stderr, wait.status.code());
-        emit_result_error(output, &message);
         return Err(TurnFailure {
             message,
             retryable: false,
@@ -393,7 +392,6 @@ fn run_turn_once(
         } else {
             stderr.trim().to_string()
         };
-        emit_result_error(output, &message);
         return Err(TurnFailure {
             message,
             retryable: true,
@@ -998,9 +996,10 @@ mod tests {
                 working_dir.path().to_str().unwrap(),
             )
             .unwrap();
-            assert!(args
-                .windows(2)
-                .any(|pair| pair == ["--resume", "session-123"]));
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--resume", "session-123"])
+            );
             assert!(!args.iter().any(|arg| arg == "--continue"));
         });
     }

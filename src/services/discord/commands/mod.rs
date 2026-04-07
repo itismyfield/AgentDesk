@@ -13,10 +13,10 @@ pub(in crate::services::discord) use super::model_catalog::{
     provider_supports_model_override, validate_model_input,
 };
 pub(in crate::services::discord) use config::{
-    build_model_picker_components_from_snapshot, build_model_picker_embed_from_snapshot,
-    clear_model_picker_pending, current_working_dir, effective_model_snapshot,
-    model_picker_pending_to_override, parse_model_picker_custom_id, resolve_model_for_turn,
-    update_channel_model_override, ModelPickerAction,
+    ModelPickerAction, build_model_picker_components_from_snapshot,
+    build_model_picker_embed_from_snapshot, clear_model_picker_pending, current_working_dir,
+    effective_model_snapshot, model_picker_pending_to_override, parse_model_picker_custom_id,
+    resolve_model_for_turn, update_channel_model_override,
 };
 pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
 pub(in crate::services::discord) use control::{

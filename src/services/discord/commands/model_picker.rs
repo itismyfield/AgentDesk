@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use poise::serenity_prelude as serenity;
 use poise::CreateReply;
+use poise::serenity_prelude as serenity;
 
 use super::super::model_catalog::provider_supports_model_override;
-use super::super::{check_auth, Context, Error, SharedData};
+use super::super::{Context, Error, SharedData, check_auth};
 use super::config::{
     build_model_picker_components_from_snapshot, build_model_picker_embed_from_snapshot,
     current_working_dir, effective_model_snapshot, remember_model_picker_pending,

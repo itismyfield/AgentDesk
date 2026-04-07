@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::org_schema_path;
-use super::settings::{resolve_memory_settings, MemoryConfigOverride, PeerAgentInfo, RoleBinding};
+use super::settings::{MemoryConfigOverride, PeerAgentInfo, RoleBinding, resolve_memory_settings};
 use crate::services::provider::ProviderKind;
 
 // ─── YAML Schema Types ──────────────────────────────────────────────────────

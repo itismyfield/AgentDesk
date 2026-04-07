@@ -3,7 +3,7 @@ use serenity::{ChannelId, CreateMessage, EditMessage, MessageId};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{rate_limit_wait, SharedData, DISCORD_MSG_LIMIT};
+use super::{DISCORD_MSG_LIMIT, SharedData, rate_limit_wait};
 use crate::services::provider::ProviderKind;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -94,11 +94,7 @@ where
 
 /// Format a risk badge for display
 pub(super) fn risk_badge(destructive: bool) -> &'static str {
-    if destructive {
-        "⚠️"
-    } else {
-        ""
-    }
+    if destructive { "⚠️" } else { "" }
 }
 
 /// Claude Code built-in slash commands
@@ -383,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_split_message_long_produces_multiple_chunks() {
-        use super::{split_message, DISCORD_MSG_LIMIT};
+        use super::{DISCORD_MSG_LIMIT, split_message};
 
         // Create a message longer than the Discord limit
         let long_msg: String = "A".repeat(DISCORD_MSG_LIMIT + 500);

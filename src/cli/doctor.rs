@@ -415,9 +415,7 @@ fn check_qwen_auth_hints(configured: bool) -> Check {
     let oauth_cache = home
         .as_ref()
         .map(|path| path.join(".qwen").join("oauth_creds.json"));
-    let project_qwen_env = project
-        .as_ref()
-        .map(|path| path.join(".qwen").join(".env"));
+    let project_qwen_env = project.as_ref().map(|path| path.join(".qwen").join(".env"));
     let project_env = project.as_ref().map(|path| path.join(".env"));
 
     let mut hints = Vec::new();
@@ -447,10 +445,7 @@ fn check_qwen_auth_hints(configured: bool) -> Check {
             "qwen auth hints",
             detail,
         )
-        .with_expected_actual(
-            "cached auth or API-key hint visible",
-            hints.join(", "),
-        )
+        .with_expected_actual("cached auth or API-key hint visible", hints.join(", "))
         .with_next_steps(vec![
             "qwen auth status".to_string(),
             "Open a Qwen CLI session and run /stats".to_string(),
@@ -495,12 +490,14 @@ fn check_qwen_runtime_artifacts(configured: bool) -> Check {
     let home_artifacts = [
         (
             "extensions",
-            home.as_ref().map(|path| path.join(".qwen").join("extensions")),
+            home.as_ref()
+                .map(|path| path.join(".qwen").join("extensions")),
             false,
         ),
         (
             "commands",
-            home.as_ref().map(|path| path.join(".qwen").join("commands")),
+            home.as_ref()
+                .map(|path| path.join(".qwen").join("commands")),
             false,
         ),
         (
@@ -523,17 +520,23 @@ fn check_qwen_runtime_artifacts(configured: bool) -> Check {
     let project_artifacts = [
         (
             "commands",
-            project.as_ref().map(|path| path.join(".qwen").join("commands")),
+            project
+                .as_ref()
+                .map(|path| path.join(".qwen").join("commands")),
             false,
         ),
         (
             "agents",
-            project.as_ref().map(|path| path.join(".qwen").join("agents")),
+            project
+                .as_ref()
+                .map(|path| path.join(".qwen").join("agents")),
             false,
         ),
         (
             "skills",
-            project.as_ref().map(|path| path.join(".qwen").join("skills")),
+            project
+                .as_ref()
+                .map(|path| path.join(".qwen").join("skills")),
             false,
         ),
         (
@@ -562,7 +565,11 @@ fn check_qwen_runtime_artifacts(configured: bool) -> Check {
         .iter()
         .filter_map(|(label, path, is_file)| {
             path.as_ref().and_then(|path| {
-                let exists = if *is_file { path.is_file() } else { path.is_dir() };
+                let exists = if *is_file {
+                    path.is_file()
+                } else {
+                    path.is_dir()
+                };
                 exists.then_some(*label)
             })
         })
@@ -571,7 +578,11 @@ fn check_qwen_runtime_artifacts(configured: bool) -> Check {
         .iter()
         .filter_map(|(label, path, is_file)| {
             path.as_ref().and_then(|path| {
-                let exists = if *is_file { path.is_file() } else { path.is_dir() };
+                let exists = if *is_file {
+                    path.is_file()
+                } else {
+                    path.is_dir()
+                };
                 exists.then_some(*label)
             })
         })
@@ -592,11 +603,7 @@ fn check_qwen_runtime_artifacts(configured: bool) -> Check {
         )
         .with_expected_actual(
             "Qwen runtime artifacts visible when configured",
-            format!(
-                "home={} project={}",
-                found_home.len(),
-                found_project.len()
-            ),
+            format!("home={} project={}", found_home.len(), found_project.len()),
         );
     }
 

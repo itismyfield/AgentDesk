@@ -1,8 +1,8 @@
 use poise::serenity_prelude as serenity;
 
 use crate::services::discord::model_catalog::{
-    is_default_picker_value, resolved_default_model, resolved_models, ModelCatalogEntry,
-    DEFAULT_PICKER_VALUE, SOURCE_PROVIDER_DEFAULT,
+    DEFAULT_PICKER_VALUE, ModelCatalogEntry, SOURCE_PROVIDER_DEFAULT, is_default_picker_value,
+    resolved_default_model, resolved_models,
 };
 use crate::services::provider::ProviderKind;
 
@@ -272,8 +272,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        build_model_picker_option_specs, build_model_picker_summary_lines,
-        capped_model_picker_explicit_entries, EXPLICIT_MODEL_OPTION_LIMIT,
+        EXPLICIT_MODEL_OPTION_LIMIT, build_model_picker_option_specs,
+        build_model_picker_summary_lines, capped_model_picker_explicit_entries,
     };
     use crate::services::discord::model_catalog::ModelCatalogEntry;
     use crate::services::discord::model_catalog::SOURCE_PROVIDER_DEFAULT;

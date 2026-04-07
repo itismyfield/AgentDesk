@@ -296,12 +296,6 @@ mod tests {
             .unwrap()
     }
 
-    #[cfg(unix)]
-    fn gh_env_lock() -> &'static Mutex<()> {
-        crate::config::shared_test_env_lock()
-    }
-
-    #[cfg(unix)]
     struct MockGhEnv {
         _lock: std::sync::MutexGuard<'static, ()>,
         _dir: tempfile::TempDir,
@@ -326,7 +320,7 @@ mod tests {
 
     #[cfg(unix)]
     fn install_mock_gh(script_body: &str) -> MockGhEnv {
-        let lock = gh_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let lock = crate::services::discord::runtime_store::lock_test_env();
         let dir = tempfile::tempdir().unwrap();
         let gh_path = dir.path().join("gh");
         let log_path = dir.path().join("gh.log");
