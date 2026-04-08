@@ -6,6 +6,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
 use super::SharedData;
+use crate::db::Db;
 use crate::services::provider::ProviderKind;
 
 /// Per-provider snapshot for the health response.
@@ -304,9 +305,64 @@ pub async fn resolve_bot_http(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SendTargetResolutionError {
+    BadRequest(&'static str),
+    NotFound(String),
+    Internal(String),
+}
+
+fn parse_channel_target_value(target: &str) -> Option<u64> {
+    let trimmed = target.trim();
+    trimmed
+        .parse::<u64>()
+        .ok()
+        .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(trimmed))
+}
+
+fn resolve_send_target_channel_id(db: &Db, target: &str) -> Result<u64, SendTargetResolutionError> {
+    if let Some(agent_id_raw) = target.strip_prefix("agent:") {
+        let agent_id = agent_id_raw.trim();
+        if agent_id.is_empty() {
+            return Err(SendTargetResolutionError::BadRequest(
+                "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)",
+            ));
+        }
+
+        let conn = db.lock().map_err(|e| {
+            SendTargetResolutionError::Internal(format!("db lock failed during agent lookup: {e}"))
+        })?;
+        let bindings = crate::db::agents::load_agent_channel_bindings(&conn, agent_id)
+            .map_err(|e| {
+                SendTargetResolutionError::Internal(format!(
+                    "agent lookup failed for {agent_id}: {e}"
+                ))
+            })?
+            .ok_or_else(|| {
+                SendTargetResolutionError::NotFound(format!("unknown agent target: {agent_id}"))
+            })?;
+        let channel_target = bindings.primary_channel().ok_or_else(|| {
+            SendTargetResolutionError::NotFound(format!(
+                "agent target has no primary channel: {agent_id}"
+            ))
+        })?;
+
+        return parse_channel_target_value(&channel_target).ok_or_else(|| {
+            SendTargetResolutionError::Internal(format!(
+                "agent target resolved to invalid channel: {channel_target}"
+            ))
+        });
+    }
+
+    let channel_target = target.strip_prefix("channel:").unwrap_or(target);
+    parse_channel_target_value(channel_target).ok_or(SendTargetResolutionError::BadRequest(
+        "invalid target format (use channel:<id>, channel:<name>, or agent:<roleId>)",
+    ))
+}
+
 /// Handle POST /api/send — agent-to-agent native routing.
-/// Accepts JSON: {"target":"channel:<id>", "content":"...", "source":"role-id", "bot":"announce|notify"}
-pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str, String) {
+/// Accepts JSON: {"target":"channel:<id>|channel:<name>|agent:<roleId>", "content":"...", "source":"role-id", "bot":"announce|notify"}
+pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> (&'a str, String) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
         return (
             "400 Bad Request",
@@ -332,24 +388,26 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str,
         );
     }
 
-    // Parse "channel:<id>" or "channel:<name>" format
-    let channel_id_raw = if let Some(id_str) = target.strip_prefix("channel:") {
-        let trimmed = id_str.trim();
-        // Try numeric first, then resolve name via role_map.json
-        trimmed
-            .parse::<u64>()
-            .ok()
-            .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(trimmed))
-    } else {
-        target.trim().parse::<u64>().ok()
-    };
-
-    let Some(channel_id_raw) = channel_id_raw else {
-        return (
-            "400 Bad Request",
-            r#"{"ok":false,"error":"invalid target format (use channel:<id> or channel:<name>)"}"#
-                .to_string(),
-        );
+    let channel_id_raw = match resolve_send_target_channel_id(db, target) {
+        Ok(id) => id,
+        Err(SendTargetResolutionError::BadRequest(message)) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"ok": false, "error": message}).to_string(),
+            );
+        }
+        Err(SendTargetResolutionError::NotFound(message)) => {
+            return (
+                "404 Not Found",
+                serde_json::json!({"ok": false, "error": message}).to_string(),
+            );
+        }
+        Err(SendTargetResolutionError::Internal(message)) => {
+            return (
+                "500 Internal Server Error",
+                serde_json::json!({"ok": false, "error": message}).to_string(),
+            );
+        }
     };
 
     let channel_id = ChannelId::new(channel_id_raw);
@@ -420,13 +478,16 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str,
             let ts = chrono::Local::now().format("%H:%M:%S");
             let emoji = if bot == "notify" { "🔔" } else { "📨" };
             println!("  [{ts}] {emoji} ROUTE: [{source}] → channel {channel_id} (bot={bot})");
-            (
-                "200 OK",
-                format!(
-                    r#"{{"ok":true,"target":"channel:{}","source":"{}","bot":"{}"}}"#,
-                    channel_id, source, bot
-                ),
-            )
+            let mut response = serde_json::json!({
+                "ok": true,
+                "target": format!("channel:{channel_id}"),
+                "source": source,
+                "bot": bot,
+            });
+            if target != format!("channel:{channel_id}") {
+                response["requested_target"] = serde_json::Value::String(target.to_string());
+            }
+            ("200 OK", response.to_string())
         }
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -738,6 +799,13 @@ fn parse_send_body(body: &str) -> Result<(String, String, String), &'static str>
 mod tests {
     use super::*;
 
+    fn test_db() -> Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        crate::db::wrap_conn(conn)
+    }
+
     #[test]
     fn test_parse_send_request_valid_json() {
         let body = r#"{"target":"channel:123","content":"hello","source":"agent-a"}"#;
@@ -791,5 +859,56 @@ mod tests {
         assert!(result.is_ok());
         let (_, _, source) = result.unwrap();
         assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn test_resolve_send_target_channel_id_supports_channel_target() {
+        let db = test_db();
+        let resolved = resolve_send_target_channel_id(&db, "channel:123").unwrap();
+        assert_eq!(resolved, 123);
+    }
+
+    #[test]
+    fn test_resolve_send_target_channel_id_uses_agent_primary_channel_for_claude() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, discord_channel_id, discord_channel_alt)
+                 VALUES ('agent-claude', 'Claude Agent', 'claude', '111', '222')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let resolved = resolve_send_target_channel_id(&db, "agent:agent-claude").unwrap();
+        assert_eq!(resolved, 111);
+    }
+
+    #[test]
+    fn test_resolve_send_target_channel_id_uses_agent_primary_channel_for_codex() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, discord_channel_id, discord_channel_alt)
+                 VALUES ('agent-codex', 'Codex Agent', 'codex', '111', '222')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let resolved = resolve_send_target_channel_id(&db, "agent:agent-codex").unwrap();
+        assert_eq!(resolved, 222);
+    }
+
+    #[test]
+    fn test_resolve_send_target_channel_id_rejects_unknown_agent_target() {
+        let db = test_db();
+        let err = resolve_send_target_channel_id(&db, "agent:missing").unwrap_err();
+        assert_eq!(
+            err,
+            SendTargetResolutionError::NotFound("unknown agent target: missing".to_string())
+        );
     }
 }
