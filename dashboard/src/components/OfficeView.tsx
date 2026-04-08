@@ -101,13 +101,17 @@ export default function OfficeView({
   onSelectDepartment,
   customDeptThemes,
 }: OfficeViewProps) {
-  // ── Mobile detection (skip Pixi on small viewports) ──
-  const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 639px)").matches);
+  const [isMobileLite, setIsMobileLite] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(max-width: 639px)").matches;
+  });
+
   useEffect(() => {
-    const mql = window.matchMedia("(max-width: 639px)");
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
-    mql.addEventListener("change", handler);
-    return () => mql.removeEventListener("change", handler);
+    const media = window.matchMedia("(max-width: 639px)");
+    const sync = () => setIsMobileLite(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
   }, []);
 
   // ── Refs for BuildOfficeSceneContext ──
@@ -147,6 +151,8 @@ export default function OfficeView({
   const tickRef = useRef(0);
   const themeHighlightTargetIdRef = useRef<string | null>(null);
   const cliUsageRef = useRef<Record<string, { windows?: Array<{ utilization: number }> }> | null>(null);
+  const eventBubbleQueueRef = useRef<Array<{ agentId: string; text: string; emoji: string; createdAt: number }>>([]);
+  const eventBubblesRef = useRef<Array<{ container: Container; createdAt: number; duration: number; baseY: number }>>([]);
 
   // Data snapshot refs
   const localeRef = useRef<SupportedLocale>(language);
@@ -169,7 +175,7 @@ export default function OfficeView({
   });
   // Build active issue lookup map from kanban cards
   const activeIssueByAgent = useMemo(() => {
-    const map = new Map<string, { number: number; url: string }>();
+    const map = new Map<string, { number: number; url: string; startedAt?: number; title?: string }>();
     if (!kanbanCards) return map;
     for (const card of kanbanCards) {
       if (!card.assignee_agent_id || !card.github_issue_number) continue;
@@ -178,11 +184,78 @@ export default function OfficeView({
       map.set(card.assignee_agent_id, {
         number: card.github_issue_number,
         url: card.github_issue_url || `https://github.com/${card.github_repo}/issues/${card.github_issue_number}`,
+        startedAt: card.started_at != null ? (card.started_at < 1e12 ? card.started_at * 1000 : card.started_at) : undefined,
+        title: card.title,
       });
     }
     return map;
   }, [kanbanCards]);
-  dataRef.current = { departments, agents, tasks: EMPTY_TASKS, subAgents, customDeptThemes, activeMeeting, meetingPresence, activeIssueByAgent };
+  const blockedAgentIds = useMemo(() => {
+    const set = new Set<string>();
+    if (!kanbanCards) return set;
+    for (const card of kanbanCards) {
+      if (card.status === "blocked" && card.assignee_agent_id) set.add(card.assignee_agent_id);
+    }
+    return set;
+  }, [kanbanCards]);
+  dataRef.current = {
+    departments,
+    agents,
+    tasks: EMPTY_TASKS,
+    subAgents,
+    customDeptThemes,
+    activeMeeting,
+    meetingPresence,
+    activeIssueByAgent,
+    blockedAgentIds,
+  };
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (!detail?.type) return;
+      const payload = detail.payload as Record<string, unknown> | undefined;
+      if (!payload) return;
+
+      let agentId: string | undefined;
+      let text = "";
+      let emoji = "";
+
+      switch (detail.type) {
+        case "kanban_card_updated": {
+          agentId = payload.assignee_agent_id as string | undefined;
+          const title = (payload.title as string) ?? "";
+          text = title.length > 18 ? `${title.slice(0, 18)}…` : title;
+          emoji = "📋";
+          break;
+        }
+        case "task_dispatch_created":
+        case "task_dispatch_updated": {
+          agentId = payload.to_agent_id as string | undefined;
+          const title = (payload.title as string) ?? "";
+          text = title.length > 18 ? `${title.slice(0, 18)}…` : title;
+          emoji = "📨";
+          break;
+        }
+        case "agent_status": {
+          agentId = payload.id as string | undefined;
+          const status = payload.status as string;
+          text = status;
+          emoji = status === "working" ? "💼" : status === "idle" ? "☕" : "💤";
+          break;
+        }
+        default:
+          return;
+      }
+
+      if (!agentId) return;
+      if (eventBubbleQueueRef.current.length >= 20) return;
+      eventBubbleQueueRef.current.push({ agentId, text, emoji, createdAt: Date.now() });
+    };
+
+    window.addEventListener("pcd-ws-event", handler as EventListener);
+    return () => window.removeEventListener("pcd-ws-event", handler as EventListener);
+  }, []);
 
   const cbRef = useRef<CallbackSnapshot>({
     onSelectAgent: onSelectAgent ?? (() => {}),
@@ -211,6 +284,7 @@ export default function OfficeView({
       roomRectsRef,
       deliveriesRef,
       deliveryLayerRef,
+      eventBubblesRef,
       prevAssignRef,
       agentPosRef,
       spriteMapRef,
@@ -293,10 +367,24 @@ export default function OfficeView({
       officeWRef,
       totalHRef,
       dataRef: dataRef as OfficeTickerContext["dataRef"],
+      eventBubbleQueueRef,
+      eventBubblesRef,
+      deliveryLayerRef,
+      agentPosRef,
       followCeoInView,
     }),
     [followCeoInView],
   );
+
+  const [elapsedTick, setElapsedTick] = useState(0);
+  useEffect(() => {
+    const intervalId = setInterval(() => setElapsedTick((tick) => tick + 1), 60_000);
+    return () => clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    if (appRef.current && !isMobileLite && initDoneRef.current) buildScene();
+  }, [activeIssueByAgent, blockedAgentIds, elapsedTick, buildScene, isMobileLite]);
 
   // ── Pixi runtime hook ──
   useOfficePixiRuntime({
@@ -325,7 +413,7 @@ export default function OfficeView({
     activeMeeting,
     customDeptThemes,
     currentTheme: theme,
-    disabled: isMobile,
+    disabled: isMobileLite,
   });
 
   const isKo = language === "ko";
@@ -333,7 +421,7 @@ export default function OfficeView({
   return (
     <div className="flex h-full min-h-0 w-full flex-col sm:flex-row sm:gap-3">
       <div className="relative min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
-        {/* Mobile: insight panel + agent status cards (no Pixi) */}
+        {/* Mobile: status-only Office Lite */}
         <div className="sm:hidden">
           <OfficeInsightPanel
             agents={agents}
@@ -346,8 +434,8 @@ export default function OfficeView({
           />
           <MobileAgentStatusGrid agents={agents} isKo={isKo} onSelectAgent={onSelectAgent} />
         </div>
-        {/* Desktop: Pixi canvas */}
-        <div ref={containerRef} className="hidden sm:block w-full min-h-full pb-40" style={{ imageRendering: "pixelated" }} />
+        {/* Desktop: full Pixi office */}
+        <div ref={containerRef} className="hidden w-full min-h-full pb-40 sm:block" style={{ imageRendering: "pixelated" }} />
       </div>
       <div className="hidden min-h-0 sm:block sm:h-full sm:w-[min(22rem,calc(100vw-1.5rem))] sm:shrink-0 sm:overflow-y-auto">
         <OfficeInsightPanel

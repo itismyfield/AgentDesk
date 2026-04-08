@@ -48,9 +48,7 @@ fn test_api_router(
 }
 
 fn env_lock() -> MutexGuard<'static, ()> {
-    crate::services::discord::runtime_store::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    crate::services::discord::runtime_store::lock_test_env()
 }
 
 struct EnvVarGuard {
@@ -109,6 +107,90 @@ fn setup_test_repo() -> (tempfile::TempDir, RepoDirOverride) {
             _env: env,
         },
     )
+}
+
+fn git_commit(repo_dir: &std::path::Path, message: &str) -> String {
+    let filename = format!(
+        "commit-{}.txt",
+        message
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect::<String>()
+    );
+    std::fs::write(repo_dir.join(filename), format!("{message}\n")).unwrap();
+    run_git(repo_dir, &["add", "."]);
+    run_git(repo_dir, &["commit", "-m", message]);
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backlog() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    harness.set_recovery_duration_ms(1_250);
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router(db.clone(), engine, Some(harness.registry())),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let url = format!("http://{addr}/api/health");
+
+    let healthy_response = reqwest::get(&url).await.unwrap();
+    assert_eq!(healthy_response.status(), reqwest::StatusCode::OK);
+    let healthy_json: serde_json::Value = healthy_response.json().await.unwrap();
+    assert_eq!(healthy_json["status"], "healthy");
+    assert_eq!(healthy_json["deferred_hooks"], 0);
+    assert_eq!(healthy_json["queue_depth"], 0);
+    assert_eq!(healthy_json["watcher_count"], 0);
+    assert_eq!(healthy_json["outbox_age"], 0);
+    assert!(
+        (healthy_json["recovery_duration"].as_f64().unwrap() - 1.25).abs() < f64::EPSILON,
+        "expected recovery_duration=1.25, got {}",
+        healthy_json["recovery_duration"]
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, status, created_at) \
+             VALUES (?1, 'notify', 'pending', datetime('now', '-5 minutes'))",
+            ["dispatch-1"],
+        )
+        .unwrap();
+    }
+
+    let degraded_response = reqwest::get(&url).await.unwrap();
+    assert_eq!(degraded_response.status(), reqwest::StatusCode::OK);
+    let degraded_json: serde_json::Value = degraded_response.json().await.unwrap();
+    assert_eq!(degraded_json["status"], "degraded");
+    assert!(
+        degraded_json["outbox_age"].as_i64().unwrap() >= 299,
+        "expected an outbox age close to 300s, got {}",
+        degraded_json["outbox_age"]
+    );
+    assert!(
+        degraded_json["degraded_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|reason| reason.starts_with("dispatch_outbox_oldest_pending_age:")),
+        "expected dispatch_outbox_oldest_pending_age reason, got {:?}",
+        degraded_json["degraded_reasons"]
+    );
 }
 
 #[tokio::test]
@@ -3342,13 +3424,21 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
 
 #[tokio::test]
 async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
-    let (_repo, _repo_guard) = setup_test_repo();
     crate::pipeline::ensure_loaded();
+    let _env_lock = env_lock();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-rereview");
     set_pmd_channel(&db, "pmd-chan-123");
     ensure_auto_queue_tables(&db);
+
+    let repo = tempfile::tempdir().unwrap();
+    run_git(repo.path(), &["init", "-b", "main"]);
+    run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+    run_git(repo.path(), &["config", "user.name", "Test"]);
+    run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+    let expected_commit = git_commit(repo.path(), "fix: review target (#269)");
+    let _repo_dir = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
 
     let completed_commit = "1111111111111111111111111111111111111269";
     {
@@ -3467,7 +3557,29 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
             |row| row.get(0),
         )
         .unwrap();
+    let reviewed_commit = conn
+        .query_row(
+            "SELECT context FROM task_dispatches WHERE id = ?1",
+            [&review_dispatch_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+        .and_then(|context| {
+            serde_json::from_str::<serde_json::Value>(&context)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("reviewed_commit")
+                        .and_then(|entry| entry.as_str())
+                        .map(str::to_string)
+                })
+        });
     assert_eq!(dispatch_status, "pending");
+    assert_eq!(
+        reviewed_commit.as_deref(),
+        Some(expected_commit.as_str()),
+        "reviewed_commit should be recovered from the repo fallback chain"
+    );
 
     let (entry_status, entry_dispatch_id): (String, String) = conn
         .query_row(

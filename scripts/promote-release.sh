@@ -117,6 +117,44 @@ _resolve_dashboard_source() {
     return 1
 }
 
+_read_kv_flag() {
+    local db_path="$1"
+    local key="$2"
+    [ -f "$db_path" ] || return 1
+    /usr/bin/sqlite3 -readonly "$db_path" \
+        "SELECT value FROM kv_meta WHERE key = '$key' LIMIT 1;" 2>/dev/null || true
+}
+
+_normalize_bool() {
+    printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' | tr -d '"'
+}
+
+_review_gate_override_source() {
+    local runtime_label db_path raw normalized
+    for runtime_label in release dev; do
+        if [ "$runtime_label" = "release" ]; then
+            db_path="$ADK_REL/data/agentdesk.sqlite"
+        else
+            db_path="$ADK_DEV/data/agentdesk.sqlite"
+        fi
+
+        raw=$(_read_kv_flag "$db_path" "review_enabled")
+        normalized=$(_normalize_bool "$raw")
+        if [ "$normalized" = "false" ]; then
+            printf '%s\t%s\t%s\n' "$runtime_label" "review_enabled" "$db_path"
+            return 0
+        fi
+
+        raw=$(_read_kv_flag "$db_path" "counter_model_review_enabled")
+        normalized=$(_normalize_bool "$raw")
+        if [ "$normalized" = "false" ]; then
+            printf '%s\t%s\t%s\n' "$runtime_label" "counter_model_review_enabled" "$db_path"
+            return 0
+        fi
+    done
+    return 1
+}
+
 _finalize_detached_helper() {
     local status="${1:-0}"
     [ "$PROMOTE_DETACHED_CHILD" = "1" ] || return 0
@@ -191,18 +229,26 @@ EOF
     echo "  current turn will finish before dcserver restart; final result will be reported automatically"
 }
 
-# Safety check: review must be passed (unless --skip-review is passed)
+# Safety check: review must be passed unless review automation is disabled
+# in runtime config, or unless --skip-review is passed explicitly.
 if [[ "${1:-}" != "--skip-review" ]]; then
-    # Check if the latest commit has a review-passed marker (may be in dev or release runtime)
-    LAST_COMMIT=$(cd "$REPO" && git rev-parse HEAD 2>/dev/null)
-    REVIEW_MARKER_DEV="$ADK_DEV/runtime/review_passed/$LAST_COMMIT"
-    REVIEW_MARKER_REL="$ADK_REL/runtime/review_passed/$LAST_COMMIT"
-    if [ ! -f "$REVIEW_MARKER_DEV" ] && [ ! -f "$REVIEW_MARKER_REL" ]; then
-        echo "✗ Review not passed for commit $LAST_COMMIT — aborting promotion"
-        echo "  Run counter-review first, or use --skip-review to override"
-        exit 1
+    REVIEW_OVERRIDE=$(_review_gate_override_source || true)
+    if [ -n "$REVIEW_OVERRIDE" ]; then
+        IFS=$'\t' read -r REVIEW_OVERRIDE_RUNTIME REVIEW_OVERRIDE_KEY REVIEW_OVERRIDE_DB <<<"$REVIEW_OVERRIDE"
+        echo "▸ Review automation disabled in ${REVIEW_OVERRIDE_RUNTIME} runtime (${REVIEW_OVERRIDE_KEY}=false)"
+        echo "  bypassing review gate using $REVIEW_OVERRIDE_DB"
+    else
+        # Check if the latest commit has a review-passed marker (may be in dev or release runtime)
+        LAST_COMMIT=$(cd "$REPO" && git rev-parse HEAD 2>/dev/null)
+        REVIEW_MARKER_DEV="$ADK_DEV/runtime/review_passed/$LAST_COMMIT"
+        REVIEW_MARKER_REL="$ADK_REL/runtime/review_passed/$LAST_COMMIT"
+        if [ ! -f "$REVIEW_MARKER_DEV" ] && [ ! -f "$REVIEW_MARKER_REL" ]; then
+            echo "✗ Review not passed for commit $LAST_COMMIT — aborting promotion"
+            echo "  Run counter-review first, or use --skip-review to override"
+            exit 1
+        fi
+        echo "▸ Review passed for $LAST_COMMIT"
     fi
-    echo "▸ Review passed for $LAST_COMMIT"
 fi
 
 # Safety check: dev must be healthy
@@ -227,6 +273,11 @@ if [ "$DASHBOARD_SOURCE" = "$REPO/dashboard/dist" ] && [ ! -f "$ADK_DEV/dashboar
 else
     echo "▸ Dashboard source: $DASHBOARD_SOURCE"
 fi
+if [ ! -d "$REPO/skills" ]; then
+    echo "✗ Managed skills not found in workspace — aborting promotion"
+    echo "  expected: $REPO/skills"
+    exit 1
+fi
 
 if _self_hosted_release_session; then
     _spawn_detached_helper "$@"
@@ -248,6 +299,13 @@ mkdir -p "$ADK_REL/dashboard"
 DIST_STAGED="$ADK_REL/dashboard/dist.new"
 rm -rf "$DIST_STAGED"
 cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
+
+# Stage managed skills before stopping release so skill sync never sees partial content.
+echo "▸ Staging managed skills..."
+SKILLS_STAGED="$ADK_REL/skills.new"
+rm -rf "$SKILLS_STAGED"
+mkdir -p "$SKILLS_STAGED"
+rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
 
 # Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
@@ -292,6 +350,11 @@ rm -rf "$ADK_REL/dashboard/dist.old"
 [ -d "$ADK_REL/dashboard/dist" ] && mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"
 mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"
 rm -rf "$ADK_REL/dashboard/dist.old"
+
+rm -rf "$ADK_REL/skills.old"
+[ -d "$ADK_REL/skills" ] && mv "$ADK_REL/skills" "$ADK_REL/skills.old"
+mv "$SKILLS_STAGED" "$ADK_REL/skills"
+rm -rf "$ADK_REL/skills.old"
 
 # Keep the user-facing CLI wrapper discoverable via PATH.
 echo "▸ Ensuring global agentdesk CLI..."

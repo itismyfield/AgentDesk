@@ -372,13 +372,16 @@ pub(in crate::services::discord) fn build_model_picker_embed_from_snapshot(
     provider: &ProviderKind,
     pending_model: Option<&str>,
     notice: Option<&str>,
+    working_dir: Option<&str>,
 ) -> serenity::CreateEmbed {
     let lines = build_model_picker_summary_lines(
         provider,
         &snapshot.effective,
+        snapshot.source,
         pending_model,
         snapshot.override_model.as_deref(),
         notice,
+        working_dir,
     );
     serenity::CreateEmbed::new()
         .title("Model Picker")
@@ -1092,6 +1095,8 @@ mod tests {
         let lines = build_model_picker_summary_lines(
             &ProviderKind::Gemini,
             "gemini-3-flash-preview",
+            ROLE_MAP_SOURCE,
+            None,
             None,
             None,
             None,
@@ -1111,8 +1116,10 @@ mod tests {
         let lines = build_model_picker_summary_lines(
             &ProviderKind::Codex,
             "gpt-5.4",
+            ROLE_MAP_SOURCE,
             Some("gpt-5.4-mini"),
             Some("gpt-5.4"),
+            None,
             None,
         );
         assert_eq!(lines[2], "현재 작업 상태 : `gpt-5.4-mini` 저장 대기");

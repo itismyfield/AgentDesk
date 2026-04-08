@@ -14,10 +14,6 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
-import {
-  generateAutoQueueForSelection,
-  resetAutoQueueForSelection,
-} from "./auto-queue-actions";
 
 interface Props {
   tr: (ko: string, en: string) => string;
@@ -72,47 +68,15 @@ const ENTRY_STATUS_STYLE: Record<
   },
 };
 
-const RUN_STATUS_STYLE: Record<
-  AutoQueueRun["status"],
-  { bg: string; text: string; label: string; labelEn: string }
-> = {
-  generated: {
-    bg: "rgba(59,130,246,0.18)",
-    text: "#60a5fa",
-    label: "생성됨",
-    labelEn: "Generated",
-  },
-  pending: {
-    bg: "rgba(56,189,248,0.2)",
-    text: "#38bdf8",
-    label: "PMD 대기",
-    labelEn: "Awaiting PMD",
-  },
-  active: {
-    bg: "rgba(139,92,246,0.2)",
-    text: "#a78bfa",
-    label: "실행 중",
-    labelEn: "Active",
-  },
-  paused: {
-    bg: "rgba(245,158,11,0.2)",
-    text: "#fbbf24",
-    label: "일시정지",
-    labelEn: "Paused",
-  },
-  completed: {
-    bg: "rgba(34,197,94,0.2)",
-    text: "#4ade80",
-    label: "완료",
-    labelEn: "Done",
-  },
+const RUN_STATUS_STYLE: Record<AutoQueueRun["status"], { bg: string; text: string; label: string; labelEn: string }> = {
+  generated: { bg: "rgba(59,130,246,0.18)", text: "#60a5fa", label: "생성됨", labelEn: "Generated" },
+  pending: { bg: "rgba(56,189,248,0.2)", text: "#38bdf8", label: "PMD 대기", labelEn: "Awaiting PMD" },
+  active: { bg: "rgba(139,92,246,0.2)", text: "#a78bfa", label: "실행 중", labelEn: "Active" },
+  paused: { bg: "rgba(245,158,11,0.2)", text: "#fbbf24", label: "일시정지", labelEn: "Paused" },
+  completed: { bg: "rgba(34,197,94,0.2)", text: "#4ade80", label: "완료", labelEn: "Done" },
 };
 
-function reorderPendingIds(
-  ids: string[],
-  fromId: string,
-  toId: string,
-): string[] | null {
+function reorderPendingIds(ids: string[], fromId: string, toId: string): string[] | null {
   const fromIdx = ids.indexOf(fromId);
   const toIdx = ids.indexOf(toId);
   if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return null;
@@ -483,14 +447,8 @@ export default function AutoQueuePanel({
 
   const fetchStatus = useCallback(async () => {
     try {
-      const s = await api.getAutoQueueStatus(
-        selectedRepo || null,
-        selectedAgentId,
-      );
-      const normalized = normalizeAutoQueueStatus(
-        s,
-        suppressedRunIdRef.current,
-      );
+      const s = await api.getAutoQueueStatus(selectedRepo || null, selectedAgentId);
+      const normalized = normalizeAutoQueueStatus(s, suppressedRunIdRef.current);
       if (shouldClearSuppressedAutoQueueRun(s, suppressedRunIdRef.current)) {
         suppressedRunIdRef.current = null;
       }
@@ -502,8 +460,7 @@ export default function AutoQueuePanel({
         setUnifiedThread(false);
       }
       // Only reset noReadyCards when a run with entries exists
-      if (!normalized.run || normalized.entries.length > 0)
-        setNoReadyCards(false);
+      if (!normalized.run || normalized.entries.length > 0) setNoReadyCards(false);
     } catch {
       // silent
     }
@@ -529,17 +486,13 @@ export default function AutoQueuePanel({
     setError(null);
     try {
       suppressedRunIdRef.current = null;
-      const result = (await generateAutoQueueForSelection(
-        api,
-        selectedRepo || null,
-        selectedAgentId,
-        generateMode,
-      )) as Record<string, unknown>;
-      if (
-        result.entries &&
-        Array.isArray(result.entries) &&
-        result.entries.length === 0
-      ) {
+      await api.resetAutoQueue({
+        runId: status?.run?.id ?? null,
+        repo: selectedRepo || null,
+        agentId: selectedAgentId || null,
+      });
+      const result = await api.generateAutoQueue(selectedRepo || null, selectedAgentId, generateMode) as Record<string, unknown>;
+      if (result.entries && Array.isArray(result.entries) && result.entries.length === 0) {
         const counts = result.counts as Record<string, number> | undefined;
         const backlog = counts?.backlog ?? 0;
         const hint =
@@ -571,13 +524,15 @@ export default function AutoQueuePanel({
     setNoReadyCards(false);
     suppressedRunIdRef.current = status?.run?.id ?? null;
     try {
-      await resetAutoQueueForSelection(api, selectedAgentId);
+      await api.resetAutoQueue({
+        runId: status?.run?.id ?? null,
+        repo: selectedRepo || null,
+        agentId: selectedAgentId || null,
+      });
       resetPanelState();
     } catch (e) {
       suppressedRunIdRef.current = null;
-      setError(
-        e instanceof Error ? e.message : tr("초기화 실패", "Reset failed"),
-      );
+      setError(e instanceof Error ? e.message : tr("초기화 실패", "Reset failed"));
     }
   };
 
@@ -674,14 +629,8 @@ export default function AutoQueuePanel({
   const doneCount = entries.filter((e) => e.status === "done").length;
   const totalCount = entries.length;
   const primaryAction = getAutoQueuePrimaryAction(run, pendingCount);
-  const showRunStartControls =
-    !!run &&
-    (run.status === "generated" || run.status === "active") &&
-    pendingCount > 0;
-  const startActionLabel =
-    run?.status === "generated"
-      ? tr("시작", "Start")
-      : tr("디스패치", "Dispatch");
+  const showRunStartControls = !!run && (run.status === "generated" || run.status === "active") && pendingCount > 0;
+  const startActionLabel = run?.status === "generated" ? tr("시작", "Start") : tr("디스패치", "Dispatch");
 
   // Group entries by agent
   const entriesByAgent = new Map<string, DispatchQueueEntryType[]>();
@@ -755,10 +704,7 @@ export default function AutoQueuePanel({
                 color: RUN_STATUS_STYLE[run.status].text,
               }}
             >
-              {tr(
-                RUN_STATUS_STYLE[run.status].label,
-                RUN_STATUS_STYLE[run.status].labelEn,
-              )}
+              {tr(RUN_STATUS_STYLE[run.status].label, RUN_STATUS_STYLE[run.status].labelEn)}
             </span>
           )}
           {totalCount > 0 && (

@@ -1,4 +1,5 @@
 mod adk_session;
+mod bot_init;
 mod commands;
 mod formatting;
 mod handoff;
@@ -11,6 +12,7 @@ mod model_picker_interaction;
 mod org_schema;
 pub(crate) mod org_writer;
 mod prompt_builder;
+mod queue_io;
 mod recovery;
 pub(crate) mod restart_report;
 mod role_map;
@@ -18,6 +20,7 @@ mod router;
 pub mod runtime_store;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
+mod shared_state;
 #[cfg(unix)]
 mod tmux;
 mod turn_bridge;
@@ -91,6 +94,12 @@ const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minut
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
+pub(crate) use bot_init::RunBotContext;
+pub(in crate::services::discord) use queue_io::{
+    channel_has_pending_soft_queue, channel_has_pending_soft_queue_at,
+    schedule_deferred_idle_queue_kickoff, watcher_should_kickoff_idle_queue,
+};
+pub(in crate::services::discord) use shared_state::*;
 /// Minimum interval between Discord placeholder edits for progress status.
 /// Configurable via AGENTDESK_STATUS_INTERVAL_SECS env var. Default: 5 seconds.
 pub(super) fn status_update_interval() -> Duration {
@@ -433,6 +442,13 @@ pub(super) struct SharedData {
     /// Set to true after startup reconciliation + recovery is complete (#122).
     /// Until true, the router queues all incoming messages.
     pub(super) reconcile_done: Arc<std::sync::atomic::AtomicBool>,
+    /// Number of queued deferred idle-queue kickoffs waiting to run.
+    pub(super) deferred_hook_backlog: std::sync::atomic::AtomicUsize,
+    /// When this provider started reconcile/recovery for the current boot.
+    pub(super) recovery_started_at: std::time::Instant,
+    /// Captured reconcile/recovery duration for the current boot in milliseconds.
+    /// Remains 0 until reconcile completes, at which point it is frozen.
+    pub(super) recovery_duration_ms: std::sync::atomic::AtomicU64,
     /// Process-global active turn counter shared across all providers.
     /// Deferred restart checks this instead of provider-local cancel_tokens.len().
     pub(super) global_active: Arc<std::sync::atomic::AtomicUsize>,
@@ -503,6 +519,19 @@ pub(super) struct Data {
     pub(super) provider: ProviderKind,
 }
 
+pub(super) fn mark_reconcile_complete(shared: &SharedData) {
+    let duration_ms = shared.recovery_started_at.elapsed().as_millis();
+    let duration_ms = duration_ms.min(u64::MAX as u128) as u64;
+    let _ = shared.recovery_duration_ms.compare_exchange(
+        0,
+        duration_ms,
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    shared
+        .reconcile_done
+        .store(true, std::sync::atomic::Ordering::Release);
+}
 pub(super) type Error = Box<dyn std::error::Error + Send + Sync>;
 pub(super) type Context<'a> = poise::Context<'a, Data, Error>;
 
@@ -1831,17 +1860,16 @@ fn resolve_codex_skill_file(path: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// Entry point: start the Discord bot
-pub async fn run_bot(
-    token: &str,
-    provider: ProviderKind,
-    global_active: Arc<std::sync::atomic::AtomicUsize>,
-    global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
-    shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
-    health_registry: Arc<health::HealthRegistry>,
-    api_port: u16,
-    db: Option<crate::db::Db>,
-    engine: Option<crate::engine::PolicyEngine>,
-) {
+pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext) {
+    let RunBotContext {
+        global_active,
+        global_finalizing,
+        shutdown_remaining,
+        health_registry,
+        api_port,
+        db,
+        engine,
+    } = context;
     // Initialize debug logging from environment variable
     claude::init_debug_from_env();
 
@@ -1896,6 +1924,9 @@ pub async fn run_bot(
         current_generation: runtime_store::load_generation(),
         restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+        recovery_started_at: std::time::Instant::now(),
+        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
         global_active,
         global_finalizing,
         shutdown_remaining,
@@ -2247,9 +2278,7 @@ pub async fn run_bot(
                     .await;
 
                     // #122: Reconcile phase complete — open intake
-                    shared_for_restart_reports
-                        .reconcile_done
-                        .store(true, std::sync::atomic::Ordering::Release);
+                    mark_reconcile_complete(&shared_for_restart_reports);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ✓ Reconcile complete — intake open");
 
@@ -3687,14 +3716,23 @@ fn enrich_role_map_with_channel_ids() {
 mod tests {
     use super::ChannelId;
     use super::{
-        DiscordBotSettings, allows_nonlocal_session_path, choose_restore_channel_name,
-        is_synthetic_thread_channel_name, select_restored_session_path, session_path_is_usable,
-        synthetic_thread_channel_name, user_is_authorized,
+        DiscordBotSettings, Intervention, InterventionMode, PendingQueueItem,
+        allows_nonlocal_session_path, channel_has_pending_soft_queue_at,
+        choose_restore_channel_name, is_synthetic_thread_channel_name, load_pending_queues,
+        requeue_intervention_front_persisted, save_channel_queue, save_pending_queues,
+        select_restored_session_path, session_path_is_usable, synthetic_thread_channel_name,
+        take_next_soft_intervention_persisted, user_is_authorized,
+        watcher_should_kickoff_idle_queue,
     };
+    use crate::services::discord::runtime_store::test_env_lock;
     use crate::services::discord::settings::{
         BotChannelRoutingGuardFailure, validate_bot_channel_routing,
     };
-    use crate::services::provider::ProviderKind;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use poise::serenity_prelude::{MessageId, UserId};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn synthetic_thread_channel_name_round_trips() {
@@ -3745,9 +3783,11 @@ mod tests {
 
     #[test]
     fn user_is_authorized_allows_owner_and_explicit_users() {
-        let mut settings = DiscordBotSettings::default();
-        settings.owner_user_id = Some(42);
-        settings.allowed_user_ids = vec![7];
+        let settings = DiscordBotSettings {
+            owner_user_id: Some(42),
+            allowed_user_ids: vec![7],
+            ..Default::default()
+        };
 
         assert!(user_is_authorized(&settings, 42));
         assert!(user_is_authorized(&settings, 7));
@@ -3756,30 +3796,14 @@ mod tests {
 
     #[test]
     fn user_is_authorized_allows_everyone_when_flag_enabled() {
-        let mut settings = DiscordBotSettings::default();
-        settings.owner_user_id = Some(42);
-        settings.allow_all_users = true;
+        let settings = DiscordBotSettings {
+            owner_user_id: Some(42),
+            allow_all_users: true,
+            ..Default::default()
+        };
 
         assert!(user_is_authorized(&settings, 42));
         assert!(user_is_authorized(&settings, 99));
-    }
-
-    #[test]
-    fn handoff_routing_guard_rejects_wrong_agent_settings() {
-        let mut settings = DiscordBotSettings::default();
-        settings.provider = ProviderKind::Codex;
-        settings.agent = Some("openclaw-maker".to_string());
-        settings.allowed_channel_ids = vec![1488022491992424448];
-
-        let result = validate_bot_channel_routing(
-            &settings,
-            &ProviderKind::Codex,
-            ChannelId::new(1488022491992424448),
-            Some("agentdesk-spark"),
-            false,
-        );
-
-        assert_eq!(result, Err(BotChannelRoutingGuardFailure::AgentMismatch));
     }
 
     #[test]
@@ -3792,6 +3816,104 @@ mod tests {
     #[test]
     fn session_path_is_usable_for_remote_nonlocal_path() {
         assert!(session_path_is_usable("~/repo", Some("mac-mini")));
+    }
+
+    #[test]
+    fn channel_has_pending_soft_queue_detects_live_backlog() {
+        let channel_id = ChannelId::new(12345);
+        let created_at = Instant::now();
+        let mut queues = HashMap::new();
+        queues.insert(
+            channel_id,
+            vec![Intervention {
+                author_id: UserId::new(42),
+                message_id: MessageId::new(7),
+                text: "pending".to_string(),
+                mode: InterventionMode::Soft,
+                created_at,
+            }],
+        );
+
+        assert!(channel_has_pending_soft_queue_at(
+            &mut queues,
+            channel_id,
+            created_at
+        ));
+        assert!(queues.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn channel_has_pending_soft_queue_prunes_expired_entries() {
+        let channel_id = ChannelId::new(12345);
+        let created_at = Instant::now();
+        let mut queues = HashMap::new();
+        queues.insert(
+            channel_id,
+            vec![Intervention {
+                author_id: UserId::new(42),
+                message_id: MessageId::new(7),
+                text: "stale".to_string(),
+                mode: InterventionMode::Soft,
+                created_at,
+            }],
+        );
+
+        assert!(!channel_has_pending_soft_queue_at(
+            &mut queues,
+            channel_id,
+            created_at + super::INTERVENTION_TTL + Duration::from_secs(1)
+        ));
+        assert!(!queues.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn watcher_should_kickoff_idle_queue_requires_idle_channel() {
+        let channel_id = ChannelId::new(12345);
+        let mut queues = HashMap::new();
+        queues.insert(
+            channel_id,
+            vec![Intervention {
+                author_id: UserId::new(42),
+                message_id: MessageId::new(7),
+                text: "pending".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+            }],
+        );
+
+        assert!(watcher_should_kickoff_idle_queue(
+            false,
+            &mut queues,
+            channel_id
+        ));
+
+        let mut busy_cancel_tokens = HashMap::new();
+        busy_cancel_tokens.insert(channel_id, Arc::new(CancelToken::new()));
+        assert!(!watcher_should_kickoff_idle_queue(
+            busy_cancel_tokens.contains_key(&channel_id),
+            &mut queues,
+            channel_id
+        ));
+    }
+
+    #[test]
+    fn handoff_routing_guard_rejects_wrong_agent_settings() {
+        let settings = DiscordBotSettings {
+            provider: ProviderKind::Codex,
+            agent: Some("openclaw-maker".to_string()),
+            allowed_channel_ids: vec![1488022491992424448],
+            ..Default::default()
+        };
+
+        let result = validate_bot_channel_routing(
+            &settings,
+            &ProviderKind::Codex,
+            ChannelId::new(1488022491992424448),
+            Some("agentdesk-spark"),
+            false,
+        );
+
+        assert_eq!(result, Err(BotChannelRoutingGuardFailure::AgentMismatch));
     }
 
     #[test]
@@ -3819,16 +3941,6 @@ mod tests {
     }
 
     // ─── Pending queue isolation tests ───────────────────────────────────────
-
-    use super::{
-        Intervention, InterventionMode, PendingQueueItem, load_pending_queues,
-        requeue_intervention_front_persisted, save_channel_queue, save_pending_queues,
-        take_next_soft_intervention_persisted,
-    };
-    use crate::services::discord::runtime_store::test_env_lock;
-    use serenity::model::id::{MessageId, UserId};
-    use std::time::Instant;
-
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 
     fn make_intervention(text: &str) -> Intervention {

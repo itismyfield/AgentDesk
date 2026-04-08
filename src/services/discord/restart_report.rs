@@ -247,6 +247,11 @@ pub(super) async fn flush_restart_reports(
                 "  [{ts}] ⏭ restart report skip for channel {} — {reason}",
                 report.channel_id,
             );
+            clear_restart_report(provider, report.channel_id);
+            println!(
+                "  [{ts}] 🧹 dropped restart report for channel {} after routing failure",
+                report.channel_id,
+            );
             continue;
         }
 

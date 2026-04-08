@@ -22,6 +22,12 @@ interface AgentManagerViewProps {
   onDepartmentsChange: () => void;
   sessions?: DispatchedSession[];
   onAssign?: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
+  activeTab?: Tab;
+  onTabChange?: (tab: Tab) => void;
+  showHeader?: boolean;
+  showTabBar?: boolean;
+  title?: string;
+  subtitle?: string;
 }
 
 type Tab = "agents" | "departments" | "dispatch";
@@ -35,6 +41,12 @@ export default function AgentManagerView({
   onDepartmentsChange,
   sessions,
   onAssign,
+  activeTab,
+  onTabChange,
+  showHeader = true,
+  showTabBar = true,
+  title,
+  subtitle,
 }: AgentManagerViewProps) {
   const locale = language;
   const isKo = locale.startsWith("ko");
@@ -44,7 +56,14 @@ export default function AgentManagerView({
   );
 
   // ── Tab state ──
-  const [tab, setTab] = useState<Tab>("agents");
+  const [internalTab, setInternalTab] = useState<Tab>("agents");
+  const tab = activeTab ?? internalTab;
+  const handleTabChange = useCallback((nextTab: Tab) => {
+    if (activeTab === undefined) {
+      setInternalTab(nextTab);
+    }
+    onTabChange?.(nextTab);
+  }, [activeTab, onTabChange]);
 
   // ── Agent tab state ──
   const [deptTab, setDeptTab] = useState("all");
@@ -252,65 +271,92 @@ export default function AgentManagerView({
     setDragOverPosition(null);
   }, []);
 
+  const defaultTitle =
+    tab === "departments"
+      ? tr("부서 관리", "Departments")
+      : tab === "dispatch"
+        ? tr("파견 세션", "Dispatch Sessions")
+        : tr("직원 관리", "Agent Manager");
+  const resolvedTitle = title ?? defaultTitle;
+  const resolvedSubtitle = subtitle
+    ?? (tab === "departments"
+      ? tr("부서 순서, 역할, 테마를 관리합니다.", "Manage department order, roles, and themes.")
+      : tab === "dispatch"
+        ? tr("감지된 AgentDesk 세션을 오피스에 배치합니다.", "Assign detected AgentDesk sessions into the office.")
+        : tr("에이전트 프로필, 스킬, 소속을 관리합니다.", "Manage agent profiles, skills, and office membership."));
+
   return (
     <div
-      className="p-4 sm:p-6 max-w-5xl mx-auto overflow-auto h-full space-y-4 pb-40 min-w-0"
+      className="mx-auto h-full max-w-5xl min-w-0 space-y-4 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
-          {tr("직원 관리", "Agent Manager")}
-        </h1>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={openCreateDept}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-surface-hover"
-            style={{ border: "1px solid var(--th-input-border)", color: "var(--th-text-secondary)" }}
-          >
-            + {tr("부서 추가", "Add Dept")}
-          </button>
-          <button
-            onClick={openCreateAgent}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-all"
-          >
-            + {tr("직원 채용", "Hire Agent")}
-          </button>
+      {showHeader && (
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
+              {resolvedTitle}
+            </h1>
+            {resolvedSubtitle && (
+              <p className="mt-1 text-sm" style={{ color: "var(--th-text-muted)" }}>
+                {resolvedSubtitle}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {(showTabBar || tab === "departments") && tab !== "dispatch" && (
+              <button
+                onClick={openCreateDept}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-white/10"
+                style={{ border: "1px solid var(--th-input-border)", color: "var(--th-text-secondary)" }}
+              >
+                + {tr("부서 추가", "Add Dept")}
+              </button>
+            )}
+            {(showTabBar || tab === "agents") && tab !== "departments" && tab !== "dispatch" && (
+              <button
+                onClick={openCreateAgent}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white transition-all"
+              >
+                + {tr("직원 채용", "Hire Agent")}
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* Tab switch */}
-      <div className="flex gap-1" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
-        <button
-          onClick={() => setTab("agents")}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            tab === "agents" ? "text-blue-400 border-b-2 border-blue-400" : ""
-          }`}
-          style={tab !== "agents" ? { color: "var(--th-text-muted)" } : undefined}
-        >
-          {tr("직원", "Agents")} ({agents.length})
-        </button>
-        <button
-          onClick={() => setTab("departments")}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            tab === "departments" ? "text-blue-400 border-b-2 border-blue-400" : ""
-          }`}
-          style={tab !== "departments" ? { color: "var(--th-text-muted)" } : undefined}
-        >
-          {tr("부서", "Departments")} ({departments.length})
-        </button>
-        {sessions && onAssign && (
+      {showTabBar && (
+        <div className="flex gap-1" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
           <button
-            onClick={() => setTab("dispatch")}
+            onClick={() => handleTabChange("agents")}
             className={`px-4 py-2 text-sm font-medium transition-colors ${
-              tab === "dispatch" ? "text-blue-400 border-b-2 border-blue-400" : ""
+              tab === "agents" ? "text-blue-400 border-b-2 border-blue-400" : ""
             }`}
-            style={tab !== "dispatch" ? { color: "var(--th-text-muted)" } : undefined}
+            style={tab !== "agents" ? { color: "var(--th-text-muted)" } : undefined}
           >
-            {tr("파견", "Dispatch")} ({sessions.length})
+            {tr("직원", "Agents")} ({agents.length})
           </button>
-        )}
-      </div>
+          <button
+            onClick={() => handleTabChange("departments")}
+            className={`px-4 py-2 text-sm font-medium transition-colors ${
+              tab === "departments" ? "text-blue-400 border-b-2 border-blue-400" : ""
+            }`}
+            style={tab !== "departments" ? { color: "var(--th-text-muted)" } : undefined}
+          >
+            {tr("부서", "Departments")} ({departments.length})
+          </button>
+          {sessions && onAssign && (
+            <button
+              onClick={() => handleTabChange("dispatch")}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                tab === "dispatch" ? "text-blue-400 border-b-2 border-blue-400" : ""
+              }`}
+              style={tab !== "dispatch" ? { color: "var(--th-text-muted)" } : undefined}
+            >
+              {tr("파견", "Dispatch")} ({sessions.length})
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Tab content */}
       {tab === "dispatch" && sessions && onAssign ? (

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use super::dcserver;
@@ -302,6 +303,355 @@ fn dcserver_log_hint() -> String {
         .unwrap_or_else(|| "~/.adk/release/logs/dcserver.stdout.log".to_string())
 }
 
+fn qwen_home_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("QWEN_HOME") {
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os("AGENTDESK_TEST_HOME") {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
+
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(dirs::home_dir)
+}
+
+fn qwen_project_dir() -> Option<PathBuf> {
+    std::env::current_dir().ok()
+}
+
+fn qwen_system_defaults_path() -> Option<PathBuf> {
+    std::env::var_os("QWEN_CODE_SYSTEM_DEFAULTS_PATH")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn qwen_system_settings_path() -> Option<PathBuf> {
+    std::env::var_os("QWEN_CODE_SYSTEM_SETTINGS_PATH")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn qwen_user_settings_path() -> Option<PathBuf> {
+    qwen_home_dir().map(|home| home.join(".qwen").join("settings.json"))
+}
+
+fn qwen_project_settings_path() -> Option<PathBuf> {
+    qwen_project_dir().map(|dir| dir.join(".qwen").join("settings.json"))
+}
+
+fn format_artifact_scope(scope: &str, items: &[&str]) -> String {
+    if items.is_empty() {
+        format!("{scope}: -")
+    } else {
+        format!("{scope}: {}", items.join(", "))
+    }
+}
+
+fn check_qwen_settings_files(configured: bool) -> Check {
+    let candidates = [
+        ("system defaults", qwen_system_defaults_path()),
+        ("user settings", qwen_user_settings_path()),
+        ("project settings", qwen_project_settings_path()),
+        ("system settings", qwen_system_settings_path()),
+    ];
+
+    let found: Vec<String> = candidates
+        .iter()
+        .filter_map(|(label, path)| {
+            path.as_ref()
+                .filter(|path| path.is_file())
+                .map(|path| format!("{label}={}", path.display()))
+        })
+        .collect();
+
+    if !found.is_empty() {
+        return Check::ok(
+            "provider_qwen_settings",
+            CheckGroup::ProviderRuntime,
+            "qwen settings files",
+            format!("found {}", found.join(" | ")),
+        )
+        .with_path(found[0].clone())
+        .with_expected_actual(
+            "Qwen settings layers discoverable",
+            format!("{} settings layer(s) found", found.len()),
+        );
+    }
+
+    let guidance = "Qwen은 settings 없이도 동작할 수 있지만, 모델 picker와 운영 surface를 안정적으로 쓰려면 ~/.qwen/settings.json 또는 <workspace>/.qwen/settings.json 구성을 권장합니다.";
+    if configured {
+        Check::warn(
+            "provider_qwen_settings",
+            CheckGroup::ProviderRuntime,
+            "qwen settings files",
+            "no Qwen settings files detected",
+            guidance,
+        )
+        .with_expected_actual(
+            "at least one Qwen settings layer",
+            "no settings.json detected",
+        )
+        .with_next_steps(vec![
+            "ls -la ~/.qwen".to_string(),
+            "ls -la ./.qwen".to_string(),
+        ])
+    } else {
+        Check::ok(
+            "provider_qwen_settings",
+            CheckGroup::ProviderRuntime,
+            "qwen settings files",
+            "no Qwen settings files detected (provider not configured)",
+        )
+        .with_expected_actual(
+            "settings present if qwen is actively used",
+            "qwen not configured",
+        )
+    }
+}
+
+fn check_qwen_auth_hints(configured: bool) -> Check {
+    let home = qwen_home_dir();
+    let project = qwen_project_dir();
+    let oauth_cache = home
+        .as_ref()
+        .map(|path| path.join(".qwen").join("oauth_creds.json"));
+    let project_qwen_env = project.as_ref().map(|path| path.join(".qwen").join(".env"));
+    let project_env = project.as_ref().map(|path| path.join(".env"));
+
+    let mut hints = Vec::new();
+    if oauth_cache.as_ref().is_some_and(|path| path.is_file()) {
+        hints.push("cached OAuth");
+    }
+    if project_qwen_env.as_ref().is_some_and(|path| path.is_file()) {
+        hints.push("project .qwen/.env");
+    }
+    if project_env.as_ref().is_some_and(|path| path.is_file()) {
+        hints.push("project .env");
+    }
+
+    let detail = if hints.is_empty() {
+        "interactive: OAuth or API key | headless: cached auth or API key only".to_string()
+    } else {
+        format!(
+            "interactive: OAuth or API key | headless: cached auth or API key only | found: {}",
+            hints.join(", ")
+        )
+    };
+
+    if !hints.is_empty() {
+        return Check::ok(
+            "provider_qwen_auth",
+            CheckGroup::ProviderRuntime,
+            "qwen auth hints",
+            detail,
+        )
+        .with_expected_actual("cached auth or API-key hint visible", hints.join(", "))
+        .with_next_steps(vec![
+            "qwen auth status".to_string(),
+            "Open a Qwen CLI session and run /stats".to_string(),
+        ]);
+    }
+
+    let guidance = "API key 경로는 project .qwen/.env 우선, 그다음 .env를 확인하세요. Qwen CLI는 env-file을 merge하지 않습니다. 사용량/제한은 숫자를 doctor에 고정하지 말고 Qwen CLI 세션의 /stats 또는 공식 문서를 확인하세요.";
+    if configured {
+        Check::warn(
+            "provider_qwen_auth",
+            CheckGroup::ProviderRuntime,
+            "qwen auth hints",
+            detail,
+            guidance,
+        )
+        .with_expected_actual(
+            "cached auth or API-key hint visible",
+            "no oauth cache or env hints found",
+        )
+        .with_next_steps(vec![
+            "qwen auth status".to_string(),
+            "ls -la ./.qwen".to_string(),
+        ])
+    } else {
+        Check::ok(
+            "provider_qwen_auth",
+            CheckGroup::ProviderRuntime,
+            "qwen auth hints",
+            format!("{detail} (provider not configured)"),
+        )
+        .with_expected_actual(
+            "auth hint required only if qwen is used",
+            "qwen not configured",
+        )
+    }
+}
+
+fn check_qwen_runtime_artifacts(configured: bool) -> Check {
+    let home = qwen_home_dir();
+    let project = qwen_project_dir();
+
+    let home_artifacts = [
+        (
+            "extensions",
+            home.as_ref()
+                .map(|path| path.join(".qwen").join("extensions")),
+            false,
+        ),
+        (
+            "commands",
+            home.as_ref()
+                .map(|path| path.join(".qwen").join("commands")),
+            false,
+        ),
+        (
+            "agents",
+            home.as_ref().map(|path| path.join(".qwen").join("agents")),
+            false,
+        ),
+        (
+            "skills",
+            home.as_ref().map(|path| path.join(".qwen").join("skills")),
+            false,
+        ),
+        (
+            "output-language.md",
+            home.as_ref()
+                .map(|path| path.join(".qwen").join("output-language.md")),
+            true,
+        ),
+    ];
+    let project_artifacts = [
+        (
+            "commands",
+            project
+                .as_ref()
+                .map(|path| path.join(".qwen").join("commands")),
+            false,
+        ),
+        (
+            "agents",
+            project
+                .as_ref()
+                .map(|path| path.join(".qwen").join("agents")),
+            false,
+        ),
+        (
+            "skills",
+            project
+                .as_ref()
+                .map(|path| path.join(".qwen").join("skills")),
+            false,
+        ),
+        (
+            "PROJECT_SUMMARY.md",
+            project
+                .as_ref()
+                .map(|path| path.join(".qwen").join("PROJECT_SUMMARY.md")),
+            true,
+        ),
+        (
+            "settings.json",
+            project
+                .as_ref()
+                .map(|path| path.join(".qwen").join("settings.json")),
+            true,
+        ),
+        (
+            ".qwen/.env",
+            project.as_ref().map(|path| path.join(".qwen").join(".env")),
+            true,
+        ),
+        (".env", project.as_ref().map(|path| path.join(".env")), true),
+    ];
+
+    let found_home: Vec<&str> = home_artifacts
+        .iter()
+        .filter_map(|(label, path, is_file)| {
+            path.as_ref().and_then(|path| {
+                let exists = if *is_file {
+                    path.is_file()
+                } else {
+                    path.is_dir()
+                };
+                exists.then_some(*label)
+            })
+        })
+        .collect();
+    let found_project: Vec<&str> = project_artifacts
+        .iter()
+        .filter_map(|(label, path, is_file)| {
+            path.as_ref().and_then(|path| {
+                let exists = if *is_file {
+                    path.is_file()
+                } else {
+                    path.is_dir()
+                };
+                exists.then_some(*label)
+            })
+        })
+        .collect();
+
+    let detail = format!(
+        "{} | {}",
+        format_artifact_scope("home", &found_home),
+        format_artifact_scope("project", &found_project)
+    );
+
+    if !found_home.is_empty() || !found_project.is_empty() {
+        return Check::ok(
+            "provider_qwen_runtime",
+            CheckGroup::ProviderRuntime,
+            "qwen runtime artifacts",
+            detail,
+        )
+        .with_expected_actual(
+            "Qwen runtime artifacts visible when configured",
+            format!("home={} project={}", found_home.len(), found_project.len()),
+        );
+    }
+
+    let guidance = "Qwen은 ~/.qwen/extensions, ~/.qwen/skills, <workspace>/.qwen/PROJECT_SUMMARY.md, <workspace>/.qwen/.env 같은 로컬 자산을 그대로 사용합니다. headless 환경에서는 project .qwen/.env 우선 여부를 함께 확인하세요.";
+    if configured {
+        Check::warn(
+            "provider_qwen_runtime",
+            CheckGroup::ProviderRuntime,
+            "qwen runtime artifacts",
+            detail,
+            guidance,
+        )
+        .with_expected_actual(
+            "at least one Qwen runtime artifact when heavily customized",
+            "no Qwen runtime artifacts detected",
+        )
+        .with_next_steps(vec![
+            "ls -la ~/.qwen".to_string(),
+            "ls -la ./.qwen".to_string(),
+        ])
+    } else {
+        Check::ok(
+            "provider_qwen_runtime",
+            CheckGroup::ProviderRuntime,
+            "qwen runtime artifacts",
+            format!("{detail} (provider not configured)"),
+        )
+        .with_expected_actual(
+            "runtime artifacts required only if qwen is used",
+            "qwen not configured",
+        )
+    }
+}
+
 fn health_endpoint(base: &str) -> String {
     format!("{}/api/health", base.trim_end_matches('/'))
 }
@@ -331,6 +681,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
 
 fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Check> {
     let configured = configured_provider_names(cfg, snapshot);
+    let qwen_configured = configured.contains("qwen");
     vec![
         check_runtime_path(),
         check_provider_cli(
@@ -344,7 +695,10 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
             configured.contains("gemini"),
             snapshot,
         ),
-        check_provider_cli(ProviderKind::Qwen, configured.contains("qwen"), snapshot),
+        check_provider_cli(ProviderKind::Qwen, qwen_configured, snapshot),
+        check_qwen_settings_files(qwen_configured),
+        check_qwen_auth_hints(qwen_configured),
+        check_qwen_runtime_artifacts(qwen_configured),
     ]
 }
 
@@ -1433,19 +1787,54 @@ pub fn cmd_doctor(fix: bool, json: bool) -> Result<(), String> {
 mod tests {
     use super::{
         Check, CheckGroup, CheckStatus, FixAction, HealthSnapshot, build_json_report,
-        check_provider_cli, check_server_running, configured_provider_names,
+        check_provider_cli, check_qwen_auth_hints, check_qwen_runtime_artifacts,
+        check_qwen_settings_files, check_server_running, configured_provider_names,
         discord_bot_check_from_health, provider_capability_summary,
     };
     use crate::config::ServerConfig;
     use crate::services::provider::ProviderKind;
     use serde_json::json;
     use std::path::Path;
-    use std::sync::MutexGuard;
 
-    fn env_guard() -> MutexGuard<'static, ()> {
-        crate::services::discord::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+    fn with_temp_qwen_doctor_env<F>(f: F)
+    where
+        F: FnOnce(&tempfile::TempDir, &tempfile::TempDir),
+    {
+        let _guard = crate::services::discord::runtime_store::lock_test_env();
+        let temp_home = tempfile::tempdir().unwrap();
+        let temp_project = tempfile::tempdir().unwrap();
+        let prev_qwen_home = std::env::var_os("QWEN_HOME");
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_test_home = std::env::var_os("AGENTDESK_TEST_HOME");
+        let prev_cwd = std::env::current_dir().unwrap();
+
+        unsafe {
+            std::env::set_var("HOME", temp_home.path());
+            std::env::set_var("USERPROFILE", temp_home.path());
+            std::env::set_var("AGENTDESK_TEST_HOME", temp_home.path());
+        }
+        std::env::set_current_dir(temp_project.path()).unwrap();
+
+        f(&temp_home, &temp_project);
+
+        std::env::set_current_dir(prev_cwd).unwrap();
+        match prev_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match prev_qwen_home {
+            Some(value) => unsafe { std::env::set_var("QWEN_HOME", value) },
+            None => unsafe { std::env::remove_var("QWEN_HOME") },
+        }
+        match prev_userprofile {
+            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
+        }
+        match prev_test_home {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_TEST_HOME", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_TEST_HOME") },
+        }
     }
 
     #[cfg(unix)]
@@ -1552,7 +1941,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn provider_runtime_check_uses_resolver_exec_path_under_minimal_path() {
-        let _guard = env_guard();
+        let _guard = crate::services::discord::runtime_store::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let helper = temp.path().join("provider-helper");
         let provider = temp.path().join("codex");
@@ -1598,7 +1987,7 @@ mod tests {
     fn provider_runtime_check_reports_permission_denied() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = env_guard();
+        let _guard = crate::services::discord::runtime_store::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let provider = temp.path().join("codex");
         let original_path = std::env::var_os("PATH");
@@ -1632,6 +2021,75 @@ mod tests {
                 None => std::env::remove_var("PATH"),
             }
         }
+    }
+
+    #[test]
+    fn qwen_doctor_detects_home_extensions_not_project_extensions() {
+        with_temp_qwen_doctor_env(|temp_home, temp_project| {
+            let home_qwen = temp_home.path().join(".qwen");
+            let project_qwen = temp_project.path().join(".qwen");
+            std::fs::create_dir_all(home_qwen.join("extensions")).unwrap();
+            std::fs::create_dir_all(&project_qwen).unwrap();
+
+            let check = check_qwen_runtime_artifacts(true);
+            assert_eq!(check.status, CheckStatus::Pass);
+            assert!(check.detail.contains("home: extensions"));
+            assert!(check.detail.contains("project: -"));
+        });
+    }
+
+    #[test]
+    fn qwen_doctor_surfaces_project_summary_and_output_language() {
+        with_temp_qwen_doctor_env(|temp_home, temp_project| {
+            let home_qwen = temp_home.path().join(".qwen");
+            let project_qwen = temp_project.path().join(".qwen");
+            std::fs::create_dir_all(&home_qwen).unwrap();
+            std::fs::create_dir_all(&project_qwen).unwrap();
+            std::fs::write(home_qwen.join("output-language.md"), "Korean").unwrap();
+            std::fs::write(project_qwen.join("PROJECT_SUMMARY.md"), "Summary").unwrap();
+
+            let check = check_qwen_runtime_artifacts(true);
+            assert_eq!(check.status, CheckStatus::Pass);
+            assert!(check.detail.contains("output-language.md"));
+            assert!(check.detail.contains("PROJECT_SUMMARY.md"));
+        });
+    }
+
+    #[test]
+    fn qwen_doctor_auth_hint_prefers_project_dot_qwen_env_before_dot_env() {
+        with_temp_qwen_doctor_env(|_temp_home, temp_project| {
+            let project_qwen = temp_project.path().join(".qwen");
+            std::fs::create_dir_all(&project_qwen).unwrap();
+            std::fs::write(project_qwen.join(".env"), "DASHSCOPE_API_KEY=one").unwrap();
+            std::fs::write(temp_project.path().join(".env"), "OPENAI_API_KEY=two").unwrap();
+
+            let check = check_qwen_auth_hints(true);
+            assert_eq!(check.status, CheckStatus::Pass);
+            assert!(check.detail.contains("project .qwen/.env"));
+            assert!(check.detail.contains("project .env"));
+        });
+    }
+
+    #[test]
+    fn qwen_doctor_prefers_qwen_home_over_home() {
+        with_temp_qwen_doctor_env(|temp_home, _temp_project| {
+            let qwen_home = tempfile::tempdir().unwrap();
+            let qwen_settings = qwen_home.path().join(".qwen").join("settings.json");
+            std::fs::create_dir_all(qwen_settings.parent().unwrap()).unwrap();
+            std::fs::write(&qwen_settings, "{}").unwrap();
+
+            unsafe {
+                std::env::set_var("QWEN_HOME", qwen_home.path());
+                std::env::set_var("HOME", temp_home.path());
+            }
+
+            let check = check_qwen_settings_files(true);
+            assert_eq!(check.status, CheckStatus::Pass);
+            assert_eq!(
+                check.path.as_deref(),
+                Some(format!("user settings={}", qwen_settings.display()).as_str())
+            );
+        });
     }
 
     #[test]

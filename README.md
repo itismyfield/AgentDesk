@@ -157,20 +157,37 @@ kanban:
   timeout_requested_minutes: 45
   timeout_in_progress_minutes: 100
   max_review_rounds: 3
-  max_chain_depth: 5
 ```
 
 ### Runtime Configuration
 
-Additional settings are stored in the database (`kv_meta` table) and configurable via the dashboard Settings page or API:
+Additional settings are stored in the database (`kv_meta` table) and exposed through four distinct surfaces:
+
+| Surface | Storage | API | Notes |
+|---------|---------|-----|-------|
+| Company settings | `kv_meta['settings']` JSON | `GET/PUT /api/settings` | Full-replace payload; callers should send a merged object. Retired legacy keys are stripped server-side. |
+| Runtime config | `kv_meta['runtime-config']` JSON | `GET/PUT /api/settings/runtime-config` | Live numeric tuning applied without restart. |
+| Policy/config keys | Individual `kv_meta` rows | `GET/PATCH /api/settings/config` | Whitelisted review, timeout, context, Discord, and merge-automation keys. |
+| Onboarding/secrets | Dedicated onboarding keys and flows | `/api/onboarding/*` | Tokens and setup secrets stay outside the general settings form. |
+
+The dashboard Settings page only edits the surfaces that truthfully map to those APIs.
+
+### Whitelisted policy/config keys
+
+Key individual `kv_meta` entries exposed via `/api/settings/config`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `auto_queue_enabled` | `true` | Enable automatic card queuing |
 | `review_enabled` | `true` | Enable counter-model review |
-| `review_max_rounds` | `3` | Maximum review rounds before escalation |
-| `timeout_requested_minutes` | `45` | Timeout for cards in requested state |
-| `timeout_in_progress_minutes` | `100` | Timeout for cards in progress |
+| `counter_model_review_enabled` | `false` | Enable cross-model review |
+| `max_review_rounds` | `3` | Maximum review rounds before escalation |
+| `pm_decision_gate_enabled` | `false` | Require PM decision gate before next transition |
+| `merge_automation_enabled` | `false` | Enable automated PR merge flow |
+| `merge_strategy` | `squash` | Auto-merge strategy (`squash`, `merge`, `rebase`) |
+| `merge_allowed_authors` | — | Comma-separated authors allowed for auto-merge |
+| `requested_timeout_min` | `45` | Timeout for cards in requested state |
+| `in_progress_stale_min` | `120` | Timeout for stale in-progress cards |
+| `context_compact_percent` | `60` | Global context compaction threshold |
 | `kanban_manager_channel_id` | — | Discord channel for PM notifications |
 
 ### Environment Variables
@@ -296,7 +313,7 @@ AgentDesk exposes 50+ REST API endpoints. Key groups:
 | `/api/auto-queue` | Generate, activate, reorder | Automatic work queuing |
 | `/api/round-table-meetings` | Start, transcript, issues | Multi-agent meetings |
 | `/api/offices` | CRUD + agent assignment | Virtual office management |
-| `/api/settings` | Config, runtime config | Platform configuration |
+| `/api/settings` | Company settings + config/runtime subroutes | Platform configuration surfaces |
 | `/api/health` | Health check | Service status |
 | `/api/onboarding` | Status, validate, complete | Setup wizard backend |
 

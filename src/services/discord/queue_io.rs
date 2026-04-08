@@ -1,12 +1,15 @@
 use super::*;
 
-pub(super) fn prune_interventions(queue: &mut Vec<Intervention>) {
-    let now = Instant::now();
+fn prune_interventions_at(queue: &mut Vec<Intervention>, now: Instant) {
     queue.retain(|i| now.duration_since(i.created_at) <= INTERVENTION_TTL);
     if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
         let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
         queue.drain(0..overflow);
     }
+}
+
+pub(super) fn prune_interventions(queue: &mut Vec<Intervention>) {
+    prune_interventions_at(queue, Instant::now());
 }
 
 pub(super) fn enqueue_intervention(
@@ -15,13 +18,12 @@ pub(super) fn enqueue_intervention(
 ) -> bool {
     prune_interventions(queue);
 
-    if let Some(last) = queue.last() {
-        if last.author_id == intervention.author_id
-            && last.text == intervention.text
-            && intervention.created_at.duration_since(last.created_at) <= INTERVENTION_DEDUP_WINDOW
-        {
-            return false;
-        }
+    if let Some(last) = queue.last()
+        && last.author_id == intervention.author_id
+        && last.text == intervention.text
+        && intervention.created_at.duration_since(last.created_at) <= INTERVENTION_DEDUP_WINDOW
+    {
+        return false;
     }
 
     queue.push(intervention);
@@ -36,9 +38,17 @@ pub(super) fn channel_has_pending_soft_queue(
     intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
     channel_id: ChannelId,
 ) -> bool {
+    channel_has_pending_soft_queue_at(intervention_queue, channel_id, Instant::now())
+}
+
+pub(super) fn channel_has_pending_soft_queue_at(
+    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
+    channel_id: ChannelId,
+    now: Instant,
+) -> bool {
     let mut remove_queue = false;
     let has_pending = if let Some(queue) = intervention_queue.get_mut(&channel_id) {
-        let has_pending = has_soft_intervention(queue);
+        let has_pending = has_soft_intervention_at(queue, now);
         remove_queue = queue.is_empty();
         has_pending
     } else {
@@ -55,14 +65,32 @@ pub(super) fn watcher_should_kickoff_idle_queue(
     intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
     channel_id: ChannelId,
 ) -> bool {
+    watcher_should_kickoff_idle_queue_at(
+        has_active_turn,
+        intervention_queue,
+        channel_id,
+        Instant::now(),
+    )
+}
+
+pub(super) fn watcher_should_kickoff_idle_queue_at(
+    has_active_turn: bool,
+    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
+    channel_id: ChannelId,
+    now: Instant,
+) -> bool {
     if has_active_turn {
         return false;
     }
-    channel_has_pending_soft_queue(intervention_queue, channel_id)
+    channel_has_pending_soft_queue_at(intervention_queue, channel_id, now)
 }
 
 pub(super) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> bool {
-    prune_interventions(queue);
+    has_soft_intervention_at(queue, Instant::now())
+}
+
+fn has_soft_intervention_at(queue: &mut Vec<Intervention>, now: Instant) -> bool {
+    prune_interventions_at(queue, now);
     queue.iter().any(|item| item.mode == InterventionMode::Soft)
 }
 
@@ -515,18 +543,18 @@ pub(super) async fn kickoff_idle_queues(
             if data.cancel_tokens.contains_key(&channel_id) {
                 continue;
             }
-            if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
-                if let Some(intervention) = dequeue_next_soft_intervention(queue) {
-                    let has_more = has_soft_intervention(queue);
-                    // Write-through: update disk after dequeue
-                    if queue.is_empty() {
-                        save_channel_queue(provider, channel_id, &[]);
-                        data.intervention_queue.remove(&channel_id);
-                    } else {
-                        save_channel_queue(provider, channel_id, queue);
-                    }
-                    result.push((channel_id, intervention, has_more));
+            if let Some(queue) = data.intervention_queue.get_mut(&channel_id)
+                && let Some(intervention) = dequeue_next_soft_intervention(queue)
+            {
+                let has_more = has_soft_intervention(queue);
+                // Write-through: update disk after dequeue
+                if queue.is_empty() {
+                    save_channel_queue(provider, channel_id, &[]);
+                    data.intervention_queue.remove(&channel_id);
+                } else {
+                    save_channel_queue(provider, channel_id, queue);
                 }
+                result.push((channel_id, intervention, has_more));
             }
         }
         result
@@ -595,6 +623,9 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
     channel_id: ChannelId,
     reason: &'static str,
 ) {
+    shared
+        .deferred_hook_backlog
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if let (Some(ctx), Some(tok)) = (
@@ -614,6 +645,9 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
                 channel_id
             );
         }
+        shared
+            .deferred_hook_backlog
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     });
 }
 

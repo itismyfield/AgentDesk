@@ -1,6 +1,7 @@
 import type {
   Agent,
   AuditLogEntry,
+  CompanySettings,
   Department,
   KanbanCard,
   KanbanRepoSource,
@@ -31,14 +32,13 @@ export function onApiError(listener: ApiErrorListener | null): void {
 }
 
 function isRetryable(status: number): boolean {
-  return status === 0 || status === 408 || status === 429 || status >= 500;
+  return status === 408 || status === 429 || status >= 500;
 }
 
 async function request<T>(url: string, opts?: RequestInit): Promise<T> {
   const method = opts?.method?.toUpperCase() ?? "GET";
   const isGet = method === "GET";
 
-  // Deduplicate identical concurrent GET requests
   if (isGet) {
     const existing = inflightGets.get(url);
     if (existing) return existing as Promise<T>;
@@ -49,7 +49,7 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
         const delay = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
-        await new Promise((r) => setTimeout(r, delay));
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -74,21 +74,21 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
           throw error;
         }
         return await res.json();
-      } catch (e) {
+      } catch (error) {
         clearTimeout(timer);
-        const error = e instanceof Error ? e : new Error(String(e));
-        if (error.name === "AbortError") {
+        const resolvedError = error instanceof Error ? error : new Error(String(error));
+        if (resolvedError.name === "AbortError") {
           lastError = new Error(`Request timeout: ${url}`);
           if (isGet && attempt < MAX_RETRIES) continue;
         } else if (
           isGet &&
           attempt < MAX_RETRIES &&
-          !error.message.startsWith("HTTP ")
+          !resolvedError.message.startsWith("HTTP ")
         ) {
-          lastError = error;
+          lastError = resolvedError;
           continue;
         }
-        throw lastError ?? error;
+        throw lastError ?? resolvedError;
       }
     }
     throw lastError ?? new Error(`Request failed: ${url}`);
@@ -100,10 +100,10 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
 
   if (isGet) inflightGets.set(url, promise);
 
-  return promise.catch((e) => {
-    const error = e instanceof Error ? e : new Error(String(e));
-    apiErrorListener?.(url, error);
-    throw error;
+  return promise.catch((error) => {
+    const resolvedError = error instanceof Error ? error : new Error(String(error));
+    apiErrorListener?.(url, resolvedError);
+    throw resolvedError;
   });
 }
 
@@ -294,14 +294,14 @@ export async function deleteDepartment(id: string): Promise<void> {
 
 // ── Settings ──
 
-export async function getSettings(): Promise<Record<string, unknown>> {
+export async function getSettings(): Promise<Partial<CompanySettings>> {
   return request("/api/settings");
 }
 
 export async function saveSettings(
-  settings: Record<string, unknown>,
-): Promise<void> {
-  await request("/api/settings", {
+  settings: Partial<CompanySettings>,
+): Promise<{ ok: boolean }> {
+  return request("/api/settings", {
     method: "PUT",
     body: JSON.stringify(settings),
   });
@@ -320,7 +320,7 @@ export async function getRuntimeConfig(): Promise<RuntimeConfigResponse> {
 
 export async function saveRuntimeConfig(
   patch: Record<string, number>,
-): Promise<{ ok: boolean; config: Record<string, number> }> {
+): Promise<{ ok: boolean }> {
   return request("/api/settings/runtime-config", {
     method: "PUT",
     body: JSON.stringify(patch),
@@ -1128,7 +1128,7 @@ export interface AutoQueueRun {
   id: string;
   repo: string | null;
   agent_id: string | null;
-  status: "pending" | "generated" | "active" | "paused" | "completed";
+  status: "generated" | "pending" | "active" | "paused" | "completed";
   ai_model: string | null;
   ai_rationale: string | null;
   timeout_minutes: number;
@@ -1275,16 +1275,22 @@ export async function reorderAutoQueueEntries(
   });
 }
 
-export async function resetAutoQueue(agentId?: string | null): Promise<{
-  ok: boolean;
-  deleted_entries: number;
-  completed_runs: number;
-  protected_active_runs?: number;
-  warning?: string;
-}> {
+export interface AutoQueueResetScope {
+  runId?: string | null;
+  repo?: string | null;
+  agentId?: string | null;
+}
+
+export async function resetAutoQueue(
+  scope: AutoQueueResetScope = {},
+): Promise<{ ok: boolean; deleted_entries: number; completed_runs: number }> {
   return request("/api/auto-queue/reset", {
     method: "POST",
-    body: JSON.stringify({ agent_id: agentId ?? undefined }),
+    body: JSON.stringify({
+      run_id: scope.runId ?? undefined,
+      repo: scope.repo ?? undefined,
+      agent_id: scope.agentId ?? undefined,
+    }),
   });
 }
 

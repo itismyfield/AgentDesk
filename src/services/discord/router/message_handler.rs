@@ -4,9 +4,11 @@ use crate::services::memory::{
     resolve_memory_session_id,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
-#[cfg(unix)]
-use crate::services::tmux_common::tmux_exact_target;
 use std::sync::Arc;
+
+const DISCORD_FORMATTING_REMINDER: &str = "<system-reminder>\n\
+     Discord formatting: minimize code blocks, keep messages concise.\n\
+     </system-reminder>";
 
 #[derive(Debug, PartialEq, Eq)]
 struct MemoryInjectionPlan<'a> {
@@ -498,7 +500,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
-    reset_provider_session_if_pending(shared, channel_id, &provider).await;
+    super::super::commands::reset_provider_session_if_pending(
+        &ctx.http, shared, &provider, channel_id,
+    )
+    .await;
     let prompt_prep_started = std::time::Instant::now();
 
     // Resolve channel/tmux session name from current session state. We need the
@@ -538,6 +543,65 @@ pub(in crate::services::discord) async fn handle_text_message(
             session_id = restored;
         }
     }
+
+    // Create cancel token — with second check to close the TOCTOU race window.
+    // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
+    // because the async gap between check and insert allows interleaving.
+    // If another message won the race, queue ourselves and clean up.
+    let cancel_token = Arc::new(CancelToken::new());
+    {
+        let mut data = shared.core.lock().await;
+        if data.cancel_tokens.contains_key(&channel_id) {
+            // Race lost — another message already started a turn.
+            // Queue this message as an intervention instead.
+            let queue = data.intervention_queue.entry(channel_id).or_default();
+            super::super::enqueue_intervention(
+                queue,
+                super::super::Intervention {
+                    author_id: request_owner,
+                    message_id: user_msg_id,
+                    text: user_text.to_string(),
+                    mode: super::super::InterventionMode::Soft,
+                    created_at: std::time::Instant::now(),
+                },
+            );
+            // Write-through: persist this channel's queue to disk
+            if let Some(q) = data.intervention_queue.get(&channel_id) {
+                let bot_owner_provider = super::super::resolve_discord_bot_provider(token);
+                super::super::save_channel_queue(
+                    &bot_owner_provider,
+                    &shared.token_hash,
+                    channel_id,
+                    q,
+                    shared
+                        .dispatch_role_overrides
+                        .get(&channel_id)
+                        .map(|r| r.value().get()),
+                );
+            }
+            drop(data);
+            // Clean up: remove placeholder and reaction created before this check
+            let _ = channel_id
+                .delete_message(&ctx.http, placeholder_msg_id)
+                .await;
+            super::super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳')
+                .await;
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
+                channel_id
+            );
+            return Ok(());
+        }
+        shared
+            .global_active
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        data.cancel_tokens.insert(channel_id, cancel_token.clone());
+        data.active_request_owner.insert(channel_id, request_owner);
+    }
+    shared
+        .turn_start_times
+        .insert(channel_id, std::time::Instant::now());
 
     let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
     let memory_backend = build_memory_backend(&memory_settings);
@@ -676,10 +740,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
-    let memory_backend_label = match memory_settings.backend {
-        settings::MemoryBackendKind::Local => "local",
-        settings::MemoryBackendKind::Mem0 => "mem0",
-    };
+    let memory_backend_label = memory_settings.backend.as_str();
     let provider_label = match &provider {
         ProviderKind::Claude => "claude",
         ProviderKind::Codex => "codex",
@@ -702,65 +763,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         session_id.is_some(),
         prompt_prep_duration_ms
     );
-
-    // Create cancel token — with second check to close the TOCTOU race window.
-    // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
-    // because the async gap between check and insert allows interleaving.
-    // If another message won the race, queue ourselves and clean up.
-    let cancel_token = Arc::new(CancelToken::new());
-    {
-        let mut data = shared.core.lock().await;
-        if data.cancel_tokens.contains_key(&channel_id) {
-            // Race lost — another message already started a turn.
-            // Queue this message as an intervention instead.
-            let queue = data.intervention_queue.entry(channel_id).or_default();
-            super::super::enqueue_intervention(
-                queue,
-                super::super::Intervention {
-                    author_id: request_owner,
-                    message_id: user_msg_id,
-                    text: user_text.to_string(),
-                    mode: super::super::InterventionMode::Soft,
-                    created_at: std::time::Instant::now(),
-                },
-            );
-            // Write-through: persist this channel's queue to disk
-            if let Some(q) = data.intervention_queue.get(&channel_id) {
-                super::super::save_channel_queue(
-                    &provider,
-                    &shared.token_hash,
-                    channel_id,
-                    q,
-                    shared
-                        .dispatch_role_overrides
-                        .get(&channel_id)
-                        .map(|r| r.value().get()),
-                );
-            }
-            drop(data);
-            // Clean up: remove placeholder and reaction created before this check
-            let _ = channel_id
-                .delete_message(&ctx.http, placeholder_msg_id)
-                .await;
-            super::super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳')
-                .await;
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
-                channel_id
-            );
-            return Ok(());
-        }
-        shared
-            .global_active
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        data.cancel_tokens.insert(channel_id, cancel_token.clone());
-        data.active_request_owner.insert(channel_id, request_owner);
-    }
-    shared
-        .turn_start_times
-        .insert(channel_id, std::time::Instant::now());
-
     // Spawn turn watchdog — cancels the turn if it exceeds the deadline.
     // The deadline is stored in cancel_token.watchdog_deadline_ms and can be
     // extended via POST /api/turns/{channel_id}/extend-timeout (up to 3h cap).
@@ -2406,48 +2408,20 @@ Any other message is sent to {p}.
     Ok(false)
 }
 
-/// Private helper: reset provider session if a model change is pending.
-async fn reset_provider_session_if_pending(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) {
-    if shared
-        .model_session_reset_pending
-        .remove(&channel_id)
-        .is_none()
-    {
-        return;
-    }
-
-    let channel_name = {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.session_id = None;
-            session.channel_name.clone()
-        } else {
-            None
-        }
-    };
-
-    if provider.uses_managed_tmux_backend() {
-        if let Some(name) = channel_name.as_deref() {
-            crate::services::claude::terminate_local_session(
-                &provider.build_tmux_session_name(name),
-            );
-        }
-    }
-
-    if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
-        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::super::DiscordSession;
     use super::*;
     use crate::services::memory::RecallResponse;
+
+    fn sample_recall() -> RecallResponse {
+        RecallResponse {
+            shared_knowledge: Some("[Shared Knowledge]".to_string()),
+            longterm_catalog: Some("- notes.md".to_string()),
+            external_recall: Some("[External Recall]".to_string()),
+            warnings: Vec::new(),
+        }
+    }
 
     fn make_session(
         current_path: Option<String>,
@@ -2466,15 +2440,6 @@ mod tests {
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: 0,
-        }
-    }
-
-    fn sample_recall() -> RecallResponse {
-        RecallResponse {
-            shared_knowledge: Some("[Shared Knowledge]".to_string()),
-            longterm_catalog: Some("- notes.md".to_string()),
-            external_recall: Some("[External Recall]".to_string()),
-            warnings: Vec::new(),
         }
     }
 

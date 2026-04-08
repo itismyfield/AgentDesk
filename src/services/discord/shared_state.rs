@@ -155,10 +155,10 @@ pub(super) fn choose_restore_channel_name(
     thread_parent: Option<(ChannelId, Option<String>)>,
     channel_id: ChannelId,
 ) -> Option<String> {
-    if let Some(existing_name) = existing_channel_name {
-        if is_synthetic_thread_channel_name(existing_name, channel_id) {
-            return Some(existing_name.to_string());
-        }
+    if let Some(existing_name) = existing_channel_name
+        && is_synthetic_thread_channel_name(existing_name, channel_id)
+    {
+        return Some(existing_name.to_string());
     }
 
     if let Some((parent_id, parent_name)) = thread_parent {

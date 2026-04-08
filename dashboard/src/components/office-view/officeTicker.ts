@@ -1,5 +1,5 @@
 import type { MutableRefObject } from "react";
-import { Graphics, Text, TextStyle, type AnimatedSprite, type Container, type Sprite } from "pixi.js";
+import { Container, Graphics, Text, TextStyle, type AnimatedSprite, type Sprite } from "pixi.js";
 import type { MeetingPresence } from "../../types";
 import {
   type Delivery,
@@ -30,6 +30,7 @@ interface AgentAnimItem {
   deskG?: Graphics;
   bedG?: Graphics;
   blanketG?: Graphics;
+  blocked?: boolean;
 }
 
 interface SubCloneAnimItem {
@@ -56,6 +57,10 @@ interface OfficeTickerData {
   meetingPresence?: MeetingPresence[];
 }
 
+function hasTint(value: unknown): value is { tint: number } {
+  return typeof value === "object" && value !== null && Reflect.has(value, "tint") && typeof Reflect.get(value, "tint") === "number";
+}
+
 export interface OfficeTickerContext {
   tickRef: MutableRefObject<number>;
   keysRef: MutableRefObject<Record<string, boolean>>;
@@ -80,6 +85,10 @@ export interface OfficeTickerContext {
   officeWRef: MutableRefObject<number>;
   totalHRef: MutableRefObject<number>;
   dataRef: MutableRefObject<OfficeTickerData>;
+  eventBubbleQueueRef: MutableRefObject<Array<{ agentId: string; text: string; emoji: string; createdAt: number }>>;
+  eventBubblesRef: MutableRefObject<Array<{ container: Container; createdAt: number; duration: number; baseY: number }>>;
+  deliveryLayerRef: MutableRefObject<Container | null>;
+  agentPosRef: MutableRefObject<Map<string, { x: number; y: number }>>;
   followCeoInView: () => void;
 }
 
@@ -136,7 +145,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
     }
   }
 
-  for (const { sprite, status, baseX, baseY, particles, agentId, cliProvider, deskG, bedG, blanketG } of ctx
+  for (const { sprite, status, baseX, baseY, particles, agentId, cliProvider, deskG, bedG, blanketG, blocked } of ctx
     .animItemsRef.current) {
     if (agentId) {
       const meetingNow = Date.now();
@@ -192,7 +201,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
         sprite.position.set(headX + TARGET_CHAR_H - 6, bedCenterY);
         sprite.alpha = 0.85;
         const child0 = sprite.children[0];
-        if (child0 && "tint" in child0) (child0 as any).tint = 0xff6666;
+        if (hasTint(child0)) child0.tint = 0xff6666;
         if (deskG) deskG.visible = false;
 
         if (bedG) {
@@ -241,7 +250,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
         sprite.rotation = 0;
         sprite.alpha = 1;
         const child0 = sprite.children[0];
-        if (child0 && "tint" in child0) (child0 as any).tint = 0xff9999;
+        if (hasTint(child0)) child0.tint = 0xff9999;
         if (deskG) deskG.visible = true;
         if (bedG) bedG.visible = false;
         if (blanketG) blanketG.visible = false;
@@ -264,7 +273,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
         sprite.rotation = 0;
         sprite.alpha = 1;
         const child0 = sprite.children[0];
-        if (child0 && "tint" in child0) (child0 as any).tint = 0xffffff;
+        if (hasTint(child0)) child0.tint = 0xffffff;
         if (deskG) deskG.visible = true;
         if (bedG) bedG.visible = false;
         if (blanketG) blanketG.visible = false;
@@ -283,11 +292,19 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
           (drop as any)._life = 0;
           particles.addChild(drop);
         }
+      } else if (blocked) {
+        sprite.rotation = 0;
+        sprite.alpha = 0.45 + Math.sin(tick * 0.06) * 0.1;
+        const child0 = sprite.children[0];
+        if (hasTint(child0)) child0.tint = 0xffaaaa;
+        if (deskG) deskG.visible = true;
+        if (bedG) bedG.visible = false;
+        if (blanketG) blanketG.visible = false;
       } else {
         sprite.rotation = 0;
         sprite.alpha = isOfflineAgent ? 0.3 : 1;
         const child0 = sprite.children[0];
-        if (child0 && "tint" in child0) (child0 as any).tint = isOfflineAgent ? 0x888899 : 0xffffff;
+        if (hasTint(child0)) child0.tint = isOfflineAgent ? 0x888899 : 0xffffff;
         if (deskG) deskG.visible = true;
         if (bedG) bedG.visible = false;
         if (blanketG) blanketG.visible = false;
@@ -380,4 +397,60 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
     },
     tick,
   );
+
+  const layer = ctx.deliveryLayerRef.current;
+  if (layer) {
+    const queue = ctx.eventBubbleQueueRef.current;
+    while (queue.length > 0) {
+      const item = queue.shift()!;
+      if (Date.now() - item.createdAt > 5000) continue;
+      const pos = ctx.agentPosRef.current.get(item.agentId);
+      if (!pos) continue;
+      const bubble = new Container();
+      const label = `${item.emoji} ${item.text}`;
+      const bubbleText = new Text({
+        text: label,
+        style: new TextStyle({ fontSize: 7, fill: 0xffffff, fontFamily: "system-ui, sans-serif" }),
+      });
+      bubbleText.anchor.set(0.5, 0.5);
+      const bubbleWidth = bubbleText.width + 10;
+      const bubbleHeight = bubbleText.height + 6;
+      const bubbleBg = new Graphics();
+      bubbleBg.roundRect(-bubbleWidth / 2, -bubbleHeight / 2, bubbleWidth, bubbleHeight, 4).fill({ color: 0x1e293b, alpha: 0.92 });
+      bubbleBg.roundRect(-bubbleWidth / 2, -bubbleHeight / 2, bubbleWidth, bubbleHeight, 4).stroke({
+        width: 0.8,
+        color: 0x6366f1,
+        alpha: 0.5,
+      });
+      bubble.addChild(bubbleBg);
+      bubble.addChild(bubbleText);
+      bubble.position.set(pos.x, pos.y - TARGET_CHAR_H - 35);
+      layer.addChild(bubble);
+      ctx.eventBubblesRef.current.push({
+        container: bubble,
+        createdAt: item.createdAt,
+        duration: 3500,
+        baseY: pos.y - TARGET_CHAR_H - 35,
+      });
+    }
+
+    const now = Date.now();
+    const bubbles = ctx.eventBubblesRef.current;
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const bubble = bubbles[i];
+      if (bubble.container.destroyed || !bubble.container.parent) {
+        bubbles.splice(i, 1);
+        continue;
+      }
+      const age = now - bubble.createdAt;
+      if (age >= bubble.duration) {
+        bubble.container.destroy();
+        bubbles.splice(i, 1);
+        continue;
+      }
+      const progress = age / bubble.duration;
+      bubble.container.alpha = progress < 0.1 ? progress / 0.1 : Math.max(0, 1 - (progress - 0.1) * 1.1);
+      bubble.container.position.y = bubble.baseY - progress * 18;
+    }
+  }
 }

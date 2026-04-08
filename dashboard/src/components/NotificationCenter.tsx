@@ -21,21 +21,26 @@ export function useNotifications(maxItems = 50) {
   );
 
   const dismissNotification = useCallback((id: string) => {
-    setNotifications((prev) => prev.filter((n) => n.id !== id));
+    setNotifications((prev) => prev.filter((notification) => notification.id !== id));
   }, []);
 
   return { notifications, pushNotification, dismissNotification } as const;
 }
 
-// ── Toast overlay: auto-dismiss ephemeral notifications ──
-
 const TOAST_TTL_MS = 5000;
 
-const TYPE_COLORS: Record<Notification["type"], string> = {
+export const NOTIFICATION_TYPE_COLORS: Record<Notification["type"], string> = {
   info: "#60a5fa",
   success: "#34d399",
   warning: "#fbbf24",
   error: "#f87171",
+};
+
+const NOTIFICATION_TYPE_BACKGROUNDS: Record<Notification["type"], string> = {
+  info: "rgba(96,165,250,0.14)",
+  success: "rgba(52,211,153,0.14)",
+  warning: "rgba(251,191,36,0.14)",
+  error: "rgba(248,113,113,0.14)",
 };
 
 interface ToastOverlayProps {
@@ -44,40 +49,47 @@ interface ToastOverlayProps {
 }
 
 export function ToastOverlay({ notifications, onDismiss }: ToastOverlayProps) {
-  const recent = notifications.filter((n) => Date.now() - n.ts < TOAST_TTL_MS);
+  const recent = notifications.filter((notification) => Date.now() - notification.ts < TOAST_TTL_MS);
 
-  // Auto-dismiss timer
   useEffect(() => {
     if (recent.length === 0) return;
-    const timer = setInterval(() => {
+    const timer = window.setInterval(() => {
       const now = Date.now();
-      for (const n of recent) {
-        if (now - n.ts >= TOAST_TTL_MS) onDismiss(n.id);
+      for (const notification of recent) {
+        if (now - notification.ts >= TOAST_TTL_MS) {
+          onDismiss(notification.id);
+        }
       }
     }, 1000);
-    return () => clearInterval(timer);
+    return () => window.clearInterval(timer);
   }, [recent, onDismiss]);
 
   if (recent.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 max-w-sm">
-      {recent.slice(0, 5).map((n) => (
+    <div className="fixed right-3 z-[100] flex max-w-sm flex-col gap-2 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] sm:bottom-4 sm:right-4">
+      {recent.slice(0, 4).map((notification) => (
         <div
-          key={n.id}
-          className="flex items-start gap-2 rounded-lg px-3 py-2 shadow-lg text-sm animate-[toast-in_0.2s_ease-out]"
+          key={notification.id}
+          className="flex items-start gap-2 rounded-xl border px-3 py-2 text-sm shadow-lg backdrop-blur-sm"
           style={{
-            background: "var(--th-card-bg)",
-            border: `1px solid ${TYPE_COLORS[n.type]}40`,
-            color: "var(--th-text-primary)",
+            borderColor: `${NOTIFICATION_TYPE_COLORS[notification.type]}55`,
+            background: `linear-gradient(135deg, ${NOTIFICATION_TYPE_BACKGROUNDS[notification.type]}, color-mix(in srgb, var(--th-surface) 92%, transparent))`,
+            color: "var(--th-text)",
           }}
         >
           <span
-            className="mt-1 w-2 h-2 rounded-full shrink-0"
-            style={{ background: TYPE_COLORS[n.type] }}
+            className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
+            style={{ background: NOTIFICATION_TYPE_COLORS[notification.type] }}
           />
-          <span className="flex-1 min-w-0 break-words text-xs">{n.message}</span>
-          <button onClick={() => onDismiss(n.id)} className="shrink-0 w-11 h-11 flex items-center justify-center text-th-text-muted hover:text-th-text-primary" aria-label="Dismiss">
+          <div className="min-w-0 flex-1">
+            <p className="break-words text-xs leading-relaxed">{notification.message}</p>
+          </div>
+          <button
+            onClick={() => onDismiss(notification.id)}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--th-text-muted)] transition-colors hover:bg-black/5 hover:text-[var(--th-text)]"
+            aria-label="Dismiss notification"
+          >
             <X size={12} />
           </button>
         </div>

@@ -43,7 +43,7 @@ fn managed_session_reset_behavior(provider: &ProviderKind) -> ManagedSessionRese
 }
 
 async fn resolve_session_key_for_clear(
-    http: &serenity::Http,
+    http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
     provider: &ProviderKind,
@@ -54,7 +54,7 @@ async fn resolve_session_key_for_clear(
         return Some(key);
     }
 
-    let channel_name =
+    let live_channel_name =
         channel_id
             .to_channel(http)
             .await
@@ -62,17 +62,46 @@ async fn resolve_session_key_for_clear(
             .and_then(|channel| match channel {
                 serenity::Channel::Guild(guild_channel) => Some(guild_channel.name),
                 _ => None,
-            })?;
-    let hostname = crate::services::platform::hostname_short();
-    Some(format!(
-        "{}:{}",
-        hostname,
-        provider.build_tmux_session_name(&channel_name)
+            });
+    let channel_name = fallback_channel_name_for_clear(
+        live_channel_name.as_deref(),
+        super::super::resolve_thread_parent(http, channel_id).await,
+        channel_id,
+    )?;
+    Some(build_fallback_session_key_for_clear(
+        &shared.token_hash,
+        provider,
+        &channel_name,
     ))
 }
 
+fn fallback_channel_name_for_clear(
+    live_channel_name: Option<&str>,
+    thread_parent: Option<(serenity::ChannelId, Option<String>)>,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    if let Some((parent_id, parent_name)) = thread_parent {
+        let parent_name = parent_name.unwrap_or_else(|| parent_id.get().to_string());
+        return Some(super::super::synthetic_thread_channel_name(
+            &parent_name,
+            channel_id,
+        ));
+    }
+
+    live_channel_name.map(ToOwned::to_owned)
+}
+
+fn build_fallback_session_key_for_clear(
+    token_hash: &str,
+    provider: &ProviderKind,
+    channel_name: &str,
+) -> String {
+    let tmux_name = provider.build_tmux_session_name(channel_name);
+    super::super::adk_session::build_namespaced_session_key(token_hash, provider, &tmux_name)
+}
+
 pub(in crate::services::discord) async fn reset_provider_session_if_pending(
-    http: &serenity::Http,
+    http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
@@ -113,7 +142,7 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
 }
 
 pub(in crate::services::discord) async fn clear_channel_session_state(
-    http: &serenity::Http,
+    http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
@@ -147,6 +176,8 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         (cancel_token, tmux_name)
     };
 
+    shared.dispatch_role_overrides.remove(&channel_id);
+    super::super::save_channel_queue(provider, &shared.token_hash, channel_id, &[], None);
     shared.model_session_reset_pending.remove(&channel_id);
 
     if let Some(token) = cancel_token {
@@ -242,8 +273,9 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!("  [{ts}] ◀ [{user_name}] /clear");
 
+    let http = ctx.serenity_context().http.clone();
     clear_channel_session_state(
-        ctx.http(),
+        &http,
         &ctx.data().shared,
         &ctx.data().provider,
         ctx.channel_id(),
@@ -320,10 +352,12 @@ pub(in crate::services::discord) async fn cmd_down(
 #[cfg(test)]
 mod tests {
     use super::{
-        ManagedSessionClearBehavior, ManagedSessionResetBehavior, managed_session_clear_behavior,
-        managed_session_reset_behavior,
+        ManagedSessionClearBehavior, ManagedSessionResetBehavior,
+        build_fallback_session_key_for_clear, fallback_channel_name_for_clear,
+        managed_session_clear_behavior, managed_session_reset_behavior,
     };
     use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::ChannelId;
 
     #[test]
     fn managed_session_clear_behavior_matches_provider_transport() {
@@ -363,6 +397,47 @@ mod tests {
             managed_session_reset_behavior(&ProviderKind::Gemini),
             ManagedSessionResetBehavior::Noop
         );
+    }
+    #[test]
+    fn fallback_channel_name_for_clear_uses_synthetic_thread_name() {
+        let channel_id = ChannelId::new(12345);
+        let channel_name = fallback_channel_name_for_clear(
+            Some("thread-title"),
+            Some((ChannelId::new(777), Some("agentdesk-codex".to_string()))),
+            channel_id,
+        );
+
+        assert_eq!(channel_name.as_deref(), Some("agentdesk-codex-t12345"));
+    }
+
+    #[test]
+    fn fallback_channel_name_for_clear_uses_parent_id_when_name_missing() {
+        let channel_id = ChannelId::new(12345);
+        let channel_name =
+            fallback_channel_name_for_clear(None, Some((ChannelId::new(777), None)), channel_id);
+
+        assert_eq!(channel_name.as_deref(), Some("777-t12345"));
+    }
+
+    #[test]
+    fn fallback_channel_name_for_clear_uses_live_name_for_non_threads() {
+        let channel_id = ChannelId::new(12345);
+        let channel_name =
+            fallback_channel_name_for_clear(Some("agentdesk-qwen"), None, channel_id);
+
+        assert_eq!(channel_name.as_deref(), Some("agentdesk-qwen"));
+    }
+
+    #[test]
+    fn fallback_clear_key_uses_namespaced_session_key() {
+        let key = build_fallback_session_key_for_clear("tokenxyz", &ProviderKind::Codex, "adk-cdx");
+        let expected_tmux = ProviderKind::Codex.build_tmux_session_name("adk-cdx");
+        let expected = crate::services::discord::adk_session::build_namespaced_session_key(
+            "tokenxyz",
+            &ProviderKind::Codex,
+            &expected_tmux,
+        );
+        assert_eq!(key, expected);
     }
 }
 
