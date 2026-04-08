@@ -250,7 +250,7 @@ export default function OfficeManagerView({
 
   return (
     <div
-      className="p-4 sm:p-6 max-w-6xl mx-auto overflow-auto h-full space-y-4 pb-40 min-w-0"
+      className="mx-auto h-full max-w-6xl min-w-0 space-y-4 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">

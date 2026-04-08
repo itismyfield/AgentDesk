@@ -289,7 +289,7 @@ export default function SettingsView({
 
   return (
     <div
-      className="p-6 max-w-2xl mx-auto space-y-6 overflow-auto h-full pb-40"
+      className="mx-auto h-full max-w-2xl min-w-0 space-y-6 overflow-x-hidden overflow-y-auto p-6 pb-40"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <h2 className="text-xl font-bold" style={{ color: "var(--th-text)" }}>

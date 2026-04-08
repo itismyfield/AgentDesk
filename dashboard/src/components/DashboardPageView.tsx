@@ -213,7 +213,7 @@ export default function DashboardPageView({
 
   return (
     <div
-      className="p-4 sm:p-6 space-y-5 max-w-6xl mx-auto overflow-auto h-full pb-40"
+      className="mx-auto h-full max-w-6xl min-w-0 space-y-5 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <DashboardHeroHeader
@@ -701,8 +701,8 @@ function SkillRankingSnapshot({
         background: "linear-gradient(145deg, color-mix(in srgb, var(--th-surface) 92%, #f59e0b 8%), var(--th-surface))",
       }}
     >
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <h3 className="text-base font-semibold" style={{ color: "var(--th-text-heading)" }}>
             {t({ ko: "스킬 랭킹", en: "Skill Ranking", ja: "スキルランキング", zh: "技能排行" })}
           </h3>
@@ -710,7 +710,7 @@ function SkillRankingSnapshot({
             {t({ ko: "호출량 기준 상위 스킬과 에이전트", en: "Top skills and agents by call volume", ja: "呼び出し量ベースの上位スキルとエージェント", zh: "按调用量统计的热门技能与代理" })}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {(["7d", "30d", "all"] as const).map((windowId) => (
             <button
               key={windowId}
@@ -734,19 +734,19 @@ function SkillRankingSnapshot({
           {t({ ko: "아직 집계된 스킬 호출이 없습니다.", en: "No skill usage aggregated yet.", ja: "まだ集計されたスキル呼び出しがありません。", zh: "尚无技能调用统计。" })}
         </div>
       ) : (
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
-          <div>
+        <div className="mt-4 grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-2">
+          <div className="min-w-0">
             <div className="text-sm font-medium mb-2" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "전체 TOP 5", en: "Overall TOP 5", ja: "全体 TOP 5", zh: "全体 TOP 5" })}
             </div>
             <ol className="space-y-2">
               {skillRanking.overall.slice(0, 5).map((row, index) => (
-                <li key={`${row.skill_name}-${index}`} className="flex items-center justify-between gap-3 text-sm">
-                  <div className="min-w-0 flex-1" style={{ color: "var(--th-text)" }}>
-                    <span className="inline-block w-6" style={{ color: "var(--th-text-muted)" }}>
+                <li key={`${row.skill_name}-${index}`} className="flex items-start justify-between gap-3 text-sm">
+                  <div className="min-w-0 flex flex-1 items-start gap-2" style={{ color: "var(--th-text)" }}>
+                    <span className="inline-flex w-6 shrink-0" style={{ color: "var(--th-text-muted)" }}>
                       {index + 1}.
                     </span>
-                    <TooltipLabel text={row.skill_desc_ko} tooltip={row.skill_name} className="align-middle" />
+                    <TooltipLabel text={row.skill_desc_ko} tooltip={row.skill_name} className="flex-1" />
                   </div>
                   <span className="font-semibold shrink-0" style={{ color: "#f59e0b" }}>
                     {numberFormatter.format(row.calls)}
@@ -756,19 +756,26 @@ function SkillRankingSnapshot({
             </ol>
           </div>
 
-          <div>
+          <div className="min-w-0">
             <div className="text-sm font-medium mb-2" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "에이전트별 TOP 5", en: "Top by Agent", ja: "エージェント別 TOP 5", zh: "按代理 TOP 5" })}
             </div>
             <ul className="space-y-2">
               {skillRanking.byAgent.slice(0, 5).map((row, index) => (
-                <li key={`${row.agent_role_id}-${row.skill_name}-${index}`} className="flex items-center justify-between gap-3 text-sm">
-                  <div className="min-w-0 flex-1 truncate" style={{ color: "var(--th-text)" }}>
-                    <span className="inline-block w-6" style={{ color: "var(--th-text-muted)" }}>
+                <li key={`${row.agent_role_id}-${row.skill_name}-${index}`} className="flex items-start justify-between gap-3 text-sm">
+                  <div className="min-w-0 flex flex-1 items-start gap-2" style={{ color: "var(--th-text)" }}>
+                    <span className="inline-flex w-6 shrink-0" style={{ color: "var(--th-text-muted)" }}>
                       {index + 1}.
                     </span>
-                    <span className="truncate">{row.agent_name} · </span>
-                    <TooltipLabel text={row.skill_desc_ko} tooltip={row.skill_name} className="align-middle" />
+                    <div className="min-w-0 flex flex-1 items-center gap-1">
+                      <span className="truncate" title={row.agent_name}>
+                        {row.agent_name}
+                      </span>
+                      <span className="shrink-0" style={{ color: "var(--th-text-muted)" }}>
+                        ·
+                      </span>
+                      <TooltipLabel text={row.skill_desc_ko} tooltip={row.skill_name} className="flex-1" />
+                    </div>
                   </div>
                   <span className="font-semibold shrink-0" style={{ color: "#f59e0b" }}>
                     {numberFormatter.format(row.calls)}

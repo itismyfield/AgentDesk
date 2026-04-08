@@ -230,7 +230,7 @@ export default function ControlCenterView({
 
       <div className="min-h-0 flex-1 overflow-hidden">
         {controlTab === "agents" && (
-          <div className="h-full overflow-auto">
+          <div className="h-full overflow-x-hidden overflow-y-auto">
             <div className="mx-auto flex max-w-5xl flex-wrap gap-2 px-4 pt-4 sm:px-6">
               <button
                 onClick={() => onAgentsPaneChange("directory")}
