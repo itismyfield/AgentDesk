@@ -56,6 +56,12 @@ impl MemoryBackendConfig {
         self.file = self.file.with_defaults();
         self
     }
+
+    fn with_managed_layout_defaults(mut self) -> Self {
+        self.backend = normalize_memory_backend_name(Some(&self.backend));
+        self.file = self.file.with_managed_layout_defaults();
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +117,16 @@ impl FileMemoryBackendConfig {
         if self.ltm_root.trim().is_empty() {
             self.ltm_root = default_ltm_root();
         }
+        if self.auto_memory_root.trim().is_empty() {
+            self.auto_memory_root = default_auto_memory_root();
+        }
+        self
+    }
+
+    fn with_managed_layout_defaults(mut self) -> Self {
+        self.sak_path = default_sak_path();
+        self.sam_path = default_sam_path();
+        self.ltm_root = default_ltm_root();
         if self.auto_memory_root.trim().is_empty() {
             self.auto_memory_root = default_auto_memory_root();
         }
@@ -601,7 +617,12 @@ fn migrate_legacy_config_file(root: &Path) -> Result<(), String> {
 fn migrate_memory_backend_file(root: &Path) -> Result<(), String> {
     let legacy = root.join("memory-backend.json");
     let current = memory_backend_path(root);
-    let mut backend = load_memory_backend(root).with_defaults();
+    let mut backend = load_memory_backend(root);
+    backend = if backend.version < MEMORY_LAYOUT_VERSION {
+        backend.with_managed_layout_defaults()
+    } else {
+        backend.with_defaults()
+    };
     backend.version = MEMORY_LAYOUT_VERSION;
 
     if let Some(parent) = current.parent() {
@@ -1729,6 +1750,9 @@ mod tests {
         let backend = load_memory_backend(root);
         assert_eq!(backend.version, 2);
         assert_eq!(backend.backend, "auto");
+        assert_eq!(backend.file.sak_path, default_sak_path());
+        assert_eq!(backend.file.sam_path, default_sam_path());
+        assert_eq!(backend.file.ltm_root, default_ltm_root());
         assert_eq!(
             backend.file.auto_memory_root,
             "~/.claude/projects/*{workspace}*/memory/"
