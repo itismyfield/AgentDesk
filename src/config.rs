@@ -348,15 +348,13 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 mod tests {
     use super::{
         AgentDef, BotConfig, Config, load_from_path, resolve_graceful_config_path, runtime_root,
-        save_to_path, shared_test_env_lock,
+        save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
 
     fn env_lock() -> MutexGuard<'static, ()> {
-        shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::services::discord::runtime_store::lock_test_env()
     }
 
     #[test]

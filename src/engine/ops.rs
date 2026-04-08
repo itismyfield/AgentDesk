@@ -1723,6 +1723,13 @@ pub fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &str) ->
 // agentdesk.exec(command, args) → stdout string
 // Runs a local command synchronously. Limited to safe commands.
 
+fn exec_override_env_var(cmd: &str) -> String {
+    format!(
+        "AGENTDESK_{}_PATH",
+        cmd.replace('-', "_").to_ascii_uppercase()
+    )
+}
+
 fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
 
@@ -1736,7 +1743,13 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
             }
 
             let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
-            match std::process::Command::new(&cmd).args(&args).output() {
+            let command_path = std::env::var_os(exec_override_env_var(&cmd))
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| std::ffi::OsString::from(&cmd));
+            match std::process::Command::new(&command_path)
+                .args(&args)
+                .output()
+            {
                 Ok(output) if output.status.success() => {
                     String::from_utf8_lossy(&output.stdout).trim().to_string()
                 }

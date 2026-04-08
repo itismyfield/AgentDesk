@@ -122,6 +122,13 @@ pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
     crate::config::shared_test_env_lock()
 }
 
+#[cfg(test)]
+pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
 pub(super) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
@@ -138,7 +145,7 @@ mod tests {
     /// Acquire the shared env lock to avoid races between tests that mutate
     /// AGENTDESK_ROOT_DIR.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        test_env_lock().lock().unwrap_or_else(|e| e.into_inner())
+        lock_test_env()
     }
 
     #[test]

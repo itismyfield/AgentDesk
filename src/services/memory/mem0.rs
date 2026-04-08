@@ -517,9 +517,7 @@ mod tests {
         Option<std::ffi::OsString>,
         Option<std::ffi::OsString>,
     ) {
-        let guard = crate::services::discord::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = crate::services::discord::runtime_store::lock_test_env();
         let prev_api_key = std::env::var_os("MEM0_API_KEY");
         let prev_base_url = std::env::var_os("MEM0_BASE_URL");
         unsafe {
@@ -550,9 +548,7 @@ mod tests {
         Option<std::ffi::OsString>,
         Option<std::ffi::OsString>,
     ) {
-        let guard = crate::services::discord::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = crate::services::discord::runtime_store::lock_test_env();
         let prev_api_key = std::env::var_os("MEM0_API_KEY");
         let prev_base_url = std::env::var_os("MEM0_BASE_URL");
         unsafe {

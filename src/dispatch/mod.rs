@@ -1571,10 +1571,6 @@ mod tests {
     use std::process::Command;
     use std::sync::MutexGuard;
 
-    fn repo_dir_env_lock() -> &'static std::sync::Mutex<()> {
-        crate::config::shared_test_env_lock()
-    }
-
     struct RepoDirOverride {
         _lock: MutexGuard<'static, ()>,
         previous: Option<String>,
@@ -1582,7 +1578,7 @@ mod tests {
 
     impl RepoDirOverride {
         fn new(path: &str) -> Self {
-            let lock = repo_dir_env_lock().lock().unwrap();
+            let lock = crate::services::discord::runtime_store::lock_test_env();
             let previous = std::env::var("AGENTDESK_REPO_DIR").ok();
             unsafe { std::env::set_var("AGENTDESK_REPO_DIR", path) };
             Self {
@@ -2140,7 +2136,9 @@ mod tests {
         conn.execute(
             "UPDATE agents
              SET discord_channel_id = NULL,
-                 discord_channel_alt = NULL
+                 discord_channel_alt = NULL,
+                 discord_channel_cc = NULL,
+                 discord_channel_cdx = NULL
              WHERE id = 'agent-1'",
             [],
         )

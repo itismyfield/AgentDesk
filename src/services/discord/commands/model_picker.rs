@@ -25,7 +25,13 @@ async fn build_model_picker_view(
     let snapshot = effective_model_snapshot(shared, target_channel_id).await;
     let working_dir = current_working_dir(shared, target_channel_id).await;
     let pending_model = snapshot.override_model.as_deref();
-    let embed = build_model_picker_embed_from_snapshot(&snapshot, provider, pending_model, None);
+    let embed = build_model_picker_embed_from_snapshot(
+        &snapshot,
+        provider,
+        pending_model,
+        None,
+        working_dir.as_deref(),
+    );
     let components = build_model_picker_components_from_snapshot(
         &snapshot,
         target_channel_id,
