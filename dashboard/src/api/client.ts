@@ -1,6 +1,7 @@
 import type {
   Agent,
   AuditLogEntry,
+  CompanySettings,
   Department,
   KanbanCard,
   KanbanRepoSource,
@@ -282,14 +283,14 @@ export async function deleteDepartment(id: string): Promise<void> {
 
 // ── Settings ──
 
-export async function getSettings(): Promise<Record<string, unknown>> {
+export async function getSettings(): Promise<Partial<CompanySettings>> {
   return request("/api/settings");
 }
 
 export async function saveSettings(
-  settings: Record<string, unknown>,
-): Promise<void> {
-  await request("/api/settings", {
+  settings: Partial<CompanySettings>,
+): Promise<{ ok: boolean }> {
+  return request("/api/settings", {
     method: "PUT",
     body: JSON.stringify(settings),
   });
@@ -308,7 +309,7 @@ export async function getRuntimeConfig(): Promise<RuntimeConfigResponse> {
 
 export async function saveRuntimeConfig(
   patch: Record<string, number>,
-): Promise<{ ok: boolean; config: Record<string, number> }> {
+): Promise<{ ok: boolean }> {
   return request("/api/settings/runtime-config", {
     method: "PUT",
     body: JSON.stringify(patch),
@@ -1261,13 +1262,14 @@ export interface AutoQueueResetScope {
 export async function resetAutoQueue(
   scope: AutoQueueResetScope = {},
 ): Promise<{ ok: boolean; deleted_entries: number; completed_runs: number }> {
-  const params = new URLSearchParams();
-  if (scope.runId) params.set("run_id", scope.runId);
-  if (scope.repo) params.set("repo", scope.repo);
-  if (scope.agentId) params.set("agent_id", scope.agentId);
-  const query = params.toString();
-  const path = query ? `/api/auto-queue/reset?${query}` : "/api/auto-queue/reset";
-  return request(path, { method: "POST" });
+  return request("/api/auto-queue/reset", {
+    method: "POST",
+    body: JSON.stringify({
+      run_id: scope.runId ?? undefined,
+      repo: scope.repo ?? undefined,
+      agent_id: scope.agentId ?? undefined,
+    }),
+  });
 }
 
 // ── Pipeline Config Hierarchy (#135) ──
