@@ -75,6 +75,8 @@ print_recent_macos_binary_logs() {
 }
 
 write_wrapper_script() {
+  # Remove a legacy symlink first so writing the wrapper does not clobber REAL_BIN.
+  rm -f "$WRAPPER_BIN"
   cat > "$WRAPPER_BIN" <<EOF
 #!/bin/bash
 exec "$REAL_BIN" "\$@"
