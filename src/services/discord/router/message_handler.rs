@@ -2691,4 +2691,25 @@ mod tests {
         assert!(!should_skip_memento_recall(&memento, false));
         assert!(!should_skip_memento_recall(&file, true));
     }
+
+    #[test]
+    fn clear_resets_memento_skip_so_next_turn_can_reload_context() {
+        let memento = settings::ResolvedMemorySettings {
+            backend: settings::MemoryBackendKind::Memento,
+            ..settings::ResolvedMemorySettings::default()
+        };
+        let mut session = make_session(Some("/tmp/project".to_string()), None);
+
+        session.restore_provider_session(Some("session-1".to_string()));
+        assert!(should_skip_memento_recall(
+            &memento,
+            session.memento_context_loaded
+        ));
+
+        session.clear_provider_session();
+        assert!(!should_skip_memento_recall(
+            &memento,
+            session.memento_context_loaded
+        ));
+    }
 }

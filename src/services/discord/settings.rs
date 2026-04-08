@@ -1390,6 +1390,42 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_memory_settings_accepts_local_alias_and_ignores_available_mcps() {
+        crate::services::memory::reset_backend_health_for_tests();
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "auto",
+                    "mcp": {
+                        "endpoint": "http://127.0.0.1:8765",
+                        "access_key_env": "MEMENTO_TEST_KEY"
+                    }
+                }),
+            );
+
+            with_env_vars(
+                &[
+                    ("MEMENTO_TEST_KEY", Some("memento-key")),
+                    ("MEM0_API_KEY", Some("mem0-key")),
+                    ("MEM0_BASE_URL", Some("http://mem0.local")),
+                ],
+                || {
+                    let resolved = resolve_memory_settings(
+                        Some(&super::MemoryConfigOverride {
+                            backend: Some("local".to_string()),
+                            ..Default::default()
+                        }),
+                        None,
+                    );
+                    assert_eq!(resolved.backend, super::MemoryBackendKind::File);
+                },
+            );
+        });
+    }
+
+    #[test]
     fn test_resolve_memory_settings_explicit_backend_falls_back_to_file_when_unavailable() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
@@ -1429,6 +1465,56 @@ mod tests {
                         None,
                     );
                     assert_eq!(memento.backend, super::MemoryBackendKind::File);
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_unavailable_explicit_backend_uses_local_prompt_guidance() {
+        crate::services::memory::reset_backend_health_for_tests();
+        with_temp_home(|_temp_home: &TempDir| {
+            with_env_vars(
+                &[
+                    ("MEMENTO_TEST_KEY", None),
+                    ("MEMENTO_WORKSPACE", None),
+                    ("MEM0_API_KEY", None),
+                    ("MEM0_BASE_URL", None),
+                ],
+                || {
+                    let resolved = resolve_memory_settings(
+                        Some(&super::MemoryConfigOverride {
+                            backend: Some("memento".to_string()),
+                            ..Default::default()
+                        }),
+                        None,
+                    );
+                    assert_eq!(resolved.backend, super::MemoryBackendKind::File);
+
+                    let prompt = super::super::prompt_builder::build_system_prompt(
+                        "ctx",
+                        "/tmp",
+                        ChannelId::new(1),
+                        "tok",
+                        "",
+                        "",
+                        true,
+                        None,
+                        false,
+                        super::super::prompt_builder::DispatchProfile::Full,
+                        None,
+                        None,
+                        None,
+                        Some(&resolved),
+                    );
+
+                    assert!(prompt.contains("[Proactive Memory Guidance]"));
+                    assert!(prompt.contains("`memory-read` skill"));
+                    assert!(prompt.contains("`memory-write` skill"));
+                    assert!(!prompt.contains("`recall` MCP tool"));
+                    assert!(!prompt.contains("`remember` MCP tool"));
+                    assert!(!prompt.contains("`search_memory` MCP tool"));
+                    assert!(!prompt.contains("`add_memories` MCP tool"));
                 },
             );
         });
