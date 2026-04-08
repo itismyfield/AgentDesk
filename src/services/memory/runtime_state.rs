@@ -77,6 +77,8 @@ struct MemoryBackendRuntimeState {
 
 static MEMORY_BACKEND_STATE: LazyLock<RwLock<MemoryBackendRuntimeState>> =
     LazyLock::new(|| RwLock::new(MemoryBackendRuntimeState::default()));
+#[cfg(test)]
+static LAST_REFRESH_REASON: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
 
 #[derive(Clone, Debug)]
 struct Mem0RuntimeConfig {
@@ -354,6 +356,12 @@ pub(crate) async fn refresh_backend_health(reason: &str) -> MemoryBackendRuntime
         snapshot.mem0.summary("mem0"),
         snapshot.memento.summary("memento")
     );
+    #[cfg(test)]
+    {
+        *LAST_REFRESH_REASON
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason.to_string());
+    }
 
     snapshot
 }
@@ -362,6 +370,17 @@ pub(crate) async fn refresh_backend_health(reason: &str) -> MemoryBackendRuntime
 pub(crate) fn reset_for_tests() {
     let mut state = lock_write();
     *state = MemoryBackendRuntimeState::default();
+    *LAST_REFRESH_REASON
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+#[cfg(test)]
+pub(crate) fn last_refresh_reason_for_tests() -> Option<String> {
+    LAST_REFRESH_REASON
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 #[cfg(test)]

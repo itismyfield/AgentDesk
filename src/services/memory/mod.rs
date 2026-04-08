@@ -15,9 +15,11 @@ use crate::services::provider::ProviderKind;
 pub(crate) use local::LocalMemoryBackend;
 pub(crate) use mem0::Mem0Backend;
 pub(crate) use memento::MementoBackend;
-#[cfg(test)]
-pub(crate) use runtime_state::reset_for_tests as reset_backend_health_for_tests;
 pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};
+#[cfg(test)]
+pub(crate) use runtime_state::{
+    last_refresh_reason_for_tests, reset_for_tests as reset_backend_health_for_tests,
+};
 
 pub(crate) const UNBOUND_MEMORY_ROLE_ID: &str = "__unbound_role__";
 
@@ -118,6 +120,14 @@ pub(crate) trait MemoryBackend: Send + Sync {
 }
 
 pub(crate) fn build_memory_backend(
+    role_binding: Option<&RoleBinding>,
+) -> (ResolvedMemorySettings, Box<dyn MemoryBackend + Send + Sync>) {
+    let settings = crate::services::discord::settings::memory_settings_for_binding(role_binding);
+    let backend = build_resolved_memory_backend(&settings);
+    (settings, backend)
+}
+
+pub(crate) fn build_resolved_memory_backend(
     settings: &ResolvedMemorySettings,
 ) -> Box<dyn MemoryBackend + Send + Sync> {
     match settings.backend {
@@ -229,21 +239,45 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_build_memory_backend_file_mem0_and_memento() {
-        let file = build_memory_backend(&ResolvedMemorySettings::default());
+    fn test_build_resolved_memory_backend_file_mem0_and_memento() {
+        let file = build_resolved_memory_backend(&ResolvedMemorySettings::default());
         let _ = file;
 
-        let mem0 = build_memory_backend(&ResolvedMemorySettings {
+        let mem0 = build_resolved_memory_backend(&ResolvedMemorySettings {
             backend: MemoryBackendKind::Mem0,
             ..ResolvedMemorySettings::default()
         });
         let _ = mem0;
 
-        let memento = build_memory_backend(&ResolvedMemorySettings {
+        let memento = build_resolved_memory_backend(&ResolvedMemorySettings {
             backend: MemoryBackendKind::Memento,
             ..ResolvedMemorySettings::default()
         });
         let _ = memento;
+    }
+
+    #[test]
+    fn test_build_memory_backend_resolves_binding_memory_settings_before_building() {
+        let binding = RoleBinding {
+            role_id: "codex".to_string(),
+            prompt_file: "/tmp/codex.md".to_string(),
+            provider: Some(ProviderKind::Codex),
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: true,
+            memory: ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            },
+        };
+
+        let (resolved, backend) = build_memory_backend(Some(&binding));
+        let _ = backend;
+        assert_eq!(resolved.backend, MemoryBackendKind::Memento);
+
+        let (default_settings, default_backend) = build_memory_backend(None);
+        let _ = default_backend;
+        assert_eq!(default_settings.backend, MemoryBackendKind::File);
     }
 
     #[test]

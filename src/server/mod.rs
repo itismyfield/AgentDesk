@@ -13,13 +13,29 @@ use crate::db::Db;
 use crate::engine::PolicyEngine;
 use crate::services::discord::health::HealthRegistry;
 
+const MEMORY_HEALTH_STARTUP_REASON: &str = "startup";
+const MEMORY_HEALTH_FIVE_MIN_REASON: &str = "OnTick5min";
+const FIVE_MIN_POLICY_TICK_INTERVAL: u64 = 10;
+
+async fn refresh_memory_health_for_startup() {
+    crate::services::memory::refresh_backend_health(MEMORY_HEALTH_STARTUP_REASON).await;
+}
+
+async fn refresh_memory_health_for_five_min_tick() {
+    crate::services::memory::refresh_backend_health(MEMORY_HEALTH_FIVE_MIN_REASON).await;
+}
+
+fn is_five_min_policy_tick(count: u64) -> bool {
+    count != 0 && count % FIVE_MIN_POLICY_TICK_INTERVAL == 0
+}
+
 pub async fn run(
     config: Config,
     db: Db,
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Result<()> {
-    crate::services::memory::refresh_backend_health("startup").await;
+    refresh_memory_health_for_startup().await;
 
     // Startup: drain any deferred hooks persisted before last shutdown (#125)
     engine.drain_startup_hooks();
@@ -201,10 +217,10 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         }
 
         // ── 5min tier: every 10th tick (300s) ──
-        if count % 10 == 0 {
+        if is_five_min_policy_tick(count) {
             fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min");
             drain_transitions(&engine, &db);
-            crate::services::memory::refresh_backend_health("OnTick5min").await;
+            refresh_memory_health_for_five_min_tick().await;
             // Also fire legacy OnTick for backward compat
             fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy");
             drain_transitions(&engine, &db);
@@ -338,6 +354,39 @@ async fn rate_limit_sync_loop(db: Db) {
                 tracing::warn!("[rate-limit-sync] Codex rate_limit fetch failed: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn startup_memory_health_refresh_uses_startup_reason() {
+        crate::services::memory::reset_backend_health_for_tests();
+        refresh_memory_health_for_startup().await;
+        assert_eq!(
+            crate::services::memory::last_refresh_reason_for_tests().as_deref(),
+            Some(MEMORY_HEALTH_STARTUP_REASON)
+        );
+    }
+
+    #[test]
+    fn five_min_policy_tick_runs_on_every_tenth_iteration() {
+        assert!(!is_five_min_policy_tick(1));
+        assert!(!is_five_min_policy_tick(9));
+        assert!(is_five_min_policy_tick(10));
+        assert!(is_five_min_policy_tick(20));
+    }
+
+    #[tokio::test]
+    async fn five_min_memory_health_refresh_uses_tick_reason() {
+        crate::services::memory::reset_backend_health_for_tests();
+        refresh_memory_health_for_five_min_tick().await;
+        assert_eq!(
+            crate::services::memory::last_refresh_reason_for_tests().as_deref(),
+            Some(MEMORY_HEALTH_FIVE_MIN_REASON)
+        );
     }
 }
 
