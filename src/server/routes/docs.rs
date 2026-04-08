@@ -377,8 +377,30 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
         // Stats
         ep("GET", "/api/stats", "stats", "Get stats"),
         // Settings
-        ep("GET", "/api/settings", "settings", "Get settings"),
-        ep("PUT", "/api/settings", "settings", "Update settings"),
+        ep(
+            "GET",
+            "/api/settings",
+            "settings",
+            "Get company settings JSON from kv_meta['settings']",
+        ),
+        ep(
+            "PUT",
+            "/api/settings",
+            "settings",
+            "Replace company settings JSON in kv_meta['settings'] (server strips retired legacy keys)",
+        ),
+        ep(
+            "GET",
+            "/api/settings/config",
+            "settings",
+            "Get whitelisted individual kv_meta policy/config keys",
+        ),
+        ep(
+            "PATCH",
+            "/api/settings/config",
+            "settings",
+            "Patch whitelisted individual kv_meta policy/config keys",
+        ),
         ep(
             "GET",
             "/api/settings/runtime-config",

@@ -1072,12 +1072,6 @@ var timeouts = {
         paths.push(agentWorkspaces[aw].workspace);
       }
     }
-    // If no workspaces found from DB, check the server's own workspace
-    if (paths.length === 0) {
-      var serverWs = agentdesk.config.get("workspace");
-      if (serverWs) paths.push(serverWs);
-    }
-
     for (var p = 0; p < paths.length; p++) {
       var ws = paths[p];
       try {

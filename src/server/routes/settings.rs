@@ -3,6 +3,23 @@ use serde_json::json;
 
 use super::AppState;
 
+const RETIRED_SETTINGS_JSON_KEYS: &[&str] = &[
+    "autoUpdateEnabled",
+    "autoUpdateNoticePending",
+    "oauthAutoSwap",
+    "officeWorkflowPack",
+    "providerModelConfig",
+    "messengerChannels",
+    "officePackProfiles",
+    "officePackHydratedPacks",
+];
+
+const RETIRED_CONFIG_KEYS: &[&str] = &[
+    "max_chain_depth",
+    "context_clear_percent",
+    "context_clear_idle_minutes",
+];
+
 /// GET /api/settings
 pub async fn get_settings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let conn = match state.db.lock() {
@@ -28,7 +45,18 @@ pub async fn get_settings(State(state): State<AppState>) -> (StatusCode, Json<se
     (StatusCode::OK, Json(parsed))
 }
 
+fn prune_retired_settings_keys(mut body: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = body.as_object_mut() {
+        for key in RETIRED_SETTINGS_JSON_KEYS {
+            obj.remove(*key);
+        }
+    }
+    body
+}
+
 /// PUT /api/settings
+/// Replaces the stored `kv_meta['settings']` JSON object; callers must send a merged payload
+/// if they want to preserve hidden keys. Retired legacy settings keys are stripped server-side.
 pub async fn put_settings(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -43,7 +71,8 @@ pub async fn put_settings(
         }
     };
 
-    let value_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
+    let normalized = prune_retired_settings_keys(body);
+    let value_str = serde_json::to_string(&normalized).unwrap_or_else(|_| "{}".to_string());
 
     if let Err(e) = conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('settings', ?1)",
@@ -58,7 +87,7 @@ pub async fn put_settings(
     (StatusCode::OK, Json(json!({"ok": true})))
 }
 
-/// Known config keys with metadata for the settings UI.
+/// Known individual `kv_meta` config keys surfaced to the dashboard and policy helpers.
 /// (key, category, label_ko, label_en, default_value)
 /// default_value is seeded into kv_meta on startup if absent.
 const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
@@ -104,6 +133,27 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         "PM Decision Gate",
         None,
     ),
+    (
+        "merge_automation_enabled",
+        "automation",
+        "자동 머지 활성화",
+        "Merge Automation Enabled",
+        Some("false"),
+    ),
+    (
+        "merge_strategy",
+        "automation",
+        "자동 머지 전략",
+        "Merge Strategy",
+        Some("squash"),
+    ),
+    (
+        "merge_allowed_authors",
+        "automation",
+        "자동 머지 허용 작성자",
+        "Merge Allowed Authors",
+        None,
+    ),
     ("server_port", "system", "서버 포트", "Server Port", None),
     (
         "requested_timeout_min",
@@ -118,13 +168,6 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         "진행 중 정체 판정 (분)",
         "In-Progress Stale (min)",
         Some("120"),
-    ),
-    (
-        "max_chain_depth",
-        "dispatch",
-        "최대 체인 깊이",
-        "Max Chain Depth",
-        Some("5"),
     ),
     (
         "context_compact_percent",
@@ -264,6 +307,7 @@ fn runtime_config_defaults() -> serde_json::Value {
 
 /// Seed default values for CONFIG_KEYS into kv_meta on startup.
 /// Only inserts if the key doesn't already exist (INSERT OR IGNORE).
+/// Also removes retired legacy keys that are no longer part of the settings surface.
 pub fn seed_config_defaults(conn: &rusqlite::Connection) {
     for (key, _, _, _, default_val) in CONFIG_KEYS {
         if let Some(val) = default_val {
@@ -273,6 +317,11 @@ pub fn seed_config_defaults(conn: &rusqlite::Connection) {
             )
             .ok();
         }
+    }
+
+    for key in RETIRED_CONFIG_KEYS {
+        conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
+            .ok();
     }
 }
 
@@ -370,7 +419,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_config_entries_includes_provider_specific_compact_percent_keys() {
+    async fn get_config_entries_includes_merge_automation_and_omits_retired_keys() {
         let db = test_db();
         let state = AppState::test_state(db.clone(), test_engine(&db));
 
@@ -386,18 +435,25 @@ mod tests {
         assert!(keys.contains("context_compact_percent_codex"));
         assert!(keys.contains("context_compact_percent_claude"));
         assert!(keys.contains("narrate_progress"));
+        assert!(keys.contains("merge_automation_enabled"));
+        assert!(keys.contains("merge_strategy"));
+        assert!(keys.contains("merge_allowed_authors"));
+        assert!(!keys.contains("max_chain_depth"));
         assert!(!keys.contains("context_clear_percent"));
         assert!(!keys.contains("context_clear_idle_minutes"));
     }
 
     #[tokio::test]
-    async fn patch_config_entries_accepts_provider_specific_compact_percent_keys() {
+    async fn patch_config_entries_accepts_merge_automation_and_provider_specific_keys() {
         let db = test_db();
         let state = AppState::test_state(db.clone(), test_engine(&db));
 
         let (patch_status, Json(patch_body)) = patch_config_entries(
             State(state.clone()),
             Json(json!({
+                "merge_automation_enabled": true,
+                "merge_strategy": "rebase",
+                "merge_allowed_authors": "itismyfield,octocat",
                 "context_compact_percent_codex": "85",
                 "context_compact_percent_claude": "75",
                 "narrate_progress": false,
@@ -405,7 +461,7 @@ mod tests {
         )
         .await;
         assert_eq!(patch_status, StatusCode::OK);
-        assert_eq!(patch_body["updated"], json!(3));
+        assert_eq!(patch_body["updated"], json!(6));
         assert_eq!(patch_body["rejected"], json!([]));
 
         let (get_status, Json(get_body)) = get_config_entries(State(state)).await;
@@ -426,6 +482,12 @@ mod tests {
             Some(&Some("75"))
         );
         assert_eq!(values.get("narrate_progress"), Some(&Some("false")));
+        assert_eq!(values.get("merge_automation_enabled"), Some(&Some("true")));
+        assert_eq!(values.get("merge_strategy"), Some(&Some("rebase")));
+        assert_eq!(
+            values.get("merge_allowed_authors"),
+            Some(&Some("itismyfield,octocat"))
+        );
     }
 
     #[test]
@@ -444,5 +506,68 @@ mod tests {
             )
             .unwrap();
         assert_eq!(value, "true");
+    }
+
+    #[test]
+    fn seed_config_defaults_removes_retired_config_keys() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        db::schema::migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('max_chain_depth', '5')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('context_clear_percent', '85')",
+            [],
+        )
+        .unwrap();
+
+        seed_config_defaults(&conn);
+
+        let retired_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kv_meta WHERE key IN ('max_chain_depth', 'context_clear_percent')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retired_count, 0);
+    }
+
+    #[tokio::test]
+    async fn put_settings_is_full_replace_and_strips_retired_company_keys() {
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+
+        let (first_status, _) = put_settings(
+            State(state.clone()),
+            Json(json!({
+                "companyName": "AgentDesk",
+                "roomThemes": {"dev": {"accent": "#fff"}},
+                "autoUpdateEnabled": true,
+            })),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK);
+
+        let (_, Json(first_body)) = get_settings(State(state.clone())).await;
+        assert_eq!(first_body["companyName"], json!("AgentDesk"));
+        assert!(first_body.get("autoUpdateEnabled").is_none());
+        assert_eq!(first_body["roomThemes"]["dev"]["accent"], json!("#fff"));
+
+        let (second_status, _) = put_settings(
+            State(state.clone()),
+            Json(json!({
+                "theme": "light",
+            })),
+        )
+        .await;
+        assert_eq!(second_status, StatusCode::OK);
+
+        let (_, Json(second_body)) = get_settings(State(state)).await;
+        assert_eq!(second_body, json!({"theme": "light"}));
     }
 }

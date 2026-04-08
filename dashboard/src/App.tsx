@@ -571,7 +571,8 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                 onSaveSettings={async (patch) => {
                   const mergedSettings = { ...settings, ...patch } as CompanySettings;
                   await api.saveSettings(mergedSettings);
-                  setSettings(mergedSettings);
+                  const refreshed = await api.getSettings();
+                  setSettings({ ...DEFAULT_SETTINGS, ...refreshed } as CompanySettings);
                   refreshAuditLogs();
                 }}
                 notifications={notifications}
