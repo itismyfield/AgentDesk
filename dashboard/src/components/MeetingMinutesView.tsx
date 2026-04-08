@@ -18,7 +18,7 @@ import {
   updateRoundTableMeetingIssueRepo,
   type GitHubRepoOption,
 } from "../api/client";
-import { FileText, Plus, Settings2, Trash2, ChevronDown, ChevronUp } from "lucide-react";
+import { FileText, Plus, Trash2, ChevronDown, ChevronUp, Settings2 } from "lucide-react";
 import MeetingDetailModal from "./MeetingDetailModal";
 import MeetingProviderFlow, { formatProviderFlow, providerFlowCaption } from "./MeetingProviderFlow";
 import MarkdownContent from "./common/MarkdownContent";
@@ -489,7 +489,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
             {t({ ko: "회의 시작", en: "Start Meeting" })}
           </h3>
 
-          {/* Registered channel row */}
+          {/* Channel selector */}
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
             <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "채널", en: "Channel" })}
@@ -599,11 +599,14 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
             <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "진행 모델", en: "Model" })}
+              {t({ ko: "진행 모델", en: "Primary" })}
             </label>
             <select
               value={primaryProvider}
-              onChange={(e) => setPrimaryProvider(e.target.value)}
+              onChange={(e) => {
+                setPrimaryProvider(e.target.value);
+                setReviewerProvider("");
+              }}
               className="px-3 py-1.5 rounded-lg text-xs"
               style={inputStyle}
             >

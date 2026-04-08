@@ -487,6 +487,12 @@ impl std::fmt::Display for BotChannelRoutingGuardFailure {
     }
 }
 
+impl BotChannelRoutingGuardFailure {
+    pub(super) fn is_expected_cross_bot_skip(self) -> bool {
+        matches!(self, Self::ChannelNotAllowed | Self::AgentMismatch)
+    }
+}
+
 pub(super) fn validate_bot_channel_routing(
     settings: &DiscordBotSettings,
     provider: &ProviderKind,
@@ -2211,6 +2217,13 @@ channels:
                 Err(BotChannelRoutingGuardFailure::ChannelNotAllowed)
             );
         });
+    }
+
+    #[test]
+    fn test_cross_bot_skip_classification_only_hides_expected_misses() {
+        assert!(BotChannelRoutingGuardFailure::ChannelNotAllowed.is_expected_cross_bot_skip());
+        assert!(BotChannelRoutingGuardFailure::AgentMismatch.is_expected_cross_bot_skip());
+        assert!(!BotChannelRoutingGuardFailure::ProviderMismatch.is_expected_cross_bot_skip());
     }
 
     #[test]

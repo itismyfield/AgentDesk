@@ -344,9 +344,9 @@ pub(super) async fn start_meeting(
     channel_id: ChannelId,
     agenda: &str,
     primary_provider: ProviderKind,
+    reviewer_provider: ProviderKind,
     shared: &Arc<SharedData>,
 ) -> Result<Option<String>, Error> {
-    let reviewer_provider = primary_provider.counterpart();
     start_meeting_with_reviewer(
         http,
         channel_id,
@@ -1582,7 +1582,8 @@ pub(super) async fn handle_meeting_command(
         let http_clone = http.clone();
         let shared_clone = shared.clone();
         let agenda = request.agenda.clone();
-        let primary_provider = request.primary_provider;
+        let primary_provider = request.primary_provider.clone();
+        let reviewer_provider = request.primary_provider.counterpart();
 
         // Spawn meeting as a background task so it doesn't block message handling
         tokio::spawn(async move {
@@ -1591,6 +1592,7 @@ pub(super) async fn handle_meeting_command(
                 channel_id,
                 &agenda,
                 primary_provider,
+                reviewer_provider,
                 &shared_clone,
             )
             .await

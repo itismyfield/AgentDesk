@@ -53,12 +53,14 @@ pub(in crate::services::discord) async fn cmd_meeting(
             let agenda_owned = agenda_text.to_string();
             // Spawn as background task
             let spawn_provider = selected_provider.clone();
+            let spawn_reviewer = selected_provider.counterpart();
             tokio::spawn(async move {
                 match meeting::start_meeting(
                     &*http,
                     channel_id,
                     &agenda_owned,
                     spawn_provider,
+                    spawn_reviewer,
                     &shared,
                 )
                 .await

@@ -242,16 +242,21 @@ pub(super) async fn flush_restart_reports(
             report.channel_name.as_deref(),
             is_dm,
         ) {
+            let expected_cross_bot_skip = reason.is_expected_cross_bot_skip();
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ restart report skip for channel {} — {reason}",
-                report.channel_id,
-            );
+            if !expected_cross_bot_skip {
+                println!(
+                    "  [{ts}] ⏭ restart report skip for channel {} — {reason}",
+                    report.channel_id,
+                );
+            }
             clear_restart_report(provider, report.channel_id);
-            println!(
-                "  [{ts}] 🧹 dropped restart report for channel {} after routing failure",
-                report.channel_id,
-            );
+            if !expected_cross_bot_skip {
+                println!(
+                    "  [{ts}] 🧹 dropped restart report for channel {} after routing failure",
+                    report.channel_id,
+                );
+            }
             continue;
         }
 

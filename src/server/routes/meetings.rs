@@ -111,21 +111,23 @@ pub async fn list_meeting_channels(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let bindings = settings::list_registered_channel_bindings();
-    let Some(registry) = state.health_registry.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "health registry unavailable"})),
-        );
-    };
+    let registry = state.health_registry.as_ref();
 
     let mut channels = Vec::new();
     for binding in bindings {
         let channel_id = ChannelId::new(binding.channel_id);
-        let channel_name =
-            health::fetch_channel_name(registry, channel_id, &binding.owner_provider)
-                .await
-                .or(binding.fallback_name.clone())
-                .unwrap_or_else(|| format!("channel-{}", binding.channel_id));
+        let channel_name = match registry {
+            Some(registry) => {
+                health::fetch_channel_name(registry, channel_id, &binding.owner_provider)
+                    .await
+                    .or(binding.fallback_name.clone())
+                    .unwrap_or_else(|| format!("channel-{}", binding.channel_id))
+            }
+            None => binding
+                .fallback_name
+                .clone()
+                .unwrap_or_else(|| format!("channel-{}", binding.channel_id)),
+        };
 
         channels.push(json!({
             "channel_id": binding.channel_id.to_string(),
@@ -645,6 +647,7 @@ pub async fn start_meeting(
     };
 
     let agenda = body.agenda.as_deref().unwrap_or("General discussion");
+
     let primary_provider = match parse_meeting_provider(body.primary_provider.as_deref()) {
         Ok(provider) => provider.unwrap_or_else(|| owner_provider.clone()),
         Err(error) => {
@@ -1231,6 +1234,14 @@ mod tests {
                 &ProviderKind::Gemini,
             ),
             Err("reviewer_provider must differ from channel owner provider".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_required_meeting_provider_rejects_missing_provider() {
+        assert_eq!(
+            parse_required_meeting_provider(None),
+            Err("reviewer_provider is required".to_string())
         );
     }
 

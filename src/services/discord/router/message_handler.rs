@@ -1566,6 +1566,7 @@ pub(super) async fn handle_text_command(
                     let http = ctx.http.clone();
                     let shared = data.shared.clone();
                     let provider = data.provider.clone();
+                    let reviewer = provider.counterpart();
                     let agenda_owned = agenda_text.to_string();
 
                     let _ = msg
@@ -1574,7 +1575,7 @@ pub(super) async fn handle_text_command(
                             format!(
                                 "📋 회의를 시작할게. 진행 모델: {} / 교차검증: {}",
                                 provider.display_name(),
-                                provider.counterpart().display_name()
+                                reviewer.display_name()
                             ),
                         )
                         .await;
@@ -1585,6 +1586,7 @@ pub(super) async fn handle_text_command(
                             channel_id,
                             &agenda_owned,
                             provider,
+                            reviewer,
                             &shared,
                         )
                         .await
@@ -1623,6 +1625,7 @@ pub(super) async fn handle_text_command(
                     let http = ctx.http.clone();
                     let shared = data.shared.clone();
                     let provider = data.provider.clone();
+                    let reviewer = provider.counterpart();
                     let agenda_owned = full_agenda.to_string();
 
                     let _ = msg
@@ -1631,7 +1634,7 @@ pub(super) async fn handle_text_command(
                             format!(
                                 "📋 회의를 시작할게. 진행 모델: {} / 교차검증: {}",
                                 provider.display_name(),
-                                provider.counterpart().display_name()
+                                reviewer.display_name()
                             ),
                         )
                         .await;
@@ -1642,6 +1645,7 @@ pub(super) async fn handle_text_command(
                             channel_id,
                             &agenda_owned,
                             provider,
+                            reviewer,
                             &shared,
                         )
                         .await

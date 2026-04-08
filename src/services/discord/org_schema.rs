@@ -391,6 +391,49 @@ pub(super) fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind>
     None
 }
 
+/// A channel entry exposed to the HTTP layer for the meeting channel selector.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegisteredChannel {
+    pub channel_id: String,
+    pub agent: String,
+    pub provider: Option<String>,
+}
+
+/// List all channels registered via `channels.by_id`.
+/// `by_name`-only entries are excluded because they have no concrete channel_id
+/// and cannot be used for direct-start meeting invocations.
+pub(crate) fn list_registered_channels() -> Vec<RegisteredChannel> {
+    let Some(schema) = load_org_schema() else {
+        return Vec::new();
+    };
+    let Some(channels) = schema.channels.as_ref() else {
+        return Vec::new();
+    };
+    let Some(by_id) = channels.by_id.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut result: Vec<RegisteredChannel> = by_id
+        .iter()
+        .map(|(channel_id, binding)| {
+            // Provider: channel-level override > agent-level default
+            let provider = binding
+                .provider
+                .clone()
+                .or_else(|| schema.agents.get(&binding.agent)?.provider.clone());
+            RegisteredChannel {
+                channel_id: channel_id.clone(),
+                agent: binding.agent.clone(),
+                provider,
+            }
+        })
+        .collect();
+
+    // Stable ordering by channel_id
+    result.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use poise::serenity_prelude::ChannelId;

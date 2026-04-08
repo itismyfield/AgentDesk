@@ -147,6 +147,56 @@ impl HealthRegistry {
             }
         }
     }
+
+    /// Start a meeting directly from the HTTP layer (dashboard direct-start).
+    /// Finds the provider's registered Http client and SharedData, then calls meeting::start_meeting().
+    /// Returns Ok(meeting_id) or an error string.
+    pub async fn start_meeting_for_channel(
+        &self,
+        channel_id: ChannelId,
+        agenda: &str,
+        primary_provider: ProviderKind,
+        reviewer_provider: ProviderKind,
+    ) -> Result<Option<String>, String> {
+        let (http, shared) = {
+            let providers = self.providers.lock().await;
+            let discord_http = self.discord_http.lock().await;
+
+            let entry = providers
+                .iter()
+                .find(|e| e.name.eq_ignore_ascii_case(primary_provider.as_str()));
+            let Some(entry) = entry else {
+                return Err(format!(
+                    "provider '{}' is not registered",
+                    primary_provider.as_str()
+                ));
+            };
+            let shared = entry.shared.clone();
+
+            let http = discord_http
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(primary_provider.as_str()))
+                .map(|(_, h)| h.clone());
+            let Some(http) = http else {
+                return Err(format!(
+                    "no Discord HTTP client registered for provider '{}'",
+                    primary_provider.as_str()
+                ));
+            };
+            (http, shared)
+        };
+
+        super::meeting::start_meeting(
+            &*http,
+            channel_id,
+            agenda,
+            primary_provider,
+            reviewer_provider,
+            &shared,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
 }
 
 /// Best-effort runtime-side equivalent of `/clear` for an existing Discord channel session.

@@ -1600,11 +1600,13 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             Some(&provider_channel_name),
             is_dm,
         ) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ watcher skip for {} — {reason} for channel {}",
-                session_name, channel_id
-            );
+            if !reason.is_expected_cross_bot_skip() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ⏭ watcher skip for {} — {reason} for channel {}",
+                    session_name, channel_id
+                );
+            }
             continue;
         }
 

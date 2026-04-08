@@ -1099,16 +1099,16 @@ export async function discardAllRoundTableIssues(id: string): Promise<{
 export async function startRoundTableMeeting(
   agenda: string,
   channelId: string,
-  primaryProvider?: string,
-  reviewerProvider?: string,
-): Promise<{ ok: boolean }> {
+  primaryProvider: string,
+  reviewerProvider: string,
+): Promise<{ ok: boolean; message?: string }> {
   return request("/api/round-table-meetings/start", {
     method: "POST",
     body: JSON.stringify({
       agenda,
       channel_id: channelId,
-      primary_provider: primaryProvider ?? null,
-      reviewer_provider: reviewerProvider ?? null,
+      primary_provider: primaryProvider,
+      reviewer_provider: reviewerProvider,
     }),
   });
 }
