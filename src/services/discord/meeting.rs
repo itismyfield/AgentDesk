@@ -857,10 +857,13 @@ async fn select_participants(
 }
 
 fn ensure_provider_candidate(candidates: &mut Vec<MeetingAgentConfig>, provider: &ProviderKind) {
-    if candidates
+    if let Some(candidate) = candidates
         .iter()
-        .any(|candidate| candidate.role_id.eq_ignore_ascii_case(provider.as_str()))
+        .position(|candidate| candidate.role_id.eq_ignore_ascii_case(provider.as_str()))
     {
+        if candidates[candidate].provider.is_none() {
+            candidates[candidate].provider = Some(provider.clone());
+        }
         return;
     }
     candidates.push(MeetingAgentConfig {
@@ -882,25 +885,36 @@ fn normalize_participant_role_ids(
     primary_provider: &ProviderKind,
     reviewer_provider: &ProviderKind,
 ) -> Vec<String> {
-    let valid_role_ids: std::collections::HashSet<String> = candidates
-        .iter()
-        .map(|candidate| candidate.role_id.clone())
-        .collect();
     let mut normalized = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     for required in [primary_provider.as_str(), reviewer_provider.as_str()] {
-        if valid_role_ids.contains(required) && seen.insert(required.to_string()) {
-            normalized.push(required.to_string());
+        if let Some(role_id) = candidates
+            .iter()
+            .find(|candidate| candidate.role_id.eq_ignore_ascii_case(required))
+            .map(|candidate| candidate.role_id.as_str())
+        {
+            let dedupe_key = role_id.to_ascii_lowercase();
+            if seen.insert(dedupe_key) {
+                normalized.push(role_id.to_string());
+            }
         }
     }
 
     for role_id in selected {
         let role_id = role_id.trim();
-        if role_id.is_empty() || !valid_role_ids.contains(role_id) {
+        if role_id.is_empty() {
             continue;
         }
-        if seen.insert(role_id.to_string()) {
+        let Some(role_id) = candidates
+            .iter()
+            .find(|candidate| candidate.role_id.eq_ignore_ascii_case(role_id))
+            .map(|candidate| candidate.role_id.as_str())
+        else {
+            continue;
+        };
+        let dedupe_key = role_id.to_ascii_lowercase();
+        if seen.insert(dedupe_key) {
             normalized.push(role_id.to_string());
         }
         if normalized.len() == 5 {
@@ -1733,8 +1747,8 @@ mod tests {
     use super::{
         ActiveMeetingSlot, Meeting, MeetingAgentConfig, MeetingParticipant, MeetingStatus,
         MeetingUtterance, ProviderKind, build_meeting_status_payload, effective_round_count,
-        meeting_slot_state, normalize_participant_role_ids, parse_meeting_start_text,
-        resolve_turn_providers,
+        ensure_provider_candidate, meeting_slot_state, normalize_participant_role_ids,
+        parse_meeting_start_text, resolve_turn_providers,
     };
     use serde_json::json;
 
@@ -1896,6 +1910,67 @@ mod tests {
             vec![
                 "gemini".to_string(),
                 "qwen".to_string(),
+                "openclaw-brain".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ensure_provider_candidate_populates_existing_provider_candidate() {
+        let mut candidates = vec![MeetingAgentConfig {
+            role_id: "Gemini".to_string(),
+            display_name: "Gemini".to_string(),
+            keywords: vec![],
+            prompt_file: String::new(),
+            provider: None,
+        }];
+
+        ensure_provider_candidate(&mut candidates, &ProviderKind::Gemini);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].role_id, "Gemini");
+        assert_eq!(candidates[0].provider, Some(ProviderKind::Gemini));
+    }
+
+    #[test]
+    fn test_normalize_participant_role_ids_matches_required_providers_case_insensitively() {
+        let candidates = vec![
+            MeetingAgentConfig {
+                role_id: "Gemini".to_string(),
+                display_name: "Gemini".to_string(),
+                keywords: vec![],
+                prompt_file: String::new(),
+                provider: Some(ProviderKind::Gemini),
+            },
+            MeetingAgentConfig {
+                role_id: "QWEN".to_string(),
+                display_name: "Qwen Code".to_string(),
+                keywords: vec![],
+                prompt_file: String::new(),
+                provider: Some(ProviderKind::Qwen),
+            },
+            MeetingAgentConfig {
+                role_id: "openclaw-brain".to_string(),
+                display_name: "Brain".to_string(),
+                keywords: vec![],
+                prompt_file: String::new(),
+                provider: Some(ProviderKind::Codex),
+            },
+        ];
+        let selected = vec!["OpenClaw-Brain".to_string()];
+
+        let normalized = normalize_participant_role_ids(
+            &selected,
+            &candidates,
+            &ProviderKind::Gemini,
+            &ProviderKind::Qwen,
+        );
+
+        assert_eq!(
+            normalized,
+            vec![
+                "Gemini".to_string(),
+                "QWEN".to_string(),
                 "openclaw-brain".to_string()
             ]
         );
