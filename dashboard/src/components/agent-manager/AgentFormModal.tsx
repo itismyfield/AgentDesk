@@ -72,10 +72,11 @@ export default function AgentFormModal({
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-x-hidden overflow-y-auto px-3 py-4 sm:items-center sm:p-4"
       style={{
         background: "var(--th-modal-overlay)",
-        paddingTop: "calc(1rem + env(safe-area-inset-top))",
+        paddingTop: "max(1rem, calc(env(safe-area-inset-top) + 0.75rem))",
+        paddingBottom: "max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))",
       }}
       onClick={(e) => {
         if (e.target === overlayRef.current) onClose();
@@ -85,7 +86,7 @@ export default function AgentFormModal({
         role="dialog"
         aria-modal="true"
         aria-label={isEdit ? tr("직원 정보 수정", "Edit Agent") : tr("신규 직원 채용", "Hire New Agent")}
-        className="w-full max-w-3xl max-h-full overflow-y-auto overscroll-contain rounded-t-3xl p-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[90vh] sm:rounded-[28px] sm:p-6"
+        className="w-full self-start max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[28px] border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-3xl sm:p-6"
         style={{
           background:
             "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
@@ -104,9 +105,10 @@ export default function AgentFormModal({
         </div>
 
         {/* 2-column layout */}
-        <div className="grid grid-cols-2 gap-5">
+        <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
           {/* ── Left column: 기본 정보 ── */}
           <SurfaceSubsection
+            className="min-w-0"
             title={tr("기본 정보", "Basic Info")}
             description={tr("이름, 이모지, 부서를 먼저 설정합니다.", "Set the identity, emoji, and department first.")}
           >
@@ -267,6 +269,7 @@ export default function AgentFormModal({
 
           {/* ── Right column ── */}
           <SurfaceSubsection
+            className="min-w-0"
             title={tr("추가 정보", "Details")}
             description={tr("프롬프트와 성격을 정리합니다.", "Describe the agent personality and prompt.")}
           >
@@ -379,7 +382,7 @@ export default function AgentFormModal({
               </div>
 
               {/* Sprite number + register */}
-              <div className="flex items-center gap-3">
+              <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
                 <div className="flex items-center gap-2">
                   <label className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
                     {tr("스프라이트 번호", "Sprite #")}
@@ -439,7 +442,10 @@ export default function AgentFormModal({
         </div>
 
         {/* Actions — full width */}
-        <div className="flex gap-2 mt-5 pt-4" style={{ borderTop: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)" }}>
+        <div
+          className="mt-5 flex flex-col gap-2 pt-4 sm:flex-row"
+          style={{ borderTop: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)" }}
+        >
           <SurfaceActionButton
             onClick={onSave}
             disabled={saving || !form.name.trim()}
@@ -455,7 +461,7 @@ export default function AgentFormModal({
           <SurfaceActionButton
             onClick={onClose}
             tone="neutral"
-            className="text-sm"
+            className="text-sm sm:self-auto"
           >
             {tr("취소", "Cancel")}
           </SurfaceActionButton>

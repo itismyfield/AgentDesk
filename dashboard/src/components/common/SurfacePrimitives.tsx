@@ -174,7 +174,7 @@ export function SurfaceSubsection({
 }: SurfaceSubsectionProps) {
   return (
     <SurfaceCard
-      className={joinClasses("rounded-3xl p-4 sm:p-5", className)}
+      className={joinClasses("min-w-0 w-full rounded-3xl p-4 sm:p-5", className)}
       style={{
         borderColor: "color-mix(in srgb, var(--th-border) 62%, transparent)",
         background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",

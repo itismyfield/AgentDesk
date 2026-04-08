@@ -626,10 +626,11 @@ export default function AgentInfoCard({
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-x-hidden overflow-y-auto px-3 py-4 sm:items-center sm:p-4"
       style={{
         background: "var(--th-modal-overlay)",
-        paddingTop: "calc(1rem + env(safe-area-inset-top))",
+        paddingTop: "max(1rem, calc(env(safe-area-inset-top) + 0.75rem))",
+        paddingBottom: "max(1rem, calc(env(safe-area-inset-bottom) + 0.75rem))",
       }}
       onClick={(e) => {
         if (e.target === overlayRef.current) onClose();
@@ -639,7 +640,7 @@ export default function AgentInfoCard({
         role="dialog"
         aria-modal="true"
         aria-label={`${localeName(locale, agent)} — ${tr("직원 상세", "Agent Details")}`}
-        className="w-full max-w-lg max-h-full overflow-y-auto overscroll-contain rounded-t-3xl shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[90vh] sm:rounded-2xl"
+        className="w-full self-start max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[32px] border p-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:my-auto sm:max-h-[90vh] sm:max-w-4xl sm:p-5"
         style={{
           background: "var(--th-card-bg)",
           border: "1px solid var(--th-card-border)",
@@ -1413,14 +1414,14 @@ export default function AgentInfoCard({
             </div>
           </SurfaceSection>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <SurfaceSubsection title={tr("소속 부서", "Department")}>
-              <div className="flex items-center gap-2">
+          <div className="grid min-w-0 gap-4 md:grid-cols-2">
+            <SurfaceSubsection title={tr("소속 부서", "Department")} className="min-w-0">
+              <div className="min-w-0 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
                 <select
                   value={selectedDeptId}
                   onChange={(e) => void saveDepartment(e.target.value)}
                   disabled={savingDept}
-                  className="flex-1 rounded-xl border px-3 py-2 text-sm outline-none"
+                  className="min-w-0 w-full rounded-xl border px-3 py-2 text-sm outline-none sm:flex-1"
                   style={{
                     background: "var(--th-input-bg)",
                     borderColor: "var(--th-input-border)",
@@ -1434,19 +1435,19 @@ export default function AgentInfoCard({
                     </option>
                   ))}
                 </select>
-                <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                <span className="self-start text-xs sm:shrink-0" style={{ color: "var(--th-text-muted)" }}>
                   {savingDept ? tr("저장 중...", "Saving...") : null}
                 </span>
               </div>
             </SurfaceSubsection>
 
-            <SurfaceSubsection title={tr("메인 Provider", "Main Provider")}>
-              <div className="flex items-center gap-2">
+            <SurfaceSubsection title={tr("메인 Provider", "Main Provider")} className="min-w-0">
+              <div className="min-w-0 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
                 <select
                   value={selectedProvider}
                   onChange={(e) => void saveProvider(e.target.value)}
                   disabled={savingProvider}
-                  className="flex-1 rounded-xl border px-3 py-2 text-sm outline-none"
+                  className="min-w-0 w-full rounded-xl border px-3 py-2 text-sm outline-none sm:flex-1"
                   style={{
                     background: "var(--th-input-bg)",
                     borderColor: "var(--th-input-border)",
@@ -1458,13 +1459,13 @@ export default function AgentInfoCard({
                   <option value="gemini">Gemini</option>
                   <option value="qwen">Qwen</option>
                 </select>
-                <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                <span className="self-start text-xs sm:shrink-0" style={{ color: "var(--th-text-muted)" }}>
                   {savingProvider ? tr("저장 중...", "Saving...") : null}
                 </span>
               </div>
             </SurfaceSubsection>
 
-            <SurfaceSubsection title={tr("소속 오피스", "Offices")} className="md:col-span-2">
+            <SurfaceSubsection title={tr("소속 오피스", "Offices")} className="min-w-0 md:col-span-2">
               {loadingOffices ? (
                 <SurfaceNotice tone="neutral" compact>
                   {tr("불러오는 중...", "Loading...")}
@@ -1501,7 +1502,7 @@ export default function AgentInfoCard({
               )}
             </SurfaceSubsection>
 
-            <SurfaceSubsection title={tr("상태 요약", "Status Summary")} className="md:col-span-2">
+            <SurfaceSubsection title={tr("상태 요약", "Status Summary")} className="min-w-0 md:col-span-2">
               <div className="space-y-3">
                 <SurfaceCard className="p-3">
                   <div className="mb-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
@@ -1538,7 +1539,7 @@ export default function AgentInfoCard({
             </SurfaceSubsection>
 
             {warnings.length > 0 && (
-              <SurfaceSubsection title={tr("이상 징후", "Warnings")} className="md:col-span-2">
+              <SurfaceSubsection title={tr("이상 징후", "Warnings")} className="min-w-0 md:col-span-2">
                 <div className="flex flex-wrap gap-2">
                   {warnings.map((warning) => (
                     <span
