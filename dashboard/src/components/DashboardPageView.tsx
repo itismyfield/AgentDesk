@@ -154,8 +154,8 @@ export default function DashboardPageView({
 
   return (
     <div
-      className="mx-auto h-full w-full max-w-6xl min-w-0 space-y-5 overflow-y-auto p-4 pb-40 sm:p-6"
-      style={{ overflowX: "clip", paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" } as React.CSSProperties}
+      className="mx-auto h-full w-full max-w-6xl min-w-0 space-y-5 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
+      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <DashboardHeroHeader
         companyName={settings.companyName}
@@ -479,8 +479,8 @@ function PulseSignalCard({
         background: `linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 93%, ${accent} 7%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)`,
       }}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1">
           <div className="text-[11px] font-semibold uppercase tracking-[0.14em]" style={{ color: accent }}>
             {label}
           </div>
@@ -494,7 +494,7 @@ function PulseSignalCard({
         {onAction && (
           <SurfaceActionButton
             onClick={onAction}
-            className="shrink-0"
+            className="w-full shrink-0 sm:w-auto"
             style={{
               color: accent,
               border: `1px solid color-mix(in srgb, ${accent} 28%, var(--th-border) 72%)`,
