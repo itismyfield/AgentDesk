@@ -418,15 +418,41 @@ pub(super) fn validate_bot_channel_routing(
     channel_name: Option<&str>,
     is_dm: bool,
 ) -> Result<(), BotChannelRoutingGuardFailure> {
-    let role_binding = resolve_role_binding(channel_id, channel_name);
+    validate_bot_channel_routing_with_provider_channel(
+        settings,
+        provider,
+        channel_id,
+        channel_name,
+        channel_name,
+        is_dm,
+    )
+}
 
-    if !bot_settings_allow_channel(settings, channel_id, is_dm) {
+pub(super) fn validate_bot_channel_routing_with_provider_channel(
+    settings: &DiscordBotSettings,
+    provider: &ProviderKind,
+    allowlist_channel_id: ChannelId,
+    binding_channel_name: Option<&str>,
+    provider_channel_name: Option<&str>,
+    is_dm: bool,
+) -> Result<(), BotChannelRoutingGuardFailure> {
+    let role_binding = resolve_role_binding(
+        allowlist_channel_id,
+        binding_channel_name.or(provider_channel_name),
+    );
+
+    if !bot_settings_allow_channel(settings, allowlist_channel_id, is_dm) {
         return Err(BotChannelRoutingGuardFailure::ChannelNotAllowed);
     }
     if !bot_settings_allow_agent(settings, role_binding.as_ref(), is_dm) {
         return Err(BotChannelRoutingGuardFailure::AgentMismatch);
     }
-    if !channel_supports_provider(provider, channel_name, is_dm, role_binding.as_ref()) {
+    if !channel_supports_provider(
+        provider,
+        provider_channel_name.or(binding_channel_name),
+        is_dm,
+        role_binding.as_ref(),
+    ) {
         return Err(BotChannelRoutingGuardFailure::ProviderMismatch);
     }
 
@@ -1031,6 +1057,7 @@ mod tests {
         load_discord_bot_launch_configs, load_narrate_progress, load_peer_agents,
         render_peer_agent_guidance, resolve_memory_settings, resolve_role_binding,
         save_bot_settings, validate_bot_channel_routing,
+        validate_bot_channel_routing_with_provider_channel,
     };
 
     fn with_temp_home<F>(f: F)
@@ -1766,6 +1793,60 @@ mod tests {
             result,
             Err(BotChannelRoutingGuardFailure::ChannelNotAllowed)
         );
+    }
+
+    #[test]
+    fn test_validate_bot_channel_routing_with_provider_channel_keeps_thread_binding() {
+        with_temp_home(|temp_home: &TempDir| {
+            let settings_dir = temp_home.path().join(".adk").join("config");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("org.yaml"),
+                r#"
+version: 1
+name: "Test Org"
+agents:
+  openclaw-maker:
+    display_name: "Maker"
+    provider: codex
+channels:
+  by_id:
+    '1470034105176424533':
+      agent: openclaw-maker
+      provider: codex
+"#,
+            )
+            .unwrap();
+
+            let mut settings = super::super::DiscordBotSettings::default();
+            settings.provider = ProviderKind::Codex;
+            settings.agent = Some("openclaw-maker".to_string());
+            settings.allowed_channel_ids = vec![1470034105176424533];
+
+            let result = validate_bot_channel_routing_with_provider_channel(
+                &settings,
+                &ProviderKind::Codex,
+                ChannelId::new(1470034105176424533),
+                Some("openclaw-maker-thread"),
+                Some("agent-sandbox-lab"),
+                false,
+            );
+
+            assert_eq!(result, Ok(()));
+
+            let parent_result = validate_bot_channel_routing(
+                &settings,
+                &ProviderKind::Codex,
+                ChannelId::new(1470643507201839189),
+                Some("agent-sandbox-lab"),
+                false,
+            );
+
+            assert_eq!(
+                parent_result,
+                Err(BotChannelRoutingGuardFailure::ChannelNotAllowed)
+            );
+        });
     }
 
     #[test]

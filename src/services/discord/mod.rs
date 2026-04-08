@@ -68,6 +68,7 @@ use runtime_store::worktrees_root;
 use settings::{
     RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings, resolve_role_binding,
     save_bot_settings, validate_bot_channel_routing,
+    validate_bot_channel_routing_with_provider_channel,
 };
 #[cfg(unix)]
 use tmux::{
@@ -1164,17 +1165,18 @@ async fn execute_handoff_turns(
             channel_id.to_channel(http).await,
             Ok(serenity::model::channel::Channel::Private(_))
         );
-        let (eff_id, eff_name) =
+        let (allowlist_channel_id, provider_channel_name) =
             if let Some((pid, pname)) = resolve_thread_parent(http, channel_id).await {
                 (pid, pname.or(record.channel_name.clone()))
             } else {
                 (channel_id, record.channel_name.clone())
             };
-        if let Err(reason) = validate_bot_channel_routing(
+        if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
             &settings_snapshot,
             provider,
-            eff_id,
-            eff_name.as_deref(),
+            allowlist_channel_id,
+            record.channel_name.as_deref(),
+            provider_channel_name.as_deref(),
             is_dm,
         ) {
             println!(
@@ -3513,18 +3515,19 @@ pub(in crate::services::discord) async fn validate_live_channel_routing_with_dm_
         ),
     };
     let (channel_name, _) = resolve_channel_category(ctx, channel_id).await;
-    let (effective_channel_id, effective_channel_name) = if let Some((parent_id, parent_name)) =
+    let (allowlist_channel_id, provider_channel_name) = if let Some((parent_id, parent_name)) =
         resolve_thread_parent(&ctx.http, channel_id).await
     {
-        (parent_id, parent_name.or(channel_name))
+        (parent_id, parent_name.or(channel_name.clone()))
     } else {
-        (channel_id, channel_name)
+        (channel_id, channel_name.clone())
     };
-    validate_bot_channel_routing(
+    validate_bot_channel_routing_with_provider_channel(
         settings,
         provider,
-        effective_channel_id,
-        effective_channel_name.as_deref(),
+        allowlist_channel_id,
+        channel_name.as_deref(),
+        provider_channel_name.as_deref(),
         is_dm,
     )
 }

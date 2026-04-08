@@ -21,6 +21,7 @@ const GEMINI_INVALID_RESUME_SELECTOR_MESSAGE: &str =
     "InvalidArgument: Gemini resume selector must be `latest` or a numeric session index";
 const GEMINI_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 const GEMINI_STREAM_IDLE_WATCHDOG: Duration = Duration::from_secs(120);
+const GEMINI_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(60);
 const GEMINI_MAX_SESSION_RETRIES: usize = 1;
 
 #[derive(Debug)]
@@ -226,6 +227,7 @@ fn execute_gemini_streaming_attempt(
         &mut state,
         GEMINI_STREAM_POLL_TIMEOUT,
         GEMINI_STREAM_IDLE_WATCHDOG,
+        GEMINI_STREAM_STARTUP_WATCHDOG,
         || {
             child
                 .try_wait()
@@ -297,12 +299,14 @@ fn collect_gemini_stream_events<F>(
     state: &mut GeminiAttemptState,
     poll_timeout: Duration,
     idle_watchdog: Duration,
+    startup_watchdog: Duration,
     mut definitive_failure_observed: F,
 ) -> GeminiStreamLoopResult
 where
     F: FnMut() -> bool,
 {
     let mut silent_for = Duration::ZERO;
+    let mut startup_silent_for = Duration::ZERO;
 
     loop {
         if is_cancelled(cancel_token) {
@@ -312,6 +316,7 @@ where
         match stdout_events.recv_timeout(poll_timeout) {
             Ok(GeminiStreamEvent::Line(line)) => {
                 silent_for = Duration::ZERO;
+                startup_silent_for = Duration::ZERO;
                 process_gemini_stream_line(&line, state, sender);
             }
             Ok(GeminiStreamEvent::ReadError(message)) => {
@@ -328,6 +333,18 @@ where
                     return GeminiStreamLoopResult::Eof;
                 }
                 if !state.meaningful_progress_seen {
+                    startup_silent_for += poll_timeout;
+                    if startup_silent_for >= startup_watchdog {
+                        if !definitive_failure_observed() {
+                            continue;
+                        }
+                        return GeminiStreamLoopResult::RetrySession {
+                            message: format!(
+                                "Gemini stream produced no output for {} seconds before first progress",
+                                startup_watchdog.as_secs()
+                            ),
+                        };
+                    }
                     continue;
                 }
                 silent_for += poll_timeout;
@@ -1270,6 +1287,7 @@ mod tests {
             &mut state,
             Duration::from_millis(5),
             Duration::from_millis(10),
+            Duration::from_millis(100),
             || false,
         );
 
@@ -1300,6 +1318,7 @@ mod tests {
             &mut state,
             Duration::from_millis(1),
             Duration::from_millis(2),
+            Duration::from_millis(100), // startup_watchdog >> cancel delay → won't fire
             || false,
         );
 
@@ -1336,6 +1355,7 @@ mod tests {
             &mut state,
             Duration::from_millis(1),
             Duration::from_millis(3),
+            Duration::from_millis(100),
             || false,
         );
 
@@ -1366,6 +1386,7 @@ mod tests {
             &mut state,
             Duration::from_millis(1),
             Duration::from_millis(3),
+            Duration::from_millis(100),
             || true,
         );
 
@@ -1465,6 +1486,70 @@ mod tests {
             other => panic!("expected Done, got {:?}", other),
         }
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn startup_watchdog_fires_retry_before_first_progress() {
+        // Before any meaningful output, silence >= startup_watchdog with process exited
+        // must trigger RetrySession.
+        let (_tx, rx) = mpsc::channel::<GeminiStreamEvent>(); // keep alive so Timeout fires
+        let (stream_tx, _stream_rx) = mpsc::channel();
+        let mut state = GeminiAttemptState::new(None);
+
+        let result = collect_gemini_stream_events(
+            &rx,
+            &stream_tx,
+            None,
+            &mut state,
+            Duration::from_millis(1),   // poll_timeout
+            Duration::from_millis(100), // idle_watchdog (never reached)
+            Duration::from_millis(3),   // startup_watchdog: short for test
+            || true,                    // process has exited
+        );
+
+        match result {
+            GeminiStreamLoopResult::RetrySession { message } => {
+                assert!(
+                    message.contains("before first progress"),
+                    "expected startup watchdog message, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected RetrySession from startup watchdog, got {:?}",
+                other
+            ),
+        }
+        assert!(!state.meaningful_progress_seen);
+    }
+
+    #[test]
+    fn startup_watchdog_does_not_fire_if_process_still_alive() {
+        // If process is still alive (definitive_failure_observed returns false),
+        // startup watchdog threshold exceeded but should keep waiting until cancelled.
+        let token = Arc::new(CancelToken::new());
+        let (_tx, rx) = mpsc::channel::<GeminiStreamEvent>(); // keep alive
+        let (stream_tx, _stream_rx) = mpsc::channel();
+        let mut state = GeminiAttemptState::new(None);
+
+        let token_for_thread = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            token_for_thread.cancelled.store(true, Ordering::Relaxed);
+        });
+
+        let result = collect_gemini_stream_events(
+            &rx,
+            &stream_tx,
+            Some(token.as_ref()),
+            &mut state,
+            Duration::from_millis(1),
+            Duration::from_millis(100),
+            Duration::from_millis(3), // startup_watchdog fires early but process alive
+            || false,                 // process still alive → keep waiting
+        );
+
+        // Should be Cancelled (not RetrySession) because process is alive.
+        assert_eq!(result, GeminiStreamLoopResult::Cancelled);
     }
 
     #[test]
