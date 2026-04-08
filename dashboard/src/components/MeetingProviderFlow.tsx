@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
 
-const PROVIDER_META: Record<string, { label: string; bg: string; color: string; border: string }> = {
+export const PROVIDER_META: Record<string, { label: string; bg: string; color: string; border: string }> = {
   claude: {
     label: "Claude",
     bg: "rgba(245,158,11,0.12)",
@@ -51,7 +51,7 @@ const PROVIDER_META: Record<string, { label: string; bg: string; color: string; 
   },
 };
 
-function getProviderMeta(provider: string | null) {
+export function getProviderMeta(provider: string | null) {
   if (!provider) {
     return {
       label: "Unknown",

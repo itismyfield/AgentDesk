@@ -420,26 +420,48 @@ fn build_review_context(
                         .provider
                         .as_deref()
                         .and_then(ProviderKind::from_str);
-                    if !obj.contains_key("from_provider") {
-                        if let Some(fp) = primary_provider.as_ref().map(ProviderKind::as_str) {
-                            obj.insert("from_provider".to_string(), json!(fp));
-                        } else if let Some(fp) = bindings
+                    let implementation_provider = resolve_agent_dispatch_channel_on_conn(
+                        &conn,
+                        to_agent_id,
+                        Some("implementation"),
+                    )
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    .and_then(provider_from_bound_channel)
+                    .or_else(|| {
+                        bindings
                             .primary_channel()
                             .as_deref()
-                            .and_then(provider_from_channel_suffix)
+                            .and_then(provider_from_bound_channel)
+                    })
+                    .or_else(|| primary_provider.clone());
+                    let review_provider =
+                        resolve_agent_dispatch_channel_on_conn(&conn, to_agent_id, Some("review"))
+                            .ok()
+                            .flatten()
+                            .as_deref()
+                            .and_then(provider_from_bound_channel)
+                            .or_else(|| {
+                                bindings
+                                    .counter_model_channel()
+                                    .as_deref()
+                                    .and_then(provider_from_bound_channel)
+                            })
+                            .or_else(|| {
+                                primary_provider
+                                    .as_ref()
+                                    .map(|provider| provider.counterpart())
+                            });
+                    if !obj.contains_key("from_provider") {
+                        if let Some(fp) = implementation_provider.as_ref().map(ProviderKind::as_str)
                         {
                             obj.insert("from_provider".to_string(), json!(fp));
                         }
                     }
                     if !obj.contains_key("target_provider") {
-                        if let Some(tp) = primary_provider.as_ref().map(|p| p.counterpart()) {
+                        if let Some(tp) = review_provider {
                             obj.insert("target_provider".to_string(), json!(tp.as_str()));
-                        } else if let Some(tp) = bindings
-                            .counter_model_channel()
-                            .as_deref()
-                            .and_then(provider_from_channel_suffix)
-                        {
-                            obj.insert("target_provider".to_string(), json!(tp));
                         }
                     }
                 }
@@ -1560,9 +1582,22 @@ fn provider_from_channel_suffix(channel: &str) -> Option<&'static str> {
         Some("codex")
     } else if channel.ends_with("-gm") {
         Some("gemini")
+    } else if channel.ends_with("-qw") {
+        Some("qwen")
     } else {
         None
     }
+}
+
+fn provider_from_bound_channel(channel: &str) -> Option<ProviderKind> {
+    crate::server::routes::dispatches::parse_channel_id(channel)
+        .and_then(|channel_id| {
+            crate::services::discord::settings::list_registered_channel_bindings()
+                .into_iter()
+                .find(|binding| binding.channel_id == channel_id)
+                .map(|binding| binding.owner_provider)
+        })
+        .or_else(|| provider_from_channel_suffix(channel).and_then(ProviderKind::from_str))
 }
 
 #[cfg(test)]
@@ -1929,7 +1964,35 @@ mod tests {
         assert_eq!(provider_from_channel_suffix("agent-cc"), Some("claude"));
         assert_eq!(provider_from_channel_suffix("agent-cdx"), Some("codex"));
         assert_eq!(provider_from_channel_suffix("agent-gm"), Some("gemini"));
+        assert_eq!(provider_from_channel_suffix("agent-qw"), Some("qwen"));
         assert_eq!(provider_from_channel_suffix("agent"), None);
+    }
+
+    #[test]
+    fn review_context_uses_actual_review_channel_provider() {
+        let db = test_db();
+        seed_card(&db, "card-review-provider", "review");
+
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "UPDATE agents
+             SET provider = 'claude',
+                 discord_channel_id = 'agent-cc',
+                 discord_channel_alt = 'agent-qw',
+                 discord_channel_cc = 'agent-cc',
+                 discord_channel_cdx = 'agent-qw'
+             WHERE id = 'agent-1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let context =
+            build_review_context(&db, "card-review-provider", "agent-1", &json!({})).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+
+        assert_eq!(parsed["from_provider"], "claude");
+        assert_eq!(parsed["target_provider"], "qwen");
     }
 
     #[test]

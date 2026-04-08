@@ -20,7 +20,10 @@ import {
 } from "../api/client";
 import { FileText, Plus, Trash2, ChevronDown, ChevronUp, Settings2 } from "lucide-react";
 import MeetingDetailModal from "./MeetingDetailModal";
-import MeetingProviderFlow, { formatProviderFlow, providerFlowCaption } from "./MeetingProviderFlow";
+import MeetingProviderFlow, {
+  getProviderMeta,
+  providerFlowCaption,
+} from "./MeetingProviderFlow";
 import MarkdownContent from "./common/MarkdownContent";
 
 const STORAGE_KEY = "pcd_meeting_channel_id";
@@ -35,6 +38,15 @@ const PROVIDER_LABELS: Record<string, string> = {
   antigravity: "Antigravity",
   api: "API",
 };
+
+function ownerProviderBadgeStyle(provider: string) {
+  const meta = getProviderMeta(provider);
+  return {
+    background: meta.bg,
+    color: meta.color,
+    border: `1px solid ${meta.border}`,
+  } as const;
+}
 
 interface Props {
   meetings: RoundTableMeeting[];
@@ -555,7 +567,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                           <span className="font-mono">{channel.channel_id}</span>
                           <span
                             className="rounded-full px-2 py-0.5"
-                            style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}
+                            style={ownerProviderBadgeStyle(channel.owner_provider)}
                           >
                             {t({ ko: `담당 ${PROVIDER_LABELS[channel.owner_provider] ?? channel.owner_provider}`, en: `Owner ${PROVIDER_LABELS[channel.owner_provider] ?? channel.owner_provider}` })}
                           </span>
@@ -717,9 +729,11 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                   <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                     {statusBadge(m.status)}
                     {(m.primary_provider || m.reviewer_provider) && (
-                      <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}>
-                        {formatProviderFlow(m.primary_provider, m.reviewer_provider)}
-                      </span>
+                      <MeetingProviderFlow
+                        primaryProvider={m.primary_provider}
+                        reviewerProvider={m.reviewer_provider}
+                        compact
+                      />
                     )}
                     <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                       {new Date(m.started_at).toLocaleDateString(locale)}
