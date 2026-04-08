@@ -962,14 +962,13 @@ fn resolve_start_meeting_providers(
     owner_provider: Option<ProviderKind>,
     requested_primary_provider: Option<ProviderKind>,
 ) -> Result<(ProviderKind, ProviderKind), String> {
-    match (owner_provider, requested_primary_provider) {
-        (Some(owner_provider), Some(primary_provider)) => Ok((owner_provider, primary_provider)),
-        (Some(owner_provider), None) => Ok((owner_provider.clone(), owner_provider)),
-        (None, Some(primary_provider)) => Ok((primary_provider.clone(), primary_provider)),
-        (None, None) => Err(
-            "channel_id is not a registered meeting channel and primary_provider is required"
-                .to_string(),
-        ),
+    match owner_provider {
+        Some(owner_provider) => {
+            let primary_provider =
+                requested_primary_provider.unwrap_or_else(|| owner_provider.clone());
+            Ok((owner_provider, primary_provider))
+        }
+        None => Err("channel_id is not a registered meeting channel".to_string()),
     }
 }
 
@@ -1269,21 +1268,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_start_meeting_providers_falls_back_to_primary_for_unregistered_channel() {
-        assert_eq!(
-            resolve_start_meeting_providers(None, Some(ProviderKind::Gemini)),
-            Ok((ProviderKind::Gemini, ProviderKind::Gemini))
-        );
-    }
-
-    #[test]
-    fn resolve_start_meeting_providers_rejects_unregistered_channel_without_primary() {
+    fn resolve_start_meeting_providers_rejects_unregistered_channel() {
         assert_eq!(
             resolve_start_meeting_providers(None, None),
-            Err(
-                "channel_id is not a registered meeting channel and primary_provider is required"
-                    .to_string()
-            )
+            Err("channel_id is not a registered meeting channel".to_string())
+        );
+        assert_eq!(
+            resolve_start_meeting_providers(None, Some(ProviderKind::Gemini)),
+            Err("channel_id is not a registered meeting channel".to_string())
         );
     }
 
@@ -1314,12 +1306,12 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
             body.0["error"],
-            "channel_id is not a registered meeting channel and primary_provider is required"
+            "channel_id is not a registered meeting channel"
         );
     }
 
     #[tokio::test]
-    async fn start_meeting_allows_unregistered_channel_when_primary_provider_is_supplied() {
+    async fn start_meeting_rejects_unregistered_channel_even_when_primary_provider_is_supplied() {
         let db = test_db();
         let state = AppState::test_state(db.clone(), test_engine(&db));
 
@@ -1334,8 +1326,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body.0["error"], "health registry unavailable");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.0["error"],
+            "channel_id is not a registered meeting channel"
+        );
     }
 
     #[tokio::test]
