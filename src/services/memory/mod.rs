@@ -1,5 +1,6 @@
 mod local;
 mod mem0;
+mod memento;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -10,6 +11,7 @@ use crate::services::provider::ProviderKind;
 
 pub(crate) use local::LocalMemoryBackend;
 pub(crate) use mem0::Mem0Backend;
+pub(crate) use memento::MementoBackend;
 
 pub(crate) const UNBOUND_MEMORY_ROLE_ID: &str = "__unbound_role__";
 
@@ -60,8 +62,9 @@ pub(crate) fn build_memory_backend(
     settings: &ResolvedMemorySettings,
 ) -> Box<dyn MemoryBackend + Send + Sync> {
     match settings.backend {
-        MemoryBackendKind::Local => Box::new(LocalMemoryBackend),
+        MemoryBackendKind::File => Box::new(LocalMemoryBackend),
         MemoryBackendKind::Mem0 => Box::new(Mem0Backend::new(settings.clone())),
+        MemoryBackendKind::Memento => Box::new(MementoBackend),
     }
 }
 
@@ -88,15 +91,21 @@ mod tests {
     use crate::services::provider::ProviderKind;
 
     #[test]
-    fn test_build_memory_backend_local_and_mem0() {
-        let local = build_memory_backend(&ResolvedMemorySettings::default());
-        let _ = local;
+    fn test_build_memory_backend_file_mem0_and_memento() {
+        let file = build_memory_backend(&ResolvedMemorySettings::default());
+        let _ = file;
 
         let mem0 = build_memory_backend(&ResolvedMemorySettings {
             backend: MemoryBackendKind::Mem0,
             ..ResolvedMemorySettings::default()
         });
         let _ = mem0;
+
+        let memento = build_memory_backend(&ResolvedMemorySettings {
+            backend: MemoryBackendKind::Memento,
+            ..ResolvedMemorySettings::default()
+        });
+        let _ = memento;
     }
 
     #[test]

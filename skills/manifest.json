@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "global_core_skills": [],
+  "skills": {
+    "memory-merge": {
+      "providers": [
+        "claude",
+        "codex"
+      ],
+      "global": true
+    },
+    "memory-read": {
+      "providers": [
+        "claude",
+        "codex"
+      ],
+      "global": true
+    },
+    "memory-write": {
+      "providers": [
+        "claude",
+        "codex"
+      ],
+      "global": true
+    }
+  }
+}

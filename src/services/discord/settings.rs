@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use poise::serenity_prelude as serenity;
 
+use crate::runtime_layout;
 use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::provider::ProviderKind;
 
@@ -112,11 +113,22 @@ pub(crate) struct Mem0IngestionConfigOverride {
     pub confidence_threshold: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum MemoryBackendKind {
     #[default]
-    Local,
+    File,
     Mem0,
+    Memento,
+}
+
+impl MemoryBackendKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Mem0 => "mem0",
+            Self::Memento => "memento",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -152,7 +164,7 @@ pub(crate) struct ResolvedMemorySettings {
 impl Default for ResolvedMemorySettings {
     fn default() -> Self {
         Self {
-            backend: MemoryBackendKind::Local,
+            backend: MemoryBackendKind::File,
             recall_timeout_ms: DEFAULT_MEMORY_RECALL_TIMEOUT_MS,
             capture_timeout_ms: DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS,
             mem0: Mem0ResolvedSettings::default(),
@@ -171,17 +183,73 @@ fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u6
     if clamped == 0 { default } else { clamped }
 }
 
-fn resolve_memory_backend(raw: Option<&str>) -> MemoryBackendKind {
+fn normalize_memory_backend_name(raw: Option<&str>) -> Option<&'static str> {
     match raw.map(str::trim).filter(|value| !value.is_empty()) {
-        None => MemoryBackendKind::Local,
-        Some(value) if value.eq_ignore_ascii_case("local") => MemoryBackendKind::Local,
-        Some(value) if value.eq_ignore_ascii_case("mem0") => MemoryBackendKind::Mem0,
+        None => None,
+        Some(value) if value.eq_ignore_ascii_case("auto") => Some("auto"),
+        Some(value) if value.eq_ignore_ascii_case("file") => Some("file"),
+        Some(value) if value.eq_ignore_ascii_case("local") => Some("file"),
+        Some(value) if value.eq_ignore_ascii_case("mem0") => Some("mem0"),
+        Some(value) if value.eq_ignore_ascii_case("memento") => Some("memento"),
         Some(value) => {
             eprintln!(
-                "  [memory] Warning: unknown memory.backend '{value}', falling back to local"
+                "  [memory] Warning: unknown memory.backend '{value}', falling back to auto-detect"
             );
-            MemoryBackendKind::Local
+            None
         }
+    }
+}
+
+fn runtime_memory_backend_config() -> Option<runtime_layout::MemoryBackendConfig> {
+    crate::config::runtime_root().map(|root| runtime_layout::load_memory_backend(&root))
+}
+
+fn configured_memory_backend_name() -> Option<String> {
+    runtime_memory_backend_config().map(|config| config.backend)
+}
+
+fn env_var_is_set(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn memento_backend_available() -> bool {
+    let Some(config) = runtime_memory_backend_config() else {
+        return false;
+    };
+    let endpoint = config.mcp.endpoint.trim();
+    let access_key_env = config.mcp.access_key_env.trim();
+    !endpoint.is_empty() && !access_key_env.is_empty() && env_var_is_set(access_key_env)
+}
+
+fn mem0_backend_available() -> bool {
+    env_var_is_set("MEM0_API_KEY") && env_var_is_set("MEM0_BASE_URL")
+}
+
+fn auto_detect_memory_backend() -> MemoryBackendKind {
+    if memento_backend_available() {
+        MemoryBackendKind::Memento
+    } else if mem0_backend_available() {
+        MemoryBackendKind::Mem0
+    } else {
+        MemoryBackendKind::File
+    }
+}
+
+fn resolve_memory_backend(raw: Option<&str>) -> MemoryBackendKind {
+    let configured = configured_memory_backend_name();
+    let requested = normalize_memory_backend_name(raw)
+        .or_else(|| normalize_memory_backend_name(configured.as_deref()))
+        .unwrap_or("auto");
+
+    match requested {
+        "auto" => auto_detect_memory_backend(),
+        "file" => MemoryBackendKind::File,
+        "mem0" => MemoryBackendKind::Mem0,
+        "memento" => MemoryBackendKind::Memento,
+        _ => MemoryBackendKind::File,
     }
 }
 
@@ -1043,6 +1111,7 @@ pub fn resolve_discord_bot_provider(token: &str) -> ProviderKind {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use poise::serenity_prelude::ChannelId;
@@ -1074,6 +1143,39 @@ mod tests {
         match prev {
             Some(v) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", v) },
             None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+    }
+
+    fn write_memory_backend_config(temp_home: &TempDir, value: serde_json::Value) {
+        let path = temp_home
+            .path()
+            .join(".adk")
+            .join("config")
+            .join("memory-backend.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+    }
+
+    fn with_env_vars<F>(values: &[(&str, Option<&str>)], f: F)
+    where
+        F: FnOnce(),
+    {
+        let mut previous = BTreeMap::new();
+        for (name, value) in values {
+            previous.insert((*name).to_string(), std::env::var_os(name));
+            match value {
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
+
+        f();
+
+        for (name, previous) in previous {
+            match previous {
+                Some(value) => unsafe { std::env::set_var(&name, value) },
+                None => unsafe { std::env::remove_var(&name) },
+            }
         }
     }
 
@@ -1109,57 +1211,185 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_memory_settings_defaults_to_local_and_code_defaults() {
-        let resolved = resolve_memory_settings(None, None);
-        assert_eq!(resolved.backend, super::MemoryBackendKind::Local);
-        assert_eq!(resolved.recall_timeout_ms, 500);
-        assert_eq!(resolved.capture_timeout_ms, 5_000);
-        assert_eq!(resolved.mem0.profile, "default");
-        assert!(resolved.mem0.ingestion.infer.is_none());
-        assert!(resolved.mem0.ingestion.custom_instructions.is_none());
-        assert!(resolved.mem0.ingestion.confidence_threshold.is_none());
+    fn test_resolve_memory_settings_defaults_to_file_and_code_defaults() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "auto"
+                }),
+            );
+
+            with_env_vars(&[("MEM0_API_KEY", None), ("MEM0_BASE_URL", None)], || {
+                let resolved = resolve_memory_settings(None, None);
+                assert_eq!(resolved.backend, super::MemoryBackendKind::File);
+                assert_eq!(resolved.recall_timeout_ms, 500);
+                assert_eq!(resolved.capture_timeout_ms, 5_000);
+                assert_eq!(resolved.mem0.profile, "default");
+                assert!(resolved.mem0.ingestion.infer.is_none());
+                assert!(resolved.mem0.ingestion.custom_instructions.is_none());
+                assert!(resolved.mem0.ingestion.confidence_threshold.is_none());
+            });
+        });
     }
 
     #[test]
     fn test_resolve_memory_settings_applies_override_and_clamps_values() {
-        let agent = super::MemoryConfigOverride {
-            backend: Some("mem0".to_string()),
-            recall_timeout_ms: Some(50),
-            capture_timeout_ms: Some(60_000),
-            mem0: Some(super::Mem0ConfigOverride {
-                profile: Some("strict".to_string()),
-                ingestion: Some(super::Mem0IngestionConfigOverride {
-                    infer: Some(true),
-                    custom_instructions: Some("Prefer durable facts".to_string()),
-                    confidence_threshold: Some(0.75),
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "file"
                 }),
-            }),
-        };
-        let channel = super::MemoryConfigOverride {
-            backend: Some("mem0".to_string()),
-            recall_timeout_ms: Some(5_000),
-            capture_timeout_ms: Some(100),
-            mem0: Some(super::Mem0ConfigOverride {
-                profile: Some("unknown-profile".to_string()),
-                ingestion: Some(super::Mem0IngestionConfigOverride {
-                    infer: None,
-                    custom_instructions: Some("Channel override".to_string()),
-                    confidence_threshold: Some(2.0),
-                }),
-            }),
-        };
+            );
 
-        let resolved = resolve_memory_settings(Some(&agent), Some(&channel));
-        assert_eq!(resolved.backend, super::MemoryBackendKind::Mem0);
-        assert_eq!(resolved.recall_timeout_ms, 2_000);
-        assert_eq!(resolved.capture_timeout_ms, 500);
-        assert_eq!(resolved.mem0.profile, "default");
-        assert_eq!(
-            resolved.mem0.ingestion.custom_instructions.as_deref(),
-            Some("Channel override")
-        );
-        assert_eq!(resolved.mem0.ingestion.infer, Some(true));
-        assert_eq!(resolved.mem0.ingestion.confidence_threshold, None);
+            let agent = super::MemoryConfigOverride {
+                backend: Some("mem0".to_string()),
+                recall_timeout_ms: Some(50),
+                capture_timeout_ms: Some(60_000),
+                mem0: Some(super::Mem0ConfigOverride {
+                    profile: Some("strict".to_string()),
+                    ingestion: Some(super::Mem0IngestionConfigOverride {
+                        infer: Some(true),
+                        custom_instructions: Some("Prefer durable facts".to_string()),
+                        confidence_threshold: Some(0.75),
+                    }),
+                }),
+            };
+            let channel = super::MemoryConfigOverride {
+                backend: Some("mem0".to_string()),
+                recall_timeout_ms: Some(5_000),
+                capture_timeout_ms: Some(100),
+                mem0: Some(super::Mem0ConfigOverride {
+                    profile: Some("unknown-profile".to_string()),
+                    ingestion: Some(super::Mem0IngestionConfigOverride {
+                        infer: None,
+                        custom_instructions: Some("Channel override".to_string()),
+                        confidence_threshold: Some(2.0),
+                    }),
+                }),
+            };
+
+            let resolved = resolve_memory_settings(Some(&agent), Some(&channel));
+            assert_eq!(resolved.backend, super::MemoryBackendKind::Mem0);
+            assert_eq!(resolved.recall_timeout_ms, 2_000);
+            assert_eq!(resolved.capture_timeout_ms, 500);
+            assert_eq!(resolved.mem0.profile, "default");
+            assert_eq!(
+                resolved.mem0.ingestion.custom_instructions.as_deref(),
+                Some("Channel override")
+            );
+            assert_eq!(resolved.mem0.ingestion.infer, Some(true));
+            assert_eq!(resolved.mem0.ingestion.confidence_threshold, None);
+        });
+    }
+
+    #[test]
+    fn test_resolve_memory_settings_auto_detects_memento_then_mem0_then_file() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "auto",
+                    "mcp": {
+                        "endpoint": "http://127.0.0.1:8765",
+                        "access_key_env": "MEMENTO_TEST_KEY"
+                    }
+                }),
+            );
+
+            with_env_vars(
+                &[
+                    ("MEMENTO_TEST_KEY", Some("memento-key")),
+                    ("MEM0_API_KEY", Some("mem0-key")),
+                    ("MEM0_BASE_URL", Some("http://mem0.local")),
+                ],
+                || {
+                    let resolved = resolve_memory_settings(None, None);
+                    assert_eq!(resolved.backend, super::MemoryBackendKind::Memento);
+                },
+            );
+
+            with_env_vars(
+                &[
+                    ("MEMENTO_TEST_KEY", None),
+                    ("MEM0_API_KEY", Some("mem0-key")),
+                    ("MEM0_BASE_URL", Some("http://mem0.local")),
+                ],
+                || {
+                    let resolved = resolve_memory_settings(None, None);
+                    assert_eq!(resolved.backend, super::MemoryBackendKind::Mem0);
+                },
+            );
+
+            with_env_vars(
+                &[
+                    ("MEMENTO_TEST_KEY", None),
+                    ("MEM0_API_KEY", None),
+                    ("MEM0_BASE_URL", None),
+                ],
+                || {
+                    let resolved = resolve_memory_settings(None, None);
+                    assert_eq!(resolved.backend, super::MemoryBackendKind::File);
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_resolve_memory_settings_explicit_backend_skips_auto_detection() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "auto",
+                    "mcp": {
+                        "endpoint": "http://127.0.0.1:8765",
+                        "access_key_env": "MEMENTO_TEST_KEY"
+                    }
+                }),
+            );
+
+            with_env_vars(
+                &[
+                    ("MEMENTO_TEST_KEY", Some("memento-key")),
+                    ("MEM0_API_KEY", Some("mem0-key")),
+                    ("MEM0_BASE_URL", Some("http://mem0.local")),
+                ],
+                || {
+                    let file = resolve_memory_settings(
+                        Some(&super::MemoryConfigOverride {
+                            backend: Some("file".to_string()),
+                            ..Default::default()
+                        }),
+                        None,
+                    );
+                    assert_eq!(file.backend, super::MemoryBackendKind::File);
+
+                    let mem0 = resolve_memory_settings(
+                        Some(&super::MemoryConfigOverride {
+                            backend: Some("mem0".to_string()),
+                            ..Default::default()
+                        }),
+                        None,
+                    );
+                    assert_eq!(mem0.backend, super::MemoryBackendKind::Mem0);
+
+                    let memento = resolve_memory_settings(
+                        Some(&super::MemoryConfigOverride {
+                            backend: Some("memento".to_string()),
+                            ..Default::default()
+                        }),
+                        None,
+                    );
+                    assert_eq!(memento.backend, super::MemoryBackendKind::Memento);
+                },
+            );
+        });
     }
 
     #[test]

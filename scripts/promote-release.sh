@@ -273,6 +273,11 @@ if [ "$DASHBOARD_SOURCE" = "$REPO/dashboard/dist" ] && [ ! -f "$ADK_DEV/dashboar
 else
     echo "▸ Dashboard source: $DASHBOARD_SOURCE"
 fi
+if [ ! -d "$REPO/skills" ]; then
+    echo "✗ Managed skills not found in workspace — aborting promotion"
+    echo "  expected: $REPO/skills"
+    exit 1
+fi
 
 if _self_hosted_release_session; then
     _spawn_detached_helper "$@"
@@ -294,6 +299,13 @@ mkdir -p "$ADK_REL/dashboard"
 DIST_STAGED="$ADK_REL/dashboard/dist.new"
 rm -rf "$DIST_STAGED"
 cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
+
+# Stage managed skills before stopping release so skill sync never sees partial content.
+echo "▸ Staging managed skills..."
+SKILLS_STAGED="$ADK_REL/skills.new"
+rm -rf "$SKILLS_STAGED"
+mkdir -p "$SKILLS_STAGED"
+rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
 
 # Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
@@ -338,6 +350,11 @@ rm -rf "$ADK_REL/dashboard/dist.old"
 [ -d "$ADK_REL/dashboard/dist" ] && mv "$ADK_REL/dashboard/dist" "$ADK_REL/dashboard/dist.old"
 mv "$DIST_STAGED" "$ADK_REL/dashboard/dist"
 rm -rf "$ADK_REL/dashboard/dist.old"
+
+rm -rf "$ADK_REL/skills.old"
+[ -d "$ADK_REL/skills" ] && mv "$ADK_REL/skills" "$ADK_REL/skills.old"
+mv "$SKILLS_STAGED" "$ADK_REL/skills"
+rm -rf "$ADK_REL/skills.old"
 
 # Keep the user-facing CLI wrapper discoverable via PATH.
 echo "▸ Ensuring global agentdesk CLI..."

@@ -5,28 +5,160 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 pub const MEMORY_LAYOUT_VERSION: u32 = 2;
+const DEFAULT_MEMORY_BACKEND: &str = "auto";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MemoryBackendConfig {
     #[serde(default = "default_memory_layout_version")]
     pub version: u32,
-    #[serde(default = "default_sak_path")]
-    pub sak_path: String,
-    #[serde(default = "default_sam_path")]
-    pub sam_path: String,
-    #[serde(default = "default_ltm_root")]
-    pub ltm_root: String,
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
+    #[serde(default)]
+    pub file: FileMemoryBackendConfig,
+    #[serde(default)]
+    pub mcp: McpMemoryBackendConfig,
+    #[serde(default, rename = "sak_path", skip_serializing)]
+    legacy_sak_path: Option<String>,
+    #[serde(default, rename = "sam_path", skip_serializing)]
+    legacy_sam_path: Option<String>,
+    #[serde(default, rename = "ltm_root", skip_serializing)]
+    legacy_ltm_root: Option<String>,
 }
 
 impl Default for MemoryBackendConfig {
     fn default() -> Self {
         Self {
             version: default_memory_layout_version(),
+            backend: default_memory_backend(),
+            file: FileMemoryBackendConfig::default(),
+            mcp: McpMemoryBackendConfig::default(),
+            legacy_sak_path: None,
+            legacy_sam_path: None,
+            legacy_ltm_root: None,
+        }
+    }
+}
+
+impl MemoryBackendConfig {
+    fn normalized(mut self) -> Self {
+        self.backend = normalize_memory_backend_name(Some(&self.backend));
+        self.file = self.file.normalized(
+            self.legacy_sak_path.take(),
+            self.legacy_sam_path.take(),
+            self.legacy_ltm_root.take(),
+        );
+        self
+    }
+
+    fn with_defaults(mut self) -> Self {
+        self.backend = normalize_memory_backend_name(Some(&self.backend));
+        self.file = self.file.with_defaults();
+        self
+    }
+
+    fn with_managed_layout_defaults(mut self) -> Self {
+        self.backend = normalize_memory_backend_name(Some(&self.backend));
+        self.file = self.file.with_managed_layout_defaults();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileMemoryBackendConfig {
+    #[serde(default = "default_sak_path")]
+    pub sak_path: String,
+    #[serde(default = "default_sam_path")]
+    pub sam_path: String,
+    #[serde(default = "default_ltm_root")]
+    pub ltm_root: String,
+    #[serde(default = "default_auto_memory_root")]
+    pub auto_memory_root: String,
+}
+
+impl Default for FileMemoryBackendConfig {
+    fn default() -> Self {
+        Self {
             sak_path: default_sak_path(),
             sam_path: default_sam_path(),
             ltm_root: default_ltm_root(),
+            auto_memory_root: default_auto_memory_root(),
         }
     }
+}
+
+impl FileMemoryBackendConfig {
+    fn normalized(
+        mut self,
+        legacy_sak_path: Option<String>,
+        legacy_sam_path: Option<String>,
+        legacy_ltm_root: Option<String>,
+    ) -> Self {
+        self.sak_path =
+            normalize_file_memory_path(self.sak_path, legacy_sak_path, default_sak_path);
+        self.sam_path =
+            normalize_file_memory_path(self.sam_path, legacy_sam_path, default_sam_path);
+        self.ltm_root =
+            normalize_file_memory_path(self.ltm_root, legacy_ltm_root, default_ltm_root);
+        if self.auto_memory_root.trim().is_empty() {
+            self.auto_memory_root = default_auto_memory_root();
+        }
+        self
+    }
+
+    fn with_defaults(mut self) -> Self {
+        if self.sak_path.trim().is_empty() {
+            self.sak_path = default_sak_path();
+        }
+        if self.sam_path.trim().is_empty() {
+            self.sam_path = default_sam_path();
+        }
+        if self.ltm_root.trim().is_empty() {
+            self.ltm_root = default_ltm_root();
+        }
+        if self.auto_memory_root.trim().is_empty() {
+            self.auto_memory_root = default_auto_memory_root();
+        }
+        self
+    }
+
+    fn with_managed_layout_defaults(mut self) -> Self {
+        self.sak_path = default_sak_path();
+        self.sam_path = default_sam_path();
+        self.ltm_root = default_ltm_root();
+        if self.auto_memory_root.trim().is_empty() {
+            self.auto_memory_root = default_auto_memory_root();
+        }
+        self
+    }
+}
+
+fn normalize_file_memory_path(
+    current: String,
+    legacy: Option<String>,
+    default_value: fn() -> String,
+) -> String {
+    let current_trimmed = current.trim();
+    let default_path = default_value();
+    let legacy = legacy.filter(|value| !value.trim().is_empty());
+
+    if current_trimmed.is_empty() {
+        return legacy.unwrap_or(default_path);
+    }
+
+    if current == default_path {
+        return legacy.unwrap_or(default_path);
+    }
+
+    current
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpMemoryBackendConfig {
+    pub endpoint: String,
+    pub access_key_env: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -87,6 +219,10 @@ fn default_memory_layout_version() -> u32 {
     MEMORY_LAYOUT_VERSION
 }
 
+fn default_memory_backend() -> String {
+    DEFAULT_MEMORY_BACKEND.to_string()
+}
+
 fn default_sak_path() -> String {
     "memories/shared-agent-knowledge/shared_knowledge.md".to_string()
 }
@@ -99,8 +235,24 @@ fn default_ltm_root() -> String {
     "memories/long-term".to_string()
 }
 
+fn default_auto_memory_root() -> String {
+    "~/.claude/projects/*{workspace}*/memory/".to_string()
+}
+
 fn default_skill_manifest_version() -> u32 {
     1
+}
+
+fn normalize_memory_backend_name(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => DEFAULT_MEMORY_BACKEND.to_string(),
+        Some(value) if value.eq_ignore_ascii_case("auto") => "auto".to_string(),
+        Some(value) if value.eq_ignore_ascii_case("file") => "file".to_string(),
+        Some(value) if value.eq_ignore_ascii_case("local") => "file".to_string(),
+        Some(value) if value.eq_ignore_ascii_case("memento") => "memento".to_string(),
+        Some(value) if value.eq_ignore_ascii_case("mem0") => "mem0".to_string(),
+        Some(_) => DEFAULT_MEMORY_BACKEND.to_string(),
+    }
 }
 
 fn current_home_dir() -> Option<PathBuf> {
@@ -183,7 +335,7 @@ fn default_shared_agent_knowledge_path(root: &Path) -> PathBuf {
 }
 
 pub fn shared_agent_knowledge_path(root: &Path) -> PathBuf {
-    resolve_memory_path(root, &load_memory_backend(root).sak_path)
+    resolve_memory_path(root, &load_memory_backend(root).file.sak_path)
 }
 
 fn default_shared_agent_memory_root(root: &Path) -> PathBuf {
@@ -192,7 +344,7 @@ fn default_shared_agent_memory_root(root: &Path) -> PathBuf {
 
 #[allow(dead_code)]
 pub fn shared_agent_memory_root(root: &Path) -> PathBuf {
-    resolve_memory_path(root, &load_memory_backend(root).sam_path)
+    resolve_memory_path(root, &load_memory_backend(root).file.sam_path)
 }
 
 fn default_long_term_memory_root(root: &Path) -> PathBuf {
@@ -200,7 +352,7 @@ fn default_long_term_memory_root(root: &Path) -> PathBuf {
 }
 
 pub fn long_term_memory_root(root: &Path) -> PathBuf {
-    resolve_memory_path(root, &load_memory_backend(root).ltm_root)
+    resolve_memory_path(root, &load_memory_backend(root).file.ltm_root)
 }
 
 pub fn memories_archive_root(root: &Path) -> PathBuf {
@@ -216,7 +368,7 @@ pub fn managed_skills_manifest_path(root: &Path) -> PathBuf {
 }
 
 pub fn resolve_memory_path(root: &Path, raw: &str) -> PathBuf {
-    let raw_path = PathBuf::from(raw);
+    let raw_path = expand_user_path(raw).unwrap_or_else(|| PathBuf::from(raw));
     if raw_path.is_absolute() {
         raw_path
     } else {
@@ -229,7 +381,7 @@ pub fn load_memory_backend(root: &Path) -> MemoryBackendConfig {
     for path in candidates {
         if let Ok(content) = fs::read_to_string(&path) {
             if let Ok(config) = serde_json::from_str::<MemoryBackendConfig>(&content) {
-                return config;
+                return config.normalized();
             }
         }
     }
@@ -337,12 +489,16 @@ fn legacy_layout_needs_migration(root: &Path) -> bool {
 }
 
 fn ensure_layout_dirs(root: &Path) -> Result<(), String> {
+    let backend = load_memory_backend(root).with_defaults();
     for dir in [
         config_dir(root),
         managed_agents_root(root),
-        shared_agent_knowledge_dir(root),
-        default_shared_agent_memory_root(root),
-        default_long_term_memory_root(root),
+        shared_agent_knowledge_path(root)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| shared_agent_knowledge_dir(root)),
+        resolve_memory_path(root, &backend.file.sam_path),
+        resolve_memory_path(root, &backend.file.ltm_root),
         memories_archive_root(root),
         managed_skills_root(root),
     ] {
@@ -354,19 +510,8 @@ fn ensure_layout_dirs(root: &Path) -> Result<(), String> {
 
 fn write_memory_backend(root: &Path) -> Result<(), String> {
     let path = memory_backend_path(root);
-    let mut config = load_memory_backend(root);
-    if config.version < MEMORY_LAYOUT_VERSION {
-        config.version = MEMORY_LAYOUT_VERSION;
-    }
-    if config.sak_path.trim().is_empty() {
-        config.sak_path = default_sak_path();
-    }
-    if config.sam_path.trim().is_empty() {
-        config.sam_path = default_sam_path();
-    }
-    if config.ltm_root.trim().is_empty() {
-        config.ltm_root = default_ltm_root();
-    }
+    let mut config = load_memory_backend(root).with_defaults();
+    config.version = MEMORY_LAYOUT_VERSION;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create '{}': {e}", parent.display()))?;
@@ -473,12 +618,11 @@ fn migrate_memory_backend_file(root: &Path) -> Result<(), String> {
     let legacy = root.join("memory-backend.json");
     let current = memory_backend_path(root);
     let mut backend = load_memory_backend(root);
-    let should_reset_paths = backend.version < MEMORY_LAYOUT_VERSION || legacy.is_file();
-    if should_reset_paths {
-        backend.sak_path = default_sak_path();
-        backend.sam_path = default_sam_path();
-        backend.ltm_root = default_ltm_root();
-    }
+    backend = if backend.version < MEMORY_LAYOUT_VERSION {
+        backend.with_managed_layout_defaults()
+    } else {
+        backend.with_defaults()
+    };
     backend.version = MEMORY_LAYOUT_VERSION;
 
     if let Some(parent) = current.parent() {
@@ -1092,7 +1236,9 @@ fn rewrite_managed_skill_paths(skill_name: &str, skill_dir: &Path) -> Result<(),
         "memory-merge" => vec![
             skill_dir.join("SKILL.md"),
             skill_dir.join("references").join("architecture.md"),
+            skill_dir.join("references").join("classification-guide.md"),
             skill_dir.join("references").join("phase-details.md"),
+            skill_dir.join("references").join("report-template.md"),
         ],
         _ => return Ok(()),
     };
@@ -1145,6 +1291,10 @@ fn skill_path_replacements() -> &'static [(&'static str, &'static str)] {
         (
             "~/ObsidianVault/RemoteVault/agents/{roleId}/long-term-memory/",
             "~/.adk/release/config/memories/long-term/{roleId}/",
+        ),
+        (
+            "~/.claude/projects/-Users-itismyfield--adk-release-workspaces-{workspace}/memory/",
+            "~/.claude/projects/*{workspace}*/memory/",
         ),
     ]
 }
@@ -1542,7 +1692,8 @@ mod tests {
     fn ensure_runtime_layout_migrates_legacy_memory_tree() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let _home_guard = TestHomeGuard::install(&temp.path().join("home"), root);
+        let home = temp.path().join("home");
+        let _home_guard = TestHomeGuard::install(&home, root);
 
         fs::create_dir_all(root.join("role-context").join("alpha.memory")).unwrap();
         fs::write(
@@ -1613,6 +1764,14 @@ mod tests {
         assert!(role_map.contains("/tmp/config/agents/alpha/IDENTITY.md"));
         let backend = load_memory_backend(root);
         assert_eq!(backend.version, 2);
+        assert_eq!(backend.backend, "auto");
+        assert_eq!(backend.file.sak_path, default_sak_path());
+        assert_eq!(backend.file.sam_path, default_sam_path());
+        assert_eq!(backend.file.ltm_root, default_ltm_root());
+        assert_eq!(
+            backend.file.auto_memory_root,
+            "~/.claude/projects/*{workspace}*/memory/"
+        );
         assert!(!root.join("shared_agent_memory").exists());
         assert!(!root.join("role-context").exists());
         assert!(!root.join("agentdesk.yaml").exists());
@@ -1681,9 +1840,17 @@ mod tests {
             &memory_backend_path(root),
             serde_json::json!({
                 "version": 2,
-                "sak_path": "/tmp/custom/shared.md",
-                "sam_path": "/tmp/custom/sam",
-                "ltm_root": "/tmp/custom/ltm"
+                "backend": "memento",
+                "file": {
+                    "sak_path": "/tmp/custom/shared.md",
+                    "sam_path": "/tmp/custom/sam",
+                    "ltm_root": "/tmp/custom/ltm",
+                    "auto_memory_root": "/tmp/custom/auto/{workspace}"
+                },
+                "mcp": {
+                    "endpoint": "http://127.0.0.1:8765",
+                    "access_key_env": "MEMENTO_API_KEY"
+                }
             }),
         );
 
@@ -1692,9 +1859,56 @@ mod tests {
 
         assert!(!report.migrated);
         assert_eq!(backend.version, 2);
-        assert_eq!(backend.sak_path, "/tmp/custom/shared.md");
-        assert_eq!(backend.sam_path, "/tmp/custom/sam");
-        assert_eq!(backend.ltm_root, "/tmp/custom/ltm");
+        assert_eq!(backend.backend, "memento");
+        assert_eq!(backend.file.sak_path, "/tmp/custom/shared.md");
+        assert_eq!(backend.file.sam_path, "/tmp/custom/sam");
+        assert_eq!(backend.file.ltm_root, "/tmp/custom/ltm");
+        assert_eq!(
+            backend.file.auto_memory_root,
+            "/tmp/custom/auto/{workspace}"
+        );
+        assert_eq!(backend.mcp.endpoint, "http://127.0.0.1:8765");
+        assert_eq!(backend.mcp.access_key_env, "MEMENTO_API_KEY");
+    }
+
+    #[test]
+    fn load_memory_backend_preserves_legacy_v1_paths_until_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let _home_guard = TestHomeGuard::install(&temp.path().join("home"), root);
+        write_json(
+            &root.join("memory-backend.json"),
+            serde_json::json!({
+                "version": 1,
+                "sak_path": "/tmp/legacy/shared.md",
+                "sam_path": "/tmp/legacy/sam",
+                "ltm_root": "/tmp/legacy/ltm"
+            }),
+        );
+
+        let backend = load_memory_backend(root);
+
+        assert_eq!(backend.version, 1);
+        assert_eq!(backend.backend, "auto");
+        assert_eq!(backend.file.sak_path, "/tmp/legacy/shared.md");
+        assert_eq!(backend.file.sam_path, "/tmp/legacy/sam");
+        assert_eq!(backend.file.ltm_root, "/tmp/legacy/ltm");
+        assert_eq!(
+            backend.file.auto_memory_root,
+            "~/.claude/projects/*{workspace}*/memory/"
+        );
+    }
+
+    #[test]
+    fn resolve_memory_path_expands_tilde_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = temp.path().join("runtime");
+        let _home_guard = TestHomeGuard::install(&home, &root);
+
+        let resolved = resolve_memory_path(&root, "~/custom/shared.md");
+
+        assert_eq!(resolved, home.join("custom").join("shared.md"));
     }
 
     #[test]
@@ -1760,7 +1974,7 @@ mod tests {
         let legacy_skill_dir = temp.path().join("obsidian").join("memory-write");
         write_text(
             &legacy_skill_dir.join("SKILL.md"),
-            "Use ~/.adk/release/shared_agent_memory/shared_knowledge.md and ~/.adk/release/shared_agent_memory/{role_id}.json",
+            "Use ~/.adk/release/shared_agent_memory/shared_knowledge.md and ~/.adk/release/shared_agent_memory/{role_id}.json and ~/.claude/projects/-Users-itismyfield--adk-release-workspaces-{workspace}/memory/",
         );
         let legacy_codex_link = home.join(".codex").join("skills").join("memory-write");
         fs::create_dir_all(legacy_codex_link.parent().unwrap()).unwrap();
@@ -1779,6 +1993,7 @@ mod tests {
             managed_content.contains("config/memories/shared-agent-knowledge/shared_knowledge.md")
         );
         assert!(managed_content.contains("config/memories/shared-agent-memory/{role_id}.json"));
+        assert!(managed_content.contains("~/.claude/projects/*{workspace}*/memory/"));
         assert!(original_content.contains("shared_agent_memory/shared_knowledge.md"));
     }
 

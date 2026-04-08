@@ -740,10 +740,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         );
     }
     let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
-    let memory_backend_label = match memory_settings.backend {
-        settings::MemoryBackendKind::Local => "local",
-        settings::MemoryBackendKind::Mem0 => "mem0",
-    };
+    let memory_backend_label = memory_settings.backend.as_str();
     let provider_label = match &provider {
         ProviderKind::Claude => "claude",
         ProviderKind::Codex => "codex",

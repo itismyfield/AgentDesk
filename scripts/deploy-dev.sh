@@ -18,6 +18,7 @@ fi
 REPO="$(cd "$REPO" && pwd)"
 DEV_WORKSPACE_DIR="${AGENTDESK_DEV_WORKSPACE_DIR:-$ADK_DEV/workspaces/agentdesk}"
 DEV_POLICY_DIR="${AGENTDESK_DEV_POLICY_DIR:-$DEV_WORKSPACE_DIR/policies}"
+DEV_SKILLS_DIR="${AGENTDESK_DEV_SKILLS_DIR:-$ADK_DEV/skills}"
 REPORT_CHANNEL_ID="${AGENTDESK_REPORT_CHANNEL_ID:-}"
 REPORT_PROVIDER="${AGENTDESK_REPORT_PROVIDER:-}"
 DEV_DEPLOY_DETACHED_CHILD="${AGENTDESK_DEPLOY_DEV_DETACHED_CHILD:-0}"
@@ -278,11 +279,20 @@ echo "▸ Syncing policies..."
 mkdir -p "$DEV_POLICY_DIR"
 rsync -a --delete "$REPO/policies/" "$DEV_POLICY_DIR/"
 
-# 3.8. Keep dev bot credentials aligned with the shared runtime credential.
+# 3.8. Sync managed skills used by the dev runtime.
+echo "▸ Syncing managed skills..."
+if [ ! -d "$REPO/skills" ]; then
+    echo "✗ Managed skills not found: $REPO/skills"
+    exit 1
+fi
+mkdir -p "$DEV_SKILLS_DIR"
+rsync -a --delete "$REPO/skills/" "$DEV_SKILLS_DIR/"
+
+# 3.9. Keep dev bot credentials aligned with the shared runtime credential.
 echo "▸ Syncing credentials..."
 _sync_dev_credentials
 
-# 3.9. Ensure the user-facing CLI wrapper is reachable via PATH.
+# 3.10. Ensure the user-facing CLI wrapper is reachable via PATH.
 echo "▸ Ensuring global agentdesk CLI..."
 "$SCRIPT_DIR/ensure-agentdesk-cli.sh"
 
