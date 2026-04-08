@@ -208,24 +208,12 @@ fn configured_memory_backend_name() -> Option<String> {
     runtime_memory_backend_config().map(|config| config.backend)
 }
 
-fn env_var_is_set(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-}
-
 fn memento_backend_available() -> bool {
-    let Some(config) = runtime_memory_backend_config() else {
-        return false;
-    };
-    let endpoint = config.mcp.endpoint.trim();
-    let access_key_env = config.mcp.access_key_env.trim();
-    !endpoint.is_empty() && !access_key_env.is_empty() && env_var_is_set(access_key_env)
+    crate::services::memory::backend_is_active(MemoryBackendKind::Memento)
 }
 
 fn mem0_backend_available() -> bool {
-    env_var_is_set("MEM0_API_KEY") && env_var_is_set("MEM0_BASE_URL")
+    crate::services::memory::backend_is_active(MemoryBackendKind::Mem0)
 }
 
 fn auto_detect_memory_backend() -> MemoryBackendKind {
@@ -247,10 +235,32 @@ fn resolve_memory_backend(raw: Option<&str>) -> MemoryBackendKind {
     match requested {
         "auto" => auto_detect_memory_backend(),
         "file" => MemoryBackendKind::File,
-        "mem0" => MemoryBackendKind::Mem0,
-        "memento" => MemoryBackendKind::Memento,
+        "mem0" => resolve_explicit_memory_backend(MemoryBackendKind::Mem0),
+        "memento" => resolve_explicit_memory_backend(MemoryBackendKind::Memento),
         _ => MemoryBackendKind::File,
     }
+}
+
+fn resolve_explicit_memory_backend(kind: MemoryBackendKind) -> MemoryBackendKind {
+    if crate::services::memory::backend_is_active(kind) {
+        return kind;
+    }
+
+    if let Some(state) = crate::services::memory::backend_state(kind) {
+        eprintln!(
+            "  [memory] Warning: requested backend '{}' unavailable (configured={}, failures={}); falling back to file",
+            kind.as_str(),
+            state.configured,
+            state.consecutive_failures
+        );
+    } else {
+        eprintln!(
+            "  [memory] Warning: requested backend '{}' unavailable; falling back to file",
+            kind.as_str()
+        );
+    }
+
+    MemoryBackendKind::File
 }
 
 fn resolve_mem0_profile(raw: Option<&str>) -> String {
@@ -1212,6 +1222,7 @@ mod tests {
 
     #[test]
     fn test_resolve_memory_settings_defaults_to_file_and_code_defaults() {
+        crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
             write_memory_backend_config(
                 temp_home,
@@ -1236,6 +1247,7 @@ mod tests {
 
     #[test]
     fn test_resolve_memory_settings_applies_override_and_clamps_values() {
+        crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
             write_memory_backend_config(
                 temp_home,
@@ -1272,22 +1284,31 @@ mod tests {
                 }),
             };
 
-            let resolved = resolve_memory_settings(Some(&agent), Some(&channel));
-            assert_eq!(resolved.backend, super::MemoryBackendKind::Mem0);
-            assert_eq!(resolved.recall_timeout_ms, 2_000);
-            assert_eq!(resolved.capture_timeout_ms, 500);
-            assert_eq!(resolved.mem0.profile, "default");
-            assert_eq!(
-                resolved.mem0.ingestion.custom_instructions.as_deref(),
-                Some("Channel override")
+            with_env_vars(
+                &[
+                    ("MEM0_API_KEY", Some("mem0-key")),
+                    ("MEM0_BASE_URL", Some("http://mem0.local")),
+                ],
+                || {
+                    let resolved = resolve_memory_settings(Some(&agent), Some(&channel));
+                    assert_eq!(resolved.backend, super::MemoryBackendKind::Mem0);
+                    assert_eq!(resolved.recall_timeout_ms, 2_000);
+                    assert_eq!(resolved.capture_timeout_ms, 500);
+                    assert_eq!(resolved.mem0.profile, "default");
+                    assert_eq!(
+                        resolved.mem0.ingestion.custom_instructions.as_deref(),
+                        Some("Channel override")
+                    );
+                    assert_eq!(resolved.mem0.ingestion.infer, Some(true));
+                    assert_eq!(resolved.mem0.ingestion.confidence_threshold, None);
+                },
             );
-            assert_eq!(resolved.mem0.ingestion.infer, Some(true));
-            assert_eq!(resolved.mem0.ingestion.confidence_threshold, None);
         });
     }
 
     #[test]
     fn test_resolve_memory_settings_auto_detects_memento_then_mem0_then_file() {
+        crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
             write_memory_backend_config(
                 temp_home,
@@ -1341,6 +1362,7 @@ mod tests {
 
     #[test]
     fn test_resolve_memory_settings_explicit_backend_skips_auto_detection() {
+        crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
             write_memory_backend_config(
                 temp_home,
@@ -1387,6 +1409,51 @@ mod tests {
                         None,
                     );
                     assert_eq!(memento.backend, super::MemoryBackendKind::Memento);
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_resolve_memory_settings_explicit_backend_falls_back_to_file_when_unavailable() {
+        crate::services::memory::reset_backend_health_for_tests();
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "auto",
+                    "mcp": {
+                        "endpoint": "http://127.0.0.1:8765",
+                        "access_key_env": "MEMENTO_TEST_KEY"
+                    }
+                }),
+            );
+
+            with_env_vars(
+                &[
+                    ("MEMENTO_TEST_KEY", None),
+                    ("MEM0_API_KEY", None),
+                    ("MEM0_BASE_URL", None),
+                ],
+                || {
+                    let mem0 = resolve_memory_settings(
+                        Some(&super::MemoryConfigOverride {
+                            backend: Some("mem0".to_string()),
+                            ..Default::default()
+                        }),
+                        None,
+                    );
+                    assert_eq!(mem0.backend, super::MemoryBackendKind::File);
+
+                    let memento = resolve_memory_settings(
+                        Some(&super::MemoryConfigOverride {
+                            backend: Some("memento".to_string()),
+                            ..Default::default()
+                        }),
+                        None,
+                    );
+                    assert_eq!(memento.backend, super::MemoryBackendKind::File);
                 },
             );
         });

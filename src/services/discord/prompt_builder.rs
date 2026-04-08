@@ -1,6 +1,6 @@
 use super::settings::{
-    discord_token_hash, load_review_tuning_guidance, load_role_prompt, load_shared_prompt,
-    render_peer_agent_guidance,
+    MemoryBackendKind, ResolvedMemorySettings, discord_token_hash, load_review_tuning_guidance,
+    load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
 };
 use super::*;
 
@@ -30,6 +30,40 @@ pub(crate) fn build_followup_turn_system_reminder() -> String {
          Replace stale tool chatter, raw logs, and old command output with placeholders like {STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE} instead of replaying them verbatim.\n\
          </system-reminder>"
     )
+}
+
+fn proactive_memory_guidance(
+    memory_settings: Option<&ResolvedMemorySettings>,
+    profile: DispatchProfile,
+) -> Option<String> {
+    if profile != DispatchProfile::Full {
+        return None;
+    }
+
+    let settings = memory_settings?;
+    let (backend_name, read_tool, write_tool, extra_note) = match settings.backend {
+        MemoryBackendKind::File => ("local", "`memory-read` skill", "`memory-write` skill", ""),
+        MemoryBackendKind::Mem0 => (
+            "mem0",
+            "`search_memory` MCP tool",
+            "`add_memories` MCP tool",
+            "",
+        ),
+        MemoryBackendKind::Memento => (
+            "memento",
+            "`recall` MCP tool",
+            "`remember` MCP tool",
+            "\n- 참고: 턴 시작 `context` 주입과 세션 종료 시 `reflect`는 서버가 담당한다. 턴 중 보강만 `recall`/`remember`로 수행한다.",
+        ),
+    };
+
+    Some(format!(
+        "\n\n[Proactive Memory Guidance]\n\
+         이 세션에서 `{backend_name}` 메모리를 사용할 수 있습니다.\n\
+         - 읽기: {read_tool} — 새로운 맥락 발견 시 추가 조회\n\
+         - 쓰기: {write_tool} — 중요한 결정/에러/절차 발견 시 기록\n\
+         - 트리거: 에러 원인 확정, 아키텍처 결정, 설정 변경, \"이전에\" 언급 시{extra_note}"
+    ))
 }
 /// Dispatch prompt profile — controls which system prompt sections are injected.
 /// `Full` includes everything (used for implementation dispatches and normal turns).
@@ -68,6 +102,7 @@ pub(super) fn build_system_prompt(
     dispatch_type: Option<&str>,
     shared_knowledge: Option<&str>,
     longterm_catalog: Option<&str>,
+    memory_settings: Option<&ResolvedMemorySettings>,
 ) -> String {
     let narration_guidance = if narrate_progress {
         "\n\nAlways keep the user informed about what you are doing. Briefly explain each step as you work \
@@ -209,6 +244,10 @@ pub(super) fn build_system_prompt(
         system_prompt_owned.push_str(sak);
     }
 
+    if let Some(memory_guidance) = proactive_memory_guidance(memory_settings, profile) {
+        system_prompt_owned.push_str(&memory_guidance);
+    }
+
     if queued_turn {
         system_prompt_owned.push_str(
             "\n\n[Queued Turn Rules]\n\
@@ -258,6 +297,7 @@ mod tests {
             None, // dispatch_type
             None, // shared_knowledge
             None, // longterm_catalog
+            None, // memory_settings
         )
     }
 
@@ -339,6 +379,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         assert!(!output.contains("Always keep the user informed about what you are doing."));
@@ -410,6 +451,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let without_skills = build_system_prompt(
             "ctx",
@@ -423,6 +465,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review"),
+            None,
             None,
             None,
         );
@@ -449,6 +492,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review"),
+            None,
             None,
             None,
         );
@@ -484,6 +528,7 @@ mod tests {
             Some("review"),
             None,
             None,
+            None,
         );
         let decision_prompt = build_system_prompt(
             "ctx",
@@ -497,6 +542,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review-decision"),
+            None,
             None,
             None,
         );
@@ -537,6 +583,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         assert!(!prompt.contains("[Peer Agent Directory]"));
@@ -570,9 +617,93 @@ mod tests {
             None,
             None,
             Some("- facts.md: deployment notes"),
+            None,
         );
 
         assert!(prompt.contains("[Long-term Memory]"));
         assert!(prompt.contains("facts.md"));
+    }
+
+    #[test]
+    fn test_full_prompt_injects_mem0_memory_guidance() {
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            true,
+            None,
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+            Some(&ResolvedMemorySettings {
+                backend: MemoryBackendKind::Mem0,
+                ..ResolvedMemorySettings::default()
+            }),
+        );
+
+        assert!(prompt.contains("[Proactive Memory Guidance]"));
+        assert!(prompt.contains("`search_memory` MCP tool"));
+        assert!(prompt.contains("`add_memories` MCP tool"));
+    }
+
+    #[test]
+    fn test_full_prompt_injects_memento_memory_guidance() {
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            true,
+            None,
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+            Some(&ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            }),
+        );
+
+        assert!(prompt.contains("[Proactive Memory Guidance]"));
+        assert!(prompt.contains("`recall` MCP tool"));
+        assert!(prompt.contains("`remember` MCP tool"));
+        assert!(prompt.contains("`context`"));
+        assert!(prompt.contains("`reflect`"));
+    }
+
+    #[test]
+    fn test_review_lite_omits_memory_guidance() {
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            true,
+            None,
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review"),
+            None,
+            None,
+            Some(&ResolvedMemorySettings {
+                backend: MemoryBackendKind::Mem0,
+                ..ResolvedMemorySettings::default()
+            }),
+        );
+
+        assert!(!prompt.contains("[Proactive Memory Guidance]"));
+        assert!(!prompt.contains("`search_memory`"));
+        assert!(!prompt.contains("`add_memories`"));
     }
 }

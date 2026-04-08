@@ -9,17 +9,19 @@ use super::retry_state::{
     clear_local_session_state, handle_gemini_retry_boundary, reset_gemini_retry_attempt_state,
     should_reset_gemini_retry_attempt_state,
 };
-use super::spawn_memory_capture_task;
 use super::stale_resume::{
     contains_stale_resume_error_text, output_file_has_stale_resume_error_after_offset,
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
+use super::{spawn_memory_capture_task, take_memento_reflect_request};
 use crate::services::discord::ChannelId;
+use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
-use crate::services::memory::CaptureRequest;
+use crate::services::memory::{CaptureRequest, SessionEndReason};
 use crate::services::provider::ProviderKind;
+use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -95,6 +97,34 @@ fn total_context_tokens_saturates_on_overflow() {
     assert_eq!(total_context_tokens(u64::MAX, 1), u64::MAX);
 }
 
+fn sample_session() -> DiscordSession {
+    DiscordSession {
+        session_id: Some("session-1".to_string()),
+        memento_context_loaded: true,
+        memento_reflected: false,
+        current_path: Some("/tmp/project".to_string()),
+        history: vec![
+            HistoryItem {
+                item_type: HistoryType::User,
+                content: "hello".to_string(),
+            },
+            HistoryItem {
+                item_type: HistoryType::Assistant,
+                content: "world".to_string(),
+            },
+        ],
+        pending_uploads: Vec::new(),
+        cleared: false,
+        channel_name: Some("adk-cdx".to_string()),
+        category_name: None,
+        remote_profile_name: None,
+        channel_id: Some(42),
+        last_active: tokio::time::Instant::now(),
+        worktree: None,
+        born_generation: 0,
+    }
+}
+
 #[tokio::test]
 async fn memory_capture_task_is_backgrounded_and_timeout_isolated() {
     let (base_url, server_handle) = spawn_hanging_http_server().await;
@@ -131,6 +161,108 @@ async fn memory_capture_task_is_backgrounded_and_timeout_isolated() {
 
     server_handle.abort();
     restore_mem0_env(prev_api_key, prev_base_url);
+}
+
+#[test]
+fn memento_reflect_request_requires_loaded_unreflected_session() {
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        ..ResolvedMemorySettings::default()
+    };
+    let mut session = sample_session();
+
+    let request = take_memento_reflect_request(
+        &mut session,
+        &settings,
+        &ProviderKind::Codex,
+        None,
+        42,
+        SessionEndReason::IdleExpiry,
+    )
+    .expect("memento reflect should be prepared");
+
+    assert_eq!(request.session_id, "session-1");
+    assert_eq!(request.channel_id, 42);
+    assert_eq!(request.reason, SessionEndReason::IdleExpiry);
+    assert_eq!(request.transcript, "[User]: hello\n[Assistant]: world");
+    assert!(session.memento_reflected);
+
+    let duplicate = take_memento_reflect_request(
+        &mut session,
+        &settings,
+        &ProviderKind::Codex,
+        None,
+        42,
+        SessionEndReason::IdleExpiry,
+    );
+    assert!(duplicate.is_none(), "reflect must be one-shot per session");
+}
+
+#[test]
+fn memento_reflect_request_skips_other_backends_or_missing_state() {
+    let mut unloaded = sample_session();
+    unloaded.memento_context_loaded = false;
+    assert!(
+        take_memento_reflect_request(
+            &mut unloaded,
+            &ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            },
+            &ProviderKind::Codex,
+            None,
+            42,
+            SessionEndReason::LocalSessionReset,
+        )
+        .is_none()
+    );
+
+    let mut non_memento = sample_session();
+    assert!(
+        take_memento_reflect_request(
+            &mut non_memento,
+            &ResolvedMemorySettings::default(),
+            &ProviderKind::Codex,
+            None,
+            42,
+            SessionEndReason::LocalSessionReset,
+        )
+        .is_none()
+    );
+
+    let mut missing_session_id = sample_session();
+    missing_session_id.session_id = None;
+    assert!(
+        take_memento_reflect_request(
+            &mut missing_session_id,
+            &ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            },
+            &ProviderKind::Codex,
+            None,
+            42,
+            SessionEndReason::LocalSessionReset,
+        )
+        .is_none()
+    );
+
+    let mut missing_history = sample_session();
+    missing_history.history.clear();
+    assert!(
+        take_memento_reflect_request(
+            &mut missing_history,
+            &ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            },
+            &ProviderKind::Codex,
+            None,
+            42,
+            SessionEndReason::LocalSessionReset,
+        )
+        .is_none()
+    );
 }
 
 #[test]

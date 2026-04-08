@@ -19,6 +19,8 @@ pub async fn run(
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Result<()> {
+    crate::services::memory::refresh_backend_health("startup").await;
+
     // Startup: drain any deferred hooks persisted before last shutdown (#125)
     engine.drain_startup_hooks();
 
@@ -202,6 +204,7 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
         if count % 10 == 0 {
             fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min");
             drain_transitions(&engine, &db);
+            crate::services::memory::refresh_backend_health("OnTick5min").await;
             // Also fire legacy OnTick for backward compat
             fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy");
             drain_transitions(&engine, &db);

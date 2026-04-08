@@ -356,6 +356,41 @@ mod tests {
 
     use super::*;
 
+    struct Mem0EnvGuard {
+        prev_api_key: Option<std::ffi::OsString>,
+        prev_base_url: Option<std::ffi::OsString>,
+    }
+
+    impl Mem0EnvGuard {
+        fn install() -> Self {
+            crate::services::memory::reset_backend_health_for_tests();
+            let prev_api_key = std::env::var_os("MEM0_API_KEY");
+            let prev_base_url = std::env::var_os("MEM0_BASE_URL");
+            unsafe {
+                std::env::set_var("MEM0_API_KEY", "test-key");
+                std::env::set_var("MEM0_BASE_URL", "http://mem0.local");
+            }
+            Self {
+                prev_api_key,
+                prev_base_url,
+            }
+        }
+    }
+
+    impl Drop for Mem0EnvGuard {
+        fn drop(&mut self) {
+            match self.prev_api_key.take() {
+                Some(value) => unsafe { std::env::set_var("MEM0_API_KEY", value) },
+                None => unsafe { std::env::remove_var("MEM0_API_KEY") },
+            }
+            match self.prev_base_url.take() {
+                Some(value) => unsafe { std::env::set_var("MEM0_BASE_URL", value) },
+                None => unsafe { std::env::remove_var("MEM0_BASE_URL") },
+            }
+            crate::services::memory::reset_backend_health_for_tests();
+        }
+    }
+
     fn with_temp_root<F>(f: F)
     where
         F: FnOnce(&TempDir),
@@ -494,6 +529,7 @@ channels:
     #[test]
     fn test_channel_binding_memory_overrides_agent_memory_defaults() {
         with_temp_root(|temp_home: &TempDir| {
+            let _mem0_env = Mem0EnvGuard::install();
             write_org_yaml(
                 temp_home.path(),
                 r#"

@@ -742,7 +742,7 @@ pub(super) async fn tmux_output_watcher(
                     .get(&channel_id)
                     .and_then(|s| s.session_id.clone());
                 if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.session_id = None;
+                    session.clear_provider_session();
                 }
                 old
             };
@@ -1748,6 +1748,8 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                     .entry(*channel_id)
                     .or_insert_with(|| super::DiscordSession {
                         session_id: None,
+                        memento_context_loaded: false,
+                        memento_reflected: false,
                         current_path: None,
                         history: Vec::new(),
                         pending_uploads: Vec::new(),

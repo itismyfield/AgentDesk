@@ -111,7 +111,7 @@ pub(super) async fn reset_session_for_auto_retry(
             .get(&channel_id)
             .and_then(|s| s.session_id.clone());
         if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.session_id = None;
+            session.clear_provider_session();
         }
         old
     };

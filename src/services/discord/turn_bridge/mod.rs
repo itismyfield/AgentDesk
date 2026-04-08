@@ -12,7 +12,8 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::services::memory::{
-    CaptureRequest, build_memory_backend, resolve_memory_role_id, resolve_memory_session_id,
+    CaptureRequest, ReflectRequest, SessionEndReason, build_memory_backend, resolve_memory_role_id,
+    resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
@@ -58,6 +59,88 @@ pub(super) fn spawn_memory_capture_task(
                 warning
             );
         }
+    })
+}
+
+pub(super) fn spawn_memory_reflect_task(
+    channel_id: ChannelId,
+    reflect_memory_settings: settings::ResolvedMemorySettings,
+    reflect_request: ReflectRequest,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let backend = build_memory_backend(&reflect_memory_settings);
+        let reason = reflect_request.reason.as_str().to_string();
+        let result = backend.reflect(reflect_request).await;
+        for warning in result.warnings {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!(
+                "  [{ts}] [memory] reflect warning for channel {} ({}): {}",
+                channel_id.get(),
+                reason,
+                warning
+            );
+        }
+    })
+}
+
+fn build_memento_transcript(history: &[HistoryItem]) -> String {
+    history
+        .iter()
+        .filter_map(|item| {
+            let content = item.content.trim();
+            if content.is_empty() {
+                return None;
+            }
+
+            let label = match item.item_type {
+                HistoryType::User => "User",
+                HistoryType::Assistant => "Assistant",
+                HistoryType::Error => "Error",
+                HistoryType::System => "System",
+                HistoryType::ToolUse => "ToolUse",
+                HistoryType::ToolResult => "ToolResult",
+            };
+
+            Some(format!("[{label}]: {content}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn take_memento_reflect_request(
+    session: &mut DiscordSession,
+    memory_settings: &settings::ResolvedMemorySettings,
+    provider: &ProviderKind,
+    role_binding: Option<&RoleBinding>,
+    channel_id: u64,
+    reason: SessionEndReason,
+) -> Option<ReflectRequest> {
+    if memory_settings.backend != settings::MemoryBackendKind::Memento
+        || !session.memento_context_loaded
+        || session.memento_reflected
+    {
+        return None;
+    }
+
+    let session_id = session
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let transcript = build_memento_transcript(&session.history);
+    if transcript.trim().is_empty() {
+        return None;
+    }
+
+    session.memento_reflected = true;
+    Some(ReflectRequest {
+        provider: provider.clone(),
+        role_id: resolve_memory_role_id(role_binding),
+        channel_id,
+        session_id,
+        reason,
+        transcript,
     })
 }
 
@@ -1247,14 +1330,26 @@ pub(super) fn spawn_turn_bridge(
 
         // Update in-memory session under lock.
         let mut should_persist_transcript = false;
+        let mut reflect_request = None;
+        let capture_memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
         let session_id_to_persist = {
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
                 if !session.cleared && !is_prompt_too_long {
+                    if terminal_session_reset_required {
+                        reflect_request = take_memento_reflect_request(
+                            session,
+                            &capture_memory_settings,
+                            &provider,
+                            role_binding.as_ref(),
+                            channel_id.get(),
+                            SessionEndReason::LocalSessionReset,
+                        );
+                    }
                     if resume_failure_detected || terminal_session_reset_required {
-                        session.session_id = None;
+                        session.clear_provider_session();
                     } else if let Some(sid) = new_session_id {
-                        session.session_id = Some(sid);
+                        session.restore_provider_session(Some(sid));
                     }
                     if should_record_final_turn {
                         session.history.push(HistoryItem {
@@ -1319,23 +1414,31 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
+        if let Some(reflect_request) = reflect_request {
+            let _reflect_task = spawn_memory_reflect_task(
+                channel_id,
+                capture_memory_settings.clone(),
+                reflect_request,
+            );
+        }
+
         if should_persist_transcript {
-            let capture_memory_settings =
-                settings::memory_settings_for_binding(role_binding.as_ref());
-            let capture_request = CaptureRequest {
-                provider: provider.clone(),
-                role_id: resolve_memory_role_id(role_binding.as_ref()),
-                channel_id: channel_id.get(),
-                session_id: resolve_memory_session_id(
-                    session_id_to_persist.as_deref(),
-                    channel_id.get(),
-                ),
-                dispatch_id: dispatch_id.clone(),
-                user_text: user_text_owned.clone(),
-                assistant_text: full_response.clone(),
-            };
-            let _capture_task =
-                spawn_memory_capture_task(channel_id, capture_memory_settings, capture_request);
+            if capture_memory_settings.backend != settings::MemoryBackendKind::Memento {
+                let capture_request = CaptureRequest {
+                    provider: provider.clone(),
+                    role_id: resolve_memory_role_id(role_binding.as_ref()),
+                    channel_id: channel_id.get(),
+                    session_id: resolve_memory_session_id(
+                        session_id_to_persist.as_deref(),
+                        channel_id.get(),
+                    ),
+                    dispatch_id: dispatch_id.clone(),
+                    user_text: user_text_owned.clone(),
+                    assistant_text: full_response.clone(),
+                };
+                let _capture_task =
+                    spawn_memory_capture_task(channel_id, capture_memory_settings, capture_request);
+            }
         }
 
         // Clear restart report BEFORE clearing inflight state (which removes

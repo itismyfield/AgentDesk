@@ -161,6 +161,13 @@ fn build_memory_injection_plan<'a>(
     }
 }
 
+fn should_skip_memento_recall(
+    memory_settings: &settings::ResolvedMemorySettings,
+    memento_context_loaded: bool,
+) -> bool {
+    memory_settings.backend == settings::MemoryBackendKind::Memento && memento_context_loaded
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -180,7 +187,11 @@ pub(in crate::services::discord) async fn handle_text_message(
         let mut data = shared.core.lock().await;
         let info = data.sessions.get_mut(&channel_id).and_then(|session| {
             let current_path = session.validated_path(channel_id)?;
-            Some((session.session_id.clone(), current_path))
+            Some((
+                session.session_id.clone(),
+                session.memento_context_loaded,
+                current_path,
+            ))
         });
         let uploads = data
             .sessions
@@ -200,7 +211,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         )
     };
 
-    let (session_id, current_path) = match session_info {
+    let (session_id, memento_context_loaded, current_path) = match session_info {
         Some(info) => info,
         None => {
             // Try auto-start from role_map workspace
@@ -301,6 +312,8 @@ pub(in crate::services::discord) async fn handle_text_message(
                                 .entry(channel_id)
                                 .or_insert_with(|| DiscordSession {
                                     session_id: None,
+                                    memento_context_loaded: false,
+                                    memento_reflected: false,
                                     current_path: None,
                                     history: Vec::new(),
                                     pending_uploads: Vec::new(),
@@ -323,13 +336,14 @@ pub(in crate::services::discord) async fn handle_text_message(
                     }
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ▶ Auto-started session from workspace: {eff_path}");
-                    let sid = {
+                    let session_state = {
                         let data = shared.core.lock().await;
                         data.sessions
                             .get(&channel_id)
-                            .and_then(|s| s.session_id.clone())
+                            .map(|s| (s.session_id.clone(), s.memento_context_loaded))
+                            .unwrap_or((None, false))
                     };
-                    (sid, eff_path)
+                    (session_state.0, session_state.1, eff_path)
                 } else {
                     rate_limit_wait(shared, channel_id).await;
                     let _ = channel_id
@@ -625,6 +639,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
     let mut session_id = session_id;
+    let mut memento_context_loaded = memento_context_loaded;
     if session_id.is_none() {
         if let Some(ref key) = adk_session_key {
             let restored = super::super::adk_session::fetch_provider_session_id(
@@ -641,8 +656,9 @@ pub(in crate::services::discord) async fn handle_text_message(
                 );
                 let mut data = shared.core.lock().await;
                 if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.session_id = restored.clone();
+                    session.restore_provider_session(restored.clone());
                 }
+                memento_context_loaded = true;
             }
             session_id = restored;
         }
@@ -709,16 +725,26 @@ pub(in crate::services::discord) async fn handle_text_message(
 
     let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
     let memory_backend = build_memory_backend(&memory_settings);
-    let memory_recall = memory_backend
-        .recall(RecallRequest {
-            provider: provider.clone(),
-            role_id: resolve_memory_role_id(role_binding.as_ref()),
-            channel_id: channel_id.get(),
-            session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
-            dispatch_profile,
-            user_text: user_text.to_string(),
-        })
-        .await;
+    let memory_recall = if should_skip_memento_recall(&memory_settings, memento_context_loaded) {
+        RecallResponse::default()
+    } else {
+        memory_backend
+            .recall(RecallRequest {
+                provider: provider.clone(),
+                role_id: resolve_memory_role_id(role_binding.as_ref()),
+                channel_id: channel_id.get(),
+                session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
+                dispatch_profile,
+                user_text: user_text.to_string(),
+            })
+            .await
+    };
+    if memory_settings.backend == settings::MemoryBackendKind::Memento && !memento_context_loaded {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.note_memento_context_loaded();
+        }
+    }
     for warning in &memory_recall.warnings {
         let ts = chrono::Local::now().format("%H:%M:%S");
         eprintln!(
@@ -837,6 +863,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         dispatch_type_str.as_deref(),
         sak_for_system,
         longterm_catalog_for_prompt,
+        Some(&memory_settings),
     );
     if sak_for_system.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1616,6 +1643,8 @@ pub(super) async fn handle_text_command(
                     .entry(channel_id)
                     .or_insert_with(|| DiscordSession {
                         session_id: None,
+                        memento_context_loaded: false,
+                        memento_reflected: false,
                         current_path: None,
                         history: Vec::new(),
                         pending_uploads: Vec::new(),
@@ -2514,7 +2543,6 @@ Any other message is sent to {p}.
 
     Ok(false)
 }
-
 #[cfg(test)]
 mod tests {
     use super::super::super::DiscordSession;
@@ -2536,6 +2564,8 @@ mod tests {
     ) -> DiscordSession {
         DiscordSession {
             session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
             current_path,
             history: Vec::new(),
             pending_uploads: Vec::new(),
@@ -2701,5 +2731,17 @@ mod tests {
             build_review_bypass_context_hint("2명만 직접 머지 가능하게 해줘"),
             None
         );
+    }
+
+    fn memento_recall_skip_only_triggers_for_loaded_memento_sessions() {
+        let memento = settings::ResolvedMemorySettings {
+            backend: settings::MemoryBackendKind::Memento,
+            ..settings::ResolvedMemorySettings::default()
+        };
+        let file = settings::ResolvedMemorySettings::default();
+
+        assert!(should_skip_memento_recall(&memento, true));
+        assert!(!should_skip_memento_recall(&memento, false));
+        assert!(!should_skip_memento_recall(&file, true));
     }
 }

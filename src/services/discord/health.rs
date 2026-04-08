@@ -189,7 +189,7 @@ pub async fn clear_provider_channel_runtime(
 
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             super::settings::cleanup_channel_uploads(channel_id);
-            session.session_id = None;
+            session.clear_provider_session();
             session.history.clear();
             session.pending_uploads.clear();
             session.cleared = true;
@@ -855,6 +855,8 @@ pub async fn handle_session_start<'a>(registry: &HealthRegistry, body: &str) -> 
             .entry(channel_id)
             .or_insert_with(|| super::DiscordSession {
                 session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
                 current_path: None,
                 history: Vec::new(),
                 pending_uploads: Vec::new(),

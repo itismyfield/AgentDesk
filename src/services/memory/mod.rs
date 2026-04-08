@@ -1,6 +1,7 @@
 mod local;
 mod mem0;
 mod memento;
+mod runtime_state;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -12,6 +13,9 @@ use crate::services::provider::ProviderKind;
 pub(crate) use local::LocalMemoryBackend;
 pub(crate) use mem0::Mem0Backend;
 pub(crate) use memento::MementoBackend;
+#[cfg(test)]
+pub(crate) use runtime_state::reset_for_tests as reset_backend_health_for_tests;
+pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};
 
 pub(crate) const UNBOUND_MEMORY_ROLE_ID: &str = "__unbound_role__";
 
@@ -47,6 +51,31 @@ pub(crate) struct CaptureRequest {
     pub assistant_text: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionEndReason {
+    IdleExpiry,
+    LocalSessionReset,
+}
+
+impl SessionEndReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::IdleExpiry => "idle_expiry",
+            Self::LocalSessionReset => "local_session_reset",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReflectRequest {
+    pub provider: ProviderKind,
+    pub role_id: String,
+    pub channel_id: u64,
+    pub session_id: String,
+    pub reason: SessionEndReason,
+    pub transcript: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CaptureResult {
     pub warnings: Vec<String>,
@@ -56,6 +85,15 @@ pub(crate) struct CaptureResult {
 pub(crate) trait MemoryBackend: Send + Sync {
     fn recall<'a>(&'a self, request: RecallRequest) -> MemoryFuture<'a, RecallResponse>;
     fn capture<'a>(&'a self, request: CaptureRequest) -> MemoryFuture<'a, CaptureResult>;
+    fn reflect<'a>(&'a self, request: ReflectRequest) -> MemoryFuture<'a, CaptureResult> {
+        Box::pin(async move {
+            let _ = request;
+            CaptureResult {
+                skipped: true,
+                ..CaptureResult::default()
+            }
+        })
+    }
 }
 
 pub(crate) fn build_memory_backend(
@@ -64,7 +102,7 @@ pub(crate) fn build_memory_backend(
     match settings.backend {
         MemoryBackendKind::File => Box::new(LocalMemoryBackend),
         MemoryBackendKind::Mem0 => Box::new(Mem0Backend::new(settings.clone())),
-        MemoryBackendKind::Memento => Box::new(MementoBackend),
+        MemoryBackendKind::Memento => Box::new(MementoBackend::new(settings.clone())),
     }
 }
 

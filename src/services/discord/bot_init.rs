@@ -1800,14 +1800,29 @@ pub(super) async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             })
             .collect()
     };
+    let provider = shared.settings.read().await.provider.clone();
+    let mut reflect_requests = Vec::new();
     {
         let mut data = shared.core.lock().await;
         for (ch, _) in &expired {
-            // Clean up worktree if session had one
-            if let Some(session) = data.sessions.get(ch)
-                && let Some(ref wt) = session.worktree
-            {
-                cleanup_git_worktree(wt);
+            if let Some(session) = data.sessions.get_mut(ch) {
+                let role_binding =
+                    super::settings::resolve_role_binding(*ch, session.channel_name.as_deref());
+                let memory_settings =
+                    super::settings::memory_settings_for_binding(role_binding.as_ref());
+                if let Some(reflect_request) = super::turn_bridge::take_memento_reflect_request(
+                    session,
+                    &memory_settings,
+                    &provider,
+                    role_binding.as_ref(),
+                    ch.get(),
+                    crate::services::memory::SessionEndReason::IdleExpiry,
+                ) {
+                    reflect_requests.push((memory_settings, reflect_request));
+                }
+                if let Some(ref wt) = session.worktree {
+                    cleanup_git_worktree(wt);
+                }
             }
             data.sessions.remove(ch);
             if data.cancel_tokens.remove(ch).is_some() {
@@ -1819,12 +1834,20 @@ pub(super) async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             data.intervention_queue.remove(ch);
         }
     }
+    for (memory_settings, reflect_request) in reflect_requests {
+        let _reflect_task = super::turn_bridge::spawn_memory_reflect_task(
+            ChannelId::new(reflect_request.channel_id),
+            memory_settings,
+            reflect_request,
+        );
+    }
     for (ch, _) in &expired {
         shared.api_timestamps.remove(ch);
         shared.tmux_watchers.remove(ch);
     }
     // Record termination audit for cleaned-up sessions
     for (_, session_key) in &expired_keys {
+        super::adk_session::clear_provider_session_id(session_key, shared.api_port).await;
         crate::services::termination_audit::record_termination(
             session_key,
             None,
@@ -2141,6 +2164,8 @@ pub(super) async fn auto_restore_session(
             .entry(channel_id)
             .or_insert_with(|| DiscordSession {
                 session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
                 current_path: None,
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
@@ -2207,6 +2232,8 @@ pub(super) async fn bootstrap_thread_session(
         .entry(thread_channel_id)
         .or_insert_with(|| DiscordSession {
             session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
             current_path: None,
             history: Vec::new(),
             pending_uploads: Vec::new(),

@@ -624,6 +624,7 @@ fn migrate_memory_backend_file(root: &Path) -> Result<(), String> {
         backend.with_defaults()
     };
     backend.version = MEMORY_LAYOUT_VERSION;
+    rewrite_legacy_managed_memory_paths(root, &mut backend);
 
     if let Some(parent) = current.parent() {
         fs::create_dir_all(parent)
@@ -638,6 +639,56 @@ fn migrate_memory_backend_file(root: &Path) -> Result<(), String> {
             .map_err(|e| format!("Failed to remove '{}': {e}", legacy.display()))?;
     }
     Ok(())
+}
+
+fn rewrite_legacy_managed_memory_paths(root: &Path, backend: &mut MemoryBackendConfig) {
+    backend.file.sak_path = rewrite_legacy_managed_memory_path(
+        root,
+        &backend.file.sak_path,
+        &[
+            root.join("shared_agent_memory").join("shared_knowledge.md"),
+            config_dir(root)
+                .join("shared_agent_memory")
+                .join("shared_knowledge.md"),
+        ],
+        default_sak_path,
+    );
+    backend.file.sam_path = rewrite_legacy_managed_memory_path(
+        root,
+        &backend.file.sam_path,
+        &[
+            root.join("shared_agent_memory"),
+            config_dir(root).join("shared_agent_memory"),
+        ],
+        default_sam_path,
+    );
+    backend.file.ltm_root = rewrite_legacy_managed_memory_path(
+        root,
+        &backend.file.ltm_root,
+        &[
+            root.join("role-context"),
+            config_dir(root).join("role-context"),
+            root.join("long-term-memory"),
+            config_dir(root).join("long-term-memory"),
+        ],
+        default_ltm_root,
+    );
+}
+
+fn rewrite_legacy_managed_memory_path(
+    root: &Path,
+    raw: &str,
+    legacy_candidates: &[PathBuf],
+    replacement: fn() -> String,
+) -> String {
+    let resolved = resolve_memory_path(root, raw);
+    if legacy_candidates
+        .iter()
+        .any(|candidate| same_canonical_path(&resolved, candidate))
+    {
+        return replacement();
+    }
+    raw.to_string()
 }
 
 fn migrate_role_context(root: &Path) -> Result<(), String> {
