@@ -110,7 +110,7 @@ mod tests {
     use super::{ChannelId, MessageId, UserId};
     use super::{
         DiscordBotSettings, Intervention, InterventionMode, allows_nonlocal_session_path,
-        channel_has_pending_soft_queue, choose_restore_channel_name,
+        channel_has_pending_soft_queue_at, choose_restore_channel_name,
         is_synthetic_thread_channel_name, session_path_is_usable, synthetic_thread_channel_name,
         user_is_authorized, watcher_should_kickoff_idle_queue,
     };
@@ -210,6 +210,7 @@ mod tests {
     #[test]
     fn channel_has_pending_soft_queue_detects_live_backlog() {
         let channel_id = ChannelId::new(12345);
+        let created_at = Instant::now();
         let mut queues = HashMap::new();
         queues.insert(
             channel_id,
@@ -218,17 +219,22 @@ mod tests {
                 message_id: MessageId::new(7),
                 text: "pending".to_string(),
                 mode: InterventionMode::Soft,
-                created_at: Instant::now(),
+                created_at,
             }],
         );
 
-        assert!(channel_has_pending_soft_queue(&mut queues, channel_id));
+        assert!(channel_has_pending_soft_queue_at(
+            &mut queues,
+            channel_id,
+            created_at
+        ));
         assert!(queues.contains_key(&channel_id));
     }
 
     #[test]
     fn channel_has_pending_soft_queue_prunes_expired_entries() {
         let channel_id = ChannelId::new(12345);
+        let created_at = Instant::now();
         let mut queues = HashMap::new();
         queues.insert(
             channel_id,
@@ -237,11 +243,15 @@ mod tests {
                 message_id: MessageId::new(7),
                 text: "stale".to_string(),
                 mode: InterventionMode::Soft,
-                created_at: Instant::now() - (super::INTERVENTION_TTL + Duration::from_secs(1)),
+                created_at,
             }],
         );
 
-        assert!(!channel_has_pending_soft_queue(&mut queues, channel_id));
+        assert!(!channel_has_pending_soft_queue_at(
+            &mut queues,
+            channel_id,
+            created_at + super::INTERVENTION_TTL + Duration::from_secs(1)
+        ));
         assert!(!queues.contains_key(&channel_id));
     }
 
