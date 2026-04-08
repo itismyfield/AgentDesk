@@ -6,6 +6,12 @@ import {
   getDisplayMeetingReferenceHashes,
 } from "./meetingReferenceHash";
 import MarkdownContent from "./common/MarkdownContent";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceEmptyState,
+  SurfaceNotice,
+} from "./common/SurfacePrimitives";
 import { useI18n } from "../i18n";
 
 const ROLE_SPRITE_MAP: Record<string, number> = {
@@ -60,7 +66,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
     <div
       ref={overlayRef}
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
+      style={{ background: "var(--th-modal-overlay)" }}
       onClick={(e) => {
         if (e.target === overlayRef.current) onClose();
       }}
@@ -71,8 +77,9 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
         aria-label={meeting.agenda}
         className="w-full max-w-2xl max-h-[85vh] rounded-2xl border shadow-2xl overflow-hidden flex flex-col"
         style={{
-          background: "var(--th-surface)",
-          borderColor: "var(--th-border)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
         }}
       >
         {/* Header */}
@@ -93,8 +100,8 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                   key={name}
                   className="text-xs px-2 py-0.5 rounded-full font-medium"
                   style={{
-                    background: "rgba(99,102,241,0.15)",
-                    color: "#818cf8",
+                    background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
+                    color: "var(--th-text-primary)",
                   }}
                 >
                   {name}
@@ -134,18 +141,32 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
               ))}
             </div>
           </div>
-          <button
+          <SurfaceActionButton
             onClick={onClose}
-            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-surface-hover transition-colors shrink-0"
-            style={{ color: "var(--th-text-muted)" }}
-            aria-label="Close"
+            tone="neutral"
+            className="shrink-0"
+            style={{ minWidth: 44, minHeight: 44 }}
           >
             ✕
-          </button>
+          </SurfaceActionButton>
         </div>
 
         {/* Body */}
         <div className="flex-1 overflow-auto p-3 sm:p-5 space-y-4">
+          {(meeting.primary_provider || meeting.reviewer_provider) && (
+            <SurfaceNotice tone="info" className="rounded-3xl p-4">
+              <div className="space-y-2">
+                <MeetingProviderFlow
+                  primaryProvider={meeting.primary_provider}
+                  reviewerProvider={meeting.reviewer_provider}
+                />
+                <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                  {providerFlowCaption(meeting.primary_provider, meeting.reviewer_provider, t)}
+                </div>
+              </div>
+            </SurfaceNotice>
+          )}
+
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <MetaCard
               label={t({ ko: "상태", en: "Status" })}
@@ -203,23 +224,20 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
           )}
 
           {meeting.summary ? (
-            <div
-              className="rounded-2xl p-4 space-y-2"
+            <SurfaceCard
+              className="space-y-2 rounded-3xl p-4"
               style={{
-                background: "rgba(99,102,241,0.08)",
-                border: "1px solid rgba(99,102,241,0.18)",
+                borderColor: "color-mix(in srgb, var(--th-accent-primary) 28%, var(--th-border) 72%)",
+                background: "color-mix(in srgb, var(--th-accent-primary-soft) 72%, var(--th-card-bg) 28%)",
               }}
             >
               <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div
-                  className="text-xs font-semibold uppercase tracking-widest"
-                  style={{ color: "#818cf8" }}
-                >
+                <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-primary)" }}>
                   Summary
                 </div>
               </div>
               <MarkdownContent content={meeting.summary} className="text-sm" />
-            </div>
+            </SurfaceCard>
           ) : (
             <div
               className="rounded-2xl p-4 text-sm"
@@ -250,7 +268,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
             );
 
             return (
-              <div key={round}>
+              <SurfaceCard key={round} className="space-y-3 rounded-3xl p-4">
                 {/* Round divider */}
                 <div className="flex items-center gap-3 mb-3">
                   <div
@@ -284,7 +302,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                 {summaryEntries.length > 0 && (
                   <div className="mt-3 space-y-2">
                     {summaryEntries.map((entry) => (
-                      <div
+                      <SurfaceNotice
                         key={entry.id ?? `s-${entry.seq}`}
                         className="rounded-xl p-3 text-sm"
                         style={{
@@ -299,11 +317,11 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                           {entry.speaker_name}
                         </div>
                         <MarkdownContent content={entry.content} />
-                      </div>
+                      </SurfaceNotice>
                     ))}
                   </div>
                 )}
-              </div>
+              </SurfaceCard>
             );
           })}
         </div>
@@ -322,7 +340,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
             }}
           >
             {t({ ko: "닫기", en: "Close" })}
-          </button>
+          </SurfaceActionButton>
         </div>
       </div>
     </div>
@@ -331,11 +349,11 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
 
 function MetaCard({ label, value }: { label: string; value: string }) {
   return (
-    <div
-      className="rounded-xl px-3 py-2"
+    <SurfaceCard
+      className="rounded-2xl px-3 py-2"
       style={{
-        background: "var(--th-bg-surface)",
-        border: "1px solid var(--th-border)",
+        background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+        borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
       }}
     >
       <div
@@ -350,7 +368,7 @@ function MetaCard({ label, value }: { label: string; value: string }) {
       >
         {value}
       </div>
-    </div>
+    </SurfaceCard>
   );
 }
 
@@ -381,16 +399,16 @@ function EntryBubble({
         >
           {entry.speaker_name}
         </div>
-        <div
+        <SurfaceCard
           className="rounded-xl rounded-tl-sm px-3 py-2 text-sm"
           style={{
-            background: "var(--th-bg-surface)",
-            border: "1px solid var(--th-border)",
+            background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+            borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
             color: "var(--th-text)",
           }}
         >
           <MarkdownContent content={entry.content} />
-        </div>
+        </SurfaceCard>
       </div>
     </div>
   );

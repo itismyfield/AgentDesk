@@ -306,8 +306,12 @@ export default function AgentManagerView({
             {(showTabBar || tab === "departments") && tab !== "dispatch" && (
               <button
                 onClick={openCreateDept}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-white/10"
-                style={{ border: "1px solid var(--th-input-border)", color: "var(--th-text-secondary)" }}
+                className="rounded-lg border px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-100"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                  background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
+                  color: "var(--th-text-secondary)",
+                }}
               >
                 + {tr("부서 추가", "Add Dept")}
               </button>

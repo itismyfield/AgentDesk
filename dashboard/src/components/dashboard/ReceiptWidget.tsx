@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import type { TFunction } from "./model";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceMetricPill,
+  SurfaceNotice,
+  SurfaceSection,
+  SurfaceSegmentButton,
+} from "../common/SurfacePrimitives";
 
 interface ModelLineItem {
   model: string;
@@ -172,6 +180,9 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
     () => viewData?.models.reduce((sum, model) => sum + model.total_tokens, 0) ?? 0,
     [viewData],
   );
+  const selectedProviderLabel = selectedProvider === "all"
+    ? null
+    : (viewData?.providers[0]?.provider ?? selectedProvider);
 
   useEffect(() => {
     if (selectedProvider === "all") return;
@@ -189,223 +200,255 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
   ];
 
   return (
-    <div className="game-panel relative overflow-hidden px-3 py-3 sm:px-4 sm:py-3.5">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <button
-          type="button"
-          onClick={() => setExpanded((prev) => !prev)}
-          className="flex items-center gap-1.5 hover:opacity-80 transition-opacity"
-        >
-          <span className="text-xs sm:text-xs font-bold uppercase tracking-wider" style={{ color: "#f59e0b" }}>
-            {t({ ko: "토큰 영수증", en: "TOKEN RECEIPT", ja: "トークンレシート", zh: "代币收据" })}
-          </span>
-          <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-            {expanded ? "▲" : "▼"}
-          </span>
+    <SurfaceSection
+      eyebrow={t({ ko: "Receipt", en: "Receipt", ja: "Receipt", zh: "Receipt" })}
+      title={t({ ko: "토큰 영수증", en: "Token Receipt", ja: "トークンレシート", zh: "代币收据" })}
+      description={t({
+        ko: `${viewData.period_start} ~ ${viewData.period_end} 사용량과 비용 흐름을 빠르게 훑어봅니다.`,
+        en: `Quick read of usage and cost from ${viewData.period_start} to ${viewData.period_end}.`,
+        ja: `${viewData.period_start} から ${viewData.period_end} までの使用量とコストを確認します。`,
+        zh: `快速查看 ${viewData.period_start} 到 ${viewData.period_end} 的用量与成本。`,
+      })}
+      badge={viewData.period_label}
+      actions={(
+        <div className="flex items-center gap-2">
           {loading && (
             <span
-              className="rounded px-1.5 py-0.5 text-[8px] font-medium"
-              style={{ color: "#fbbf24", background: "rgba(245,158,11,0.14)", border: "1px solid rgba(245,158,11,0.24)" }}
+              className="rounded-full border px-2 py-1 text-[10px] font-medium"
+              style={{
+                color: "var(--th-accent-warn)",
+                background: "color-mix(in srgb, var(--th-badge-amber-bg) 82%, transparent)",
+                borderColor: "color-mix(in srgb, var(--th-accent-warn) 28%, var(--th-border) 72%)",
+              }}
             >
               {t({ ko: "갱신 중", en: "SYNCING", ja: "更新中", zh: "更新中" })}
             </span>
           )}
-        </button>
-
-        <div className="flex gap-0.5 flex-wrap justify-end">
-          {periods.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setPeriod(item.id)}
-              className="px-2 py-0.5 text-[9px] sm:text-[10px] font-medium rounded transition-colors"
-              style={
-                period === item.id
-                  ? { background: "rgba(245,158,11,0.2)", color: "#f59e0b", border: "1px solid rgba(245,158,11,0.3)" }
-                  : { color: "var(--th-text-muted)", border: "1px solid transparent" }
-              }
-            >
-              {item.label}
-            </button>
-          ))}
+          <SurfaceActionButton
+            tone={expanded ? "neutral" : "warn"}
+            compact
+            onClick={() => setExpanded((prev) => !prev)}
+          >
+            {expanded
+              ? t({ ko: "접기", en: "Collapse", ja: "閉じる", zh: "收起" })
+              : t({ ko: "영수증 펼치기", en: "Expand Receipt", ja: "レシートを開く", zh: "展开收据" })}
+          </SurfaceActionButton>
         </div>
+      )}
+      className="relative overflow-hidden"
+      style={{
+        borderColor: "color-mix(in srgb, var(--th-accent-warn) 22%, var(--th-border) 78%)",
+        background:
+          "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-amber-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 97%, transparent) 100%)",
+      }}
+    >
+      <div className="mt-4 flex flex-wrap gap-2">
+        {periods.map((item) => (
+          <SurfaceSegmentButton
+            key={item.id}
+            tone="warn"
+            active={period === item.id}
+            onClick={() => setPeriod(item.id)}
+          >
+            {item.label}
+          </SurfaceSegmentButton>
+        ))}
       </div>
 
       {providerOptions.length > 1 && (
-        <div className="mt-2 flex gap-1 overflow-x-auto">
-          <button
-            type="button"
+        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+          <SurfaceSegmentButton
+            tone="warn"
+            active={selectedProvider === "all"}
             onClick={() => setSelectedProvider("all")}
-            className="shrink-0 rounded-full px-2.5 py-1 text-[10px] font-medium"
-            style={
-              selectedProvider === "all"
-                ? { color: "#f59e0b", border: "1px solid rgba(245,158,11,0.28)", background: "rgba(245,158,11,0.12)" }
-                : { color: "var(--th-text-muted)", border: "1px solid rgba(255,255,255,0.06)" }
-            }
           >
             {t({ ko: "전체 Provider", en: "All Providers", ja: "全 Provider", zh: "全部 Provider" })}
-          </button>
+          </SurfaceSegmentButton>
           {providerOptions.map((provider) => {
             const active = providerKey(selectedProvider) === providerKey(provider);
             return (
-              <button
+              <SurfaceSegmentButton
                 key={provider}
-                type="button"
+                tone="warn"
+                active={active}
                 onClick={() => setSelectedProvider(provider)}
-                className="shrink-0 rounded-full px-2.5 py-1 text-[10px] font-medium"
-                style={
-                  active
-                    ? { color: "#f59e0b", border: "1px solid rgba(245,158,11,0.28)", background: "rgba(245,158,11,0.12)" }
-                    : { color: "var(--th-text-muted)", border: "1px solid rgba(255,255,255,0.06)" }
-                }
               >
                 {provider}
-              </button>
+              </SurfaceSegmentButton>
             );
           })}
         </div>
       )}
 
-      <div className="mt-3 flex items-center gap-3 sm:gap-4 flex-wrap">
-        <div className="flex items-baseline gap-1">
-          <span className="text-lg sm:text-xl font-bold font-mono" style={{ color: "#f59e0b" }}>
-            {formatCost(viewData.total)}
-          </span>
-          {viewData.cache_discount > 0.001 && (
-            <span className="text-[9px] sm:text-[10px] font-mono" style={{ color: "#059669" }}>
-              (-{formatCost(viewData.cache_discount)})
+      <div className="mt-4 flex flex-wrap gap-3">
+        <SurfaceMetricPill
+          label={t({ ko: "총 비용", en: "Total Cost", ja: "総コスト", zh: "总成本" })}
+          value={(
+            <span className="inline-flex items-center gap-2">
+              <span style={{ color: "var(--th-accent-warn)" }}>{formatCost(viewData.total)}</span>
+              {viewData.cache_discount > 0.001 && (
+                <span className="text-[11px]" style={{ color: "var(--th-accent-primary)" }}>
+                  -{formatCost(viewData.cache_discount)}
+                </span>
+              )}
             </span>
           )}
-        </div>
-        <div className="text-[9px] sm:text-[10px]" style={{ color: "var(--th-text-muted)" }}>
-          {formatTokens(totalTokens)} {t({ ko: "토큰", en: "tokens", ja: "トークン", zh: "代币" })}
-          {" / "}
-          {viewData.models.length} {t({ ko: "모델 라인", en: "model lines", ja: "モデル行", zh: "模型行" })}
-        </div>
+          tone="warn"
+        />
+        <SurfaceMetricPill
+          label={t({ ko: "토큰 사용량", en: "Token Usage", ja: "トークン使用量", zh: "代币用量" })}
+          value={t({
+            ko: `${formatTokens(totalTokens)} tokens / ${viewData.models.length} lines`,
+            en: `${formatTokens(totalTokens)} tokens / ${viewData.models.length} lines`,
+            ja: `${formatTokens(totalTokens)} tokens / ${viewData.models.length} lines`,
+            zh: `${formatTokens(totalTokens)} tokens / ${viewData.models.length} lines`,
+          })}
+          tone="info"
+        />
         {selectedProvider === "all" ? (
-          <div className="text-[9px] sm:text-[10px]" style={{ color: "var(--th-text-muted)" }}>
-            {viewData.stats.total_messages.toLocaleString()} {t({ ko: "메시지", en: "msgs", ja: "メッセージ", zh: "消息" })}
-            {" / "}
-            {viewData.stats.total_sessions} {t({ ko: "세션", en: "sessions", ja: "セッション", zh: "会话" })}
-          </div>
-        ) : (
-          <div className="text-[9px] sm:text-[10px]" style={{ color: "var(--th-text-muted)" }}>
-            {t({
-              ko: `${viewData.providers[0]?.provider ?? selectedProvider} slice`,
-              en: `${viewData.providers[0]?.provider ?? selectedProvider} slice`,
-              ja: `${viewData.providers[0]?.provider ?? selectedProvider} slice`,
-              zh: `${viewData.providers[0]?.provider ?? selectedProvider} slice`,
+          <SurfaceMetricPill
+            label={t({ ko: "활동량", en: "Activity", ja: "アクティビティ", zh: "活动量" })}
+            value={t({
+              ko: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
+              en: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
+              ja: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
+              zh: `${viewData.stats.total_messages.toLocaleString()} msgs / ${viewData.stats.total_sessions} sessions`,
             })}
-          </div>
+            tone="neutral"
+          />
+        ) : (
+          <SurfaceMetricPill
+            label={t({ ko: "Provider Slice", en: "Provider Slice", ja: "Provider Slice", zh: "Provider Slice" })}
+            value={selectedProviderLabel ?? selectedProvider}
+            tone="accent"
+          />
         )}
       </div>
 
+      {selectedProviderLabel && (
+        <SurfaceNotice className="mt-4" tone="info" compact>
+          {t({
+            ko: `${selectedProviderLabel} provider만 필터링한 비용/토큰 slice입니다.`,
+            en: `This view is filtered to the ${selectedProviderLabel} provider slice.`,
+            ja: `${selectedProviderLabel} provider に絞った slice です。`,
+            zh: `当前视图是 ${selectedProviderLabel} provider 的 slice。`,
+          })}
+        </SurfaceNotice>
+      )}
+
       {expanded && (
-        <div
-          className="mt-3 rounded-lg p-3 sm:p-4 font-mono text-xs sm:text-xs"
+        <SurfaceCard
+          className="mt-4 rounded-3xl p-2 sm:p-3"
           style={{
-            background: "#fefdf8",
-            color: "#1a1a1a",
-            maxWidth: 440,
+            background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
+            borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
           }}
         >
-          <div className="text-center font-bold text-[13px] tracking-widest mb-0.5">AI TOKEN RECEIPT</div>
-          <div className="text-center text-[9px]" style={{ color: "#666" }}>
-            {viewData.period_start} ~ {viewData.period_end}
-          </div>
-          {selectedProvider !== "all" && (
-            <div className="text-center text-[9px] mt-0.5" style={{ color: "#a16207" }}>
-              {viewData.providers[0]?.provider ?? selectedProvider}
+          <div
+            className="mx-auto max-w-[440px] rounded-2xl p-3 sm:p-4 font-mono text-xs sm:text-xs"
+            style={{
+              background: "#fefdf8",
+              color: "#1a1a1a",
+            }}
+          >
+            <div className="text-center font-bold text-[13px] tracking-widest mb-0.5">AI TOKEN RECEIPT</div>
+            <div className="text-center text-[9px]" style={{ color: "#666" }}>
+              {viewData.period_start} ~ {viewData.period_end}
             </div>
-          )}
-          <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
-
-          <div className="flex justify-between text-[9px] font-bold mb-1" style={{ color: "#888", letterSpacing: 1 }}>
-            <span className="flex-1">MODEL</span>
-            <span style={{ width: 60, textAlign: "right" }}>TOKENS</span>
-            <span style={{ width: 70, textAlign: "right" }}>COST</span>
-          </div>
-
-          {viewData.models.map((model) => (
-            <div key={`${model.provider}-${model.model}`} className="flex items-baseline mb-0.5">
-              <span className="font-semibold shrink-0">{model.display_name}</span>
-              <span className="flex-1 mx-1" style={{ borderBottom: "1px dotted #ccc", height: 10 }} />
-              <span className="shrink-0 text-[10px]" style={{ width: 60, textAlign: "right", color: "#555" }}>
-                {formatTokens(model.total_tokens)}
-              </span>
-              <span className="shrink-0 font-semibold" style={{ width: 70, textAlign: "right" }}>
-                {formatCost(model.cost)}
-              </span>
-            </div>
-          ))}
-
-          <hr style={{ border: "none", borderTop: "1px dashed #bbb", margin: "8px 0", opacity: 0.6 }} />
-
-          <div className="flex justify-between font-bold">
-            <span>SUBTOTAL</span>
-            <span>{formatCost(viewData.subtotal)}</span>
-          </div>
-          {viewData.cache_discount > 0.001 && (
-            <div className="flex justify-between font-semibold" style={{ color: "#059669" }}>
-              <span>CACHE DISCOUNT</span>
-              <span>-{formatCost(viewData.cache_discount)}</span>
-            </div>
-          )}
-
-          <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
-
-          <div className="flex justify-between font-bold text-[14px]">
-            <span>TOTAL</span>
-            <span>{formatCost(viewData.total)}</span>
-          </div>
-
-          <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
-
-          <div className="text-[10px] font-bold mb-1" style={{ color: "#444" }}>STATISTICS</div>
-          <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
-            <span>Tokens</span>
-            <span>{formatTokens(totalTokens)}</span>
-          </div>
-          {selectedProvider === "all" && (
-            <>
-              <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
-                <span>Messages</span>
-                <span>{viewData.stats.total_messages.toLocaleString()}</span>
+            {selectedProvider !== "all" && (
+              <div className="text-center text-[9px] mt-0.5" style={{ color: "#a16207" }}>
+                {viewData.providers[0]?.provider ?? selectedProvider}
               </div>
-              <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
-                <span>Sessions</span>
-                <span>{viewData.stats.total_sessions.toLocaleString()}</span>
-              </div>
-            </>
-          )}
+            )}
+            <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
 
-          {selectedProvider === "all" && viewData.agents.length > 0 && (
-            <>
-              <div className="text-[9px] font-bold mt-2 mb-0.5" style={{ color: "#666" }}>AGENT USAGE</div>
-              {viewData.agents.filter((agent) => agent.percentage >= 0.1).map((agent) => (
-                <div key={agent.agent} className="flex justify-between text-[10px]" style={{ color: "#555" }}>
-                  <span>{agent.agent}</span>
-                  <span>{agent.percentage.toFixed(0)}%</span>
+            <div className="flex justify-between text-[9px] font-bold mb-1" style={{ color: "#888", letterSpacing: 1 }}>
+              <span className="flex-1">MODEL</span>
+              <span style={{ width: 60, textAlign: "right" }}>TOKENS</span>
+              <span style={{ width: 70, textAlign: "right" }}>COST</span>
+            </div>
+
+            {viewData.models.map((model) => (
+              <div key={`${model.provider}-${model.model}`} className="flex items-baseline mb-0.5">
+                <span className="font-semibold shrink-0">{model.display_name}</span>
+                <span className="flex-1 mx-1" style={{ borderBottom: "1px dotted #ccc", height: 10 }} />
+                <span className="shrink-0 text-[10px]" style={{ width: 60, textAlign: "right", color: "#555" }}>
+                  {formatTokens(model.total_tokens)}
+                </span>
+                <span className="shrink-0 font-semibold" style={{ width: 70, textAlign: "right" }}>
+                  {formatCost(model.cost)}
+                </span>
+              </div>
+            ))}
+
+            <hr style={{ border: "none", borderTop: "1px dashed #bbb", margin: "8px 0", opacity: 0.6 }} />
+
+            <div className="flex justify-between font-bold">
+              <span>SUBTOTAL</span>
+              <span>{formatCost(viewData.subtotal)}</span>
+            </div>
+            {viewData.cache_discount > 0.001 && (
+              <div className="flex justify-between font-semibold" style={{ color: "#059669" }}>
+                <span>CACHE DISCOUNT</span>
+                <span>-{formatCost(viewData.cache_discount)}</span>
+              </div>
+            )}
+
+            <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
+
+            <div className="flex justify-between font-bold text-[14px]">
+              <span>TOTAL</span>
+              <span>{formatCost(viewData.total)}</span>
+            </div>
+
+            <hr style={{ border: "none", borderTop: "2px double #bbb", margin: "8px 0", opacity: 0.6 }} />
+
+            <div className="text-[10px] font-bold mb-1" style={{ color: "#444" }}>STATISTICS</div>
+            <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+              <span>Tokens</span>
+              <span>{formatTokens(totalTokens)}</span>
+            </div>
+            {selectedProvider === "all" && (
+              <>
+                <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+                  <span>Messages</span>
+                  <span>{viewData.stats.total_messages.toLocaleString()}</span>
                 </div>
-              ))}
-            </>
-          )}
+                <div className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+                  <span>Sessions</span>
+                  <span>{viewData.stats.total_sessions.toLocaleString()}</span>
+                </div>
+              </>
+            )}
 
-          <div className="text-[9px] font-bold mt-2 mb-0.5" style={{ color: "#666" }}>PROVIDER USAGE</div>
-          {viewData.providers.map((provider) => (
-            <div key={provider.provider} className="flex justify-between text-[10px]" style={{ color: "#555" }}>
-              <span>{provider.provider}</span>
-              <span>{provider.percentage.toFixed(0)}%</span>
+            {selectedProvider === "all" && viewData.agents.length > 0 && (
+              <>
+                <div className="text-[9px] font-bold mt-2 mb-0.5" style={{ color: "#666" }}>AGENT USAGE</div>
+                {viewData.agents.filter((agent) => agent.percentage >= 0.1).map((agent) => (
+                  <div key={agent.agent} className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+                    <span>{agent.agent}</span>
+                    <span>{agent.percentage.toFixed(0)}%</span>
+                  </div>
+                ))}
+              </>
+            )}
+
+            <div className="text-[9px] font-bold mt-2 mb-0.5" style={{ color: "#666" }}>PROVIDER USAGE</div>
+            {viewData.providers.map((provider) => (
+              <div key={provider.provider} className="flex justify-between text-[10px]" style={{ color: "#555" }}>
+                <span>{provider.provider}</span>
+                <span>{provider.percentage.toFixed(0)}%</span>
+              </div>
+            ))}
+
+            <hr style={{ border: "none", borderTop: "1px dashed #bbb", margin: "8px 0", opacity: 0.6 }} />
+            <div className="text-center text-xs" style={{ color: "#888" }}>Thank you for using AgentDesk!</div>
+            <div className="text-center text-[12px] mt-1" style={{ color: "#1a1a1a", opacity: 0.2, letterSpacing: 1 }}>
+              ||||| || ||| || |||| || ||| | |||| ||| ||
             </div>
-          ))}
-
-          <hr style={{ border: "none", borderTop: "1px dashed #bbb", margin: "8px 0", opacity: 0.6 }} />
-          <div className="text-center text-xs" style={{ color: "#888" }}>Thank you for using AgentDesk!</div>
-          <div className="text-center text-[12px] mt-1" style={{ color: "#1a1a1a", opacity: 0.2, letterSpacing: 1 }}>
-            ||||| || ||| || |||| || ||| | |||| ||| ||
           </div>
-        </div>
+        </SurfaceCard>
       )}
-    </div>
+    </SurfaceSection>
   );
 }

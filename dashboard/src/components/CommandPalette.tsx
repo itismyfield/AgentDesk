@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { Search } from "lucide-react";
 import type { Agent, Department } from "../types";
+import { SurfaceEmptyState } from "./common/SurfacePrimitives";
 
 interface PaletteRoute {
   id: string;
@@ -122,13 +123,17 @@ export default function CommandPalette({
       className="fixed inset-0 z-[100] flex items-start justify-center pt-[15vh]"
       onClick={onClose}
     >
-      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
+      <div className="fixed inset-0" style={{ background: "var(--th-modal-overlay)" }} />
       <div
         role="dialog"
         aria-modal="true"
         aria-label={tr("명령 팔레트", "Command Palette")}
-        className="relative w-full max-w-lg mx-4 rounded-2xl overflow-hidden shadow-2xl"
-        style={{ background: "var(--th-surface)", border: "1px solid var(--th-border)" }}
+        className="relative w-full max-w-lg mx-4 overflow-hidden rounded-[28px] border shadow-2xl"
+        style={{
+          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Search input */}
@@ -156,9 +161,12 @@ export default function CommandPalette({
               key={item.type === "agent" ? item.agent.id : item.type === "nav" ? item.id : item.dept.id}
               onClick={() => handleSelect(item)}
               className={`w-full flex items-center gap-3 px-4 py-2 text-left text-sm transition-colors ${
-                i === selectedIndex ? "bg-indigo-600/20" : "hover:bg-surface-subtle"
+                i === selectedIndex ? "rounded-xl" : ""
               }`}
-              style={{ color: "var(--th-text)" }}
+              style={{
+                color: "var(--th-text)",
+                background: i === selectedIndex ? "var(--th-accent-primary-soft)" : "transparent",
+              }}
             >
               <span className="text-base w-6 text-center">
                 {item.type === "agent" ? item.agent.avatar_emoji
@@ -187,9 +195,9 @@ export default function CommandPalette({
             </button>
           ))}
           {results.length === 0 && (
-            <div className="px-4 py-6 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+            <SurfaceEmptyState className="mx-2 px-4 py-6 text-center text-sm">
               {tr("결과 없음", "No results")}
-            </div>
+            </SurfaceEmptyState>
           )}
         </div>
       </div>

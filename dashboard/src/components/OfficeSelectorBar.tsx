@@ -18,6 +18,12 @@ export default function OfficeSelectorBar({
 }: OfficeSelectorBarProps) {
   if (offices.length === 0) return null;
 
+  const inactiveButtonStyle = {
+    color: "var(--th-text-secondary)",
+    background: "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)",
+    border: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)",
+  };
+
   return (
     <div
       className="flex items-center gap-1.5 px-3 py-2 overflow-x-auto shrink-0"
@@ -28,15 +34,11 @@ export default function OfficeSelectorBar({
     >
       <button
         onClick={() => onSelectOffice(null)}
-        className={`px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-all ${
-          selectedOfficeId === null
-            ? "bg-indigo-600 text-white"
-            : "hover:bg-surface-hover"
-        }`}
+        className="px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-all"
         style={
-          selectedOfficeId !== null
-            ? { color: "var(--th-text-secondary)" }
-            : undefined
+          selectedOfficeId === null
+            ? { background: "var(--th-accent-primary)", color: "white" }
+            : inactiveButtonStyle
         }
       >
         {isKo ? "전체" : "All"}
@@ -46,15 +48,11 @@ export default function OfficeSelectorBar({
         <button
           key={o.id}
           onClick={() => onSelectOffice(o.id)}
-          className={`px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1 ${
-            selectedOfficeId === o.id
-              ? "text-white"
-              : "hover:bg-surface-hover"
-          }`}
+          className="px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1"
           style={
             selectedOfficeId === o.id
               ? { background: o.color }
-              : { color: "var(--th-text-secondary)" }
+              : inactiveButtonStyle
           }
         >
           <span>{o.icon}</span>
@@ -76,8 +74,12 @@ export default function OfficeSelectorBar({
 
       <button
         onClick={onManageOffices}
-        className="ml-auto p-1.5 rounded-md hover:bg-surface-hover transition-colors shrink-0"
-        style={{ color: "var(--th-text-muted)" }}
+        className="ml-auto p-1.5 rounded-md transition-colors shrink-0"
+        style={{
+          color: "var(--th-text-muted)",
+          background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
+          border: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)",
+        }}
         title={isKo ? "오피스 관리" : "Manage Offices"}
       >
         <Settings size={14} />

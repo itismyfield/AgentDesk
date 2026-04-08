@@ -71,7 +71,7 @@ export function ToastOverlay({ notifications, onDismiss }: ToastOverlayProps) {
       {recent.slice(0, 4).map((notification) => (
         <div
           key={notification.id}
-          className="flex items-start gap-2 rounded-xl border px-3 py-2 text-sm shadow-lg backdrop-blur-sm"
+          className="flex items-start gap-2 rounded-xl border px-3 py-2 text-sm shadow-lg"
           style={{
             borderColor: `${NOTIFICATION_TYPE_COLORS[notification.type]}55`,
             background: `linear-gradient(135deg, ${NOTIFICATION_TYPE_BACKGROUNDS[notification.type]}, color-mix(in srgb, var(--th-surface) 92%, transparent))`,
@@ -87,7 +87,11 @@ export function ToastOverlay({ notifications, onDismiss }: ToastOverlayProps) {
           </div>
           <button
             onClick={() => onDismiss(notification.id)}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--th-text-muted)] transition-colors hover:bg-black/5 hover:text-[var(--th-text)]"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted)] transition-opacity hover:opacity-100"
+            style={{
+              background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
+              borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+            }}
             aria-label="Dismiss notification"
           >
             <X size={12} />

@@ -27,9 +27,9 @@ export const PROVIDER_META: Record<string, { label: string; bg: string; color: s
   },
   opencode: {
     label: "OpenCode",
-    bg: "rgba(168,85,247,0.12)",
-    color: "#c084fc",
-    border: "rgba(168,85,247,0.25)",
+    bg: "rgba(6,182,212,0.12)",
+    color: "#22d3ee",
+    border: "rgba(6,182,212,0.25)",
   },
   copilot: {
     label: "Copilot",
@@ -39,9 +39,9 @@ export const PROVIDER_META: Record<string, { label: string; bg: string; color: s
   },
   antigravity: {
     label: "Antigravity",
-    bg: "rgba(244,114,182,0.12)",
-    color: "#f9a8d4",
-    border: "rgba(244,114,182,0.25)",
+    bg: "rgba(249,115,22,0.12)",
+    color: "#fdba74",
+    border: "rgba(249,115,22,0.25)",
   },
   api: {
     label: "API",

@@ -1,6 +1,14 @@
-import { Suspense, lazy, useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, useState, type CSSProperties } from "react";
 import type { CompanySettings } from "../types";
 import * as api from "../api";
+import {
+  SettingsCallout,
+  SettingsCard,
+  SettingsEmptyState,
+  SettingsFieldCard,
+  SettingsSection,
+  SettingsSubsection,
+} from "./common/SettingsPrimitives";
 
 const OnboardingWizard = lazy(() => import("./OnboardingWizard"));
 
@@ -564,13 +572,13 @@ interface SummaryCardProps {
   accent?: string;
 }
 
-function SummaryCard({ label, value, description, accent = "#6366f1" }: SummaryCardProps) {
+function SummaryCard({ label, value, description, accent = "var(--th-accent-primary)" }: SummaryCardProps) {
   return (
-    <div
-      className="rounded-2xl border p-4"
+    <SettingsCard
+      className="rounded-2xl p-4"
       style={{
         borderColor: "rgba(148,163,184,0.16)",
-        background: `linear-gradient(180deg, color-mix(in srgb, ${accent} 10%, rgba(15,23,42,0.96)) 0%, rgba(15,23,42,0.74) 100%)`,
+        background: `linear-gradient(180deg, color-mix(in srgb, ${accent} 12%, var(--th-card-bg) 88%) 0%, color-mix(in srgb, var(--th-bg-surface) 92%, transparent) 100%)`,
       }}
     >
       <div className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: "var(--th-text-muted)" }}>
@@ -582,7 +590,7 @@ function SummaryCard({ label, value, description, accent = "#6366f1" }: SummaryC
       <p className="mt-2 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
         {description}
       </p>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -594,8 +602,8 @@ interface SurfaceCardProps {
 
 function SurfaceCard({ title, body, footer }: SurfaceCardProps) {
   return (
-    <div
-      className="rounded-2xl border p-4"
+    <SettingsCard
+      className="rounded-2xl p-4"
       style={{ borderColor: "rgba(148,163,184,0.14)", background: "rgba(15,23,42,0.34)" }}
     >
       <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
@@ -641,8 +649,8 @@ interface AuditNoteCardProps {
 
 function AuditNoteCard({ note, isKo }: AuditNoteCardProps) {
   return (
-    <div
-      className="rounded-2xl border p-4"
+    <SettingsCard
+      className="rounded-2xl p-4"
       style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -669,7 +677,7 @@ function AuditNoteCard({ note, isKo }: AuditNoteCardProps) {
           </span>
         ))}
       </div>
-    </div>
+    </SettingsCard>
   );
 }
 
@@ -749,9 +757,21 @@ export default function SettingsView({
     border: "1px solid var(--th-border)",
     color: "var(--th-text)",
   };
-  const sectionStyle: CSSProperties = {
-    border: "1px solid rgba(148,163,184,0.16)",
-    background: "linear-gradient(180deg, rgba(15,23,42,0.72) 0%, rgba(15,23,42,0.44) 100%)",
+  const primaryActionClass = "inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl px-5 py-2.5 text-sm font-medium text-white transition-colors disabled:opacity-50";
+  const primaryActionStyle: CSSProperties = {
+    background: "var(--th-accent-primary)",
+  };
+  const secondaryActionClass = "inline-flex min-h-[44px] items-center justify-center rounded-2xl border px-5 py-2.5 text-sm font-medium transition-[opacity,color,border-color] hover:opacity-100";
+  const secondaryActionStyle: CSSProperties = {
+    borderColor: "rgba(148,163,184,0.28)",
+    color: "var(--th-text-secondary)",
+    background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+  };
+  const compactSecondaryActionClass = "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium transition-[opacity,color,border-color] hover:opacity-100";
+  const compactSecondaryActionStyle: CSSProperties = {
+    borderColor: "rgba(148,163,184,0.2)",
+    color: "var(--th-text-muted)",
+    background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
   };
 
   const handleSave = async () => {
@@ -838,14 +858,35 @@ export default function SettingsView({
       className="mx-auto h-full max-w-5xl min-w-0 space-y-6 overflow-x-hidden overflow-y-auto px-4 py-5 pb-40 sm:px-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      <div className="flex items-center gap-3">
-        <h2 className="text-lg font-semibold tracking-tight" style={{ color: "var(--th-text)" }}>
-          {tr("설정", "Settings")}
-        </h2>
-        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-          {tr(`회사 ${4} · 런타임 ${runtimeFieldCount} · 정책 ${configEntries.length}`, `Company ${4} · Runtime ${runtimeFieldCount} · Policy ${configEntries.length}`)}
-        </span>
-      </div>
+      <section
+        className="rounded-[28px] border p-5 sm:p-6"
+        style={{
+          borderColor: "color-mix(in srgb, var(--th-accent-primary) 22%, var(--th-border) 78%)",
+          background: "radial-gradient(circle at top left, color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent), color-mix(in srgb, var(--th-card-bg) 92%, transparent) 48%, color-mix(in srgb, var(--th-bg-surface) 94%, transparent) 100%)",
+        }}
+      >
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="min-w-0">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.22em]" style={{ color: "var(--th-text-secondary)" }}>
+              {tr("설정 제어실", "Settings Control Room")}
+            </div>
+            <h2 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl" style={{ color: "var(--th-text)" }}>
+              {tr("AgentDesk 설정창 재정렬", "Reframing AgentDesk settings")}
+            </h2>
+            <p className="mt-3 max-w-3xl text-sm leading-6" style={{ color: "var(--th-text-secondary)" }}>
+              {tr(
+                "설정은 단순 입력 폼이 아니라 저장 위치와 적용 범위를 이해해야 안전하게 다룰 수 있습니다. 이 화면은 회사 설정, 즉시 반영 런타임 설정, 파이프라인 정책, 별도 관리 설정을 분리해서 보여줍니다.",
+                "Settings are safe only when their storage surface and effect scope are visible. This view separates company settings, live runtime tuning, pipeline policy keys, and settings managed elsewhere.",
+              )}
+            </p>
+          </div>
+          <div
+            className="rounded-2xl border px-4 py-3 text-sm"
+            style={{ borderColor: "rgba(148,163,184,0.2)", background: "rgba(15,23,42,0.38)", color: "var(--th-text-secondary)" }}
+          >
+            {tr("현재 일반 설정 저장은 merged object로 수행되어 hidden JSON key를 보존합니다.", "General settings now save as a merged object so hidden JSON keys stay intact.")}
+          </div>
+        </div>
 
       <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
         <SectionHeading
@@ -1006,15 +1047,14 @@ export default function SettingsView({
         )}
       </section>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("저장 경로", "Storage Surfaces")}
           title={tr("어디에 저장되는지 먼저 보이게", "Make storage surfaces explicit")}
           description={tr(
             "설정이 한 곳에만 있지 않아서, 저장 경로를 이해하지 못하면 UI가 쉽게 거짓말을 하게 됩니다. 아래 카드는 현재 AgentDesk 설정의 실제 저장면을 요약합니다.",
             "Settings do not live in one place, so the UI becomes misleading unless the storage path is explicit. These cards summarize the current storage surfaces.",
           )}
-        />
+        >
 
         <div className="mt-5 grid gap-3 lg:grid-cols-2 2xl:grid-cols-5">
           <SurfaceCard
@@ -1058,10 +1098,9 @@ export default function SettingsView({
             footer={tr("source: onboarding API + kv_meta", "source: onboarding API + kv_meta")}
           />
         </div>
-      </section>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("회사 설정", "Workspace Identity")}
           title={tr("브랜드/언어/테마", "Brand, language, and theme")}
             description={tr(
@@ -1072,7 +1111,7 @@ export default function SettingsView({
         />
 
         <div className="mt-5 grid gap-3 lg:grid-cols-2">
-          <InputCard
+          <SettingsFieldCard
             label={tr("회사 이름", "Company name")}
             description={tr("대시보드 hero와 주요 타이틀에 노출됩니다.", "Shown in the dashboard hero and primary titles.")}
           >
@@ -1083,9 +1122,9 @@ export default function SettingsView({
               className="w-full rounded-2xl px-3 py-2.5 text-sm"
               style={inputStyle}
             />
-          </InputCard>
+          </SettingsFieldCard>
 
-          <InputCard
+          <SettingsFieldCard
             label={tr("CEO 이름", "CEO name")}
             description={tr("오피스와 일부 운영 UI에서 대표 인물 이름으로 사용됩니다.", "Used as the representative persona name in office and ops surfaces.")}
           >
@@ -1096,9 +1135,9 @@ export default function SettingsView({
               className="w-full rounded-2xl px-3 py-2.5 text-sm"
               style={inputStyle}
             />
-          </InputCard>
+          </SettingsFieldCard>
 
-          <InputCard
+          <SettingsFieldCard
             label={tr("언어", "Language")}
             description={tr("대시보드 전반의 로캘과 기본 텍스트 방향을 정합니다.", "Controls dashboard locale and default text language.")}
           >
@@ -1113,9 +1152,9 @@ export default function SettingsView({
               <option value="ja">日本語</option>
               <option value="zh">中文</option>
             </select>
-          </InputCard>
+          </SettingsFieldCard>
 
-          <InputCard
+          <SettingsFieldCard
             label={tr("테마", "Theme")}
             description={tr("대시보드 전체 테마와 오피스 화면의 기본 분위기를 정합니다.", "Sets the overall dashboard theme and base office mood.")}
           >
@@ -1129,28 +1168,29 @@ export default function SettingsView({
               <option value="light">{tr("라이트", "Light")}</option>
               <option value="auto">{tr("자동 (시스템)", "Auto (System)")}</option>
             </select>
-          </InputCard>
+          </SettingsFieldCard>
         </div>
 
-        <div className="mt-5 flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
+        <SettingsCallout className="mt-5" action={
+            <button
+              onClick={handleSave}
+              disabled={saving || !companyDirty}
+              className={primaryActionClass}
+              style={primaryActionStyle}
+            >
+              {saving ? tr("저장 중...", "Saving...") : tr("회사 설정 저장", "Save company settings")}
+            </button>
+        }>
           <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
             {tr(
               "이 저장 버튼은 현재 회사 설정 patch를 기존 `settings` JSON과 합쳐 보내고, 저장 후 서버 값을 다시 불러옵니다. `roomThemes` 같은 숨겨진 키는 보존하고 retired key는 서버 정본에 맞춰 제거합니다.",
               "This save action merges the edited patch with the existing `settings` JSON and re-fetches the server value afterward. Hidden keys such as `roomThemes` are preserved while retired keys are removed to match the server canonical state.",
             )}
           </p>
-          <button
-            onClick={handleSave}
-            disabled={saving || !companyDirty}
-            className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
-          >
-            {saving ? tr("저장 중...", "Saving...") : tr("회사 설정 저장", "Save company settings")}
-          </button>
-        </div>
-      </section>
+        </SettingsCallout>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("즉시 반영", "Live Runtime")}
           title={tr("운영 리듬과 캐시 튜닝", "Tune runtime cadence and caching")}
           description={tr(
@@ -1161,21 +1201,17 @@ export default function SettingsView({
         />
 
         {!rcLoaded ? (
-          <div className="mt-5 rounded-2xl border p-4 text-sm" style={{ borderColor: "rgba(148,163,184,0.16)", color: "var(--th-text-muted)" }}>
+          <SettingsEmptyState className="mt-5 text-sm">
             {tr("런타임 설정을 불러오는 중...", "Loading runtime config...")}
-          </div>
+          </SettingsEmptyState>
         ) : (
           <div className="mt-5 space-y-5">
             {CATEGORIES.map((category) => (
-              <div key={category.titleEn} className="rounded-3xl border p-4 sm:p-5" style={{ borderColor: "rgba(148,163,184,0.14)", background: "rgba(15,23,42,0.26)" }}>
-                <div className="mb-4">
-                  <h4 className="text-base font-medium" style={{ color: "var(--th-text)" }}>
-                    {tr(category.titleKo, category.titleEn)}
-                  </h4>
-                  <p className="mt-1 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                    {tr(category.descriptionKo, category.descriptionEn)}
-                  </p>
-                </div>
+              <SettingsSubsection
+                key={category.titleEn}
+                title={tr(category.titleKo, category.titleEn)}
+                description={tr(category.descriptionKo, category.descriptionEn)}
+              >
                 <div className="grid gap-3 xl:grid-cols-2">
                   {category.fields.map((field) => {
                     const value = rcValues[field.key] ?? rcDefaults[field.key] ?? 0;
@@ -1183,9 +1219,9 @@ export default function SettingsView({
                     const isDefault = value === defaultValue;
 
                     return (
-                      <div
+                      <SettingsCard
                         key={field.key}
-                        className="rounded-2xl border p-4"
+                        className="rounded-2xl p-4"
                         style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.32)" }}
                       >
                         <div className="flex items-start justify-between gap-3">
@@ -1216,7 +1252,7 @@ export default function SettingsView({
                             value={value}
                             onChange={(event) => handleRcChange(field.key, Number(event.target.value))}
                             className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full"
-                            style={{ accentColor: "#6366f1" }}
+                            style={{ accentColor: "var(--th-accent-primary)" }}
                           />
                           <input
                             type="number"
@@ -1239,18 +1275,18 @@ export default function SettingsView({
                           <div className="mt-3 flex justify-end">
                             <button
                               onClick={() => handleRcReset(field.key)}
-                              className="inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-medium transition-colors hover:border-indigo-400/50 hover:text-indigo-200"
-                              style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-muted)" }}
+                              className={compactSecondaryActionClass}
+                              style={compactSecondaryActionStyle}
                             >
                               {tr("기본값으로 되돌리기", "Reset to default")}
                             </button>
                           </div>
                         )}
-                      </div>
+                      </SettingsCard>
                     );
                   })}
                 </div>
-              </div>
+              </SettingsSubsection>
             ))}
 
             <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
@@ -1260,17 +1296,21 @@ export default function SettingsView({
               <button
                 onClick={handleRcSave}
                 disabled={rcSaving || !rcDirty}
-                className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+                className={primaryActionClass}
+                style={primaryActionStyle}
               >
                 {rcSaving ? tr("저장 중...", "Saving...") : tr("런타임 설정 저장", "Save runtime config")}
               </button>
-            </div>
+            }>
+              <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+                {tr("런타임 설정은 저장 즉시 적용됩니다. 값 조정이 잦다면 먼저 작은 폭으로 바꾸고 Pulse/영수증/로그 반응을 확인하는 편이 안전합니다.", "Runtime config applies immediately. If you tune frequently, prefer small changes first and verify Pulse, receipts, and logs before making larger moves.")}
+              </p>
+            </SettingsCallout>
           </div>
         )}
-      </section>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("파이프라인 정책", "Pipeline Policy")}
           title={tr("개별 `kv_meta` 키 관리", "Manage individual `kv_meta` keys")}
           description={tr(
@@ -1281,9 +1321,9 @@ export default function SettingsView({
         />
 
         {configEntries.length === 0 ? (
-          <div className="mt-5 rounded-2xl border p-4 text-sm" style={{ borderColor: "rgba(148,163,184,0.16)", color: "var(--th-text-muted)" }}>
+          <SettingsEmptyState className="mt-5 text-sm">
             {tr("시스템 설정을 불러오는 중...", "Loading system config...")}
-          </div>
+          </SettingsEmptyState>
         ) : (
           <div className="mt-5 space-y-4">
             {(Object.keys(SYSTEM_CATEGORY_META) as Array<keyof typeof SYSTEM_CATEGORY_META>).map((categoryKey) => {
@@ -1292,16 +1332,11 @@ export default function SettingsView({
               const meta = SYSTEM_CATEGORY_META[categoryKey];
 
               return (
-                <div key={categoryKey} className="rounded-3xl border p-4 sm:p-5" style={{ borderColor: "rgba(148,163,184,0.14)", background: "rgba(15,23,42,0.26)" }}>
-                  <div className="mb-4">
-                    <div className="text-base font-medium" style={{ color: "var(--th-text)" }}>
-                      {tr(meta.titleKo, meta.titleEn)}
-                    </div>
-                    <p className="mt-1 text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                      {tr(meta.descriptionKo, meta.descriptionEn)}
-                    </p>
-                  </div>
-
+                <SettingsSubsection
+                  key={categoryKey}
+                  title={tr(meta.titleKo, meta.titleEn)}
+                  description={tr(meta.descriptionKo, meta.descriptionEn)}
+                >
                   <div className="grid gap-3 xl:grid-cols-2">
                     {entries.map((entry) => {
                       const description = SYSTEM_CONFIG_DESCRIPTIONS[entry.key];
@@ -1318,9 +1353,9 @@ export default function SettingsView({
                       const restartNote = restartBehaviorNote(entry.restart_behavior, isKo);
 
                       return (
-                        <div
+                        <SettingsCard
                           key={entry.key}
-                          className="rounded-2xl border p-4"
+                          className="rounded-2xl p-4"
                           style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.32)" }}
                         >
                           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1456,11 +1491,11 @@ export default function SettingsView({
                               </>
                             )}
                           </div>
-                        </div>
+                        </SettingsCard>
                       );
                     })}
                   </div>
-                </div>
+                </SettingsSubsection>
               );
             })}
 
@@ -1478,30 +1513,35 @@ export default function SettingsView({
               >
                 {configSaving ? tr("저장 중...", "Saving...") : tr("정책 설정 저장", "Save policy settings")}
               </button>
-            </div>
+            }>
+              <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+                {tr(
+                  "이 섹션은 whitelist된 개별 `kv_meta` 키만 편집합니다. `context_clear_*`처럼 설명은 있지만 API에 없는 항목은 아래 audit 섹션에서 별도 정리 대상으로 표시합니다.",
+                  "This section edits only whitelisted individual `kv_meta` keys. Items such as `context_clear_*` that are described but not exposed by the API are surfaced in the audit section below.",
+                )}
+              </p>
+            </SettingsCallout>
           </div>
         )}
-      </section>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("감사 결과", "Audit Findings")}
           title={tr("별도 관리 / 정리 필요 항목", "Managed elsewhere / cleanup-needed items")}
           description={tr(
             "이 항목들은 일반 설정창에서 바로 편집하지 않는 편이 맞거나, read-only/계약 메모로 남겨두는 편이 더 정확한 surface입니다.",
             "These items are either better managed outside the general settings form or are more truthful when kept as read-only or contract notes.",
           )}
-        />
+        >
 
         <div className="mt-5 grid gap-3 xl:grid-cols-2">
           {AUDIT_NOTES.map((note) => (
             <AuditNoteCard key={note.id} note={note} isKo={isKo} />
           ))}
         </div>
-      </section>
+      </SettingsSection>
 
-      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
-        <SectionHeading
+      <SettingsSection
           eyebrow={tr("온보딩", "Onboarding")}
           title={tr("토큰과 첫 설정은 별도 흐름으로", "Keep secrets and first-run setup in a dedicated flow")}
           description={tr(
@@ -1509,9 +1549,12 @@ export default function SettingsView({
             "Onboarding tokens, channel IDs, and provider values are safer and easier to understand inside a dedicated wizard than in the general settings form, so this screen links back to that flow instead of embedding raw text inputs.",
           )}
           badge={tr("dashboard > discord onboarding bridge", "dashboard > Discord onboarding bridge")}
-        />
+        >
 
-        <div className="mt-5 rounded-3xl border p-4 sm:p-5" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
+        <SettingsCard
+          className="mt-5 rounded-3xl p-4 sm:p-5"
+          style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}
+        >
           <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
             <div>
               <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
@@ -1526,14 +1569,14 @@ export default function SettingsView({
             </div>
             <button
               onClick={() => setShowOnboarding(true)}
-              className="inline-flex min-h-[44px] items-center justify-center rounded-2xl border px-5 py-2.5 text-sm font-medium transition-colors hover:border-indigo-400/50 hover:text-indigo-200"
-              style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-secondary)" }}
+              className={secondaryActionClass}
+              style={secondaryActionStyle}
             >
               {tr("온보딩 다시 열기", "Open onboarding again")}
             </button>
           </div>
-        </div>
-      </section>
+        </SettingsCard>
+      </SettingsSection>
 
       {showOnboarding && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-[#0a0e1a]" role="dialog" aria-modal="true" aria-label="Onboarding wizard">

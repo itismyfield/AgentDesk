@@ -225,8 +225,11 @@ export function DashboardMissionLog({
           style={{ color: "var(--th-text-primary)" }}
         >
           <span
-            className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500/15 text-sm"
-            style={{ boxShadow: "0 0 8px rgba(139,92,246,0.2)" }}
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-sm"
+            style={{
+              background: "color-mix(in srgb, var(--th-accent-primary-soft) 76%, transparent)",
+              boxShadow: "0 0 8px color-mix(in srgb, var(--th-accent-primary) 18%, transparent)",
+            }}
           >
             📡
           </span>

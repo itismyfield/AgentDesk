@@ -283,7 +283,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
 
   const categories: Array<{ key: OpsCategory; label: string; value: number; color: string }> = [
     { key: "review", label: t({ ko: "검토 대기", en: "Review", ja: "レビュー待ち", zh: "待审查" }), value: kanban.review_queue, color: "#14b8a6" },
-    { key: "acceptance", label: t({ ko: "수락 지연", en: "Ack delay", ja: "受諾遅延", zh: "接收延迟" }), value: kanban.waiting_acceptance, color: "#8b5cf6" },
+    { key: "acceptance", label: t({ ko: "수락 지연", en: "Ack delay", ja: "受諾遅延", zh: "接收延迟" }), value: kanban.waiting_acceptance, color: "#10b981" },
     { key: "stalled", label: t({ ko: "진행 정체", en: "Stalled", ja: "停滞", zh: "停滞" }), value: kanban.stale_in_progress, color: "#f59e0b" },
     { key: "blocked", label: t({ ko: "수동 개입", en: "Manual intervention", ja: "手動介入", zh: "人工介入" }), value: kanban.blocked, color: "#ef4444" },
   ];
@@ -382,7 +382,7 @@ function OpsCardRow({ card, t, onAction }: {
   const repo = card.github_repo?.replace(/^[^/]+\//, "") ?? "";
   const statusColor = isManualInterventionCard(card) ? "#f59e0b"
     : card.status === "review" ? "#14b8a6"
-    : "#8b5cf6";
+    : "#10b981";
 
   return (
     <div
@@ -907,8 +907,8 @@ export function HeatmapWidget({ agents, t }: HeatmapWidgetProps) {
                 background: total === 0
                   ? "rgba(100,116,139,0.15)"
                   : isCurrent
-                    ? "#6366f1"
-                    : `rgba(99,102,241,${0.2 + (total / maxCount) * 0.6})`,
+                    ? "var(--th-accent-primary)"
+                    : `color-mix(in srgb, var(--th-accent-primary) ${Math.round((0.2 + (total / maxCount) * 0.6) * 100)}%, transparent)`,
                 minWidth: 0,
               }}
               title={`${h.hour}:00 — ${total} events`}

@@ -4,6 +4,12 @@ import { localeName, useI18n } from "../../i18n";
 import * as api from "../../api";
 import EmojiPicker from "./EmojiPicker";
 import type { FormData } from "./types";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceNotice,
+  SurfaceSubsection,
+} from "../common/SurfacePrimitives";
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -79,11 +85,11 @@ export default function AgentFormModal({
         role="dialog"
         aria-modal="true"
         aria-label={isEdit ? tr("직원 정보 수정", "Edit Agent") : tr("신규 직원 채용", "Hire New Agent")}
-        className="w-full max-w-2xl max-h-full overflow-y-auto overscroll-contain rounded-t-3xl p-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[90vh] sm:rounded-2xl sm:p-6"
+        className="w-full max-w-3xl max-h-full overflow-y-auto overscroll-contain rounded-t-3xl p-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[90vh] sm:rounded-[28px] sm:p-6"
         style={{
-          background: "var(--th-card-bg)",
-          border: "1px solid var(--th-card-border)",
-          backdropFilter: "blur(20px)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 96%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 98%, transparent) 100%)",
+          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
           paddingBottom: "max(1.25rem, calc(1.25rem + env(safe-area-inset-bottom)))",
         }}
       >
@@ -92,33 +98,30 @@ export default function AgentFormModal({
           <h3 className="text-base font-bold" style={{ color: "var(--th-text-heading)" }}>
             {isEdit ? tr("직원 정보 수정", "Edit Agent") : tr("신규 직원 채용", "Hire New Agent")}
           </h3>
-          <button
-            onClick={onClose}
-            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors"
-            style={{ color: "var(--th-text-muted)" }}
-            aria-label="Close"
-          >
+          <SurfaceActionButton onClick={onClose} tone="neutral" compact className="h-11 w-11" style={{ padding: 0 }} aria-label="Close">
             ✕
-          </button>
+          </SurfaceActionButton>
         </div>
 
         {/* 2-column layout */}
         <div className="grid grid-cols-2 gap-5">
           {/* ── Left column: 기본 정보 ── */}
-          <div className="space-y-4">
-            <div
-              className="text-xs font-semibold uppercase tracking-widest"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("기본 정보", "Basic Info")}
-            </div>
+          <SurfaceSubsection
+            title={tr("기본 정보", "Basic Info")}
+            description={tr("이름, 이모지, 부서를 먼저 설정합니다.", "Set the identity, emoji, and department first.")}
+          >
+            <div className="space-y-4">
             {/* ── 스프라이트 얼굴 미리보기 + 위/아래 변경 ── */}
             <div className="flex items-center gap-3">
               <div className="flex flex-col items-center gap-1">
                 <button
                   type="button"
-                  className="w-6 h-6 rounded flex items-center justify-center text-xs hover:bg-[var(--th-bg-surface-hover)] transition-colors"
-                  style={{ color: "var(--th-text-muted)", border: "1px solid var(--th-input-border)" }}
+                  className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors"
+                  style={{
+                    color: "var(--th-text-muted)",
+                    border: "1px solid var(--th-input-border)",
+                    background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
+                  }}
                   onClick={() => {
                     const next = Math.max(1, spriteNum || 0) + 1;
                     setSpriteNum(next);
@@ -144,8 +147,12 @@ export default function AgentFormModal({
                 </div>
                 <button
                   type="button"
-                  className="w-6 h-6 rounded flex items-center justify-center text-xs hover:bg-[var(--th-bg-surface-hover)] transition-colors"
-                  style={{ color: "var(--th-text-muted)", border: "1px solid var(--th-input-border)" }}
+                  className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors"
+                  style={{
+                    color: "var(--th-text-muted)",
+                    border: "1px solid var(--th-input-border)",
+                    background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
+                  }}
                   onClick={() => {
                     const next = Math.max(1, (spriteNum || 1) - 1);
                     setSpriteNum(next);
@@ -158,7 +165,10 @@ export default function AgentFormModal({
               <div className="flex-1 min-w-0">
                 <span
                   className="text-xs font-mono px-1.5 py-0.5 rounded"
-                  style={{ color: "var(--th-text-muted)", background: "var(--th-bg-surface-hover)" }}
+                  style={{
+                    color: "var(--th-text-muted)",
+                    background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+                  }}
                 >
                   #{spriteNum || "—"}
                 </span>
@@ -252,16 +262,15 @@ export default function AgentFormModal({
                 </select>
               </div>
             </div>
-          </div>
+            </div>
+          </SurfaceSubsection>
 
           {/* ── Right column ── */}
-          <div className="space-y-4">
-            <div
-              className="text-xs font-semibold uppercase tracking-widest"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("추가 정보", "Details")}
-            </div>
+          <SurfaceSubsection
+            title={tr("추가 정보", "Details")}
+            description={tr("프롬프트와 성격을 정리합니다.", "Describe the agent personality and prompt.")}
+          >
+            <div className="space-y-4">
             {/* 성격/프롬프트 */}
             <div>
               <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
@@ -276,17 +285,16 @@ export default function AgentFormModal({
                 style={inputStyle}
               />
             </div>
-          </div>
+            </div>
+          </SurfaceSubsection>
         </div>
 
         {/* ── Sprite Upload ── */}
-        <div className="mt-5 pt-4" style={{ borderTop: "1px solid var(--th-card-border)" }}>
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-3"
-            style={{ color: "var(--th-text-muted)" }}
+        <div className="mt-5">
+          <SurfaceSubsection
+            title={tr("캐릭터 스프라이트", "Character Sprite")}
+            description={tr("스프라이트 시트를 업로드하고 등록 번호를 확정합니다.", "Upload the sprite sheet and register the final sprite number.")}
           >
-            {tr("캐릭터 스프라이트", "Character Sprite")}
-          </div>
 
           {!previews && !processing && (
             <label
@@ -333,12 +341,11 @@ export default function AgentFormModal({
           )}
 
           {processing && (
-            <div className="flex items-center justify-center gap-2 py-8" style={{ color: "var(--th-text-muted)" }}>
-              <span className="animate-spin text-lg">⏳</span>
+            <SurfaceNotice tone="info" className="justify-center py-8" leading={<span className="animate-spin text-lg">⏳</span>}>
               <span className="text-sm">
                 {tr("배경 제거 및 분할 처리 중...", "Removing background & splitting...")}
               </span>
-            </div>
+            </SurfaceNotice>
           )}
 
           {previews && !processing && (
@@ -390,7 +397,7 @@ export default function AgentFormModal({
                     }}
                   />
                 </div>
-                <button
+                <SurfaceActionButton
                   onClick={async () => {
                     if (!previews) return;
                     setRegistering(true);
@@ -405,56 +412,53 @@ export default function AgentFormModal({
                     }
                   }}
                   disabled={registering || registered || !spriteNum}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                    registered
-                      ? "bg-emerald-600/20 text-emerald-400 border border-emerald-500/30"
-                      : "bg-blue-600 hover:bg-blue-500 text-white"
-                  } disabled:opacity-50`}
+                  tone={registered ? "success" : "accent"}
                 >
                   {registering
                     ? tr("등록 중...", "Registering...")
                     : registered
                       ? tr("등록 완료!", "Registered!")
                       : tr("스프라이트 등록", "Register Sprite")}
-                </button>
+                </SurfaceActionButton>
                 {previews && (
-                  <button
+                  <SurfaceActionButton
                     onClick={() => {
                       setPreviews(null);
                       setSpriteFile(null);
                       setRegistered(false);
                     }}
-                    className="text-xs px-2 py-1 rounded-lg hover:bg-[var(--th-bg-surface-hover)] transition-colors"
-                    style={{ color: "var(--th-text-muted)" }}
+                    tone="neutral"
                   >
                     {tr("다시 업로드", "Re-upload")}
-                  </button>
+                  </SurfaceActionButton>
                 )}
               </div>
             </div>
           )}
+          </SurfaceSubsection>
         </div>
 
         {/* Actions — full width */}
-        <div className="flex gap-2 mt-5 pt-4" style={{ borderTop: "1px solid var(--th-card-border)" }}>
-          <button
+        <div className="flex gap-2 mt-5 pt-4" style={{ borderTop: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)" }}>
+          <SurfaceActionButton
             onClick={onSave}
             disabled={saving || !form.name.trim()}
-            className="flex-1 px-4 py-2.5 rounded-lg text-sm font-medium transition-all bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white disabled:opacity-40 shadow-sm shadow-blue-600/20"
+            tone="accent"
+            className="flex-1 text-sm"
           >
             {saving
               ? tr("처리 중...", "Saving...")
               : isEdit
                 ? tr("변경사항 저장", "Save Changes")
                 : tr("채용 확정", "Confirm Hire")}
-          </button>
-          <button
+          </SurfaceActionButton>
+          <SurfaceActionButton
             onClick={onClose}
-            className="px-4 py-2.5 rounded-lg text-sm font-medium transition-all hover:bg-[var(--th-bg-surface-hover)]"
-            style={{ border: "1px solid var(--th-input-border)", color: "var(--th-text-secondary)" }}
+            tone="neutral"
+            className="text-sm"
           >
             {tr("취소", "Cancel")}
-          </button>
+          </SurfaceActionButton>
         </div>
       </div>
     </div>

@@ -419,7 +419,7 @@ export function runOfficeTickerStep(ctx: OfficeTickerContext): void {
       bubbleBg.roundRect(-bubbleWidth / 2, -bubbleHeight / 2, bubbleWidth, bubbleHeight, 4).fill({ color: 0x1e293b, alpha: 0.92 });
       bubbleBg.roundRect(-bubbleWidth / 2, -bubbleHeight / 2, bubbleWidth, bubbleHeight, 4).stroke({
         width: 0.8,
-        color: 0x6366f1,
+        color: 0x10b981,
         alpha: 0.5,
       });
       bubble.addChild(bubbleBg);

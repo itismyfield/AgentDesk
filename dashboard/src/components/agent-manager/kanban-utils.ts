@@ -20,11 +20,11 @@ export const COLUMN_DEFS: Array<{
 }> = [
   { status: "backlog", labelKo: "백로그", labelEn: "Backlog", accent: "#64748b" },
   { status: "ready", labelKo: "준비됨", labelEn: "Ready", accent: "#0ea5e9" },
-  { status: "requested", labelKo: "요청됨", labelEn: "Requested", accent: "#8b5cf6" },
+  { status: "requested", labelKo: "요청됨", labelEn: "Requested", accent: "#10b981" },
   { status: "in_progress", labelKo: "진행 중", labelEn: "In Progress", accent: "#f59e0b" },
   { status: "review", labelKo: "검토", labelEn: "Review", accent: "#14b8a6" },
-  { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: "#e879f9" },
-  { status: "qa_in_progress", labelKo: "QA 진행", labelEn: "QA In Progress", accent: "#c084fc" },
+  { status: "qa_pending", labelKo: "QA 대기", labelEn: "QA Pending", accent: "#06b6d4" },
+  { status: "qa_in_progress", labelKo: "QA 진행", labelEn: "QA In Progress", accent: "#3b82f6" },
   { status: "qa_failed", labelKo: "QA 실패", labelEn: "QA Failed", accent: "#fb7185" },
   { status: "done", labelKo: "완료", labelEn: "Done", accent: "#22c55e" },
 ];
@@ -74,7 +74,7 @@ export const STATUS_TRANSITIONS: Record<KanbanCardStatus, KanbanCardStatus[]> = 
 
 export const TRANSITION_STYLE: Record<string, { bg: string; text: string }> = {
   ready: { bg: "rgba(14,165,233,0.18)", text: "#38bdf8" },
-  requested: { bg: "rgba(139,92,246,0.18)", text: "#a78bfa" },
+  requested: { bg: "rgba(16,185,129,0.18)", text: "#10b981" },
   in_progress: { bg: "rgba(245,158,11,0.18)", text: "#fbbf24" },
   review: { bg: "rgba(20,184,166,0.18)", text: "#2dd4bf" },
   done: { bg: "rgba(34,197,94,0.22)", text: "#4ade80" },
@@ -82,10 +82,10 @@ export const TRANSITION_STYLE: Record<string, { bg: string; text: string }> = {
   backlog: { bg: "rgba(100,116,139,0.18)", text: "#94a3b8" },
   cancelled: { bg: "rgba(107,114,128,0.18)", text: "#9ca3af" },
   failed: { bg: "rgba(249,115,22,0.18)", text: "#fb923c" },
-  qa_pending: { bg: "rgba(232,121,249,0.18)", text: "#e879f9" },
-  qa_in_progress: { bg: "rgba(192,132,252,0.18)", text: "#c084fc" },
+  qa_pending: { bg: "rgba(6,182,212,0.18)", text: "#06b6d4" },
+  qa_in_progress: { bg: "rgba(59,130,246,0.18)", text: "#3b82f6" },
   qa_failed: { bg: "rgba(251,113,133,0.18)", text: "#fb7185" },
-  pending_decision: { bg: "rgba(244,114,182,0.18)", text: "#f472b6" },
+  pending_decision: { bg: "rgba(249,115,22,0.18)", text: "#f97316" },
 };
 
 export const REQUEST_TIMEOUT_MS = 45 * 60 * 1000;

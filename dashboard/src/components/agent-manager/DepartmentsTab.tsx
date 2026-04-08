@@ -1,6 +1,7 @@
 import type { DragEvent } from "react";
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
+import { SurfaceActionButton, SurfaceCard, SurfaceEmptyState, SurfaceNotice } from "../common/SurfacePrimitives";
 import type { Translator } from "./types";
 
 interface DepartmentsTabProps {
@@ -47,28 +48,24 @@ export default function DepartmentsTab({
   return (
     <div className="space-y-4">
       {deptOrderDirty && (
-        <div
-          className="flex items-center gap-3 px-4 py-3 rounded-xl"
-          style={{ background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.3)" }}
+        <SurfaceNotice
+          tone="info"
+          className="flex flex-col gap-3 sm:flex-row sm:items-center"
+          action={(
+            <div className="flex flex-wrap items-center gap-2">
+              <SurfaceActionButton onClick={onSaveOrder} disabled={reorderSaving}>
+                {reorderSaving ? tr("저장 중...", "Saving...") : tr("순번 저장", "Save Order")}
+              </SurfaceActionButton>
+              <SurfaceActionButton tone="neutral" onClick={onCancelOrder}>
+                {tr("취소", "Cancel")}
+              </SurfaceActionButton>
+            </div>
+          )}
         >
           <span className="text-sm" style={{ color: "var(--th-text-primary)" }}>
             {tr("순번이 변경되었습니다.", "Order has been changed.")}
           </span>
-          <button
-            onClick={onSaveOrder}
-            disabled={reorderSaving}
-            className="ml-auto px-4 py-1.5 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50 transition-all"
-          >
-            {reorderSaving ? tr("저장 중...", "Saving...") : tr("순번 저장", "Save Order")}
-          </button>
-          <button
-            onClick={onCancelOrder}
-            className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all hover:bg-surface-subtle"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("취소", "Cancel")}
-          </button>
-        </div>
+        </SurfaceNotice>
       )}
 
       <div className="space-y-2">
@@ -79,15 +76,17 @@ export default function DepartmentsTab({
           const showDropBefore = isDragTarget && dragOverPosition === "before";
           const showDropAfter = isDragTarget && dragOverPosition === "after";
           return (
-            <div
+            <SurfaceCard
               key={dept.id}
-              draggable
+              className={`group relative flex items-center gap-3 px-4 py-3 transition-all hover:shadow-md ${isDragging ? "opacity-60" : ""}`}
+              style={{ cursor: "grab" }}
               onDragStart={(e) => onDragStart(dept.id, e)}
               onDragOver={(e) => onDragOver(dept.id, e)}
               onDrop={(e) => onDrop(dept.id, e)}
               onDragEnd={onDragEnd}
-              className={`relative flex items-center gap-3 px-4 py-3 rounded-xl transition-all hover:shadow-md group ${isDragging ? "opacity-60" : ""}`}
-              style={{ background: "var(--th-card-bg)", border: "1px solid var(--th-card-border)" }}
+              // SurfaceCard renders a div, so drag attributes stay here.
+              // eslint-disable-next-line react/no-unknown-property
+              draggable
             >
               {showDropBefore && (
                 <div className="pointer-events-none absolute left-2 right-2 top-0 h-0.5 rounded bg-blue-400" />
@@ -97,22 +96,24 @@ export default function DepartmentsTab({
               )}
 
               <div className="flex flex-col gap-0.5">
-                <button
+                <SurfaceActionButton
                   onClick={() => onMoveDept(index, -1)}
                   disabled={index === 0}
-                  className="w-6 h-5 flex items-center justify-center rounded text-xs transition-all hover:bg-surface-hover disabled:opacity-20"
-                  style={{ color: "var(--th-text-muted)" }}
+                  tone="neutral"
+                  compact
+                  className="h-5 w-6 px-0 py-0"
                 >
                   ▲
-                </button>
-                <button
+                </SurfaceActionButton>
+                <SurfaceActionButton
                   onClick={() => onMoveDept(index, 1)}
                   disabled={index === deptOrder.length - 1}
-                  className="w-6 h-5 flex items-center justify-center rounded text-xs transition-all hover:bg-surface-hover disabled:opacity-20"
-                  style={{ color: "var(--th-text-muted)" }}
+                  tone="neutral"
+                  compact
+                  className="h-5 w-6 px-0 py-0"
                 >
                   ▼
-                </button>
+                </SurfaceActionButton>
               </div>
 
               <div
@@ -148,23 +149,23 @@ export default function DepartmentsTab({
                 {dept.id}
               </code>
 
-              <button
+              <SurfaceActionButton
                 onClick={() => onEditDept(dept)}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all opacity-0 group-hover:opacity-100 hover:bg-surface-hover"
-                style={{ color: "var(--th-text-muted)" }}
+                tone="neutral"
+                className="opacity-0 group-hover:opacity-100"
               >
                 {tr("편집", "Edit")}
-              </button>
-            </div>
+              </SurfaceActionButton>
+            </SurfaceCard>
           );
         })}
       </div>
 
       {deptOrder.length === 0 && (
-        <div className="text-center py-16" style={{ color: "var(--th-text-muted)" }}>
+        <SurfaceEmptyState className="py-16 text-center">
           <div className="text-3xl mb-2">🏢</div>
           {tr("등록된 부서가 없습니다.", "No departments found.")}
-        </div>
+        </SurfaceEmptyState>
       )}
     </div>
   );

@@ -24,6 +24,11 @@ import {
   parseIssueSections,
   priorityLabel,
 } from "./kanban-utils";
+import {
+  SurfaceActionButton,
+  SurfaceEmptyState,
+  SurfaceNotice,
+} from "../common/SurfacePrimitives";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -155,9 +160,12 @@ export default function KanbanColumn({
       {/* Card list */}
       <div className="space-y-2 min-h-12">
         {column.status === "backlog" && loadingIssues && (
-          <div className="rounded-xl border border-dashed px-3 py-4 text-xs text-center" style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-muted)" }}>
+          <SurfaceEmptyState
+            className="rounded-2xl px-3 py-4 text-center text-xs"
+            style={{ borderColor: "rgba(148,163,184,0.24)" }}
+          >
             {tr("GitHub backlog 로딩 중...", "Loading GitHub backlog...")}
-          </div>
+          </SurfaceEmptyState>
         )}
 
         {/* Backlog issues */}
@@ -184,11 +192,14 @@ export default function KanbanColumn({
 
         {/* Empty state */}
         {backlogCount === 0 && !initialLoading && !(column.status === "backlog" && loadingIssues) && (
-          <div className="rounded-xl border border-dashed px-3 py-4 text-xs text-center" style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-muted)" }}>
+          <SurfaceEmptyState
+            className="rounded-2xl px-3 py-4 text-center text-xs"
+            style={{ borderColor: "rgba(148,163,184,0.24)" }}
+          >
             {column.status === "backlog"
               ? tr("repo backlog가 비어 있습니다.", "This repo backlog is empty.")
               : tr("여기에 드롭", "Drop here")}
-          </div>
+          </SurfaceEmptyState>
         )}
 
         {/* Kanban cards */}
@@ -265,7 +276,10 @@ function BacklogIssueCard({
   return (
     <article
       className="rounded-2xl border p-3 cursor-pointer transition-colors hover:border-[rgba(148,163,184,0.4)]"
-      style={{ borderColor: "rgba(148,163,184,0.2)", backgroundColor: "var(--th-card-bg)" }}
+      style={{
+        borderColor: "rgba(148,163,184,0.2)",
+        background: "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+      }}
       onClick={() => onBacklogIssueClick(issue)}
       draggable
       onDragStart={(event) => {
@@ -306,15 +320,15 @@ function BacklogIssueCard({
       </div>
       <div className="mt-3 flex flex-col items-start gap-2 text-xs sm:flex-row sm:items-center sm:justify-between" style={{ color: "var(--th-text-muted)" }}>
         <span>{tr("업데이트", "Updated")}: {formatIso(issue.updatedAt, locale)}</span>
-        <div className="flex gap-2">
-          <button
-            onClick={(event) => { event.stopPropagation(); onCloseIssue(issue); }}
+        <div className="flex gap-2" onClick={(event) => event.stopPropagation()}>
+          <SurfaceActionButton
+            onClick={() => onCloseIssue(issue)}
             disabled={closingIssueNumber === issue.number}
-            className="rounded-lg px-3 py-1.5 border disabled:opacity-50"
-            style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-muted)" }}
+            tone="neutral"
+            compact
           >
             {closingIssueNumber === issue.number ? tr("닫는 중", "Closing") : tr("닫기", "Close")}
-          </button>
+          </SurfaceActionButton>
           <button
             onClick={(event) => {
               event.stopPropagation();
@@ -429,9 +443,11 @@ function KanbanCardArticle({
       onClick={() => onCardClick(card.id)}
       className="rounded-2xl border p-3 cursor-pointer transition-transform hover:-translate-y-0.5"
       style={{
-        borderColor: cardBorderColor,
-        backgroundColor: cardBackgroundColor,
-        borderLeft: isReviewCard(card) ? "3px solid rgba(139,92,246,0.6)" : undefined,
+        borderColor: dragOverCardId === card.id ? column.accent : "rgba(148,163,184,0.2)",
+        background: isReviewCard(card)
+          ? "linear-gradient(180deg, color-mix(in srgb, rgba(16,185,129,0.16) 78%, var(--th-card-bg) 22%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)"
+          : "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+        borderLeft: isReviewCard(card) ? "3px solid rgba(16,185,129,0.6)" : undefined,
         opacity: draggingCardId === card.id ? 0.45 : 1,
         boxShadow: dwellBadge?.tone === "stale"
           ? "0 0 0 1px rgba(239,68,68,0.12)"
@@ -444,7 +460,7 @@ function KanbanCardArticle({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
             {isReviewCard(card) && (
-              <span className="px-1.5 py-0.5 rounded-full text-xs font-semibold" style={{ backgroundColor: "rgba(139,92,246,0.25)", color: "#a78bfa" }}>
+              <span className="px-1.5 py-0.5 rounded-full text-xs font-semibold" style={{ backgroundColor: "rgba(16,185,129,0.18)", color: "#10b981" }}>
                 {card.latest_dispatch_type === "review-decision" ? "Decision" : "Review"}
               </span>
             )}
@@ -599,15 +615,21 @@ function KanbanCardArticle({
         <div className="mt-2 rounded-md px-2.5 py-2 text-xs" style={{ backgroundColor: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)", color: "#fca5a5" }}>
           <span className="font-semibold">{tr("수동 개입 사유", "Manual intervention reason")}:</span>{" "}
           {card.blocked_reason}
-        </div>
+        </SurfaceNotice>
       )}
 
       {card.status === "review" && card.review_status && (
-        <div className="mt-2 rounded-md px-2.5 py-2 text-xs" style={{
-          backgroundColor: (card.review_status === "dilemma_pending" || card.review_status === "suggestion_pending") ? "rgba(234,179,8,0.12)" : card.review_status === "improve_rework" ? "rgba(249,115,22,0.12)" : "rgba(20,184,166,0.12)",
-          border: `1px solid ${(card.review_status === "dilemma_pending" || card.review_status === "suggestion_pending") ? "rgba(234,179,8,0.3)" : card.review_status === "improve_rework" ? "rgba(249,115,22,0.3)" : "rgba(20,184,166,0.3)"}`,
-          color: (card.review_status === "dilemma_pending" || card.review_status === "suggestion_pending") ? "#fde047" : card.review_status === "improve_rework" ? "#fdba74" : "#5eead4",
-        }}>
+        <SurfaceNotice
+          tone={
+            card.review_status === "dilemma_pending" || card.review_status === "suggestion_pending"
+              ? "warn"
+              : card.review_status === "improve_rework"
+                ? "danger"
+                : "success"
+          }
+          compact
+          className="mt-2 text-xs"
+        >
           {card.review_status === "reviewing" && (() => {
             const reviewDispatch = latestDispatch?.parent_dispatch_id
               ? dispatches.find((d) => d.parent_dispatch_id === latestDispatch?.id && d.dispatch_type === "review")
@@ -624,7 +646,7 @@ function KanbanCardArticle({
           {card.review_status === "suggestion_pending" && tr("리뷰 제안 결정 대기", "Review suggestions pending")}
           {card.review_status === "dilemma_pending" && tr("판단 대기 (딜레마)", "Dilemma pending")}
           {card.review_status === "decided" && tr("결정됨", "Decided")}
-        </div>
+        </SurfaceNotice>
       )}
 
       <div className="mt-3 space-y-1.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
@@ -649,27 +671,26 @@ function KanbanCardArticle({
 
       {/* Quick transition buttons */}
       {(STATUS_TRANSITIONS[card.status] ?? []).length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
+        <div className="mt-2 flex flex-wrap gap-1.5" onClick={(event) => event.stopPropagation()}>
           {(STATUS_TRANSITIONS[card.status] ?? []).map((target) => {
             const style = TRANSITION_STYLE[target] ?? TRANSITION_STYLE.backlog;
             return (
-              <button
+              <SurfaceActionButton
                 key={target}
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
+                onClick={() => {
                   onSetActionError(null);
                   onUpdateCardStatus(card.id, target);
                 }}
-                className="rounded-lg px-2.5 py-1 text-xs font-medium border"
+                tone="neutral"
+                compact
                 style={{
-                  backgroundColor: style.bg,
+                  background: style.bg,
                   borderColor: style.text,
                   color: style.text,
                 }}
               >
                 → {labelForStatus(target, tr)}
-              </button>
+              </SurfaceActionButton>
             );
           })}
         </div>

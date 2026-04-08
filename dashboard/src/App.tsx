@@ -573,7 +573,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
             key={item.id}
             onClick={() => handleNavigate(item.id)}
             className={`relative flex h-full flex-1 flex-col items-center justify-center text-[10px] ${
-              view === item.id ? "text-indigo-400" : "text-gray-500"
+              view === item.id ? "text-emerald-300" : "text-gray-500"
             }`}
           >
             {item.icon}
@@ -693,7 +693,7 @@ function NavBtn({
       onClick={onClick}
       title={label}
       className={`relative flex w-14 flex-col items-center justify-center gap-0.5 rounded-lg py-1.5 transition-colors ${
-        active ? "bg-indigo-600 text-white" : "text-gray-500 hover:bg-gray-800 hover:text-gray-300"
+        active ? "bg-emerald-600 text-white" : "text-gray-500 hover:bg-gray-800 hover:text-gray-300"
       }`}
     >
       {icon}

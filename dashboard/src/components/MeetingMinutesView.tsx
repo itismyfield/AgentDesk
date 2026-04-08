@@ -36,6 +36,14 @@ import {
   getDisplayMeetingReferenceHashes,
 } from "./meetingReferenceHash";
 import MarkdownContent from "./common/MarkdownContent";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceEmptyState,
+  SurfaceMetricPill,
+  SurfaceNotice,
+  SurfaceSection,
+} from "./common/SurfacePrimitives";
 
 const STORAGE_KEY = "pcd_meeting_channel_id";
 const FIXED_PARTICIPANTS_STORAGE_KEY = "pcd_meeting_fixed_participants";
@@ -845,6 +853,13 @@ export default function MeetingMinutesView({
     });
   };
 
+  const activeMeetingCount = meetings.filter((meeting) => meeting.status === "in_progress").length;
+  const completedMeetingCount = meetings.filter((meeting) => meeting.status === "completed").length;
+  const unresolvedIssueCount = meetings.reduce((sum, meeting) => {
+    const issueProgress = getIssueProgress(meeting);
+    return sum + issueProgress.pending + issueProgress.failed;
+  }, 0);
+
   return (
     <div
       className={
@@ -897,429 +912,133 @@ export default function MeetingMinutesView({
           onClick={() => setShowStartForm((v) => !v)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors"
         >
-          <Plus size={14} />
-          {t({ ko: "새 회의", en: "New Meeting" })}
-        </button>
-      </div>
+          <div className="text-sm leading-6">
+            {unresolvedIssueCount > 0
+              ? t({
+                  ko: `생성 대기 또는 실패한 후속 일감 ${unresolvedIssueCount}건을 이 화면에서 바로 정리할 수 있습니다.`,
+                  en: `You can resolve ${unresolvedIssueCount} pending or failed follow-up issues directly from this screen.`,
+                })
+              : t({
+                  ko: "현재 미해결 후속 일감이 없습니다. 새 라운드 테이블을 시작하거나 최근 회의 흐름을 검토하세요.",
+                  en: "There are no unresolved follow-up issues. Start a new round table or review recent meeting flow.",
+                })}
+          </div>
+        </SurfaceNotice>
+      </SurfaceSection>
 
       {/* Start meeting form */}
       {showStartForm && (
-        <div
-          className="rounded-2xl border p-4 sm:p-5 mb-6 space-y-3"
-          style={{
-            background: "var(--th-surface)",
-            borderColor: "var(--th-border)",
-          }}
+        <SurfaceSection
+          eyebrow={t({ ko: "Compose", en: "Compose" })}
+          title={t({ ko: "회의 시작", en: "Start Meeting" })}
+          description={t({
+            ko: "회의 채널, 안건, 진행 모델을 정하면 반대 모델 교차검증이 자동으로 따라옵니다.",
+            en: "Set the channel, agenda, and primary model. Counter-model cross-review follows automatically.",
+          })}
+          actions={(
+            <SurfaceActionButton tone="neutral" onClick={() => setShowStartForm(false)}>
+              {t({ ko: "취소", en: "Cancel" })}
+            </SurfaceActionButton>
+          )}
         >
-          <h3
-            className="text-sm font-semibold"
-            style={{ color: "var(--th-text)" }}
-          >
-            {t({ ko: "회의 시작", en: "Start Meeting" })}
-          </h3>
+          <div className="mt-4 space-y-3">
 
-          {/* Channel selector */}
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label
-              className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {t({ ko: "채널", en: "Channel" })}
-            </label>
-            <div className="flex-1 space-y-2">
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={channelQuery}
-                  onChange={(e) => setChannelQuery(e.target.value)}
-                  placeholder={t({
-                    ko: "등록된 회의 채널 검색",
-                    en: "Search registered meeting channel",
-                  })}
-                  className="flex-1 px-3 py-1.5 rounded-lg text-sm"
-                  style={inputStyle}
-                  autoFocus
-                />
-                <button
-                  onClick={() =>
-                    void getRoundTableMeetingChannels()
-                      .then((channels) => {
-                        setMeetingChannels(channels);
-                        setChannelError(null);
-                      })
-                      .catch((error) => {
-                        setChannelError(
-                          error instanceof Error
-                            ? error.message
-                            : t({
-                                ko: "회의 채널 목록을 불러오지 못했습니다",
-                                en: "Failed to load meeting channels",
-                              }),
-                        );
-                      })
-                  }
-                  className="p-2 rounded-lg border transition-colors hover:bg-surface-subtle"
-                  style={{
-                    borderColor: "var(--th-border)",
-                    color: "var(--th-text-muted)",
-                  }}
-                  title={t({
-                    ko: "채널 목록 새로고침",
-                    en: "Refresh channel list",
-                  })}
-                >
-                  <Settings2 size={14} />
-                </button>
-              </div>
-              <div
-                className="max-h-44 overflow-y-auto rounded-xl border p-2 space-y-1"
-                style={{
-                  background: "var(--th-bg-surface)",
-                  borderColor: "var(--th-border)",
-                }}
-              >
-                {loadingChannels ? (
-                  <div
-                    className="px-2 py-2 text-xs"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    {t({
-                      ko: "등록 채널 불러오는 중...",
-                      en: "Loading registered channels...",
-                    })}
-                  </div>
-                ) : filteredChannels.length === 0 ? (
-                  <div
-                    className="px-2 py-2 text-xs"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    {t({
-                      ko: "조건에 맞는 등록 채널이 없습니다",
-                      en: "No registered channel matches the filter",
-                    })}
-                  </div>
-                ) : (
-                  filteredChannels.map((channel) => {
-                    const isSelected = channel.channel_id === channelId;
-                    return (
-                      <button
-                        key={channel.channel_id}
-                        onClick={() => setChannelId(channel.channel_id)}
-                        className="w-full rounded-lg border px-3 py-2 text-left transition-colors"
-                        style={{
-                          background: isSelected
-                            ? "rgba(245,158,11,0.12)"
-                            : "transparent",
-                          borderColor: isSelected
-                            ? "rgba(245,158,11,0.35)"
-                            : "var(--th-border)",
-                        }}
-                      >
-                        <div
-                          className="text-sm font-medium"
-                          style={{ color: "var(--th-text)" }}
-                        >
-                          {channel.channel_name}
-                        </div>
-                        <div
-                          className="mt-1 flex flex-wrap items-center gap-2 text-xs"
-                          style={{ color: "var(--th-text-muted)" }}
-                        >
-                          <span className="font-mono">
-                            {channel.channel_id}
-                          </span>
-                          <span
-                            className="rounded-full px-2 py-0.5"
-                            style={ownerProviderBadgeStyle(
-                              channel.owner_provider,
-                            )}
-                          >
-                            {t({
-                              ko: `담당 ${PROVIDER_LABELS[channel.owner_provider] ?? channel.owner_provider}`,
-                              en: `Owner ${PROVIDER_LABELS[channel.owner_provider] ?? channel.owner_provider}`,
-                            })}
-                          </span>
-                        </div>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-              {selectedChannel && (
-                <div
-                  className="text-xs"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {t({
-                    ko: `선택된 채널: ${selectedChannel.channel_name} (${selectedChannel.channel_id}) · 담당 ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
-                    en: `Selected channel: ${selectedChannel.channel_name} (${selectedChannel.channel_id}) · owner ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
-                  })}
-                </div>
-              )}
-              {channelError && (
-                <div
-                  className="text-xs px-3 py-1.5 rounded-lg"
-                  style={{
-                    background: "rgba(239,68,68,0.1)",
-                    color: "#f87171",
-                  }}
-                >
-                  {channelError}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Agenda input */}
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label
-              className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {t({ ko: "안건", en: "Agenda" })}
-            </label>
-            <textarea
-              value={agenda}
-              onChange={(e) => setAgenda(e.target.value)}
-              placeholder={t({
-                ko: "회의 안건을 입력하세요",
-                en: "Enter meeting agenda",
-              })}
-              rows={3}
-              className="flex-1 min-h-[84px] resize-y rounded-lg px-3 py-2 text-sm leading-5"
-              style={inputStyle}
-            />
-          </div>
-
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-            <label
-              className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {t({ ko: "진행 프로바이더", en: "Primary Provider" })}
-            </label>
-            <select
-              value={primaryProvider}
-              onChange={(e) => {
-                setPrimaryProvider(e.target.value);
-                setReviewerProvider("");
-              }}
-              className="px-3 py-1.5 rounded-lg text-xs"
-              style={inputStyle}
-            >
-              {MEETING_PROVIDERS.map((p) => (
-                <option key={p} value={p}>
-                  {PROVIDER_LABELS[p] ?? p.toUpperCase()}
-                </option>
-              ))}
-            </select>
-            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {selectedChannel
-                ? t({
-                    ko: `채널 담당 프로바이더는 ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider} 입니다`,
-                    en: `Channel owner provider is ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
-                  })
-                : t({
-                    ko: "등록된 채널을 먼저 선택하세요",
-                    en: "Select a registered channel first",
-                  })}
-            </span>
-          </div>
-
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-            <label
-              className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {t({ ko: "리뷰 프로바이더", en: "Reviewer Provider" })}
-            </label>
-            <select
-              value={reviewerProvider}
-              onChange={(e) => setReviewerProvider(e.target.value)}
-              className="px-3 py-1.5 rounded-lg text-xs"
-              style={inputStyle}
-              disabled={reviewerOptions.length === 0}
-            >
-              {reviewerOptions.length === 0 ? (
-                <option value="">
-                  {t({
-                    ko: "선택 가능한 리뷰 프로바이더 없음",
-                    en: "No reviewer provider available",
-                  })}
-                </option>
-              ) : (
-                reviewerOptions.map((provider) => (
-                  <option key={provider} value={provider}>
-                    {PROVIDER_LABELS[provider] ?? provider.toUpperCase()}
-                  </option>
-                ))
-              )}
-            </select>
-            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {selectedChannel
-                ? t({
-                    ko: "리뷰 프로바이더는 채널 담당 프로바이더, 진행 프로바이더와 달라야 합니다",
-                    en: "Reviewer provider must differ from the channel owner provider and primary provider",
-                  })
-                : t({
-                    ko: "채널 선택 후 리뷰 프로바이더를 정하세요",
-                    en: "Pick reviewer provider after selecting a channel",
-                  })}
-            </span>
-          </div>
-
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label
-              className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {t({ ko: "고정 전문 에이전트", en: "Fixed Expert Agents" })}
-            </label>
-            <div className="flex-1 min-w-0 space-y-2">
-              {!selectedChannel ? (
-                <div
-                  className="text-xs"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {t({
-                    ko: "채널 선택 후 전문 에이전트를 고정할 수 있습니다",
-                    en: "Select a channel to pin expert agents",
-                  })}
-                </div>
-              ) : availableExperts.length === 0 ? (
-                <div
-                  className="text-xs"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {t({
-                    ko: "설정된 전문 에이전트 후보가 없습니다",
-                    en: "No configured expert candidates",
-                  })}
-                </div>
-              ) : (
-                <>
+            {/* Channel ID row */}
+            <SurfaceCard className="rounded-2xl p-4" style={{ background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}>
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24" style={{ color: "var(--th-text-muted)" }}>
+                  {t({ ko: "채널 ID", en: "Channel ID" })}
+                </label>
+                {showChannelEdit || !channelId ? (
                   <input
                     type="text"
-                    value={expertQuery}
-                    onChange={(e) => setExpertQuery(e.target.value)}
-                    placeholder={t({
-                      ko: "전문 에이전트 검색 후 여러 명 선택",
-                      en: "Search specialist agents and pick multiple",
-                    })}
-                    className="w-full rounded-lg px-3 py-1.5 text-sm"
+                    value={channelId}
+                    onChange={(e) => setChannelId(e.target.value)}
+                    placeholder={t({ ko: "Discord 채널 ID", en: "Discord Channel ID" })}
+                    className="flex-1 px-3 py-1.5 rounded-lg text-xs font-mono"
                     style={inputStyle}
+                    onBlur={() => { if (channelId) setShowChannelEdit(false); }}
+                    autoFocus
                   />
-                  {filteredExperts.length === 0 ? (
-                    <div
-                      className="text-xs"
-                      style={{ color: "var(--th-text-muted)" }}
+                ) : (
+                  <div className="flex items-center gap-2 flex-1">
+                    <span className="text-xs font-mono" style={{ color: "var(--th-text-muted)" }}>
+                      {channelId}
+                    </span>
+                    <SurfaceActionButton
+                      onClick={() => setShowChannelEdit(true)}
+                      tone="neutral"
+                      compact
+                      title={t({ ko: "채널 ID 변경", en: "Change Channel ID" })}
                     >
-                      {t({
-                        ko: "조건에 맞는 전문 에이전트가 없습니다",
-                        en: "No specialist agent matches the filter",
-                      })}
-                    </div>
-                  ) : (
-                    <div
-                      className="max-h-36 overflow-y-auto rounded-xl border p-2 sm:max-h-44"
-                      style={{
-                        background: "var(--th-bg-surface)",
-                        borderColor: "var(--th-border)",
-                      }}
-                    >
-                      <div className="flex min-w-0 flex-wrap gap-2">
-                        {filteredExperts.map((expert) => {
-                          const selected = fixedParticipants.includes(
-                            expert.role_id,
-                          );
-                          return (
-                            <button
-                              key={expert.role_id}
-                              type="button"
-                              onClick={() => toggleFixedParticipant(expert)}
-                              className="max-w-full rounded-full border px-3 py-1 text-left text-xs transition-colors"
-                              style={{
-                                background: selected
-                                  ? "rgba(245,158,11,0.16)"
-                                  : "rgba(148,163,184,0.08)",
-                                borderColor: selected
-                                  ? "rgba(245,158,11,0.45)"
-                                  : "var(--th-border)",
-                                color: selected
-                                  ? "#fbbf24"
-                                  : "var(--th-text-secondary)",
-                              }}
-                              title={`${expert.display_name} (${expert.role_id})`}
-                            >
-                              <span className="break-all font-semibold [overflow-wrap:anywhere]">
-                                {expert.display_name}
-                              </span>
-                              <span className="ml-1 font-mono opacity-75">
-                                #{expert.role_id}
-                              </span>
-                              {expert.provider_hint && (
-                                <span className="ml-1 opacity-75">
-                                  {expert.provider_hint}
-                                </span>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-              {fixedParticipants.length > 0 && (
-                <div
-                  className="mt-1 text-xs break-all [overflow-wrap:anywhere]"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {t({
-                    ko: `고정 전문 에이전트: ${fixedParticipants.join(", ")}`,
-                    en: `Pinned expert agents: ${fixedParticipants.join(", ")}`,
-                  })}
+                      <Settings2 size={12} style={{ color: "var(--th-text-muted)" }} />
+                    </SurfaceActionButton>
+                  </div>
+                )}
+              </div>
+            </SurfaceCard>
+
+            {/* Agenda input */}
+            <SurfaceCard className="rounded-2xl p-4" style={{ background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}>
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-3">
+                <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
+                  {t({ ko: "안건", en: "Agenda" })}
+                </label>
+                <input
+                  type="text"
+                  value={agenda}
+                  onChange={(e) => setAgenda(e.target.value)}
+                  placeholder={t({ ko: "회의 안건을 입력하세요", en: "Enter meeting agenda" })}
+                  className="flex-1 px-3 py-1.5 rounded-lg text-sm"
+                  style={inputStyle}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) handleStartMeeting(); }}
+                />
+              </div>
+            </SurfaceCard>
+
+            <SurfaceCard className="rounded-2xl p-4" style={{ background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)", borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)" }}>
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-3">
+                  <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24" style={{ color: "var(--th-text-muted)" }}>
+                    {t({ ko: "진행 모델", en: "Model" })}
+                  </label>
+                  <select
+                    value={primaryProvider}
+                    onChange={(e) => setPrimaryProvider(e.target.value)}
+                    className="px-3 py-1.5 rounded-lg text-xs"
+                    style={inputStyle}
+                  >
+                    {MEETING_PROVIDERS.map((p) => (
+                      <option key={p} value={p}>{PROVIDER_LABELS[p] ?? p.toUpperCase()}</option>
+                    ))}
+                  </select>
                 </div>
-              )}
+                <SurfaceNotice tone="info" compact>
+                  {t({ ko: "반대 모델이 자동 교차검증", en: "Counter model auto cross-review" })}
+                </SurfaceNotice>
+              </div>
+            </SurfaceCard>
+
+            {startError && (
+              <SurfaceNotice tone="danger" compact>
+                {startError}
+              </SurfaceNotice>
+            )}
+
+            <div className="flex items-center gap-2 justify-end">
+              <SurfaceActionButton tone="neutral" onClick={() => setShowStartForm(false)}>
+                {t({ ko: "취소", en: "Cancel" })}
+              </SurfaceActionButton>
+              <SurfaceActionButton
+                tone="accent"
+                onClick={handleStartMeeting}
+                disabled={starting || !agenda.trim() || !channelId.trim()}
+              >
+                {starting ? t({ ko: "시작 중...", en: "Starting..." }) : t({ ko: "회의 시작", en: "Start Meeting" })}
+              </SurfaceActionButton>
             </div>
           </div>
-
-          {startError && (
-            <div
-              className="text-xs px-3 py-1.5 rounded-lg"
-              style={{ background: "rgba(239,68,68,0.1)", color: "#f87171" }}
-            >
-              {startError}
-            </div>
-          )}
-
-          <div className="flex items-center gap-2 justify-end">
-            <button
-              onClick={() => setShowStartForm(false)}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-surface-subtle"
-              style={{
-                borderColor: "var(--th-border)",
-                color: "var(--th-text-muted)",
-              }}
-            >
-              {t({ ko: "취소", en: "Cancel" })}
-            </button>
-            <button
-              onClick={handleStartMeeting}
-              disabled={
-                starting ||
-                !agenda.trim() ||
-                !channelId.trim() ||
-                !reviewerProvider.trim()
-              }
-              className="px-4 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors disabled:opacity-40"
-            >
-              {starting
-                ? t({ ko: "시작 중...", en: "Starting..." })
-                : t({ ko: "회의 시작", en: "Start Meeting" })}
-            </button>
-          </div>
-        </div>
+        </SurfaceSection>
       )}
 
       {/* Empty state */}
@@ -1340,7 +1059,17 @@ export default function MeetingMinutesView({
       )}
 
       {/* Meeting list */}
-      <div className="space-y-4">
+      {meetings.length > 0 && (
+        <SurfaceSection
+          eyebrow={t({ ko: "Archive", en: "Archive" })}
+          title={t({ ko: "회의 타임라인", en: "Meeting Timeline" })}
+          description={t({
+            ko: "각 회의의 진행 상태, 참여자, 후속 일감 생성 흐름을 한 번에 확인합니다.",
+            en: "Review meeting status, participants, and follow-up issue generation flow at a glance.",
+          })}
+          badge={t({ ko: `${meetings.length}개 회의`, en: `${meetings.length} meetings` })}
+        >
+          <div className="mt-4 space-y-4">
         {meetings.map((m) => {
           const hasProposedIssues =
             m.proposed_issues && m.proposed_issues.length > 0;
@@ -1359,12 +1088,12 @@ export default function MeetingMinutesView({
           const selectionReason = normalizeSelectionReason(m.selection_reason);
 
           return (
-            <div
+            <SurfaceCard
               key={m.id}
-              className="min-w-0 overflow-hidden rounded-2xl border p-4 sm:p-5 space-y-3"
+              className="space-y-4 rounded-3xl p-4 sm:p-5"
               style={{
-                background: "var(--th-surface)",
-                borderColor: "var(--th-border)",
+                background: "color-mix(in srgb, var(--th-card-bg) 94%, transparent)",
+                borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
               }}
             >
               {/* Top row */}
@@ -1465,10 +1194,10 @@ export default function MeetingMinutesView({
                 {m.participant_names.map((name) => (
                   <span
                     key={name}
-                    className="max-w-full break-all rounded-full px-2 py-0.5 text-xs font-medium"
+                    className="text-xs px-2 py-0.5 rounded-full font-medium"
                     style={{
-                      background: "rgba(99,102,241,0.15)",
-                      color: "#818cf8",
+                      background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
+                      color: "var(--th-text-primary)",
                     }}
                   >
                     {name}
@@ -1529,14 +1258,22 @@ export default function MeetingMinutesView({
                         {t({ ko: "PMD 요약", en: "PMD Summary" })}
                       </div>
                     </div>
-                    <MarkdownContent content={m.summary} />
+                    <div className="text-sm" style={{ color: "var(--th-text)" }}>
+                      <MarkdownContent content={m.summary} />
+                    </div>
                   </div>
-                </div>
+                </SurfaceNotice>
               )}
 
               {/* Proposed issues preview */}
               {hasProposedIssues && !issueProgress.allCreated && (
-                <div className="min-w-0 overflow-hidden">
+                <SurfaceCard
+                  className="space-y-2 rounded-2xl p-3"
+                  style={{
+                    background: "color-mix(in srgb, var(--th-bg-surface) 88%, transparent)",
+                    borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+                  }}
+                >
                   <button
                     onClick={() => toggleIssuePreview(m.id)}
                     className="flex min-w-0 items-center gap-1.5 break-words text-left text-xs font-medium transition-colors hover:opacity-80 [overflow-wrap:anywhere]"
@@ -1553,7 +1290,7 @@ export default function MeetingMinutesView({
                     })}
                   </button>
                   {issuesExpanded && (
-                    <div className="mt-2 space-y-1.5">
+                    <div className="space-y-2">
                       {m.proposed_issues!.map((issue, i) => {
                         const issueResult = getMeetingIssueResult(m, issue);
                         const issueState = getMeetingIssueState(issueResult);
@@ -1591,7 +1328,7 @@ export default function MeetingMinutesView({
                                   };
 
                         return (
-                          <div
+                          <SurfaceNotice
                             key={i}
                             className="min-w-0 overflow-hidden rounded-lg px-3 py-2 text-xs"
                             style={{
@@ -1679,12 +1416,20 @@ export default function MeetingMinutesView({
                                 )}
                               </div>
                             </div>
-                          </div>
+                            <div className="mt-2">
+                              <span
+                                className="rounded-full px-2 py-0.5 text-xs font-semibold"
+                                style={{ background: statusMeta.bg, color: statusMeta.color }}
+                              >
+                                {statusMeta.label}
+                              </span>
+                            </div>
+                          </SurfaceNotice>
                         );
                       })}
                     </div>
                   )}
-                </div>
+                </SurfaceCard>
               )}
 
               {hasProposedIssues && (
@@ -1700,194 +1445,105 @@ export default function MeetingMinutesView({
                   }}
                 >
                   {getIssueProgressText(issueProgress)}
-                </div>
+                </SurfaceNotice>
               )}
 
               {/* Actions */}
-              <div className="flex flex-col gap-2 pt-1 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between min-w-0">
-                <div className="flex items-center gap-2 flex-wrap min-w-0">
-                  <button
-                    onClick={() => handleOpenDetail(m)}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-surface-subtle"
-                    style={{
-                      borderColor: "var(--th-border)",
-                      color: "var(--th-text-secondary)",
-                    }}
-                  >
-                    {t({ ko: "상세 보기", en: "Details" })}
-                  </button>
-                  {hasProposedIssues ? (
-                    <>
-                      <button
-                        onClick={() => handleCreateIssues(m.id, selectedRepo)}
-                        disabled={!canRetryIssues || creatingIssue === m.id}
-                        className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-40"
-                        style={{
-                          background:
-                            issueProgress.allCreated ||
-                            issueProgress.allResolved
-                              ? "transparent"
-                              : issueProgress.failed > 0
-                                ? "rgba(245,158,11,0.15)"
-                                : "rgba(16,185,129,0.15)",
-                          color:
-                            issueProgress.allCreated ||
-                            issueProgress.allResolved
-                              ? "var(--th-text-muted)"
-                              : issueProgress.failed > 0
-                                ? "#fbbf24"
-                                : "#34d399",
-                          border: `1px solid ${
-                            issueProgress.allCreated ||
-                            issueProgress.allResolved
-                              ? "var(--th-border)"
-                              : issueProgress.failed > 0
-                                ? "rgba(245,158,11,0.3)"
-                                : "rgba(16,185,129,0.3)"
-                          }`,
-                        }}
-                      >
-                        {issueProgress.allCreated
-                          ? t({
-                              ko: `일감 생성 완료 (${issueProgress.created}/${issueProgress.total})`,
-                              en: `Issues created (${issueProgress.created}/${issueProgress.total})`,
-                            })
-                          : issueProgress.allResolved
-                            ? t({
-                                ko: `일감 처리 완료 (생성 ${issueProgress.created}, 폐기 ${issueProgress.discarded})`,
-                                en: `Issues resolved (created ${issueProgress.created}, discarded ${issueProgress.discarded})`,
-                              })
-                            : creatingIssue === m.id
-                              ? t({ ko: "생성 중...", en: "Creating..." })
-                              : isSavingRepo
-                                ? t({
-                                    ko: "Repo 저장 중...",
-                                    en: "Saving repo...",
-                                  })
-                                : !selectedRepo
-                                  ? t({
-                                      ko: "Repo 선택 필요",
-                                      en: "Select repo",
-                                    })
-                                  : issueProgress.failed > 0
-                                    ? t({
-                                        ko: `실패분 재시도 (${issueProgress.created}/${issueProgress.total})`,
-                                        en: `Retry failed (${issueProgress.created}/${issueProgress.total})`,
-                                      })
-                                    : t({
-                                        ko: `일감 생성 (${issueProgress.total}건)`,
-                                        en: `Create issues (${issueProgress.total})`,
-                                      })}
-                      </button>
-                      {issueProgress.pending + issueProgress.failed > 0 && (
-                        <button
-                          onClick={() => void handleDiscardAllIssues(m.id)}
-                          disabled={!!discardingMeetingIds[m.id]}
-                          className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-40"
-                          style={{
-                            background: "rgba(148,163,184,0.12)",
-                            color: "#cbd5e1",
-                            border: "1px solid rgba(148,163,184,0.2)",
-                          }}
+              <SurfaceCard
+                className="rounded-2xl p-3"
+                style={{
+                  background: "color-mix(in srgb, var(--th-bg-surface) 90%, transparent)",
+                  borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+                }}
+              >
+                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap min-w-0">
+                    <SurfaceActionButton tone="neutral" onClick={() => void handleOpenDetail(m)}>
+                      {t({ ko: "상세 보기", en: "Details" })}
+                    </SurfaceActionButton>
+                    {hasProposedIssues ? (
+                      <>
+                        <SurfaceActionButton
+                          tone={createButtonTone}
+                          onClick={() => handleCreateIssues(m.id, selectedRepo)}
+                          disabled={!canRetryIssues || creatingIssue === m.id}
                         >
-                          {!!discardingMeetingIds[m.id]
-                            ? t({
-                                ko: "전체 폐기 중...",
-                                en: "Discarding all...",
-                              })
-                            : t({
-                                ko: `남은 일감 전체 폐기 (${issueProgress.pending + issueProgress.failed}건)`,
-                                en: `Discard all remaining (${issueProgress.pending + issueProgress.failed})`,
-                              })}
-                        </button>
-                      )}
-                    </>
-                  ) : m.issues_created ? (
-                    <span
-                      className="px-3 py-1.5 text-xs font-medium"
-                      style={{ color: "var(--th-text-muted)" }}
-                    >
-                      {t({ ko: "일감 생성 완료", en: "Issues created" })}
-                    </span>
-                  ) : (
-                    <span
-                      className="px-3 py-1.5 text-xs font-medium"
-                      style={{ color: "var(--th-text-muted)" }}
-                    >
-                      {t({ ko: "추출된 일감 없음", en: "No issues extracted" })}
-                    </span>
+                          {issueProgress.allCreated
+                            ? t({ ko: `일감 생성 완료 (${issueProgress.created}/${issueProgress.total})`, en: `Issues created (${issueProgress.created}/${issueProgress.total})` })
+                            : issueProgress.allResolved
+                              ? t({ ko: `일감 처리 완료 (생성 ${issueProgress.created}, 폐기 ${issueProgress.discarded})`, en: `Issues resolved (created ${issueProgress.created}, discarded ${issueProgress.discarded})` })
+                              : creatingIssue === m.id
+                                ? t({ ko: "생성 중...", en: "Creating..." })
+                                : isSavingRepo
+                                  ? t({ ko: "Repo 저장 중...", en: "Saving repo..." })
+                                  : !selectedRepo
+                                    ? t({ ko: "Repo 선택 필요", en: "Select repo" })
+                                    : issueProgress.failed > 0
+                                      ? t({ ko: `실패분 재시도 (${issueProgress.created}/${issueProgress.total})`, en: `Retry failed (${issueProgress.created}/${issueProgress.total})` })
+                                      : t({ ko: `일감 생성 (${issueProgress.total}건)`, en: `Create issues (${issueProgress.total})` })}
+                        </SurfaceActionButton>
+                        {issueProgress.pending + issueProgress.failed > 0 && (
+                          <SurfaceActionButton
+                            tone="neutral"
+                            onClick={() => void handleDiscardAllIssues(m.id)}
+                            disabled={!!discardingMeetingIds[m.id]}
+                          >
+                            {!!discardingMeetingIds[m.id]
+                              ? t({ ko: "전체 폐기 중...", en: "Discarding all..." })
+                              : t({ ko: `남은 일감 전체 폐기 (${issueProgress.pending + issueProgress.failed}건)`, en: `Discard all remaining (${issueProgress.pending + issueProgress.failed})` })}
+                          </SurfaceActionButton>
+                        )}
+                      </>
+                    ) : (
+                      m.issues_created ? (
+                        <SurfaceNotice compact tone="success">
+                          {t({ ko: "일감 생성 완료", en: "Issues created" })}
+                        </SurfaceNotice>
+                      ) : (
+                        <SurfaceNotice compact tone="neutral">
+                          {t({ ko: "추출된 일감 없음", en: "No issues extracted" })}
+                        </SurfaceNotice>
+                      )
+                    )}
+                  </div>
+                  {hasProposedIssues && (
+                    <div className="flex flex-col gap-1 min-w-0 sm:min-w-[280px]">
+                      <div className="text-xs font-semibold uppercase tracking-widest text-left sm:text-right" style={{ color: "var(--th-text-muted)" }}>
+                        {t({ ko: "이 회의용 Repo", en: "Repo for this meeting" })}
+                      </div>
+                      <select
+                        value={selectedRepo}
+                        onChange={(e) => void handleRepoChange(m.id, e.target.value)}
+                        className="px-3 py-2 rounded-lg text-sm"
+                        style={inputStyle}
+                        disabled={loadingRepos || isSavingRepo || repoOptions.length === 0}
+                      >
+                        {!selectedRepo && <option value="">{t({ ko: "Repo 선택", en: "Select repo" })}</option>}
+                        {repoOptions.map((repo) => (
+                          <option key={repo.nameWithOwner} value={repo.nameWithOwner}>
+                            {githubRepos.some((item) => item.nameWithOwner === repo.nameWithOwner)
+                              ? repo.nameWithOwner
+                              : `${repo.nameWithOwner} ${t({ ko: "(현재 목록에 없음)", en: "(not in current list)" })}`}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="text-xs text-left sm:text-right" style={{ color: repoSaveErrors[m.id] ? "#fbbf24" : "var(--th-text-muted)" }}>
+                        {repoSaveErrors[m.id]
+                          || (isSavingRepo ? t({ ko: "repo 저장 중...", en: "Saving repo..." }) : null)
+                          || repoError
+                          || (loadingRepos ? t({ ko: "repo 목록 불러오는 중...", en: "Loading repos..." }) : null)
+                          || (repoOwner ? t({ ko: `gh 계정 ${repoOwner}`, en: `gh account ${repoOwner}` }) : "")}
+                      </div>
+                    </div>
                   )}
                 </div>
-                {hasProposedIssues && (
-                  <div className="flex flex-col gap-1 min-w-0 sm:min-w-[280px]">
-                    <div
-                      className="text-xs font-semibold uppercase tracking-widest text-left sm:text-right"
-                      style={{ color: "var(--th-text-muted)" }}
-                    >
-                      {t({ ko: "이 회의용 Repo", en: "Repo for this meeting" })}
-                    </div>
-                    <select
-                      value={selectedRepo}
-                      onChange={(e) =>
-                        void handleRepoChange(m.id, e.target.value)
-                      }
-                      className="px-3 py-2 rounded-lg text-sm"
-                      style={inputStyle}
-                      disabled={
-                        loadingRepos || isSavingRepo || repoOptions.length === 0
-                      }
-                    >
-                      {!selectedRepo && (
-                        <option value="">
-                          {t({ ko: "Repo 선택", en: "Select repo" })}
-                        </option>
-                      )}
-                      {repoOptions.map((repo) => (
-                        <option
-                          key={repo.nameWithOwner}
-                          value={repo.nameWithOwner}
-                        >
-                          {githubRepos.some(
-                            (item) => item.nameWithOwner === repo.nameWithOwner,
-                          )
-                            ? repo.nameWithOwner
-                            : `${repo.nameWithOwner} ${t({ ko: "(현재 목록에 없음)", en: "(not in current list)" })}`}
-                        </option>
-                      ))}
-                    </select>
-                    <div
-                      className="text-xs text-left sm:text-right"
-                      style={{
-                        color: repoSaveErrors[m.id]
-                          ? "#fbbf24"
-                          : "var(--th-text-muted)",
-                      }}
-                    >
-                      {repoSaveErrors[m.id] ||
-                        (isSavingRepo
-                          ? t({ ko: "repo 저장 중...", en: "Saving repo..." })
-                          : null) ||
-                        repoError ||
-                        (loadingRepos
-                          ? t({
-                              ko: "repo 목록 불러오는 중...",
-                              en: "Loading repos...",
-                            })
-                          : null) ||
-                        (repoOwner
-                          ? t({
-                              ko: `gh 계정 ${repoOwner}`,
-                              en: `gh account ${repoOwner}`,
-                            })
-                          : "")}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
+              </SurfaceCard>
+            </SurfaceCard>
           );
         })}
-      </div>
+          </div>
+        </SurfaceSection>
+      )}
 
       {detailMeeting && (
         <MeetingDetailModal

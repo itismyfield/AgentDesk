@@ -78,7 +78,7 @@ export const STATUS_LABELS: Record<string, { color: string; dot: string }> = {
   inbox: { color: "bg-slate-500/20 text-slate-200 border-slate-400/30", dot: "bg-slate-400" },
   planned: { color: "bg-blue-500/20 text-blue-100 border-blue-400/30", dot: "bg-blue-400" },
   in_progress: { color: "bg-amber-500/20 text-amber-100 border-amber-400/30", dot: "bg-amber-400" },
-  review: { color: "bg-violet-500/20 text-violet-100 border-violet-400/30", dot: "bg-violet-400" },
+  review: { color: "bg-sky-500/20 text-sky-100 border-sky-400/30", dot: "bg-sky-400" },
   done: { color: "bg-emerald-500/20 text-emerald-100 border-emerald-400/30", dot: "bg-emerald-400" },
   pending: { color: "bg-orange-500/20 text-orange-100 border-orange-400/30", dot: "bg-orange-400" },
   cancelled: { color: "bg-rose-500/20 text-rose-100 border-rose-400/30", dot: "bg-rose-400" },
@@ -88,7 +88,7 @@ export const STATUS_LEFT_BORDER: Record<string, string> = {
   inbox: "border-l-slate-400",
   planned: "border-l-blue-400",
   in_progress: "border-l-amber-400",
-  review: "border-l-violet-400",
+  review: "border-l-sky-400",
   done: "border-l-emerald-400",
   pending: "border-l-orange-400",
   cancelled: "border-l-rose-400",
@@ -117,7 +117,7 @@ export function taskStatusLabel(status: string, t: TFunction) {
 
 export const DEPT_COLORS = [
   { bar: "from-blue-500 to-cyan-400", badge: "bg-blue-500/20 text-blue-200 border-blue-400/30" },
-  { bar: "from-violet-500 to-fuchsia-400", badge: "bg-violet-500/20 text-violet-200 border-violet-400/30" },
+  { bar: "from-lime-500 to-emerald-400", badge: "bg-lime-500/20 text-lime-100 border-lime-400/30" },
   { bar: "from-emerald-500 to-teal-400", badge: "bg-emerald-500/20 text-emerald-200 border-emerald-400/30" },
   { bar: "from-amber-500 to-orange-400", badge: "bg-amber-500/20 text-amber-100 border-amber-400/30" },
   { bar: "from-rose-500 to-pink-400", badge: "bg-rose-500/20 text-rose-100 border-rose-400/30" },

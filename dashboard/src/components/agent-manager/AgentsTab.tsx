@@ -1,5 +1,11 @@
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
+import {
+  SurfaceCard,
+  SurfaceEmptyState,
+  SurfaceMetricPill,
+  SurfaceSegmentButton,
+} from "../common/SurfacePrimitives";
 import AgentCard from "./AgentCard";
 import { StackedSpriteIcon } from "./EmojiPicker";
 import type { Translator } from "./types";
@@ -63,100 +69,118 @@ export default function AgentsTab({
 
   return (
     <>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="flex flex-wrap gap-3">
         {[
           {
             label: tr("전체 인원", "Total"),
             value: agents.length,
+            tone: "accent" as const,
             icon: <StackedSpriteIcon sprites={randomIconSprites.total} />,
           },
-          { label: tr("근무 중", "Working"), value: workingCount, icon: "💼" },
-          { label: tr("부서", "Departments"), value: departments.length, icon: "🏢" },
+          {
+            label: tr("근무 중", "Working"),
+            value: workingCount,
+            tone: "success" as const,
+            icon: "💼",
+          },
+          {
+            label: tr("부서", "Departments"),
+            value: departments.length,
+            tone: "info" as const,
+            icon: "🏢",
+          },
         ].map((summary) => (
-          <div
+          <SurfaceMetricPill
             key={summary.label}
-            className="rounded-xl px-4 py-3"
-            style={{ background: "var(--th-card-bg)", border: "1px solid var(--th-card-border)" }}
-          >
-            <div className="text-xs mb-1" style={{ color: "var(--th-text-muted)" }}>
-              {summary.icon} {summary.label}
-            </div>
-            <div className="text-2xl font-bold tabular-nums" style={{ color: "var(--th-text-heading)" }}>
-              {summary.value}
-            </div>
-          </div>
+            label={`${typeof summary.icon === "string" ? summary.icon : "🧩"} ${summary.label}`}
+            value={
+              <span className="text-2xl font-bold tabular-nums" style={{ color: "var(--th-text-heading)" }}>
+                {summary.value}
+              </span>
+            }
+            tone={summary.tone}
+            className="min-w-[132px] flex-1 sm:flex-none"
+            style={{ minHeight: 76 }}
+          />
         ))}
       </div>
 
-      <div className="flex items-center gap-2 flex-wrap" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
-        <button
-          onClick={() => setDeptTab("all")}
-          className={`flex items-center gap-1 px-3 py-2 text-xs font-medium transition-colors ${
-            deptTab === "all" ? "text-blue-400 border-b-2 border-blue-400" : "hover:text-slate-200"
-          }`}
-          style={deptTab !== "all" ? { color: "var(--th-text-muted)" } : undefined}
-        >
-          {tr("전체", "All")} <span className="opacity-60">{agents.length}</span>
-        </button>
-        {departments.map((department) => {
-          const count = deptCounts.get(department.id);
-          return (
-            <button
-              key={department.id}
-              onClick={() => setDeptTab(department.id)}
-              onDoubleClick={(e) => {
-                e.preventDefault();
-                onEditDepartment(department);
-              }}
-              title={tr("더블클릭: 부서 편집", "Double-click: edit dept")}
-              className={`flex items-center gap-1 px-3 py-2 text-xs font-medium transition-colors ${
-                deptTab === department.id ? "text-blue-400 border-b-2 border-blue-400" : "hover:text-slate-200"
-              }`}
-              style={deptTab !== department.id ? { color: "var(--th-text-muted)" } : undefined}
-            >
-              <span>{department.icon}</span>
-              <span className="hidden sm:inline">{localeName(locale, department)}</span>
-              <span className="opacity-60">{count?.total ?? 0}</span>
-            </button>
-          );
-        })}
-        <div className="ml-auto pb-1 flex items-center gap-2">
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-2 py-1.5 rounded-lg text-xs outline-none"
-            style={{
-              background: "var(--th-input-bg)",
-              border: "1px solid var(--th-input-border)",
-              color: "var(--th-text-primary)",
-            }}
-          >
-            <option value="all">{tr("상태: 전체", "Status: All")}</option>
-            <option value="working">{tr("근무 중", "Working")}</option>
-            <option value="idle">{tr("대기", "Idle")}</option>
-            <option value="break">{tr("휴식", "Break")}</option>
-            <option value="offline">{tr("오프라인", "Offline")}</option>
-          </select>
-          <input
-            type="text"
-            placeholder={`${tr("검색", "Search")}...`}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="px-3 py-1.5 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500/40 transition-shadow w-36"
-            style={{
-              background: "var(--th-input-bg)",
-              border: "1px solid var(--th-input-border)",
-              color: "var(--th-text-primary)",
-            }}
-          />
+      <SurfaceCard className="space-y-3 rounded-3xl p-4 sm:p-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <SurfaceSegmentButton active={deptTab === "all"} onClick={() => setDeptTab("all")} tone="accent">
+            {tr("전체", "All")} <span className="opacity-60">{agents.length}</span>
+          </SurfaceSegmentButton>
+          {departments.map((department) => {
+            const count = deptCounts.get(department.id);
+            return (
+              <SurfaceSegmentButton
+                key={department.id}
+                active={deptTab === department.id}
+                onClick={() => setDeptTab(department.id)}
+                tone="info"
+                className="flex items-center gap-1"
+                style={{ maxWidth: "100%" }}
+              >
+                <span
+                  onDoubleClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onEditDepartment(department);
+                  }}
+                  title={tr("더블클릭: 부서 편집", "Double-click: edit dept")}
+                  className="inline-flex items-center gap-1"
+                >
+                  <span>{department.icon}</span>
+                  <span className="hidden sm:inline">{localeName(locale, department)}</span>
+                  <span className="opacity-60">{count?.total ?? 0}</span>
+                </span>
+              </SurfaceSegmentButton>
+            );
+          })}
         </div>
-      </div>
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
+            {tr("부서 chip 더블클릭으로 편집할 수 있습니다.", "Double-click a department chip to edit it.")}
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="rounded-xl px-3 py-2 text-xs outline-none"
+              style={{
+                background: "var(--th-input-bg)",
+                border: "1px solid var(--th-input-border)",
+                color: "var(--th-text-primary)",
+              }}
+            >
+              <option value="all">{tr("상태: 전체", "Status: All")}</option>
+              <option value="working">{tr("근무 중", "Working")}</option>
+              <option value="idle">{tr("대기", "Idle")}</option>
+              <option value="break">{tr("휴식", "Break")}</option>
+              <option value="offline">{tr("오프라인", "Offline")}</option>
+            </select>
+            <input
+              type="text"
+              placeholder={`${tr("검색", "Search")}...`}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full rounded-xl px-3 py-2 text-xs outline-none transition-shadow sm:w-40"
+              style={{
+                background: "var(--th-input-bg)",
+                border: "1px solid var(--th-input-border)",
+                color: "var(--th-text-primary)",
+              }}
+            />
+          </div>
+        </div>
+      </SurfaceCard>
 
       {sortedAgents.length === 0 ? (
-        <div className="text-center py-16" style={{ color: "var(--th-text-muted)" }}>
-          <div className="text-3xl mb-2">🔍</div>
-          {tr("검색 결과 없음", "No agents found")}
-        </div>
+        <SurfaceEmptyState className="py-12 text-center">
+          <div className="text-3xl">🔍</div>
+          <div className="mt-2 text-sm">{tr("검색 결과 없음", "No agents found")}</div>
+        </SurfaceEmptyState>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {sortedAgents.map((agent) => (

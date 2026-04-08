@@ -12,6 +12,15 @@ import type {
 } from "../../types";
 import { localeName } from "../../i18n";
 import AgentAvatar from "../AgentAvatar";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceEmptyState,
+  SurfaceMetricPill,
+  SurfaceNotice,
+  SurfaceSection,
+  SurfaceSubsection,
+} from "../common/SurfacePrimitives";
 import { STATUS_DOT } from "./constants";
 import TurnTranscriptPanel from "./TurnTranscriptPanel";
 import type { Translator } from "./types";
@@ -127,7 +136,7 @@ export function getAgentTitle(xp: number, isKo: boolean) {
 }
 
 const ACTIVITY_SOURCE_COLORS: Record<string, string> = {
-  agentdesk: "#a78bfa",
+  agentdesk: "#10b981",
   idle: "#64748b",
 };
 
@@ -1379,271 +1388,530 @@ export default function AgentInfoCard({
                       {tr("비활성", "Off")}
                     </span>
                   )}
+                  <span className="rounded-full px-2 py-0.5 text-xs" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
+                    {dept ? `${dept.icon} ${localeName(locale, dept)}` : tr("미배정", "Unassigned")}
+                  </span>
                 </div>
-              ))}
+                <div className="flex flex-wrap gap-2">
+                  <SurfaceMetricPill
+                    label={tr("레벨", "Level")}
+                    tone="accent"
+                    value={`Lv.${levelInfo.level} ${levelTitle}`}
+                  />
+                  <SurfaceMetricPill
+                    label={tr("완료", "Done")}
+                    tone="success"
+                    value={`${agent.stats_tasks_done} ${tr("건", "tasks")}`}
+                  />
+                  <SurfaceMetricPill
+                    label="AgentDesk"
+                    tone="info"
+                    value={`${workingLinkedSessions.length}/${claudeSessions.length}`}
+                  />
+                </div>
+              </div>
             </div>
-          )}
-        </div>
+          </SurfaceSection>
 
-        {/* Skills */}
-        <div className="px-5 py-3">
-          <div
-            className="text-xs font-semibold uppercase tracking-widest mb-2"
-            style={{ color: "var(--th-text-muted)" }}
-          >
-            {tr("스킬", "Skills")}
-          </div>
-          {loadingSkills ? (
-            <div
-              className="text-xs py-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("불러오는 중...", "Loading...")}
-            </div>
-          ) : agentSkills.length === 0 && sharedSkills.length === 0 ? (
-            <div
-              className="text-xs py-2"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              {tr("등록된 스킬이 없습니다", "No skills")}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {agentSkills.length > 0 && (
-                <div>
-                  <div
-                    className="text-xs mb-1 font-medium"
-                    style={{ color: "var(--th-text-secondary)" }}
-                  >
-                    {tr("전용 스킬", "Agent-specific")}
-                  </div>
-                  <div className="flex flex-wrap gap-1">
-                    {agentSkills.map((skill) => (
-                      <span
-                        key={skill.name}
-                        className="text-xs px-2 py-0.5 rounded-full"
-                        style={{
-                          background: "rgba(99,102,241,0.15)",
-                          color: "#a5b4fc",
-                        }}
-                        title={skill.description}
+          <div className="grid gap-4 md:grid-cols-2">
+            <SurfaceSubsection title={tr("소속 부서", "Department")}>
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedDeptId}
+                  onChange={(e) => void saveDepartment(e.target.value)}
+                  disabled={savingDept}
+                  className="flex-1 rounded-xl border px-3 py-2 text-sm outline-none"
+                  style={{
+                    background: "var(--th-input-bg)",
+                    borderColor: "var(--th-input-border)",
+                    color: "var(--th-text-primary)",
+                  }}
+                >
+                  <option value="">{tr("— 미배정 —", "— Unassigned —")}</option>
+                  {departments.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.icon} {localeName(locale, d)}
+                    </option>
+                  ))}
+                </select>
+                <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                  {savingDept ? tr("저장 중...", "Saving...") : null}
+                </span>
+              </div>
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={tr("메인 Provider", "Main Provider")}>
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedProvider}
+                  onChange={(e) => void saveProvider(e.target.value)}
+                  disabled={savingProvider}
+                  className="flex-1 rounded-xl border px-3 py-2 text-sm outline-none"
+                  style={{
+                    background: "var(--th-input-bg)",
+                    borderColor: "var(--th-input-border)",
+                    color: "var(--th-text-primary)",
+                  }}
+                >
+                  <option value="claude">Claude</option>
+                  <option value="codex">Codex</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="qwen">Qwen</option>
+                </select>
+                <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                  {savingProvider ? tr("저장 중...", "Saving...") : null}
+                </span>
+              </div>
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={tr("소속 오피스", "Offices")} className="md:col-span-2">
+              {loadingOffices ? (
+                <SurfaceNotice tone="neutral" compact>
+                  {tr("불러오는 중...", "Loading...")}
+                </SurfaceNotice>
+              ) : officeMemberships.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("등록된 오피스가 없습니다", "No offices")}
+                </SurfaceEmptyState>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {officeMemberships.map((office) => {
+                    const assigned = office.assigned;
+                    const savingOffice = !!savingOfficeIds[office.id];
+
+                    return (
+                      <button
+                        key={office.id}
+                        onClick={() => void toggleOfficeMembership(office)}
+                        disabled={savingOffice}
+                        className="rounded-xl px-2.5 py-1.5 text-xs font-medium transition-all disabled:opacity-50"
+                        style={assigned
+                          ? { background: office.color, color: "#ffffff" }
+                          : {
+                            background: "var(--th-bg-surface)",
+                            color: "var(--th-text-secondary)",
+                            border: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)",
+                          }}
                       >
-                        {skill.name}
-                      </span>
-                    ))}
-                  </div>
+                        {office.icon} {localeName(locale, office)}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
-              {sharedSkills.length > 0 && (
-                <div>
-                  <button
-                    onClick={() => setShowSharedSkills(!showSharedSkills)}
-                    className="text-xs font-medium flex items-center gap-1 hover:underline"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    {tr("공유 스킬", "Shared")} ({sharedSkills.length})
-                    <span className="text-xs">
-                      {showSharedSkills ? "▲" : "▼"}
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={tr("상태 요약", "Status Summary")} className="md:col-span-2">
+              <div className="space-y-3">
+                <SurfaceCard className="p-3">
+                  <div className="mb-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    {tr("현재 작업", "Current Work")}
+                  </div>
+                  <div className="text-xs leading-relaxed" style={{ color: "var(--th-text-primary)" }}>
+                    {currentWorkSummary || tr("현재 작업 설명이 없습니다", "No current work detail")}
+                  </div>
+                </SurfaceCard>
+                <div className="flex flex-wrap gap-2">
+                  {currentWorkElapsedMs != null && (
+                    <SurfaceMetricPill
+                      label={tr("경과", "Elapsed")}
+                      tone="info"
+                      value={formatElapsedCompact(currentWorkElapsedMs, isKo)}
+                    />
+                  )}
+                  <SurfaceMetricPill
+                    label={tr("DB 경로", "DB routes")}
+                    tone="accent"
+                    value={`${dbBindings.length}`}
+                  />
+                </div>
+                {currentWorkDetails.length > 0 && (
+                  <div className="space-y-1">
+                    {currentWorkDetails.map((line, idx) => (
+                      <div key={`${line}:${idx}`} className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
+                        • {line}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </SurfaceSubsection>
+
+            {warnings.length > 0 && (
+              <SurfaceSubsection title={tr("이상 징후", "Warnings")} className="md:col-span-2">
+                <div className="flex flex-wrap gap-2">
+                  {warnings.map((warning) => (
+                    <span
+                      key={warning.code}
+                      className="rounded-lg px-2 py-1 text-xs"
+                      style={{
+                        background:
+                          warning.severity === "error"
+                            ? "rgba(239,68,68,0.14)"
+                            : warning.severity === "warning"
+                              ? "rgba(245,158,11,0.14)"
+                              : "rgba(96,165,250,0.14)",
+                        color:
+                          warning.severity === "error"
+                            ? "#fca5a5"
+                            : warning.severity === "warning"
+                              ? "#fcd34d"
+                              : "#93c5fd",
+                      }}
+                    >
+                      {isKo ? warning.ko : warning.en}
                     </span>
-                  </button>
-                  {showSharedSkills && (
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {sharedSkills.map((skill) => (
-                        <span
-                          key={skill.name}
-                          className="text-xs px-2 py-0.5 rounded-full"
-                          style={{
-                            background: "var(--th-bg-surface)",
-                            color: "var(--th-text-muted)",
-                          }}
-                          title={skill.description}
-                        >
-                          {skill.name}
+                  ))}
+                </div>
+              </SurfaceSubsection>
+            )}
+
+            <SurfaceSubsection title={tr("정본 연결", "Source of Truth")} className="md:col-span-2">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {sourceOfTruthRows.map((row) => (
+                  <SurfaceCard key={row.label} className="p-3" style={{ background: "var(--th-bg-surface)" }}>
+                    <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                      {row.label}
+                    </div>
+                    <div className="mt-1 break-all text-xs font-medium" style={{ color: row.tone }}>
+                      {row.value}
+                    </div>
+                  </SurfaceCard>
+                ))}
+              </div>
+              {roleMapBindings.length > 0 && (
+                <SurfaceNotice tone="warn" compact className="mt-3">
+                  {tr("RoleMap 경로가 있으면 Discord source-of-truth는 role_map 우선으로 봅니다.", "When RoleMap exists, role_map is treated as the Discord source-of-truth.")}
+                </SurfaceNotice>
+              )}
+            </SurfaceSubsection>
+
+            {agent.personality && (
+              <SurfaceSubsection title={tr("성격", "Personality")} className="md:col-span-2">
+                <div className="whitespace-pre-wrap text-xs leading-relaxed" style={{ color: "var(--th-text-secondary)" }}>
+                  {agent.personality}
+                </div>
+              </SurfaceSubsection>
+            )}
+
+            {agent.session_info && (
+              <SurfaceSubsection title={tr("현재 작업", "Current Session")} className="md:col-span-2">
+                <div className="text-xs leading-relaxed" style={{ color: "var(--th-text-secondary)" }}>
+                  {agent.session_info}
+                </div>
+              </SurfaceSubsection>
+            )}
+
+            {discordBindings.length > 0 && (
+              <SurfaceSubsection
+                title={`${tr("Discord 라우팅", "Discord Routing")} (${discordBindings.length})`}
+                description={tr("RoleMap/Primary/Alt/Codex는 이 agent에 연결된 Discord 경로의 source다.", "RoleMap/Primary/Alt/Codex indicate how this agent is wired to Discord.")}
+                className="md:col-span-2"
+              >
+                <div className="space-y-1">
+                  {discordBindings.map((b) => {
+                    const source = inferBindingSource(b);
+                    const sourceLabel = bindingSourceLabel(source);
+                    const title = b.channelId;
+                    const subtitle = b.counterModelChannelId && b.counterModelChannelId !== b.channelId
+                      ? `counter: ${b.counterModelChannelId}`
+                      : null;
+
+                    return (
+                      <SurfaceCard key={`${b.channelId}:${source}`} className="flex items-center gap-2 px-2.5 py-1.5" style={{ background: "var(--th-bg-surface)" }}>
+                        <span className="text-sm">💬</span>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-xs font-medium" style={{ color: "var(--th-text-primary)" }}>
+                            {title}
+                          </div>
+                          {subtitle && (
+                            <div className="mt-0.5 truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
+                              {subtitle}
+                            </div>
+                          )}
+                        </div>
+                        <span className="rounded px-1.5 py-0.5 text-xs" style={{ background: "rgba(88,101,242,0.15)", color: "#7289da" }}>
+                          {sourceLabel}
                         </span>
-                      ))}
+                      </SurfaceCard>
+                    );
+                  })}
+                </div>
+              </SurfaceSubsection>
+            )}
+
+            <SurfaceSubsection title={`${tr("연결된 AgentDesk 세션", "Linked AgentDesk Sessions")}${!loadingClaudeSessions ? ` (${claudeSessions.length})` : ""}`} className="md:col-span-2">
+              {loadingClaudeSessions ? (
+                <SurfaceNotice tone="neutral" compact>{tr("불러오는 중...", "Loading...")}</SurfaceNotice>
+              ) : claudeSessions.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("연결된 AgentDesk 세션 없음", "No linked AgentDesk sessions")}
+                </SurfaceEmptyState>
+              ) : (
+                <div className="space-y-1.5">
+                  {claudeSessions.map((s) => (
+                    <SurfaceCard key={s.id} className="flex items-start justify-between gap-2 px-2.5 py-2" style={{ background: "var(--th-bg-surface)" }}>
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-medium" style={{ color: "var(--th-text-primary)" }}>
+                          {s.name || s.session_key}
+                        </div>
+                        <div className="mt-0.5 truncate text-xs" style={{ color: "var(--th-text-muted)" }}>
+                          {s.session_info || s.model || "AgentDesk session"}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <span
+                          className="rounded px-1.5 py-0.5 text-xs"
+                          style={{
+                            background:
+                              s.provider === "codex"
+                                ? "rgba(56,189,248,0.18)"
+                                : s.provider === "gemini"
+                                  ? "rgba(250,204,21,0.18)"
+                                  : s.provider === "qwen"
+                                    ? "rgba(34,197,94,0.18)"
+                                  : "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
+                            color:
+                              s.provider === "codex"
+                                ? "#38bdf8"
+                                : s.provider === "gemini"
+                                  ? "#facc15"
+                                  : s.provider === "qwen"
+                                    ? "#86efac"
+                                  : "var(--th-accent-primary)",
+                          }}
+                        >
+                          {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : s.provider === "qwen" ? "Qwen" : "Claude"}
+                        </span>
+                        <span
+                          className="rounded px-1.5 py-0.5 text-xs"
+                          style={{
+                            background: s.status === "working" ? "rgba(16,185,129,0.15)" : "rgba(100,116,139,0.15)",
+                            color: s.status === "working" ? "#34d399" : "#94a3b8",
+                          }}
+                        >
+                          {s.status === "working" ? tr("작업중", "Working") : tr("대기", "Idle")}
+                        </span>
+                      </div>
+                    </SurfaceCard>
+                  ))}
+                </div>
+              )}
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={`${tr("크론 작업", "Cron Jobs")} ${!loadingCron ? `(${cronJobs.length})` : ""}`} className="md:col-span-2">
+              {loadingCron ? (
+                <SurfaceNotice tone="neutral" compact>{tr("불러오는 중...", "Loading...")}</SurfaceNotice>
+              ) : cronJobs.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("등록된 크론 작업이 없습니다", "No cron jobs")}
+                </SurfaceEmptyState>
+              ) : (
+                <div className="space-y-1.5">
+                  {cronJobs.map((job) => (
+                    <SurfaceCard key={job.id} className="flex items-start gap-2 px-2.5 py-2" style={{ background: "var(--th-bg-surface)" }}>
+                      <span className={`mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${
+                        job.enabled
+                          ? job.state?.lastStatus === "ok" ? "bg-emerald-400" : "bg-amber-400"
+                          : "bg-slate-500"
+                      }`} />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-xs font-medium" style={{ color: "var(--th-text-primary)" }} title={job.name}>
+                          {job.name}
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-mono" style={{ color: "var(--th-text-muted)" }}>
+                            {formatSchedule(job.schedule, isKo)}
+                          </span>
+                          {job.state?.lastRunAtMs && (
+                            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                              {tr("최근:", "Last:")} {timeAgo(job.state.lastRunAtMs, isKo)}
+                              {job.state.lastDurationMs != null && ` (${formatDuration(job.state.lastDurationMs)})`}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      {!job.enabled && (
+                        <span className="shrink-0 rounded px-1.5 py-0.5 text-xs" style={{ background: "rgba(100,116,139,0.2)", color: "#94a3b8" }}>
+                          {tr("비활성", "Off")}
+                        </span>
+                      )}
+                    </SurfaceCard>
+                  ))}
+                </div>
+              )}
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={tr("최근 변경", "Recent Changes")} className="md:col-span-2">
+              {loadingAudit ? (
+                <SurfaceNotice tone="neutral" compact>{tr("불러오는 중...", "Loading...")}</SurfaceNotice>
+              ) : auditLogs.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("관련 변경 로그가 없습니다", "No related audit logs")}
+                </SurfaceEmptyState>
+              ) : (
+                <div className="space-y-1.5">
+                  {auditLogs.map((log) => (
+                    <SurfaceCard key={log.id} className="px-3 py-2" style={{ background: "var(--th-bg-surface)" }}>
+                      <div className="text-xs" style={{ color: "var(--th-text-primary)" }}>
+                        {log.summary}
+                      </div>
+                      <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                        {log.action} • {timeAgo(log.created_at, isKo)}
+                      </div>
+                    </SurfaceCard>
+                  ))}
+                </div>
+              )}
+            </SurfaceSubsection>
+
+            <SurfaceSubsection title={tr("스킬", "Skills")} className="md:col-span-2">
+              {loadingSkills ? (
+                <SurfaceNotice tone="neutral" compact>{tr("불러오는 중...", "Loading...")}</SurfaceNotice>
+              ) : agentSkills.length === 0 && sharedSkills.length === 0 ? (
+                <SurfaceEmptyState className="text-xs">
+                  {tr("등록된 스킬이 없습니다", "No skills")}
+                </SurfaceEmptyState>
+              ) : (
+                <div className="space-y-2">
+                  {agentSkills.length > 0 && (
+                    <div>
+                      <div className="mb-1 text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                        {tr("전용 스킬", "Agent-specific")}
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {agentSkills.map((skill) => (
+                          <span
+                            key={skill.name}
+                            className="rounded-full px-2 py-0.5 text-xs"
+                            style={{
+                              background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
+                              color: "var(--th-accent-primary)",
+                            }}
+                            title={skill.description}
+                          >
+                            {skill.name}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {sharedSkills.length > 0 && (
+                    <div>
+                      <SurfaceActionButton onClick={() => setShowSharedSkills(!showSharedSkills)} tone="neutral" compact>
+                        {tr("공유 스킬", "Shared")} ({sharedSkills.length}) {showSharedSkills ? "▲" : "▼"}
+                      </SurfaceActionButton>
+                      {showSharedSkills && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {sharedSkills.map((skill) => (
+                            <span
+                              key={skill.name}
+                              className="rounded-full px-2 py-0.5 text-xs"
+                              style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
+                              title={skill.description}
+                            >
+                              {skill.name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
               )}
-            </div>
-          )}
-        </div>
+            </SurfaceSubsection>
 
-        {/* Footer with Level */}
-        <div
-          className="px-5 py-3 space-y-2"
-          style={{ borderTop: "1px solid var(--th-card-border)" }}
-        >
-          {/* Level progress bar */}
-          {(() => {
-            const lv = getAgentLevel(agent.stats_xp);
-            const title = getAgentTitle(agent.stats_xp, isKo);
-            return (
-              <div className="flex items-center gap-2">
-                <span
-                  className="text-xs font-bold px-2 py-0.5 rounded-full shrink-0"
-                  style={{
-                    background: "rgba(99,102,241,0.18)",
-                    color: "#a5b4fc",
-                  }}
-                >
-                  Lv.{lv.level} {title}
-                </span>
-                <div
-                  className="flex-1 h-1.5 rounded-full overflow-hidden"
-                  style={{ background: "var(--th-bg-surface)" }}
-                >
-                  <div
-                    className="h-full rounded-full transition-all"
+            <SurfaceSubsection title={tr("활동 레벨", "Activity Level")} className="md:col-span-2">
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="shrink-0 rounded-full px-2 py-0.5 text-xs font-bold"
                     style={{
-                      width: `${Math.round(lv.progress * 100)}%`,
-                      background: "linear-gradient(90deg, #6366f1, #a78bfa)",
+                      background: "color-mix(in srgb, var(--th-accent-primary-soft) 80%, transparent)",
+                      color: "var(--th-accent-primary)",
                     }}
-                  />
+                  >
+                    Lv.{levelInfo.level} {levelTitle}
+                  </span>
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full" style={{ background: "var(--th-bg-surface)" }}>
+                    <div
+                      className="h-full rounded-full transition-all"
+                      style={{
+                        width: `${Math.round(levelInfo.progress * 100)}%`,
+                        background: "linear-gradient(90deg, var(--th-accent-primary), var(--th-accent-info))",
+                      }}
+                    />
+                  </div>
+                  <span className="shrink-0 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    {agent.stats_xp} / {levelInfo.nextThreshold === Infinity ? "MAX" : levelInfo.nextThreshold} XP
+                  </span>
                 </div>
-                <span
-                  className="text-xs shrink-0"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {agent.stats_xp} /{" "}
-                  {lv.nextThreshold === Infinity ? "MAX" : lv.nextThreshold} XP
-                </span>
-              </div>
-            );
-          })()}
-          {/* Activity Timeline */}
-          <div
-            className="rounded-2xl border overflow-hidden"
-            style={{
-              borderColor: "var(--th-border-subtle)",
-              background: "var(--th-bg-card)",
-            }}
-          >
-            <button
-              onClick={() => setTimelineOpen((v) => !v)}
-              className="w-full flex items-center justify-between px-4 py-3 text-xs font-semibold"
-              style={{ color: "var(--th-text-heading)" }}
-            >
-              <span>{tr("활동 타임라인", "Activity Timeline")}</span>
-              <span style={{ color: "var(--th-text-muted)" }}>
-                {timelineOpen ? "▲" : "▼"}
-              </span>
-            </button>
-            {timelineOpen && (
-              <div className="px-4 pb-3 space-y-1.5 max-h-64 overflow-y-auto">
-                {loadingTimeline ? (
-                  <div
-                    className="text-xs py-2"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    …
-                  </div>
-                ) : timeline.length === 0 ? (
-                  <div
-                    className="text-xs py-2"
-                    style={{ color: "var(--th-text-muted)" }}
-                  >
-                    {tr("활동 없음", "No activity")}
-                  </div>
-                ) : (
-                  timeline.map((evt) => {
-                    const sourceColor =
-                      evt.source === "dispatch"
-                        ? "#a78bfa"
-                        : evt.source === "session"
-                          ? "#38bdf8"
-                          : "#4ade80";
-                    const sourceLabel =
-                      evt.source === "dispatch"
-                        ? "D"
-                        : evt.source === "session"
-                          ? "S"
-                          : "K";
-                    const durationStr =
-                      evt.duration_ms != null
-                        ? evt.duration_ms < 60_000
-                          ? `${Math.round(evt.duration_ms / 1000)}s`
-                          : `${Math.round(evt.duration_ms / 60_000)}m`
-                        : null;
-                    return (
-                      <div
-                        key={`${evt.source}-${evt.id}`}
-                        className="flex items-start gap-2 text-xs"
-                      >
-                        <span
-                          className="shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold mt-0.5"
-                          style={{
-                            backgroundColor: `${sourceColor}22`,
-                            color: sourceColor,
-                          }}
-                        >
-                          {sourceLabel}
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className="truncate"
-                            style={{ color: "var(--th-text-primary)" }}
-                          >
-                            {evt.title}
-                          </div>
-                          <div
-                            className="flex gap-2"
-                            style={{ color: "var(--th-text-muted)" }}
-                          >
-                            <span>{timeAgo(evt.timestamp, isKo)}</span>
-                            <span
-                              className="px-1 rounded"
-                              style={{
-                                backgroundColor: `${sourceColor}15`,
-                                color: sourceColor,
-                              }}
-                            >
-                              {evt.status}
-                            </span>
-                            {durationStr && <span>{durationStr}</span>}
-                            {evt.detail && "issue" in evt.detail && (
-                              <span>#{String(evt.detail.issue)}</span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            )}
-          </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              {agent.role_id && (
-                <span
-                  className="whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-xs"
-                  style={{
-                    background: "var(--th-bg-surface)",
-                    color: "var(--th-text-muted)",
-                  }}
-                >
-                  {agent.role_id}
-                </span>
-              )}
-              <span
-                className="whitespace-nowrap text-xs"
-                style={{ color: "var(--th-text-muted)" }}
-              >
-                {tr("완료", "Done")} {agent.stats_tasks_done}
-              </span>
-            </div>
-            <button
-              onClick={onClose}
-              className="shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium transition-all hover:bg-[var(--th-bg-surface-hover)]"
-              style={{
-                border: "1px solid var(--th-input-border)",
-                color: "var(--th-text-secondary)",
-              }}
-            >
-              {tr("닫기", "Close")}
-            </button>
+                <SurfaceCard className="overflow-hidden px-0 py-0" style={{ background: "var(--th-bg-card)" }}>
+                  <button
+                    onClick={() => setTimelineOpen((v) => !v)}
+                    className="flex w-full items-center justify-between px-4 py-3 text-xs font-semibold"
+                    style={{ color: "var(--th-text-heading)" }}
+                  >
+                    <span>{tr("활동 타임라인", "Activity Timeline")}</span>
+                    <span style={{ color: "var(--th-text-muted)" }}>{timelineOpen ? "▲" : "▼"}</span>
+                  </button>
+                  {timelineOpen && (
+                    <div className="space-y-1.5 px-4 pb-3">
+                      {loadingTimeline ? (
+                        <SurfaceNotice tone="neutral" compact>…</SurfaceNotice>
+                      ) : timeline.length === 0 ? (
+                        <SurfaceEmptyState className="py-2 text-xs">{tr("활동 없음", "No activity")}</SurfaceEmptyState>
+                      ) : (
+                        <div className="max-h-64 space-y-1.5 overflow-y-auto">
+                          {timeline.map((evt) => {
+                            const sourceColor = evt.source === "dispatch" ? "#10b981" : evt.source === "session" ? "#38bdf8" : "#84cc16";
+                            const sourceLabel = evt.source === "dispatch" ? "D" : evt.source === "session" ? "S" : "K";
+                            const durationStr = evt.duration_ms != null
+                              ? evt.duration_ms < 60_000
+                                ? `${Math.round(evt.duration_ms / 1000)}s`
+                                : `${Math.round(evt.duration_ms / 60_000)}m`
+                              : null;
+                            return (
+                              <div key={`${evt.source}-${evt.id}`} className="flex items-start gap-2 text-xs">
+                                <span
+                                  className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-xs font-bold"
+                                  style={{ backgroundColor: `${sourceColor}22`, color: sourceColor }}
+                                >
+                                  {sourceLabel}
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <div className="truncate" style={{ color: "var(--th-text-primary)" }}>{evt.title}</div>
+                                  <div className="flex flex-wrap gap-2" style={{ color: "var(--th-text-muted)" }}>
+                                    <span>{timeAgo(evt.timestamp, isKo)}</span>
+                                    <span className="rounded px-1" style={{ backgroundColor: `${sourceColor}15`, color: sourceColor }}>
+                                      {evt.status}
+                                    </span>
+                                    {durationStr && <span>{durationStr}</span>}
+                                    {evt.detail && "issue" in evt.detail && <span>#{String(evt.detail.issue)}</span>}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </SurfaceCard>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {agent.role_id && (
+                    <span className="rounded px-1.5 py-0.5 font-mono text-xs" style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}>
+                      {agent.role_id}
+                    </span>
+                  )}
+                  <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    {tr("완료", "Done")} {agent.stats_tasks_done}
+                  </span>
+                </div>
+              </div>
+            </SurfaceSubsection>
           </div>
         </div>
       </div>

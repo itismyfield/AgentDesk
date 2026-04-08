@@ -2,6 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Building2, Plus, Save, Trash2, UserPlus, Users } from "lucide-react";
 import type { Agent, Office } from "../types";
 import * as api from "../api/client";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceEmptyState,
+  SurfaceMetricPill,
+  SurfaceNotice,
+  SurfaceSection,
+  SurfaceSubsection,
+} from "./common/SurfacePrimitives";
 
 interface OfficeManagerViewProps {
   offices: Office[];
@@ -21,8 +30,8 @@ interface OfficeDraft {
 
 const OFFICE_ICONS = ["🏢", "🏠", "🏭", "🏗️", "🏛️", "🍳", "🎮", "📚", "🔬", "🎨", "🛠️", "🌐"];
 const OFFICE_COLORS = [
-  "#6366f1", "#3b82f6", "#06b6d4", "#10b981", "#f59e0b",
-  "#ef4444", "#ec4899", "#8b5cf6", "#64748b", "#14b8a6",
+  "#10b981", "#14b8a6", "#06b6d4", "#3b82f6", "#84cc16",
+  "#f59e0b", "#f97316", "#ef4444", "#64748b", "#22c55e",
 ];
 
 function makeBlankDraft(): OfficeDraft {
@@ -30,7 +39,7 @@ function makeBlankDraft(): OfficeDraft {
     name: "",
     name_ko: "",
     icon: "🏢",
-    color: "#6366f1",
+    color: "#10b981",
     description: "",
   };
 }
@@ -41,7 +50,7 @@ function makeDraftFromOffice(office: Office | null): OfficeDraft {
     name: office.name ?? "",
     name_ko: office.name_ko ?? "",
     icon: office.icon ?? "🏢",
-    color: office.color ?? "#6366f1",
+    color: office.color ?? "#10b981",
     description: office.description ?? "",
   };
 }
@@ -253,69 +262,53 @@ export default function OfficeManagerView({
       className="mx-auto h-full max-w-6xl min-w-0 space-y-4 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
-            {tr("오피스 관리", "Offices")}
-          </h1>
-          <p className="mt-1 text-sm" style={{ color: "var(--th-text-muted)" }}>
-            {tr("오피스 CRUD, 멤버 배치, 표시 순서를 한 화면에서 관리합니다.", "Manage office CRUD, memberships, and ordering from one page.")}
-          </p>
+      <SurfaceSection
+        title={tr("오피스 관리", "Offices")}
+        description={tr("오피스 CRUD, 멤버 배치, 표시 순서를 한 화면에서 관리합니다.", "Manage office CRUD, memberships, and ordering from one page.")}
+        badge={`${order.length} ${tr("개", "items")}`}
+        actions={(
+          <div className="flex flex-wrap items-center gap-2">
+            {orderDirty && (
+              <>
+                <SurfaceActionButton tone="neutral" onClick={cancelOrder}>
+                  {tr("순서 취소", "Cancel Order")}
+                </SurfaceActionButton>
+                <SurfaceActionButton tone="success" disabled={orderSaving} onClick={() => void saveOrder()}>
+                  <span className="inline-flex items-center gap-1.5">
+                    <Save size={13} />
+                    {orderSaving ? tr("저장 중...", "Saving...") : tr("순서 저장", "Save Order")}
+                  </span>
+                </SurfaceActionButton>
+              </>
+            )}
+            <SurfaceActionButton tone="accent" onClick={startCreate}>
+              <span className="inline-flex items-center gap-1.5">
+                <Plus size={13} />
+                {tr("오피스 추가", "Add Office")}
+              </span>
+            </SurfaceActionButton>
+          </div>
+        )}
+      >
+        <div className="mt-4 flex flex-wrap gap-3">
+          <SurfaceMetricPill label={tr("오피스", "Offices")} value={`${order.length} ${tr("개", "items")}`} tone="accent" />
+          <SurfaceMetricPill label={tr("배치 멤버", "Assigned")} value={`${memberIds.size} ${tr("명", "agents")}`} tone={memberIds.size > 0 ? "info" : "neutral"} />
+          <SurfaceMetricPill label={tr("정렬 상태", "Ordering")} value={orderDirty ? tr("변경 있음", "Unsaved changes") : tr("동기화됨", "In sync")} tone={orderDirty ? "warn" : "success"} />
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {orderDirty && (
-            <>
-              <button
-                onClick={cancelOrder}
-                className="rounded-lg px-3 py-1.5 text-xs font-medium"
-                style={{ border: "1px solid rgba(148,163,184,0.24)", color: "var(--th-text-secondary)" }}
-              >
-                {tr("순서 취소", "Cancel Order")}
-              </button>
-              <button
-                onClick={() => void saveOrder()}
-                disabled={orderSaving}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-              >
-                <Save size={13} />
-                {orderSaving ? tr("저장 중...", "Saving...") : tr("순서 저장", "Save Order")}
-              </button>
-            </>
-          )}
-          <button
-            onClick={startCreate}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white"
-          >
-            <Plus size={13} />
-            {tr("오피스 추가", "Add Office")}
-          </button>
-        </div>
-      </div>
+      </SurfaceSection>
 
       <div className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
-        <section
-          className="rounded-2xl border p-4"
-          style={{ borderColor: "rgba(148,163,184,0.18)", background: "var(--th-surface)" }}
+        <SurfaceSection
+          title={tr("오피스 목록", "Office List")}
+          description={tr("선택한 오피스를 오른쪽에서 편집합니다.", "Select an office to edit on the right.")}
+          badge={`${order.length} ${tr("개", "items")}`}
+          className="h-fit"
         >
-          <div className="mb-3 flex items-center justify-between">
-            <div>
-              <div className="text-sm font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                {tr("오피스 목록", "Office List")}
-              </div>
-              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                {tr("선택한 오피스를 오른쪽에서 편집합니다.", "Select an office to edit on the right.")}
-              </div>
-            </div>
-            <span className="rounded-full px-2 py-1 text-[11px]" style={{ background: "rgba(59,130,246,0.12)", color: "#60a5fa" }}>
-              {order.length} {tr("개", "items")}
-            </span>
-          </div>
-
-          <div className="space-y-2">
+          <div className="mt-4 space-y-2">
             {order.map((office, index) => {
               const active = !creating && office.id === selectedId;
               return (
-                <div
+                <SurfaceCard
                   key={office.id}
                   className="flex items-center gap-3 rounded-xl border px-3 py-3 transition-colors"
                   style={{
@@ -348,8 +341,12 @@ export default function OfficeManagerView({
                         moveOffice(index, -1);
                       }}
                       disabled={index === 0}
-                      className="rounded-md p-1 hover:bg-white/5 disabled:opacity-35"
-                      style={{ color: "var(--th-text-muted)" }}
+                      className="rounded-md border p-1 transition-opacity hover:opacity-100 disabled:opacity-35"
+                      style={{
+                        color: "var(--th-text-muted)",
+                        background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
+                        borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                      }}
                       title={tr("위로", "Move Up")}
                     >
                       <ArrowUp size={13} />
@@ -359,66 +356,65 @@ export default function OfficeManagerView({
                         moveOffice(index, 1);
                       }}
                       disabled={index === order.length - 1}
-                      className="rounded-md p-1 hover:bg-white/5 disabled:opacity-35"
-                      style={{ color: "var(--th-text-muted)" }}
+                      className="rounded-md border p-1 transition-opacity hover:opacity-100 disabled:opacity-35"
+                      style={{
+                        color: "var(--th-text-muted)",
+                        background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
+                        borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                      }}
                       title={tr("아래로", "Move Down")}
                     >
                       <ArrowDown size={13} />
                     </button>
                   </div>
-                </div>
+                </SurfaceCard>
               );
             })}
 
             {creating && (
-              <div
-                className="rounded-xl border px-3 py-3"
-                style={{ borderColor: "rgba(99,102,241,0.35)", background: "rgba(99,102,241,0.08)", color: "var(--th-text-primary)" }}
-              >
+              <SurfaceNotice tone="accent">
                 <div className="text-sm font-medium">{tr("새 오피스 작성 중", "Creating a new office")}</div>
                 <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
                   {tr("오른쪽 폼을 채워 저장하세요.", "Fill out the form on the right and save it.")}
                 </div>
-              </div>
+              </SurfaceNotice>
             )}
           </div>
-        </section>
+        </SurfaceSection>
 
         <div className="space-y-4">
-          <section
-            className="rounded-2xl border p-4 sm:p-5"
-            style={{ borderColor: "rgba(148,163,184,0.18)", background: "var(--th-surface)" }}
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <Building2 size={18} style={{ color: creating ? "#818cf8" : selectedOffice?.color || "#60a5fa" }} />
-                  <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                    {creating ? tr("새 오피스", "New Office") : selectedOffice ? (isKo ? selectedOffice.name_ko || selectedOffice.name : selectedOffice.name) : tr("오피스 선택", "Select an Office")}
-                  </h2>
-                </div>
-                <p className="mt-1 text-sm" style={{ color: "var(--th-text-muted)" }}>
-                  {creating
-                    ? tr("기본 정보부터 저장한 뒤 멤버를 배치할 수 있습니다.", "Save the basic profile first, then assign members.")
-                    : tr("이름, 아이콘, 설명을 수정하고 멤버를 조정합니다.", "Edit the identity, icon, description, and members for this office.")}
-                </p>
-              </div>
-              {!creating && selectedOffice && (
-                <button
-                  onClick={() => void deleteOffice()}
-                  disabled={saving}
-                  className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium"
-                  style={{ border: "1px solid rgba(239,68,68,0.3)", color: "#f87171" }}
-                >
+          <SurfaceSection
+            title={creating ? tr("새 오피스", "New Office") : selectedOffice ? (isKo ? selectedOffice.name_ko || selectedOffice.name : selectedOffice.name) : tr("오피스 선택", "Select an Office")}
+            description={creating
+              ? tr("기본 정보부터 저장한 뒤 멤버를 배치할 수 있습니다.", "Save the basic profile first, then assign members.")
+              : tr("이름, 아이콘, 설명을 수정하고 멤버를 조정합니다.", "Edit the identity, icon, description, and members for this office.")}
+            badge={creating ? tr("초안", "Draft") : selectedOffice ? tr("편집 중", "Editing") : undefined}
+            actions={!creating && selectedOffice ? (
+              <SurfaceActionButton tone="danger" disabled={saving} onClick={() => void deleteOffice()}>
+                <span className="inline-flex items-center gap-1.5">
                   <Trash2 size={13} />
                   {tr("삭제", "Delete")}
-                </button>
-              )}
+                </span>
+              </SurfaceActionButton>
+            ) : undefined}
+            style={{
+              background: `linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, ${creating ? "var(--th-accent-primary)" : selectedOffice?.color || "var(--th-accent-info)"} 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 97%, transparent) 100%)`,
+            }}
+          >
+            <div className="mb-0 flex items-center gap-2">
+              <Building2 size={18} style={{ color: creating ? "var(--th-accent-primary)" : selectedOffice?.color || "var(--th-accent-info)" }} />
+              <span className="text-xs uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+                {tr("오피스 프로필", "Office Profile")}
+              </span>
             </div>
 
             {(creating || selectedOffice) ? (
               <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
-                <div className="space-y-3">
+                <SurfaceSubsection
+                  title={tr("기본 정보", "Identity")}
+                  description={tr("이름과 설명을 먼저 정리합니다.", "Define the office name and description first.")}
+                >
+                  <div className="space-y-3">
                   <label className="block">
                     <span className="mb-1 block text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
                       {tr("영문 이름", "Name")}
@@ -457,9 +453,14 @@ export default function OfficeManagerView({
                       style={inputStyle}
                     />
                   </label>
-                </div>
+                  </div>
+                </SurfaceSubsection>
 
-                <div className="space-y-3">
+                <SurfaceSubsection
+                  title={tr("표현", "Appearance")}
+                  description={tr("아이콘, 대표 색상, 미리보기를 한 곳에서 조정합니다.", "Adjust icon, accent color, and preview together.")}
+                >
+                  <div className="space-y-3">
                   <div>
                     <div className="mb-1 text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
                       {tr("아이콘", "Icon")}
@@ -471,8 +472,12 @@ export default function OfficeManagerView({
                           onClick={() => setDraft((prev) => ({ ...prev, icon }))}
                           className="flex h-10 w-10 items-center justify-center rounded-xl text-lg transition-colors"
                           style={{
-                            border: `1px solid ${draft.icon === icon ? "rgba(99,102,241,0.5)" : "rgba(148,163,184,0.18)"}`,
-                            background: draft.icon === icon ? "rgba(99,102,241,0.14)" : "var(--th-bg-surface)",
+                            border: draft.icon === icon
+                              ? "1px solid color-mix(in srgb, var(--th-accent-primary) 40%, transparent)"
+                              : "1px solid rgba(148,163,184,0.18)",
+                            background: draft.icon === icon
+                              ? "color-mix(in srgb, var(--th-accent-primary-soft) 76%, transparent)"
+                              : "var(--th-bg-surface)",
                           }}
                         >
                           {icon}
@@ -521,60 +526,56 @@ export default function OfficeManagerView({
                       </div>
                     </div>
                   </div>
-                </div>
+                  </div>
+                </SurfaceSubsection>
               </div>
             ) : (
-              <div className="mt-4 rounded-2xl border px-4 py-8 text-center" style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-muted)" }}>
+              <SurfaceEmptyState className="mt-4 px-4 py-8 text-center">
                 {tr("왼쪽에서 오피스를 선택하거나 새 오피스를 추가하세요.", "Choose an office from the left or create a new one.")}
-              </div>
+              </SurfaceEmptyState>
             )}
 
             {(creating || selectedOffice) && (
               <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
                 {creating && (
-                  <button
+                  <SurfaceActionButton
                     onClick={() => {
                       setCreating(false);
                       setSelectedId(offices[0]?.id ?? null);
                     }}
-                    className="rounded-lg px-3 py-2 text-sm font-medium"
-                    style={{ border: "1px solid rgba(148,163,184,0.24)", color: "var(--th-text-secondary)" }}
                   >
                     {tr("취소", "Cancel")}
-                  </button>
+                  </SurfaceActionButton>
                 )}
-                <button
+                <SurfaceActionButton
                   onClick={() => void saveOffice()}
                   disabled={saving || !draft.name.trim()}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
+                  tone="accent"
+                  className="text-sm"
                 >
-                  <Save size={14} />
-                  {saving ? tr("저장 중...", "Saving...") : tr("오피스 저장", "Save Office")}
-                </button>
+                  <span className="inline-flex items-center gap-1.5">
+                    <Save size={14} />
+                    {saving ? tr("저장 중...", "Saving...") : tr("오피스 저장", "Save Office")}
+                  </span>
+                </SurfaceActionButton>
               </div>
             )}
-          </section>
+          </SurfaceSection>
 
           {!creating && selectedOffice && (
-            <section
-              className="rounded-2xl border p-4 sm:p-5"
-              style={{ borderColor: "rgba(148,163,184,0.18)", background: "var(--th-surface)" }}
+            <SurfaceSection
+              title={tr("오피스 멤버", "Office Members")}
+              description={tr("현재 오피스에 배치할 에이전트를 토글합니다.", "Toggle which agents should belong to this office.")}
+              badge={`${memberIds.size} ${tr("명 배치됨", "assigned")}`}
+              style={{
+                background: `linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, ${selectedOffice.color} 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 97%, transparent) 100%)`,
+              }}
             >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <Users size={18} style={{ color: selectedOffice.color }} />
-                    <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                      {tr("오피스 멤버", "Office Members")}
-                    </h2>
-                  </div>
-                  <p className="mt-1 text-sm" style={{ color: "var(--th-text-muted)" }}>
-                    {tr("현재 오피스에 배치할 에이전트를 토글합니다.", "Toggle which agents should belong to this office.")}
-                  </p>
-                </div>
-                <div className="rounded-full px-3 py-1 text-xs" style={{ background: `${selectedOffice.color}22`, color: selectedOffice.color }}>
-                  {memberIds.size} {tr("명 배치됨", "assigned")}
-                </div>
+              <div className="mb-0 flex items-center gap-2">
+                <Users size={18} style={{ color: selectedOffice.color }} />
+                <span className="text-xs uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
+                  {tr("멤버 배치", "Membership")}
+                </span>
               </div>
 
               <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -591,46 +592,53 @@ export default function OfficeManagerView({
                 </span>
               </div>
 
-              <div className="mt-4 grid gap-3 md:grid-cols-2">
-                {filteredAgents.map((agent) => {
-                  const assigned = memberIds.has(agent.id);
-                  return (
-                    <button
-                      key={agent.id}
-                      onClick={() => void toggleMember(agent.id)}
-                      disabled={saving}
-                      className="flex items-center gap-3 rounded-2xl border px-3 py-3 text-left transition-colors disabled:opacity-60"
-                      style={{
-                        borderColor: assigned ? `${selectedOffice.color}55` : "rgba(148,163,184,0.18)",
-                        background: assigned ? `color-mix(in srgb, ${selectedOffice.color} 12%, var(--th-bg-surface))` : "var(--th-bg-surface)",
-                      }}
-                    >
-                      <div className="flex h-11 w-11 items-center justify-center rounded-2xl text-xl" style={{ background: "rgba(148,163,184,0.12)" }}>
-                        {agent.avatar_emoji}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
-                          {agent.alias || agent.name_ko || agent.name}
-                        </div>
-                        <div className="truncate text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                          {agent.department_name_ko || agent.department_name || tr("미배정", "Unassigned")}
-                        </div>
-                      </div>
-                      <span
-                        className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium"
+              {filteredAgents.length > 0 ? (
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  {filteredAgents.map((agent) => {
+                    const assigned = memberIds.has(agent.id);
+                    return (
+                      <SurfaceCard
+                        key={agent.id}
+                        onClick={() => void toggleMember(agent.id)}
+                        className="cursor-pointer rounded-2xl border px-3 py-3 text-left transition-colors disabled:opacity-60"
                         style={{
-                          background: assigned ? `${selectedOffice.color}22` : "rgba(148,163,184,0.12)",
-                          color: assigned ? selectedOffice.color : "var(--th-text-muted)",
+                          borderColor: assigned ? `${selectedOffice.color}55` : "rgba(148,163,184,0.18)",
+                          background: assigned ? `color-mix(in srgb, ${selectedOffice.color} 12%, var(--th-bg-surface))` : "var(--th-bg-surface)",
                         }}
                       >
-                        <UserPlus size={12} />
-                        {assigned ? tr("배치됨", "Assigned") : tr("추가", "Add")}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-11 w-11 items-center justify-center rounded-2xl text-xl" style={{ background: "rgba(148,163,184,0.12)" }}>
+                            {agent.avatar_emoji}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+                              {agent.alias || agent.name_ko || agent.name}
+                            </div>
+                            <div className="truncate text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                              {agent.department_name_ko || agent.department_name || tr("미배정", "Unassigned")}
+                            </div>
+                          </div>
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium"
+                            style={{
+                              background: assigned ? `${selectedOffice.color}22` : "rgba(148,163,184,0.12)",
+                              color: assigned ? selectedOffice.color : "var(--th-text-muted)",
+                            }}
+                          >
+                            <UserPlus size={12} />
+                            {assigned ? tr("배치됨", "Assigned") : tr("추가", "Add")}
+                          </span>
+                        </div>
+                      </SurfaceCard>
+                    );
+                  })}
+                </div>
+              ) : (
+                <SurfaceEmptyState className="mt-4">
+                  {tr("조건에 맞는 에이전트가 없습니다.", "No agents match this filter.")}
+                </SurfaceEmptyState>
+              )}
+            </SurfaceSection>
           )}
         </div>
       </div>

@@ -1,6 +1,7 @@
 import type { Agent, Department } from "../../types";
 import { localeName } from "../../i18n";
 import AgentAvatar from "../AgentAvatar";
+import { SurfaceActionButton, SurfaceCard } from "../common/SurfacePrimitives";
 import { STATUS_DOT } from "./constants";
 import type { Translator } from "./types";
 
@@ -37,10 +38,13 @@ export default function AgentCard({
   const dept = departments.find((d) => d.id === agent.department_id);
 
   return (
-    <div
+    <SurfaceCard
       onClick={onEdit}
-      className="group rounded-xl p-4 cursor-pointer transition-all hover:scale-[1.01] hover:shadow-lg hover:shadow-black/10"
-      style={{ background: "var(--th-card-bg)", border: "1px solid var(--th-card-border)" }}
+      className="group cursor-pointer rounded-3xl p-4 transition-all hover:-translate-y-0.5"
+      style={{
+        background: "color-mix(in srgb, var(--th-card-bg) 94%, transparent)",
+        borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
+      }}
     >
       <div className="flex items-start gap-3">
         <div className="relative shrink-0">
@@ -66,8 +70,12 @@ export default function AgentCard({
           {dept && (
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
               <span
-                className="text-xs px-1.5 py-0.5 rounded-md"
-                style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
+                className="rounded-full px-2 py-1 text-[11px]"
+                style={{
+                  background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
+                  color: "var(--th-text-muted)",
+                  border: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)",
+                }}
               >
                 {dept.icon} {localeName(locale, dept)}
               </span>
@@ -78,7 +86,7 @@ export default function AgentCard({
 
       <div
         className="mt-3 flex flex-wrap items-center justify-between gap-2 pt-2.5"
-        style={{ borderTop: "1px solid var(--th-card-border)" }}
+        style={{ borderTop: "1px solid color-mix(in srgb, var(--th-border) 70%, transparent)" }}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
           {agent.personality && (
@@ -97,33 +105,34 @@ export default function AgentCard({
         >
           {isDeleting ? (
             <>
-              <button
+              <SurfaceActionButton
                 onClick={onDeleteConfirm}
                 disabled={saving || agent.status === "working"}
-                className="px-2 py-0.5 rounded text-xs font-medium bg-red-600 hover:bg-red-500 text-white disabled:opacity-40 transition-colors"
+                tone="danger"
+                compact
               >
                 {tr("해고", "Fire")}
-              </button>
-              <button
+              </SurfaceActionButton>
+              <SurfaceActionButton
                 onClick={onDeleteCancel}
-                className="px-2 py-0.5 rounded text-xs transition-colors"
-                style={{ color: "var(--th-text-muted)" }}
+                tone="neutral"
+                compact
               >
                 {tr("취소", "No")}
-              </button>
+              </SurfaceActionButton>
             </>
           ) : (
-            <button
+            <SurfaceActionButton
               onClick={onDeleteClick}
-              className="px-1.5 py-0.5 rounded text-xs hover:bg-red-500/15 hover:text-red-400 transition-colors"
-              style={{ color: "var(--th-text-muted)" }}
-              title={tr("해고", "Fire")}
+              tone="neutral"
+              compact
+              style={{ minWidth: 28 }}
             >
               ✕
-            </button>
+            </SurfaceActionButton>
           )}
         </div>
       </div>
-    </div>
+    </SurfaceCard>
   );
 }

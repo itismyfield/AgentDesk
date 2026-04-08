@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import TooltipLabel from "../common/TooltipLabel";
 import type { TFunction } from "./model";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceSection,
+} from "../common/SurfacePrimitives";
 
 interface RateLimitBucket {
   id: string;
@@ -185,78 +190,87 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
   if (!data || !data.providers || data.providers.length === 0) return null;
 
   return (
-    <div className="game-panel relative overflow-hidden px-3 py-3 sm:px-4 sm:py-3.5">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div style={{ color: "#60a5fa" }}>
-            <TooltipLabel
-              text={title}
-              tooltip={tooltip}
-              className="text-[10px] sm:text-xs font-bold uppercase tracking-wider"
-            />
-          </div>
-          <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
-            {t({
-              ko: "Provider 버킷 사용량과 stale 캐시 상태",
-              en: "Provider bucket utilization and stale cache status",
-              ja: "Provider バケット使用量と stale cache 状態",
-              zh: "Provider bucket 使用量与 stale cache 状态",
-            })}
-          </div>
-        </div>
-        {onOpenSettings && (
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            className="shrink-0 rounded-lg px-3 py-2 text-[11px] font-medium"
-            style={{
-              color: "#93c5fd",
-              border: "1px solid rgba(96,165,250,0.35)",
-              background: "rgba(59,130,246,0.12)",
-            }}
-          >
-            {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
-          </button>
-        )}
-      </div>
-
-      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-x-6">
+    <SurfaceSection
+      eyebrow={t({ ko: "운영 Weather", en: "OPERATING WEATHER", ja: "運用 WEATHER", zh: "运营 WEATHER" })}
+      title={t({ ko: "Provider 한도 현황", en: "Provider Rate Limit Health", ja: "Provider 制限状況", zh: "Provider 限额状态" })}
+      description={t({
+        ko: "Provider 버킷 사용량과 stale 캐시 상태를 한눈에 확인합니다.",
+        en: "Track provider bucket utilization and stale cache state at a glance.",
+        ja: "Provider バケット使用量と stale キャッシュ状態をひと目で確認します。",
+        zh: "一眼查看 Provider bucket 使用率与 stale cache 状态。",
+      })}
+      actions={onOpenSettings ? (
+        <SurfaceActionButton onClick={onOpenSettings} tone="info" compact>
+          {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
+        </SurfaceActionButton>
+      ) : undefined}
+    >
+      <div className="mt-4 grid gap-3 xl:grid-cols-3">
         {data.providers.map((provider) => {
           const accent = getAccent(provider.provider);
           return (
-            <div key={provider.provider} className="flex items-center gap-0 min-w-0">
-              {/* Fixed-width left: provider + stale */}
-              <div className="flex items-center gap-1 shrink-0" style={{ width: 120 }}>
-                <span
-                  className="text-xs font-bold uppercase tracking-wider whitespace-nowrap"
-                  style={{ color: accent }}
-                >
-                  {(PROVIDER_ICONS[provider.provider] ?? "•")}{" "}
-                  {provider.provider}
-                </span>
-                {provider.stale ? (
-                  <span
-                    className="rounded px-1 py-px text-[10px] leading-tight font-medium shrink-0"
-                    style={{ color: "#fbbf24", background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.2)" }}
+            <SurfaceCard
+              key={provider.provider}
+              className="rounded-3xl p-4"
+              style={{
+                borderColor: `color-mix(in srgb, ${accent} 22%, var(--th-border) 78%)`,
+                background: "color-mix(in srgb, var(--th-card-bg) 92%, transparent)",
+              }}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div
+                    className="text-xs font-bold uppercase tracking-wider"
+                    style={{ color: accent }}
                   >
-                    {t({ ko: "지연", en: "STALE", ja: "遅延", zh: "延迟" })}
-                  </span>
-                ) : null}
+                    {(PROVIDER_ICONS[provider.provider] ?? "•")} {provider.provider}
+                  </div>
+                  <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                    {provider.stale
+                      ? t({ ko: "캐시 지연 상태", en: "Stale cache", ja: "キャッシュ遅延", zh: "缓存延迟" })
+                      : t({ ko: "정상 수집 중", en: "Fresh cache", ja: "正常取得中", zh: "缓存正常" })}
+                  </div>
+                </div>
+                <span
+                  className="rounded-full px-2 py-1 text-[10px] font-medium"
+                  style={{
+                    color: provider.stale ? "#fbbf24" : accent,
+                    border: `1px solid ${provider.stale ? "rgba(251,191,36,0.3)" : `color-mix(in srgb, ${accent} 24%, var(--th-border) 76%)`}`,
+                    background: provider.stale
+                      ? "rgba(251,191,36,0.1)"
+                      : `color-mix(in srgb, ${accent} 10%, var(--th-bg-surface) 90%)`,
+                  }}
+                >
+                  {provider.stale
+                    ? t({ ko: "지연", en: "STALE", ja: "遅延", zh: "延迟" })
+                    : t({ ko: "정상", en: "FRESH", ja: "正常", zh: "正常" })}
+                </span>
               </div>
-              {/* Buckets — flat row, refresh absolute below */}
-              <div className="flex-1 grid grid-cols-2 gap-x-4 sm:gap-x-5">
+
+              <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {provider.buckets.map((bucket) => {
                   const colors = getColors(provider.provider, bucket.level);
                   const remaining = formatTimeRemaining(bucket.resets_at);
                   return (
-                    <div key={bucket.id} className="relative flex items-center gap-1.5 sm:gap-2">
-                      <span
-                        className="text-xs font-bold shrink-0"
-                        style={{ color: colors.text, minWidth: 18 }}
-                      >
-                        {bucket.label}
-                      </span>
-                      <div className="flex-1" style={{ minWidth: 60 }}>
+                    <div key={bucket.id} className="relative">
+                      <div className="mb-1.5 flex items-center justify-between gap-2">
+                        <span
+                          className="text-xs font-bold"
+                          style={{ color: colors.text }}
+                        >
+                          {bucket.label}
+                        </span>
+                        <span
+                          className="text-xs font-mono font-bold"
+                          style={{
+                            color: colors.text,
+                            textShadow: bucket.level === "danger" ? `0 0 6px ${colors.glow}` : "none",
+                          }}
+                        >
+                          {bucket.utilization}%
+                        </span>
+                      </div>
+                      <div style={{ minWidth: 60 }}>
                         <div
                           className="relative rounded-full overflow-hidden"
                           style={{
@@ -275,19 +289,10 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                           />
                         </div>
                       </div>
-                      <span
-                        className="text-xs font-mono font-bold shrink-0"
-                        style={{
-                          color: colors.text,
-                          textShadow: bucket.level === "danger" ? `0 0 6px ${colors.glow}` : "none",
-                        }}
-                      >
-                        {bucket.utilization}%
-                      </span>
                       {remaining && (
                         <span
-                          className="absolute whitespace-nowrap text-[8px]"
-                          style={{ color: "var(--th-text-muted)", top: "calc(100% + 1px)", left: 0, lineHeight: 1 }}
+                          className="mt-1 inline-flex whitespace-nowrap text-[10px]"
+                          style={{ color: "var(--th-text-muted)", lineHeight: 1.2 }}
                         >
                           ↻ {remaining}
                         </span>
@@ -296,10 +301,10 @@ export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetPr
                   );
                 })}
               </div>
-            </div>
+            </SurfaceCard>
           );
         })}
       </div>
-    </div>
+    </SurfaceSection>
   );
 }

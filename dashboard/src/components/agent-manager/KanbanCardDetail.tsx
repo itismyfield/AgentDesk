@@ -5,6 +5,13 @@ import CardIssueContent from "./CardIssueContent";
 import CardTimeline from "./CardTimeline";
 import TurnTranscriptPanel from "./TurnTranscriptPanel";
 import { localeName } from "../../i18n";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceEmptyState,
+  SurfaceMetricPill,
+  SurfaceNotice,
+} from "../common/SurfacePrimitives";
 import type {
   Agent,
   KanbanCard,
@@ -140,6 +147,11 @@ export default function KanbanCardDetail({
   const [reviewBusy, setReviewBusy] = useState(false);
 
   const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
+  const inputChrome = {
+    borderColor: "color-mix(in srgb, var(--th-border) 70%, transparent)",
+    background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+    color: "var(--th-text-primary)",
+  } as const;
 
   const getAgentLabel = (agentId: string | null | undefined) => {
     if (!agentId) return tr("미할당", "Unassigned");
@@ -224,44 +236,66 @@ export default function KanbanCardDetail({
   };
 
   return (
-    <div className="fixed inset-0 z-50 backdrop-blur-sm flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-0 sm:p-4" style={{ backgroundColor: "var(--th-modal-overlay)" }} onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
         className="w-full max-w-3xl max-h-[88svh] overflow-y-auto rounded-t-3xl border p-5 sm:max-h-[90vh] sm:rounded-3xl sm:p-6 space-y-4"
         style={{
-          backgroundColor: "var(--th-bg-surface)",
-          borderColor: "rgba(148,163,184,0.24)",
+          background:
+            "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, transparent) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
+          borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
           paddingBottom: "max(6rem, calc(6rem + env(safe-area-inset-bottom)))",
         }}
         role="dialog" aria-modal="true" aria-label="Card details"
       >
         <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
-                {labelForStatus(selectedCard.status, tr)}
-              </span>
-              <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
-                {priorityLabel(selectedCard.priority, tr)}
-              </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap gap-2">
+              <SurfaceMetricPill
+                label={tr("상태", "Status")}
+                value={labelForStatus(selectedCard.status, tr)}
+                tone="info"
+                className="min-w-[120px]"
+              />
+              <SurfaceMetricPill
+                label={tr("우선순위", "Priority")}
+                value={priorityLabel(selectedCard.priority, tr)}
+                tone="warn"
+                className="min-w-[120px]"
+              />
               {selectedCard.github_repo && (
-                <span className="px-2 py-0.5 rounded-full text-xs bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {selectedCard.github_repo}
-                </span>
+                <SurfaceMetricPill
+                  label="GitHub"
+                  value={selectedCard.github_repo}
+                  tone="neutral"
+                  className="min-w-[140px]"
+                />
               )}
             </div>
             <h3 className="mt-2 text-xl font-semibold" style={{ color: "var(--th-text-heading)" }}>
               {selectedCard.title}
             </h3>
           </div>
-          <button
-            onClick={onClose}
-            className="shrink-0 whitespace-nowrap rounded-xl px-3 py-2 text-sm bg-surface-medium"
-            style={{ color: "var(--th-text-secondary)" }}
-          >
+          <SurfaceActionButton onClick={onClose} tone="neutral" className="shrink-0 whitespace-nowrap">
             {tr("닫기", "Close")}
-          </button>
+          </SurfaceActionButton>
         </div>
+
+        {/* Pipeline progress visualization */}
+        {selectedCard.pipeline_stage_id && (
+          <PipelineProgress
+            tr={tr}
+            locale={locale}
+            cardId={selectedCard.id}
+            currentStageId={selectedCard.pipeline_stage_id}
+          />
+        )}
+
+        {actionError && (
+          <SurfaceNotice tone="danger">
+            {actionError}
+          </SurfaceNotice>
+        )}
 
         <div className="grid gap-3 md:grid-cols-2">
           <label className="space-y-1">
@@ -270,7 +304,7 @@ export default function KanbanCardDetail({
               value={editor.title}
               onChange={(event) => setEditor((prev) => ({ ...prev, title: event.target.value }))}
               className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
-              style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+              style={inputChrome}
             />
           </label>
           <div className="space-y-1">
@@ -326,7 +360,7 @@ export default function KanbanCardDetail({
               value={editor.assignee_agent_id}
               onChange={(event) => setEditor((prev) => ({ ...prev, assignee_agent_id: event.target.value }))}
               className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
-              style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+              style={inputChrome}
             >
               <option value="">{tr("없음", "None")}</option>
               {agents.map((agent) => (
@@ -340,14 +374,14 @@ export default function KanbanCardDetail({
               value={editor.priority}
               onChange={(event) => setEditor((prev) => ({ ...prev, priority: event.target.value as KanbanCardPriority }))}
               className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
-              style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+              style={inputChrome}
             >
               {PRIORITY_OPTIONS.map((priority) => (
                 <option key={priority} value={priority}>{priorityLabel(priority, tr)}</option>
               ))}
             </select>
           </label>
-          <div className="rounded-2xl border p-3 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
+          <SurfaceCard className="p-3" style={{ background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)" }}>
             <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("GitHub", "GitHub")}</div>
             <div style={{ color: "var(--th-text-primary)" }}>
               {selectedCard.github_issue_url ? (
@@ -358,7 +392,7 @@ export default function KanbanCardDetail({
                 selectedCard.github_issue_number ? `#${selectedCard.github_issue_number}` : "-"
               )}
             </div>
-          </div>
+          </SurfaceCard>
         </div>
 
         {/* Blocked reason */}
@@ -370,15 +404,21 @@ export default function KanbanCardDetail({
             <div className="text-sm" style={{ color: "#fca5a5" }}>
               {selectedCard.blocked_reason}
             </div>
-          </div>
+          </SurfaceNotice>
         )}
 
         {/* Review status */}
         {selectedCard.status === "review" && selectedCard.review_status && (
-          <div className="rounded-2xl border p-4" style={{
-            backgroundColor: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "rgba(234,179,8,0.08)" : selectedCard.review_status === "improve_rework" ? "rgba(249,115,22,0.08)" : "rgba(20,184,166,0.08)",
-            borderColor: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "rgba(234,179,8,0.3)" : selectedCard.review_status === "improve_rework" ? "rgba(249,115,22,0.3)" : "rgba(20,184,166,0.3)",
-          }}>
+          <SurfaceNotice
+            tone={
+              (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending")
+                ? "warn"
+                : selectedCard.review_status === "improve_rework"
+                  ? "danger"
+                  : "success"
+            }
+            className="block"
+          >
             <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{
               color: (selectedCard.review_status === "dilemma_pending" || selectedCard.review_status === "suggestion_pending") ? "#eab308" : selectedCard.review_status === "improve_rework" ? "#f97316" : "#14b8a6",
             }}>
@@ -404,7 +444,7 @@ export default function KanbanCardDetail({
               {selectedCard.review_status === "dilemma_pending" && tr("판단이 어려운 항목이 있습니다. 수동으로 결정해 주세요.", "Dilemma items found — manual decision needed.")}
               {selectedCard.review_status === "decided" && tr("리뷰 결정이 완료되었습니다.", "Review decision completed.")}
             </div>
-          </div>
+          </SurfaceNotice>
         )}
 
         {/* Review suggestion decision UI */}
@@ -415,10 +455,13 @@ export default function KanbanCardDetail({
           if (actionableItems.length === 0) return null;
           const allDecided = actionableItems.every((i) => reviewDecisions[i.id]);
           return (
-            <div className="rounded-2xl border p-4 space-y-4" style={{
-              borderColor: "rgba(234,179,8,0.35)",
-              backgroundColor: "rgba(234,179,8,0.06)",
-            }}>
+            <SurfaceCard
+              className="space-y-4"
+              style={{
+                borderColor: "rgba(234,179,8,0.35)",
+                backgroundColor: "rgba(234,179,8,0.06)",
+              }}
+            >
               <div className="flex items-center justify-between gap-2">
                 <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#eab308" }}>
                   {tr("리뷰 제안 사항", "Review Suggestions")}
@@ -434,7 +477,7 @@ export default function KanbanCardDetail({
                 {actionableItems.map((item) => {
                   const decision = reviewDecisions[item.id];
                   return (
-                    <div key={item.id} className="rounded-xl border p-3 space-y-2" style={{
+                    <SurfaceCard key={item.id} className="space-y-2 p-3" style={{
                       borderColor: decision === "accept" ? "rgba(34,197,94,0.35)" : decision === "reject" ? "rgba(239,68,68,0.35)" : "rgba(148,163,184,0.22)",
                       backgroundColor: decision === "accept" ? "rgba(34,197,94,0.06)" : decision === "reject" ? "rgba(239,68,68,0.06)" : "rgba(255,255,255,0.03)",
                     }}>
@@ -466,40 +509,38 @@ export default function KanbanCardDetail({
                         </div>
                       )}
                       <div className="flex gap-2 pt-1">
-                        <button
+                        <SurfaceActionButton
                           onClick={() => {
                             setReviewDecisions((prev) => ({ ...prev, [item.id]: "accept" }));
                             void api.saveReviewDecisions(reviewData.id, [{ item_id: item.id, decision: "accept" }]).catch(() => {});
                           }}
-                          className="flex-1 rounded-lg px-3 py-1.5 text-xs font-medium border transition-colors"
+                          tone={decision === "accept" ? "success" : "neutral"}
+                          className="flex-1"
                           style={{
-                            borderColor: decision === "accept" ? "rgba(34,197,94,0.6)" : "rgba(148,163,184,0.28)",
-                            backgroundColor: decision === "accept" ? "rgba(34,197,94,0.2)" : "transparent",
                             color: decision === "accept" ? "#4ade80" : "var(--th-text-secondary)",
                           }}
                         >
                           {tr("수용", "Accept")}
-                        </button>
-                        <button
+                        </SurfaceActionButton>
+                        <SurfaceActionButton
                           onClick={() => {
                             setReviewDecisions((prev) => ({ ...prev, [item.id]: "reject" }));
                             void api.saveReviewDecisions(reviewData.id, [{ item_id: item.id, decision: "reject" }]).catch(() => {});
                           }}
-                          className="flex-1 rounded-lg px-3 py-1.5 text-xs font-medium border transition-colors"
+                          tone={decision === "reject" ? "danger" : "neutral"}
+                          className="flex-1"
                           style={{
-                            borderColor: decision === "reject" ? "rgba(239,68,68,0.6)" : "rgba(148,163,184,0.28)",
-                            backgroundColor: decision === "reject" ? "rgba(239,68,68,0.2)" : "transparent",
                             color: decision === "reject" ? "#f87171" : "var(--th-text-secondary)",
                           }}
                         >
                           {tr("불수용", "Reject")}
-                        </button>
+                        </SurfaceActionButton>
                       </div>
-                    </div>
+                    </SurfaceCard>
                   );
                 })}
               </div>
-              <button
+              <SurfaceActionButton
                 disabled={!allDecided || reviewBusy}
                 onClick={async () => {
                   setReviewBusy(true);
@@ -514,9 +555,10 @@ export default function KanbanCardDetail({
                     setReviewBusy(false);
                   }
                 }}
-                className="w-full rounded-xl px-4 py-2.5 text-sm font-medium text-white disabled:opacity-40 transition-colors"
+                tone="warn"
+                className="w-full py-2.5 text-sm"
                 style={{
-                  backgroundColor: allDecided ? "#eab308" : "rgba(234,179,8,0.3)",
+                  color: allDecided ? "#fef3c7" : "var(--th-text-muted)",
                 }}
               >
                 {reviewBusy
@@ -524,8 +566,8 @@ export default function KanbanCardDetail({
                   : allDecided
                     ? tr("결정 완료 → 재디스패치", "Decisions Complete → Dispatch Rework")
                     : tr("모든 항목에 결정을 내려주세요", "Decide all items first")}
-              </button>
-            </div>
+              </SurfaceActionButton>
+            </SurfaceCard>
           );
         })()}
 
@@ -557,7 +599,7 @@ export default function KanbanCardDetail({
         </div>
 
         {canRedispatchCard(selectedCard) && (
-          <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "var(--th-border-subtle)" }}>
+          <SurfaceCard className="space-y-3">
             <div>
               <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
                 {tr("이슈 변경 후 재전송", "Resend with Updated Issue")}
@@ -576,23 +618,23 @@ export default function KanbanCardDetail({
                 value={redispatchReason}
                 onChange={(e) => setRedispatchReason(e.target.value)}
                 className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
-                style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                style={inputChrome}
               />
-              <button
+              <SurfaceActionButton
                 type="button"
                 onClick={() => void handleRedispatch()}
                 disabled={redispatching}
-                className="rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-50 whitespace-nowrap"
-                style={{ backgroundColor: "#d97706" }}
+                tone="warn"
+                className="whitespace-nowrap"
               >
                 {redispatching ? tr("전송 중...", "Sending...") : tr("재전송", "Resend")}
-              </button>
+              </SurfaceActionButton>
             </div>
-          </div>
+          </SurfaceCard>
         )}
 
         {canRetryCard(selectedCard) && (
-          <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "var(--th-border-subtle)" }}>
+          <SurfaceCard className="space-y-3">
             <div>
               <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
                 {tr("재시도 / 담당자 변경", "Retry / Change Assignee")}
@@ -606,42 +648,30 @@ export default function KanbanCardDetail({
                 value={retryAssigneeId}
                 onChange={(event) => setRetryAssigneeId(event.target.value)}
                 className="w-full rounded-xl px-3 py-2 text-sm bg-surface-light border"
-                style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                style={inputChrome}
               >
                 {agents.map((agent) => (
                   <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
                 ))}
               </select>
-              <button
+              <SurfaceActionButton
                 type="button"
                 onClick={() => void handleRetryCard()}
                 disabled={retryingCard || !(retryAssigneeId || selectedCard.assignee_agent_id)}
-                className="rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-50 whitespace-nowrap"
-                style={{ backgroundColor: "#7c3aed" }}
+                tone="accent"
+                className="whitespace-nowrap"
               >
                 {retryingCard ? tr("전송 중...", "Sending...") : tr("재시도", "Retry")}
-              </button>
+              </SurfaceActionButton>
             </div>
-          </div>
+          </SurfaceCard>
         )}
 
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 text-sm">
-          <div className="rounded-2xl border p-3 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-            <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("생성", "Created")}</div>
-            <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.created_at, locale)}</div>
-          </div>
-          <div className="rounded-2xl border p-3 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-            <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("요청", "Requested")}</div>
-            <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.requested_at, locale)}</div>
-          </div>
-          <div className="rounded-2xl border p-3 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-            <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("시작", "Started")}</div>
-            <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.started_at, locale)}</div>
-          </div>
-          <div className="rounded-2xl border p-3 bg-surface-subtle" style={{ borderColor: "var(--th-border-subtle)" }}>
-            <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("완료", "Completed")}</div>
-            <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.completed_at, locale)}</div>
-          </div>
+          <SurfaceMetricPill label={tr("생성", "Created")} value={formatIso(selectedCard.created_at, locale)} />
+          <SurfaceMetricPill label={tr("요청", "Requested")} value={formatIso(selectedCard.requested_at, locale)} />
+          <SurfaceMetricPill label={tr("시작", "Started")} value={formatIso(selectedCard.started_at, locale)} />
+          <SurfaceMetricPill label={tr("완료", "Completed")} value={formatIso(selectedCard.completed_at, locale)} />
         </div>
 
         {/* Dispatch history — all dispatches for this card */}
@@ -666,7 +696,7 @@ export default function KanbanCardDetail({
           };
 
           return (
-            <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "var(--th-border-subtle)" }}>
+            <SurfaceCard className="space-y-3">
               <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
                 {tr("Dispatch 이력", "Dispatch history")}
                 {cardDispatches.length > 0 && (
@@ -676,9 +706,9 @@ export default function KanbanCardDetail({
                 )}
               </h4>
               {parseCardMetadata(selectedCard.metadata_json).timed_out_reason && (
-                <div className="rounded-xl px-3 py-2 text-sm" style={{ color: "#fdba74", backgroundColor: "rgba(154,52,18,0.18)" }}>
+                <SurfaceNotice tone="warn" compact className="text-sm">
                   {parseCardMetadata(selectedCard.metadata_json).timed_out_reason}
-                </div>
+                </SurfaceNotice>
               )}
               {cardDispatches.length > 0 ? (
                 <div className="space-y-2 max-h-64 overflow-y-auto">
@@ -726,18 +756,18 @@ export default function KanbanCardDetail({
                   ))}
                 </div>
               ) : (
-                <div className="grid gap-2 md:grid-cols-2 text-sm">
+                <SurfaceEmptyState className="grid gap-2 md:grid-cols-2 text-sm">
                   <div>{tr("dispatch 상태", "Dispatch status")}: {selectedCard.latest_dispatch_status ?? "-"}</div>
                   <div>{tr("최신 dispatch", "Latest dispatch")}: {selectedCard.latest_dispatch_id ? `#${selectedCard.latest_dispatch_id.slice(0, 8)}` : "-"}</div>
-                </div>
+                </SurfaceEmptyState>
               )}
-            </div>
+            </SurfaceCard>
           );
         })()}
 
         {/* State transition history (audit log) */}
         {auditLog.length > 0 && (
-          <div className="rounded-2xl border p-4 bg-surface-subtle space-y-3" style={{ borderColor: "var(--th-border-subtle)" }}>
+          <SurfaceCard className="space-y-3">
             <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
               {tr("상태 전환 이력", "State Transition History")}
               <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
@@ -766,7 +796,7 @@ export default function KanbanCardDetail({
                 </div>
               ))}
             </div>
-          </div>
+          </SurfaceCard>
         )}
 
         {/* Unified GitHub comment timeline */}
@@ -781,41 +811,43 @@ export default function KanbanCardDetail({
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex gap-2">
-            <button
+            <SurfaceActionButton
               onClick={handleDeleteCard}
               disabled={savingCard}
-              className="rounded-xl px-4 py-2 text-sm font-medium"
-              style={{ color: "#fecaca", backgroundColor: "rgba(127,29,29,0.32)" }}
+              tone="danger"
+              className="text-sm"
+              style={{ color: "#fecaca" }}
             >
               {tr("카드 삭제", "Delete card")}
-            </button>
+            </SurfaceActionButton>
             {selectedCard.status !== "done" && (
-              <button
+              <SurfaceActionButton
                 onClick={() => setCancelConfirm({ cardIds: [selectedCard.id], source: "single" })}
                 disabled={savingCard}
-                className="rounded-xl px-4 py-2 text-sm font-medium"
-                style={{ color: "#9ca3af", backgroundColor: "rgba(107,114,128,0.18)" }}
+                tone="neutral"
+                className="text-sm"
               >
                 {tr("백로그로 되돌리기", "Move to backlog")}
               </button>
             )}
           </div>
           <div className="flex flex-col-reverse gap-2 sm:flex-row">
-            <button
+            <SurfaceActionButton
               onClick={onClose}
-              className="rounded-xl px-4 py-2 text-sm bg-surface-medium"
-              style={{ color: "var(--th-text-secondary)" }}
+              tone="neutral"
+              className="text-sm"
             >
               {tr("닫기", "Close")}
-            </button>
-            <button
+            </SurfaceActionButton>
+            <SurfaceActionButton
               onClick={() => void handleSaveCard()}
               disabled={savingCard || !editor.title.trim()}
-              className="rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-              style={{ backgroundColor: "#2563eb" }}
+              tone="info"
+              className="text-sm"
+              style={{ color: "#dbeafe" }}
             >
               {savingCard ? tr("저장 중", "Saving") : tr("저장", "Save")}
-            </button>
+            </SurfaceActionButton>
           </div>
         </div>
       </div>

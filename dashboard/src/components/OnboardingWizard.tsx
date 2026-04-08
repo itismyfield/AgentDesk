@@ -758,11 +758,11 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   const stepBox = "rounded-2xl border p-6 space-y-5";
   const inputStyle = "w-full rounded-xl px-4 py-3 text-sm bg-surface-subtle border";
   const btnPrimary =
-    "px-6 py-3 rounded-xl text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors";
+    "px-6 py-3 rounded-xl text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors";
   const btnSecondary =
-    "px-6 py-3 rounded-xl text-sm font-medium border text-white/70 hover:text-white transition-colors";
+    "px-6 py-3 rounded-xl text-sm font-medium border bg-surface-subtle text-th-text-secondary hover:text-th-text-primary hover:opacity-100 disabled:opacity-50 transition-[opacity,color]";
   const btnSmall =
-    "px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors";
+    "px-3 py-1.5 rounded-lg text-xs font-medium border bg-surface-subtle text-th-text-secondary hover:text-th-text-primary hover:opacity-100 transition-[opacity,color]";
   const labelStyle = "text-xs font-medium block mb-1";
   const actionRow = "flex flex-col sm:flex-row gap-3 pt-2";
   const borderLight = "rgba(148,163,184,0.2)";
@@ -918,7 +918,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               className="h-1.5 rounded-full transition-all"
               style={{
                 width: s <= step ? 40 : 20,
-                backgroundColor: s <= step ? "#818cf8" : "rgba(148,163,184,0.3)",
+                backgroundColor: s <= step ? "var(--th-accent-primary)" : "rgba(148,163,184,0.3)",
               }}
             />
           ))}
@@ -951,13 +951,19 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           </div>
 
           {/* How to get tokens */}
-          <div className="rounded-xl p-4 text-sm space-y-2" style={{ backgroundColor: "rgba(99,102,241,0.08)", border: `1px solid rgba(99,102,241,0.2)` }}>
-            <div className="font-medium" style={{ color: "#a5b4fc" }}>
+          <div
+            className="rounded-xl p-4 text-sm space-y-2"
+            style={{
+              background: "color-mix(in srgb, var(--th-accent-primary-soft) 72%, transparent)",
+              border: "1px solid color-mix(in srgb, var(--th-accent-primary) 24%, var(--th-border) 76%)",
+            }}
+          >
+            <div className="font-medium" style={{ color: "var(--th-text-primary)" }}>
               {tr("봇 토큰을 얻는 방법", "How to get bot tokens")}
             </div>
             <ol className="list-decimal list-inside space-y-1" style={{ color: "var(--th-text-secondary)" }}>
               <li>
-                <a href="https://discord.com/developers/applications" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">
+                <a href="https://discord.com/developers/applications" target="_blank" rel="noopener noreferrer" className="text-emerald-300 hover:text-emerald-200 underline">
                   Discord Developer Portal
                 </a>
                 {tr("에서 New Application 클릭", " → Click New Application")}
@@ -1010,8 +1016,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                         }}
                         className="px-3 py-1 text-xs transition-colors"
                         style={{
-                          backgroundColor: bot.provider === p ? "rgba(99,102,241,0.3)" : "transparent",
-                          color: bot.provider === p ? "#a5b4fc" : "var(--th-text-muted)",
+                          backgroundColor: bot.provider === p ? "color-mix(in srgb, var(--th-accent-primary-soft) 84%, transparent)" : "transparent",
+                          color: bot.provider === p ? "var(--th-text-primary)" : "var(--th-text-muted)",
                         }}
                       >
                         {providerLabel(p)}
@@ -1048,7 +1054,12 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                       href={makeInviteUrl(bot.botInfo.bot_id!, PERMS.command)}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                      className="text-xs px-2 py-0.5 rounded-md border transition-colors hover:opacity-100"
+                      style={{
+                        borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)",
+                        background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
+                        color: "var(--th-text-primary)",
+                      }}
                     >
                       {tr("서버에 초대 →", "Invite to server →")}
                     </a>
@@ -1107,7 +1118,12 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   href={makeInviteUrl(announceBotInfo.bot_id!, PERMS.announce)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                  className="text-xs px-2 py-0.5 rounded-md border transition-colors hover:opacity-100"
+                  style={{
+                    borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)",
+                    background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
+                    color: "var(--th-text-primary)",
+                  }}
                 >
                   {tr("서버에 초대 (관리자 권한) →", "Invite to server (Admin) →")}
                 </a>
@@ -1131,7 +1147,13 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 "시스템 상태, 오류, 경고 등 정보 전달에만 사용됩니다.\n이 봇의 메시지에는 에이전트가 반응하지 않습니다.\n없어도 기본 기능에 지장은 없습니다.",
                 "Only for system status and error notifications.\nAgents don't respond to this bot's messages.\nOptional — core features work without it.",
               )} />
-              <span className="text-xs px-1.5 py-0.5 rounded bg-surface-hover font-medium" style={{ color: "var(--th-text-muted)" }}>
+              <span
+                className="text-xs px-1.5 py-0.5 rounded font-medium"
+                style={{
+                  color: "var(--th-text-muted)",
+                  background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)",
+                }}
+              >
                 {tr("선택", "Optional")}
               </span>
             </div>
@@ -1150,7 +1172,12 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   href={makeInviteUrl(notifyBotInfo.bot_id!, PERMS.notify)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                  className="text-xs px-2 py-0.5 rounded-md border transition-colors hover:opacity-100"
+                  style={{
+                    borderColor: "color-mix(in srgb, var(--th-accent-primary) 26%, var(--th-border) 74%)",
+                    background: "color-mix(in srgb, var(--th-accent-primary-soft) 78%, transparent)",
+                    color: "var(--th-text-primary)",
+                  }}
                 >
                   {tr("서버에 초대 →", "Invite to server →")}
                 </a>
@@ -1169,7 +1196,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               onClick={() => void validateStep1()}
               disabled={!commandBots[0]?.token || !announceToken || validating}
               className={btnSecondary}
-              style={{ borderColor: "rgba(99,102,241,0.4)", color: "#a5b4fc" }}
+              style={{
+                borderColor: "color-mix(in srgb, var(--th-accent-primary) 32%, var(--th-border) 68%)",
+                color: "var(--th-text-primary)",
+              }}
             >
               {validating ? tr("검증 중...", "Validating...") : tr("토큰 검증", "Validate Tokens")}
             </button>
@@ -1186,7 +1216,12 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           </div>
           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {tr("토큰은 나중에 설정 파일에서 직접 입력할 수 있습니다: ", "Tokens can be set later in: ")}
-            <code className="text-xs px-1 py-0.5 rounded bg-surface-hover">~/.adk/release/config/agentdesk.yaml</code>
+            <code
+              className="text-xs px-1 py-0.5 rounded"
+              style={{ background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)" }}
+            >
+              ~/.adk/release/agentdesk.yaml
+            </code>
           </p>
         </div>
       )}
@@ -1259,7 +1294,12 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                     <div className="rounded-lg p-3 text-xs" style={{ backgroundColor: "rgba(251,191,36,0.08)" }}>
                       <div style={{ color: "#fde68a" }}>
                         {tr("터미널에서 로그인하세요:", "Login in terminal:")}
-                        <code className="ml-2 px-1.5 py-0.5 rounded bg-surface-hover">{providerLoginCommand(provider)}</code>
+                        <code
+                          className="ml-2 px-1.5 py-0.5 rounded"
+                          style={{ background: "color-mix(in srgb, var(--th-bg-surface) 94%, transparent)" }}
+                        >
+                          {providerLoginCommand(provider)}
+                        </code>
                       </div>
                     </div>
                   )}
@@ -1307,8 +1347,11 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 onClick={() => selectTemplate(tpl.key)}
                 className="rounded-xl p-4 border text-left transition-all hover:scale-[1.02]"
                 style={{
-                  borderColor: selectedTemplate === tpl.key ? "#818cf8" : borderLight,
-                  backgroundColor: selectedTemplate === tpl.key ? "rgba(99,102,241,0.1)" : "transparent",
+                  borderColor: selectedTemplate === tpl.key ? "var(--th-accent-primary)" : borderLight,
+                  backgroundColor:
+                    selectedTemplate === tpl.key
+                      ? "color-mix(in srgb, var(--th-accent-primary-soft) 82%, transparent)"
+                      : "transparent",
                 }}
               >
                 <div className="text-2xl mb-2">{tpl.icon}</div>
@@ -1376,7 +1419,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                             onClick={() => void generateAiPrompt(agent.id)}
                             disabled={generatingPrompt}
                             className={btnSmall}
-                            style={{ borderColor: "rgba(99,102,241,0.4)", color: "#a5b4fc" }}
+                            style={{
+                              borderColor: "color-mix(in srgb, var(--th-accent-primary) 32%, var(--th-border) 68%)",
+                              color: "var(--th-text-primary)",
+                            }}
                           >
                             {generatingPrompt ? tr("생성 중...", "Generating...") : tr("AI 초안 생성", "AI Draft")}
                           </button>
@@ -1601,8 +1647,11 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
             />
 
-            <div className="rounded-lg p-3 text-xs space-y-2" style={{ backgroundColor: "rgba(99,102,241,0.06)" }}>
-              <div className="font-medium" style={{ color: "#a5b4fc" }}>
+            <div
+              className="rounded-lg p-3 text-xs space-y-2"
+              style={{ background: "color-mix(in srgb, var(--th-accent-primary-soft) 64%, transparent)" }}
+            >
+              <div className="font-medium" style={{ color: "var(--th-text-primary)" }}>
                 {tr("Discord 사용자 ID 찾는 방법", "How to find your Discord User ID")}
               </div>
               <ol className="list-decimal list-inside space-y-1" style={{ color: "var(--th-text-secondary)" }}>

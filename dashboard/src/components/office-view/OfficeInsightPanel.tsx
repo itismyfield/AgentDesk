@@ -2,6 +2,14 @@ import { useState, useEffect, type ReactNode } from "react";
 import type { Notification } from "../NotificationCenter";
 import type { Agent, AuditLogEntry, KanbanCard } from "../../types";
 import { getAgentWarnings } from "../../agent-insights";
+import {
+  SurfaceActionButton,
+  SurfaceCard,
+  SurfaceListItem,
+  SurfaceMetricPill,
+  SurfaceNotice,
+  SurfaceSection,
+} from "../common/SurfacePrimitives";
 
 interface OfficeInsightPanelProps {
   agents: Agent[];
@@ -104,175 +112,176 @@ export default function OfficeInsightPanel({
   const rootClassName = docked
     ? "relative z-20 w-full pointer-events-auto"
     : "relative z-20 mb-3 px-3 pt-3 pointer-events-auto sm:absolute sm:left-auto sm:right-3 sm:top-3 sm:mb-0 sm:w-[min(22rem,calc(100vw-1.5rem))] sm:px-0 sm:pt-0";
+  const sectionEyebrow = isKo ? "오피스 상황판" : "Office pulse";
+  const sectionTitle = isKo ? "오피스 운영 신호" : "Office operations";
+  const sectionDescription = isKo
+    ? "리뷰, 완료, 열린 이슈, 경고 에이전트를 같은 표면에서 빠르게 확인합니다."
+    : "Review, closed issues, open work, and warning agents from one surface.";
+  const situationBody = (
+    <>
+      <div className="mt-4 grid grid-cols-3 gap-2">
+        <StatChip
+          label={isKo ? "검토필요" : "Review"}
+          value={String(reviewCount)}
+          tone="info"
+          interactive
+          onClick={onNavigateToKanban}
+        />
+        <StatChip
+          label={isKo ? "오늘 완료" : "Closed"}
+          value={String(ghClosedToday)}
+          tone="success"
+          interactive
+          onClick={handleShowClosedIssues}
+        />
+        <StatChip
+          label={isKo ? "열린이슈" : "Open"}
+          value={String(openIssueCount)}
+          tone="warn"
+          interactive
+          onClick={onNavigateToKanban}
+        />
+      </div>
+
+      <MiniRateLimitBar isKo={isKo} />
+
+      {showClosedIssues ? (
+        <ClosedIssueList issues={closedIssues} isKo={isKo} onClose={() => setShowClosedIssues(false)} />
+      ) : null}
+
+      {showWarnings && warningCount > 0 ? (
+        <WarningList
+          items={warningAgents}
+          isKo={isKo}
+          onSelectAgent={(agent) => {
+            onSelectAgent?.(agent);
+            setShowWarnings(false);
+          }}
+        />
+      ) : null}
+    </>
+  );
 
   return (
     <div className={rootClassName}>
       <div className="sm:hidden">
-        <section
-          className="rounded-2xl p-3 shadow-xl"
+        <SurfaceSection
+          eyebrow={sectionEyebrow}
+          title={sectionTitle}
+          description={sectionDescription}
+          className="rounded-[24px] p-4"
           style={{
-            background: "color-mix(in srgb, var(--th-card-bg) 86%, transparent)",
-            border: "1px solid var(--th-card-border)",
-            backdropFilter: "blur(18px)",
+            borderColor: "color-mix(in srgb, var(--th-accent-primary) 14%, var(--th-border) 86%)",
+            background:
+              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-accent-primary-soft) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
           }}
-        >
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-1.5">
-              <div className="text-xs font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--th-text-muted)" }}>
-                {isKo ? "상황판" : "Situation"}
-              </div>
+          actions={(
+            <div className="flex flex-wrap items-center gap-2">
               {warningCount > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setShowWarnings((v) => !v)}
-                  className="rounded-full px-1.5 py-0.5 text-xs font-bold"
-                  style={{ color: "#92400e", background: "rgba(251,191,36,0.25)", border: "1px solid rgba(251,191,36,0.4)" }}
+                <SurfaceActionButton
+                  tone="warn"
+                  compact
+                  onClick={() => setShowWarnings((value) => !value)}
                 >
-                  ⚠ {warningCount}
-                </button>
+                  {isKo ? `경고 ${warningCount}` : `${warningCount} warnings`}
+                </SurfaceActionButton>
               )}
+              <SurfaceActionButton
+                tone={mobileExpanded ? "info" : "neutral"}
+                compact
+                onClick={() => setMobileExpanded((value) => !value)}
+              >
+                {mobileExpanded ? (isKo ? "접기" : "Hide") : (isKo ? "더보기" : "Details")}
+              </SurfaceActionButton>
             </div>
-            <button
-              type="button"
-              onClick={() => setMobileExpanded((value) => !value)}
-              className="rounded-full px-2 py-1 text-xs font-medium"
-              style={{
-                color: "var(--th-text)",
-                background: "var(--th-bg-surface)",
-                border: "1px solid var(--th-card-border)",
-              }}
-            >
-              {mobileExpanded ? (isKo ? "접기" : "Hide") : (isKo ? "더보기" : "Details")}
-            </button>
+          )}
+        >
+          {situationBody}
+        </SurfaceSection>
+
+        {mobileExpanded ? (
+          <div className="mt-3 max-h-[38vh] space-y-3 overflow-y-auto pr-1">
+            <InsightCard title={isKo ? "최근 이벤트" : "Recent Activity"} count={visibleNotifications.length}>
+              {visibleNotifications.length === 0 ? (
+                <SurfaceNotice compact>
+                  {isKo ? "표시할 런타임 이벤트가 없습니다" : "No runtime events"}
+                </SurfaceNotice>
+              ) : (
+                <div className="mt-2 space-y-2">
+                  {visibleNotifications.map((item) => (
+                    <EventRow
+                      key={item.id}
+                      title={item.message}
+                      ts={item.ts}
+                      isKo={isKo}
+                      accent={
+                        item.type === "success"
+                          ? "#34d399"
+                          : item.type === "warning"
+                            ? "#fbbf24"
+                            : item.type === "error"
+                              ? "#f87171"
+                              : "#60a5fa"
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+            </InsightCard>
+
+            <InsightCard title={isKo ? "최근 변경" : "Recent Changes"} count={recentChanges.length}>
+              {recentChanges.length === 0 ? (
+                <SurfaceNotice compact>
+                  {isKo ? "표시할 변경 로그가 없습니다" : "No recent changes"}
+                </SurfaceNotice>
+              ) : (
+                <div className="mt-2 space-y-2">
+                  {recentChanges.map((item) => (
+                    <EventRow
+                      key={item.id}
+                      title={item.summary}
+                      ts={item.created_at}
+                      isKo={isKo}
+                      accent="#f59e0b"
+                      subtitle={`${item.entity_type}:${item.entity_id}`}
+                    />
+                  ))}
+                </div>
+              )}
+            </InsightCard>
           </div>
-          <div className="mt-2 grid grid-cols-3 gap-2">
-            <StatChip label={isKo ? "검토필요" : "Review"} value={String(reviewCount)} color="#14b8a6" interactive onClick={onNavigateToKanban} />
-            <StatChip label={isKo ? "오늘 완료" : "Closed"} value={String(ghClosedToday)} color="#34d399" interactive onClick={handleShowClosedIssues} />
-            <StatChip label={isKo ? "열린이슈" : "Open"} value={String(openIssueCount)} color="#f59e0b" interactive onClick={onNavigateToKanban} />
-          </div>
-
-          <MiniRateLimitBar isKo={isKo} />
-
-          {showClosedIssues ? (
-            <ClosedIssueList issues={closedIssues} isKo={isKo} onClose={() => setShowClosedIssues(false)} />
-          ) : null}
-
-          {showWarnings && warningCount > 0 ? (
-            <WarningList
-              items={warningAgents}
-              isKo={isKo}
-              onSelectAgent={(agent) => {
-                onSelectAgent?.(agent);
-                setShowWarnings(false);
-              }}
-            />
-          ) : null}
-
-          {mobileExpanded ? (
-            <div className="mt-3 max-h-[38vh] space-y-3 overflow-y-auto pr-1">
-              <InsightCard title={isKo ? "최근 이벤트" : "Recent Activity"} count={visibleNotifications.length}>
-                {visibleNotifications.length === 0 ? (
-                  <div className="mt-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {isKo ? "표시할 런타임 이벤트가 없습니다" : "No runtime events"}
-                  </div>
-                ) : (
-                  <div className="mt-2 space-y-2">
-                    {visibleNotifications.map((item) => (
-                      <EventRow
-                        key={item.id}
-                        title={item.message}
-                        ts={item.ts}
-                        isKo={isKo}
-                        accent={
-                          item.type === "success"
-                            ? "#34d399"
-                            : item.type === "warning"
-                              ? "#fbbf24"
-                              : item.type === "error"
-                                ? "#f87171"
-                                : "#60a5fa"
-                        }
-                      />
-                    ))}
-                  </div>
-                )}
-              </InsightCard>
-
-              <InsightCard title={isKo ? "최근 변경" : "Recent Changes"} count={recentChanges.length}>
-                {recentChanges.length === 0 ? (
-                  <div className="mt-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {isKo ? "표시할 변경 로그가 없습니다" : "No recent changes"}
-                  </div>
-                ) : (
-                  <div className="mt-2 space-y-2">
-                    {recentChanges.map((item) => (
-                      <EventRow
-                        key={item.id}
-                        title={item.summary}
-                        ts={item.created_at}
-                        isKo={isKo}
-                        accent="#f59e0b"
-                        subtitle={`${item.entity_type}:${item.entity_id}`}
-                      />
-                    ))}
-                  </div>
-                )}
-              </InsightCard>
-            </div>
-          ) : null}
-        </section>
+        ) : null}
       </div>
 
       <div className="hidden sm:flex sm:flex-col sm:gap-3">
-        <section
-          className="rounded-2xl p-3 shadow-xl"
+        <SurfaceSection
+          eyebrow={sectionEyebrow}
+          title={sectionTitle}
+          description={sectionDescription}
+          className="rounded-[24px] p-4"
           style={{
-            background: "color-mix(in srgb, var(--th-card-bg) 86%, transparent)",
-            border: "1px solid var(--th-card-border)",
-            backdropFilter: "blur(18px)",
+            borderColor: "color-mix(in srgb, var(--th-accent-primary) 14%, var(--th-border) 86%)",
+            background:
+              "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-accent-primary-soft) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
           }}
+          actions={warningCount > 0 ? (
+            <SurfaceActionButton
+              tone="warn"
+              compact
+              onClick={() => setShowWarnings((value) => !value)}
+            >
+              {isKo ? `경고 ${warningCount}` : `${warningCount} warnings`}
+            </SurfaceActionButton>
+          ) : undefined}
         >
-          <div className="flex items-center gap-1.5">
-            <div className="text-xs font-semibold uppercase tracking-[0.24em]" style={{ color: "var(--th-text-muted)" }}>
-              {isKo ? "상황판" : "Situation"}
-            </div>
-            {warningCount > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowWarnings((v) => !v)}
-                className="rounded-full px-1.5 py-0.5 text-xs font-bold"
-                style={{ color: "#92400e", background: "rgba(251,191,36,0.25)", border: "1px solid rgba(251,191,36,0.4)" }}
-              >
-                ⚠ {warningCount}
-              </button>
-            )}
-          </div>
-          <div className="mt-2 grid grid-cols-3 gap-2">
-            <StatChip label={isKo ? "검토필요" : "Review"} value={String(reviewCount)} color="#14b8a6" interactive onClick={onNavigateToKanban} />
-            <StatChip label={isKo ? "오늘 완료" : "Closed"} value={String(ghClosedToday)} color="#34d399" interactive onClick={handleShowClosedIssues} />
-            <StatChip label={isKo ? "열린이슈" : "Open"} value={String(openIssueCount)} color="#f59e0b" interactive onClick={onNavigateToKanban} />
-          </div>
-          {showClosedIssues ? (
-            <ClosedIssueList issues={closedIssues} isKo={isKo} onClose={() => setShowClosedIssues(false)} />
-          ) : null}
-          {showWarnings && warningCount > 0 ? (
-            <WarningList
-              items={warningAgents}
-              isKo={isKo}
-              onSelectAgent={(agent) => {
-                onSelectAgent?.(agent);
-                setShowWarnings(false);
-              }}
-            />
-          ) : null}
-          <MiniRateLimitBar isKo={isKo} />
-        </section>
+          {situationBody}
+        </SurfaceSection>
 
         <InsightCard title={isKo ? "최근 이벤트" : "Recent Activity"} count={visibleNotifications.length}>
           {visibleNotifications.length === 0 ? (
-            <div className="mt-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+            <SurfaceNotice compact>
               {isKo ? "표시할 런타임 이벤트가 없습니다" : "No runtime events"}
-            </div>
+            </SurfaceNotice>
           ) : (
             <div className="mt-2 space-y-2">
               {visibleNotifications.map((item) => (
@@ -298,9 +307,9 @@ export default function OfficeInsightPanel({
 
         <InsightCard title={isKo ? "최근 변경" : "Recent Changes"} count={recentChanges.length}>
           {recentChanges.length === 0 ? (
-            <div className="mt-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+            <SurfaceNotice compact>
               {isKo ? "표시할 변경 로그가 없습니다" : "No recent changes"}
-            </div>
+            </SurfaceNotice>
           ) : (
             <div className="mt-2 space-y-2">
               {recentChanges.map((item) => (
@@ -331,12 +340,11 @@ function InsightCard({
   children: ReactNode;
 }) {
   return (
-    <section
-      className="rounded-2xl p-3 shadow-xl"
+    <SurfaceCard
+      className="rounded-[24px] p-4"
       style={{
-        background: "color-mix(in srgb, var(--th-card-bg) 84%, transparent)",
-        border: "1px solid var(--th-card-border)",
-        backdropFilter: "blur(18px)",
+        borderColor: "color-mix(in srgb, var(--th-border) 66%, transparent)",
+        background: "color-mix(in srgb, var(--th-card-bg) 90%, transparent)",
       }}
     >
       <div className="flex items-center justify-between">
@@ -348,20 +356,20 @@ function InsightCard({
         </span>
       </div>
       {children}
-    </section>
+    </SurfaceCard>
   );
 }
 
 function StatChip({
   label,
   value,
-  color,
+  tone,
   interactive = false,
   onClick,
 }: {
   label: string;
   value: string;
-  color: string;
+  tone: "info" | "success" | "warn";
   interactive?: boolean;
   onClick?: () => void;
 }) {
@@ -369,21 +377,16 @@ function StatChip({
     <button
       type="button"
       onClick={interactive ? onClick : undefined}
-      className="rounded-xl px-2 py-2 text-left"
+      className="w-full rounded-2xl text-left"
       disabled={!interactive}
-      style={{
-        background: "var(--th-bg-surface)",
-        border: "1px solid var(--th-card-border)",
-        cursor: interactive ? "pointer" : "default",
-        opacity: interactive ? 1 : 1,
-      }}
+      style={{ cursor: interactive ? "pointer" : "default" }}
     >
-      <div className="text-xs uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
-        {label}
-      </div>
-      <div className="mt-1 text-sm font-semibold" style={{ color }}>
-        {value}
-      </div>
+      <SurfaceMetricPill
+        label={label}
+        value={<span className="text-sm font-semibold">{value}</span>}
+        tone={tone}
+        className="h-full min-w-0"
+      />
     </button>
   );
 }
@@ -398,20 +401,14 @@ function WarningList({
   onSelectAgent?: (agent: Agent) => void;
 }) {
   return (
-    <div
-      className="mt-3 rounded-xl border p-2"
-      style={{
-        background: "var(--th-bg-surface)",
-        borderColor: "var(--th-card-border)",
-      }}
-    >
+    <SurfaceCard className="mt-3 p-3">
       <div className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
         {isKo ? "문제 agent" : "Warning agents"}
       </div>
       {items.length === 0 ? (
-        <div className="mt-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+        <SurfaceNotice className="mt-2" compact>
           {isKo ? "현재 경고가 없습니다" : "No warnings right now"}
-        </div>
+        </SurfaceNotice>
       ) : (
         <div className="mt-2 space-y-2">
           {items.map(({ agent, warnings }) => (
@@ -419,20 +416,25 @@ function WarningList({
               key={agent.id}
               type="button"
               onClick={() => onSelectAgent?.(agent)}
-              className="w-full rounded-lg px-2 py-2 text-left"
-              style={{ background: "rgba(148,163,184,0.08)" }}
+              className="w-full text-left"
             >
-              <div className="text-xs font-medium" style={{ color: "var(--th-text)" }}>
-                {agent.avatar_emoji} {agent.alias || agent.name_ko || agent.name}
-              </div>
-              <div className="mt-0.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                {(isKo ? warnings.map((warning) => warning.ko) : warnings.map((warning) => warning.en)).join(", ")}
-              </div>
+              <SurfaceListItem
+                tone="warn"
+                className="p-3"
+                trailing={<span className="text-xs" style={{ color: "var(--th-accent-warn)" }}>⚠</span>}
+              >
+                <div className="text-xs font-medium" style={{ color: "var(--th-text)" }}>
+                  {agent.avatar_emoji} {agent.alias || agent.name_ko || agent.name}
+                </div>
+                <div className="mt-0.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                  {(isKo ? warnings.map((warning) => warning.ko) : warnings.map((warning) => warning.en)).join(", ")}
+                </div>
+              </SurfaceListItem>
             </button>
           ))}
         </div>
       )}
-    </div>
+    </SurfaceCard>
   );
 }
 
@@ -450,9 +452,13 @@ function EventRow({
   accent: string;
 }) {
   return (
-    <div
-      className="rounded-xl px-2.5 py-2"
-      style={{ background: "var(--th-bg-surface)" }}
+    <SurfaceListItem
+      className="p-3"
+      trailing={
+        <div className="text-xs text-right" style={{ color: "var(--th-text-muted)" }}>
+          {timeAgo(ts, isKo)}
+        </div>
+      }
     >
       <div className="flex items-start gap-2">
         <span className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ background: accent }} />
@@ -465,12 +471,9 @@ function EventRow({
               {subtitle}
             </div>
           ) : null}
-          <div className="mt-0.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
-            {timeAgo(ts, isKo)}
-          </div>
         </div>
       </div>
-    </div>
+    </SurfaceListItem>
   );
 }
 
@@ -488,27 +491,17 @@ interface ClosedIssueItem {
 function ClosedIssueList({ issues, isKo, onClose }: { issues: ClosedIssueItem[]; isKo: boolean; onClose: () => void }) {
   const repoShort = (repo: string) => repo.split("/").pop() || repo;
   return (
-    <div
-      className="mt-3 rounded-xl border p-2"
-      style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-card-border)" }}
-    >
+    <SurfaceCard className="mt-3 p-3">
       <div className="flex items-center justify-between">
         <div className="text-xs font-semibold uppercase tracking-[0.18em]" style={{ color: "var(--th-text-muted)" }}>
           {isKo ? `오늘 완료 (${issues.length})` : `Closed today (${issues.length})`}
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-xs px-1 rounded"
-          style={{ color: "var(--th-text-muted)" }}
-        >
-          ✕
-        </button>
+        <SurfaceActionButton tone="neutral" compact onClick={onClose}>✕</SurfaceActionButton>
       </div>
       {issues.length === 0 ? (
-        <div className="mt-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
+        <SurfaceNotice className="mt-2" compact>
           {isKo ? "오늘 완료된 이슈가 없습니다" : "No issues closed today"}
-        </div>
+        </SurfaceNotice>
       ) : (
         <div className="mt-2 max-h-[30vh] space-y-1.5 overflow-y-auto pr-1">
           {issues.map((issue) => (
@@ -517,25 +510,31 @@ function ClosedIssueList({ issues, isKo, onClose }: { issues: ClosedIssueItem[];
               href={issue.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="block rounded-lg px-2 py-1.5"
-              style={{ background: "rgba(148,163,184,0.08)" }}
+              className="block"
             >
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs font-bold shrink-0 rounded px-1 py-0.5" style={{ color: "#34d399", background: "rgba(52,211,153,0.1)" }}>
-                  {repoShort(issue.repo)}
-                </span>
-                <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
-                  #{issue.number}
-                </span>
-              </div>
-              <div className="mt-0.5 text-xs leading-snug" style={{ color: "var(--th-text)" }}>
-                {issue.title}
-              </div>
+              <SurfaceListItem
+                tone="success"
+                className="p-3"
+                trailing={
+                  <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
+                    #{issue.number}
+                  </span>
+                }
+              >
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold leading-none" style={{ borderColor: "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)", background: "var(--th-accent-primary-soft)", color: "var(--th-accent-primary)" }}>
+                    {repoShort(issue.repo)}
+                  </span>
+                </div>
+                <div className="mt-1 text-xs leading-snug" style={{ color: "var(--th-text)" }}>
+                  {issue.title}
+                </div>
+              </SurfaceListItem>
             </a>
           ))}
         </div>
       )}
-    </div>
+    </SurfaceCard>
   );
 }
 
@@ -595,9 +594,9 @@ const RL_COLORS: Record<string, { normal: string; warning: string; danger: strin
   Claude: { accent: "#f59e0b", normal: "#f59e0b", warning: "#ea580c", danger: "#ef4444" },
   Codex: { accent: "#34d399", normal: "#34d399", warning: "#fbbf24", danger: "#f87171" },
   Gemini: { accent: "#3b82f6", normal: "#3b82f6", warning: "#f59e0b", danger: "#ef4444" },
-  OpenCode: { accent: "#a855f7", normal: "#a855f7", warning: "#f59e0b", danger: "#ef4444" },
+  OpenCode: { accent: "#06b6d4", normal: "#06b6d4", warning: "#f59e0b", danger: "#ef4444" },
   Copilot: { accent: "#10b981", normal: "#10b981", warning: "#f59e0b", danger: "#ef4444" },
-  Antigravity: { accent: "#f472b6", normal: "#f472b6", warning: "#f59e0b", danger: "#ef4444" },
+  Antigravity: { accent: "#f97316", normal: "#f97316", warning: "#f59e0b", danger: "#ef4444" },
   API: { accent: "#94a3b8", normal: "#94a3b8", warning: "#f59e0b", danger: "#ef4444" },
 };
 const RL_ICONS: Record<string, string> = {
