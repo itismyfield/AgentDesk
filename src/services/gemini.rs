@@ -335,9 +335,7 @@ where
                 if !state.meaningful_progress_seen {
                     startup_silent_for += poll_timeout;
                     if startup_silent_for >= startup_watchdog {
-                        if !definitive_failure_observed() {
-                            continue;
-                        }
+                        let _ = definitive_failure_observed();
                         return GeminiStreamLoopResult::RetrySession {
                             message: format!(
                                 "Gemini stream produced no output for {} seconds before first progress",
@@ -349,9 +347,7 @@ where
                 }
                 silent_for += poll_timeout;
                 if silent_for >= idle_watchdog {
-                    if !definitive_failure_observed() {
-                        continue;
-                    }
+                    let _ = definitive_failure_observed();
                     return GeminiStreamLoopResult::RetrySession {
                         message: format!(
                             "Gemini stream produced no output for {} seconds",
@@ -1333,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_watchdog_waits_if_process_is_still_alive_during_extended_silence() {
+    fn idle_watchdog_retries_if_process_is_still_alive_during_extended_silence() {
         let (tx, rx) = mpsc::channel();
         let (stream_tx, stream_rx) = mpsc::channel();
         let mut state = GeminiAttemptState::new(None);
@@ -1341,17 +1337,11 @@ mod tests {
             r#"{"type":"message","role":"assistant","content":"partial"}"#.to_string(),
         ))
         .unwrap();
-        let token = Arc::new(CancelToken::new());
-        let token_for_thread = token.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(5));
-            token_for_thread.cancelled.store(true, Ordering::Relaxed);
-        });
 
         let result = collect_gemini_stream_events(
             &rx,
             &stream_tx,
-            Some(token.as_ref()),
+            None,
             &mut state,
             Duration::from_millis(1),
             Duration::from_millis(3),
@@ -1359,7 +1349,12 @@ mod tests {
             || false,
         );
 
-        assert_eq!(result, GeminiStreamLoopResult::Cancelled);
+        match result {
+            GeminiStreamLoopResult::RetrySession { message } => {
+                assert!(message.contains("Gemini stream produced no output"));
+            }
+            other => panic!("expected RetrySession, got {:?}", other),
+        }
         assert_eq!(state.final_text, "partial");
         assert!(state.meaningful_progress_seen);
         match stream_rx.recv().unwrap() {
@@ -1523,33 +1518,31 @@ mod tests {
     }
 
     #[test]
-    fn startup_watchdog_does_not_fire_if_process_still_alive() {
-        // If process is still alive (definitive_failure_observed returns false),
-        // startup watchdog threshold exceeded but should keep waiting until cancelled.
-        let token = Arc::new(CancelToken::new());
+    fn startup_watchdog_fires_if_process_is_still_alive() {
         let (_tx, rx) = mpsc::channel::<GeminiStreamEvent>(); // keep alive
         let (stream_tx, _stream_rx) = mpsc::channel();
         let mut state = GeminiAttemptState::new(None);
 
-        let token_for_thread = token.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(10));
-            token_for_thread.cancelled.store(true, Ordering::Relaxed);
-        });
-
         let result = collect_gemini_stream_events(
             &rx,
             &stream_tx,
-            Some(token.as_ref()),
+            None,
             &mut state,
             Duration::from_millis(1),
             Duration::from_millis(100),
-            Duration::from_millis(3), // startup_watchdog fires early but process alive
-            || false,                 // process still alive → keep waiting
+            Duration::from_millis(3),
+            || false,
         );
 
-        // Should be Cancelled (not RetrySession) because process is alive.
-        assert_eq!(result, GeminiStreamLoopResult::Cancelled);
+        match result {
+            GeminiStreamLoopResult::RetrySession { message } => {
+                assert!(
+                    message.contains("before first progress"),
+                    "expected startup watchdog message, got: {message}"
+                );
+            }
+            other => panic!("expected RetrySession, got {:?}", other),
+        }
     }
 
     #[test]
