@@ -1743,9 +1743,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn deploy_pipeline_uses_card_scoped_worktree_instead_of_latest_session_cwd() {
-        let _env_guard = crate::services::discord::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _env_guard = crate::services::discord::runtime_store::lock_test_env();
 
         let temp = TempDir::new().unwrap();
         let policies_dir = temp.path().join("policies");

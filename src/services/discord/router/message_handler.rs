@@ -4,9 +4,11 @@ use crate::services::memory::{
     resolve_memory_session_id,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
-#[cfg(unix)]
-use crate::services::tmux_common::tmux_exact_target;
 use std::sync::Arc;
+
+const DISCORD_FORMATTING_REMINDER: &str = "<system-reminder>\n\
+     Discord formatting: minimize code blocks, keep messages concise.\n\
+     </system-reminder>";
 
 #[derive(Debug, PartialEq, Eq)]
 struct MemoryInjectionPlan<'a> {
@@ -498,7 +500,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
-    reset_provider_session_if_pending(shared, channel_id, &provider).await;
+    super::super::commands::reset_provider_session_if_pending(
+        &ctx.http, shared, &provider, channel_id,
+    )
+    .await;
     let prompt_prep_started = std::time::Instant::now();
 
     // Resolve channel/tmux session name from current session state. We need the
@@ -1672,48 +1677,14 @@ pub(super) async fn handle_text_command(
         }
 
         "!clear" => {
-            let mut d = data.shared.core.lock().await;
-            if let Some(token) = d.cancel_tokens.remove(&channel_id) {
-                token.cancel_with_tmux_cleanup();
-            }
-            // Build tmux session name from channel name
-            let tmux_name = d
-                .sessions
-                .get(&channel_id)
-                .and_then(|s| s.channel_name.as_ref())
-                .map(|ch_name| data.provider.build_tmux_session_name(ch_name));
-            if let Some(session) = d.sessions.get_mut(&channel_id) {
-                session.history.clear();
-                session.pending_uploads.clear();
-                session.cleared = true;
-                session.session_id = None;
-            }
-            d.intervention_queue.remove(&channel_id);
-            drop(d);
-            // Clear stored provider session_id from DB
-            if let Some(key) = super::super::adk_session::build_adk_session_key(
+            super::super::commands::clear_channel_session_state(
+                &ctx.http,
                 &data.shared,
-                channel_id,
                 &data.provider,
+                channel_id,
+                "!clear",
             )
-            .await
-            {
-                super::super::adk_session::clear_provider_session_id(&key, data.shared.api_port)
-                    .await;
-            }
-            // Send /clear to the actual Claude Code session via tmux
-            #[cfg(unix)]
-            if data.provider == crate::services::provider::ProviderKind::Claude {
-                if let Some(ref name) = tmux_name {
-                    let exact_target = tmux_exact_target(name);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        std::process::Command::new("tmux")
-                            .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
-                            .output()
-                    })
-                    .await;
-                }
-            }
+            .await;
             let _ = msg.reply(&ctx.http, "Session cleared.").await;
             return Ok(true);
         }
@@ -2386,65 +2357,14 @@ Any other message is sent to {p}.
             }
 
             // Build the prompt
-            let skill_prompt = match &data.provider {
-                ProviderKind::Claude => {
-                    if args_str.is_empty() {
-                        format!(
-                            "Execute the skill `/{skill}` now. \
-                             Use the Skill tool with skill=\"{skill}\". \
-                             Read files under `references/` only if the skill points to them or you need extra detail."
-                        )
-                    } else {
-                        format!(
-                            "Execute the skill `/{skill}` with arguments: {args_str}\n\
-                             Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\". \
-                             Read files under `references/` only if the skill points to them or you need extra detail."
-                        )
-                    }
-                }
-                ProviderKind::Codex => {
-                    if args_str.is_empty() {
-                        format!(
-                            "Use the local Codex skill `/{skill}` now. \
-                             Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                        )
-                    } else {
-                        format!(
-                            "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
-                             Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                        )
-                    }
-                }
-                ProviderKind::Gemini => {
-                    if args_str.is_empty() {
-                        format!(
-                            "Use the local Gemini skill `/{skill}` now. \
-                             Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                        )
-                    } else {
-                        format!(
-                            "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
-                             Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                        )
-                    }
-                }
-                ProviderKind::Qwen => {
-                    if args_str.is_empty() {
-                        format!(
-                            "Use the local Qwen skill `/{skill}` now. \
-                             Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                        )
-                    } else {
-                        format!(
-                            "Use the local Qwen skill `/{skill}` now with this user request: {args_str}\n\
-                             Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                        )
-                    }
-                }
-                ProviderKind::Unsupported(name) => {
-                    let _ = msg
-                        .reply(&ctx.http, format!("Provider '{}' is not installed.", name))
-                        .await;
+            let skill_prompt = match super::super::commands::build_provider_skill_prompt(
+                &data.provider,
+                &skill,
+                args_str,
+            ) {
+                Ok(prompt) => prompt,
+                Err(message) => {
+                    let _ = msg.reply(&ctx.http, message).await;
                     return Ok(true);
                 }
             };
@@ -2482,48 +2402,20 @@ Any other message is sent to {p}.
     Ok(false)
 }
 
-/// Private helper: reset provider session if a model change is pending.
-async fn reset_provider_session_if_pending(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) {
-    if shared
-        .model_session_reset_pending
-        .remove(&channel_id)
-        .is_none()
-    {
-        return;
-    }
-
-    let channel_name = {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.session_id = None;
-            session.channel_name.clone()
-        } else {
-            None
-        }
-    };
-
-    if provider.uses_managed_tmux_backend() {
-        if let Some(name) = channel_name.as_deref() {
-            crate::services::claude::terminate_local_session(
-                &provider.build_tmux_session_name(name),
-            );
-        }
-    }
-
-    if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
-        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::super::DiscordSession;
     use super::*;
     use crate::services::memory::RecallResponse;
+
+    fn sample_recall() -> RecallResponse {
+        RecallResponse {
+            shared_knowledge: Some("[Shared Knowledge]".to_string()),
+            longterm_catalog: Some("- notes.md".to_string()),
+            external_recall: Some("[External Recall]".to_string()),
+            warnings: Vec::new(),
+        }
+    }
 
     fn make_session(
         current_path: Option<String>,
@@ -2542,15 +2434,6 @@ mod tests {
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: 0,
-        }
-    }
-
-    fn sample_recall() -> RecallResponse {
-        RecallResponse {
-            shared_knowledge: Some("[Shared Knowledge]".to_string()),
-            longterm_catalog: Some("- notes.md".to_string()),
-            external_recall: Some("[External Recall]".to_string()),
-            warnings: Vec::new(),
         }
     }
 
@@ -2621,6 +2504,16 @@ mod tests {
         assert_eq!(codex.shared_knowledge_for_system_prompt, None);
         assert_eq!(codex.external_recall_for_context, Some("[External Recall]"));
         assert_eq!(codex.longterm_catalog_for_system_prompt, Some("- notes.md"));
+
+        let qwen =
+            build_memory_injection_plan(&ProviderKind::Qwen, false, DispatchProfile::Full, &recall);
+        assert_eq!(
+            qwen.shared_knowledge_for_context,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(qwen.shared_knowledge_for_system_prompt, None);
+        assert_eq!(qwen.external_recall_for_context, Some("[External Recall]"));
+        assert_eq!(qwen.longterm_catalog_for_system_prompt, Some("- notes.md"));
     }
 
     #[test]

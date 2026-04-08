@@ -19,6 +19,9 @@ pub(in crate::services::discord) use config::{
     resolve_model_for_turn, update_channel_model_override,
 };
 pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
+pub(in crate::services::discord) use control::{
+    clear_channel_session_state, reset_provider_session_if_pending,
+};
 pub(super) use control::{cmd_clear, cmd_down, cmd_shell, cmd_stop};
 pub(in crate::services::discord) use diagnostics::{
     build_health_report, build_inflight_report, build_queue_report, build_status_report,
@@ -31,4 +34,5 @@ pub(super) use meeting_cmd::cmd_meeting;
 pub(super) use model_picker::cmd_model;
 pub(super) use receipt::cmd_receipt;
 pub(super) use session::{cmd_pwd, cmd_start};
+pub(in crate::services::discord) use skill::build_provider_skill_prompt;
 pub(super) use skill::cmd_cc;

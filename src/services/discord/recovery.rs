@@ -1481,9 +1481,7 @@ mod tests {
 
     #[test]
     fn missing_session_recovery_saves_handoff_for_followup_turn() {
-        let _lock = super::super::runtime_store::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::runtime_store::lock_test_env();
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("agentdesk-root");
         std::fs::create_dir_all(root.join("runtime")).unwrap();

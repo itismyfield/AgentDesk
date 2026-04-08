@@ -3,6 +3,40 @@ pub mod sync;
 pub mod triage;
 
 use crate::db::Db;
+use crate::services::platform::binary_resolver::{
+    apply_runtime_path, resolve_binary_with_login_shell,
+};
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+const GH_PATH_OVERRIDE_ENV: &str = "AGENTDESK_GH_PATH";
+
+fn gh_path() -> Option<String> {
+    if let Some(override_path) = std::env::var_os(GH_PATH_OVERRIDE_ENV).filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(override_path).to_string_lossy().to_string());
+    }
+
+    static GH_PATH: OnceLock<Option<String>> = OnceLock::new();
+    GH_PATH
+        .get_or_init(|| resolve_binary_with_login_shell("gh"))
+        .clone()
+}
+
+fn gh_command() -> Result<std::process::Command, String> {
+    let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
+    let mut command = std::process::Command::new(&gh);
+    apply_runtime_path(&mut command);
+    Ok(command)
+}
+
+fn tokio_gh_command() -> Result<tokio::process::Command, String> {
+    let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
+    let mut command = tokio::process::Command::new(&gh);
+    if let Some(path) = crate::services::platform::merged_runtime_path() {
+        command.env("PATH", path);
+    }
+    Ok(command)
+}
 
 /// Check whether the `gh` CLI is available on this system.
 pub fn gh_available() -> bool {

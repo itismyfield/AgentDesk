@@ -7,8 +7,74 @@ use super::super::turn_bridge::cancel_active_token;
 use super::super::{Context, Error, auto_restore_session, check_auth};
 use crate::services::provider::{ProviderKind, cancel_requested};
 
-// Re-use the report builders from diagnostics (they are private to diagnostics,
-// so cmd_cc duplicates the built-in handler logic inline, matching the original code).
+// Keep provider-specific skill wording in one helper so /cc and !cc stay aligned.
+
+pub(in crate::services::discord) fn build_provider_skill_prompt(
+    provider: &ProviderKind,
+    skill: &str,
+    args_str: &str,
+) -> Result<String, String> {
+    match provider {
+        ProviderKind::Claude => {
+            if args_str.is_empty() {
+                Ok(format!(
+                    "Execute the skill `/{skill}` now. \
+                     Use the Skill tool with skill=\"{skill}\". \
+                     Read files under `references/` only if the skill points to them or you need extra detail."
+                ))
+            } else {
+                Ok(format!(
+                    "Execute the skill `/{skill}` with arguments: {args_str}\n\
+                     Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\". \
+                     Read files under `references/` only if the skill points to them or you need extra detail."
+                ))
+            }
+        }
+        ProviderKind::Codex => {
+            if args_str.is_empty() {
+                Ok(format!(
+                    "Use the local Codex skill `/{skill}` now. \
+                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
+                ))
+            } else {
+                Ok(format!(
+                    "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
+                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
+                ))
+            }
+        }
+        ProviderKind::Gemini => {
+            if args_str.is_empty() {
+                Ok(format!(
+                    "Use the local Gemini skill `/{skill}` now. \
+                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
+                ))
+            } else {
+                Ok(format!(
+                    "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
+                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
+                ))
+            }
+        }
+        ProviderKind::Qwen => {
+            if args_str.is_empty() {
+                Ok(format!(
+                    "Use the local Qwen skill `/{skill}` from the active `.qwen/skills` runtime now. \
+                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
+                ))
+            } else {
+                Ok(format!(
+                    "Use the local Qwen skill `/{skill}` from the active `.qwen/skills` runtime now with this user request: {args_str}\n\
+                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
+                ))
+            }
+        }
+        ProviderKind::Unsupported(name) => Err(format!(
+            "Provider '{}' is not installed. This skill cannot run.",
+            name
+        )),
+    }
+}
 
 /// Autocomplete handler for /cc skill names
 async fn autocomplete_skill<'a>(
@@ -229,67 +295,10 @@ pub(in crate::services::discord) async fn cmd_cc(
     }
 
     // Build the prompt that tells the active provider to invoke the skill
-    let skill_prompt = match &ctx.data().provider {
-        ProviderKind::Claude => {
-            if args_str.is_empty() {
-                format!(
-                    "Execute the skill `/{skill}` now. \
-                     Use the Skill tool with skill=\"{skill}\". \
-                     Read files under `references/` only if the skill points to them or you need extra detail."
-                )
-            } else {
-                format!(
-                    "Execute the skill `/{skill}` with arguments: {args_str}\n\
-                     Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\". \
-                     Read files under `references/` only if the skill points to them or you need extra detail."
-                )
-            }
-        }
-        ProviderKind::Codex => {
-            if args_str.is_empty() {
-                format!(
-                    "Use the local Codex skill `/{skill}` now. \
-                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                )
-            } else {
-                format!(
-                    "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
-                    Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                )
-            }
-        }
-        ProviderKind::Gemini => {
-            if args_str.is_empty() {
-                format!(
-                    "Use the local Gemini skill `/{skill}` now. \
-                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                )
-            } else {
-                format!(
-                    "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
-                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                )
-            }
-        }
-        ProviderKind::Qwen => {
-            if args_str.is_empty() {
-                format!(
-                    "Use the local Qwen skill `/{skill}` now. \
-                     Load its `SKILL.md` first, follow it exactly, and read files under `references/` only when the skill points to them or you need them."
-                )
-            } else {
-                format!(
-                    "Use the local Qwen skill `/{skill}` now with this user request: {args_str}\n\
-                     Load its `SKILL.md` first, adapt it to the request, and read files under `references/` only when the skill points to them or you need them."
-                )
-            }
-        }
-        ProviderKind::Unsupported(name) => {
-            ctx.say(format!(
-                "Provider '{}' is not installed. This skill cannot run.",
-                name
-            ))
-            .await?;
+    let skill_prompt = match build_provider_skill_prompt(&ctx.data().provider, &skill, args_str) {
+        Ok(prompt) => prompt,
+        Err(message) => {
+            ctx.say(message).await?;
             return Ok(());
         }
     };
@@ -322,4 +331,21 @@ pub(in crate::services::discord) async fn cmd_cc(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_provider_skill_prompt;
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn qwen_skill_prompt_variant_mentions_qwen_runtime_skills() {
+        let prompt =
+            build_provider_skill_prompt(&ProviderKind::Qwen, "deploy", "--dry-run").unwrap();
+
+        assert!(prompt.contains("local Qwen skill `/deploy`"));
+        assert!(prompt.contains("`.qwen/skills`"));
+        assert!(prompt.contains("Load its `SKILL.md` first"));
+        assert!(prompt.contains("--dry-run"));
+    }
 }

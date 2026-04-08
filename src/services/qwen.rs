@@ -32,9 +32,9 @@ use crate::services::tmux_diagnostics::{
 
 const QWEN_CANCELLED_MESSAGE: &str = "Qwen request cancelled";
 const QWEN_SESSION_DEAD_MESSAGE: &str = "Qwen stream ended without a terminal result";
-const QWEN_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
-const QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY: u32 = 2;
-const QWEN_MAX_SESSION_RETRIES: usize = 1;
+pub(crate) const QWEN_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY: u32 = 2;
+pub(crate) const QWEN_MAX_SESSION_RETRIES: usize = 1;
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 pub(crate) const QWEN_CODE_SYSTEM_SETTINGS_ENV: &str = "QWEN_CODE_SYSTEM_SETTINGS_PATH";
 const QWEN_SUPPORTED_ALLOWED_TOOLS: &[&str] = &[
@@ -85,7 +85,7 @@ enum QwenStreamEvent {
 }
 
 #[derive(Clone, Debug)]
-enum QwenResumeStrategy {
+pub(crate) enum QwenResumeStrategy {
     Fresh,
     Continue,
     Resume(String),
@@ -261,7 +261,7 @@ pub fn execute_command_streaming(
         );
     }
 
-    let mut resume_strategy = normalize_resume_strategy(session_id)?;
+    let mut resume_strategy = normalize_resume_strategy(session_id, working_dir)?;
 
     for attempt in 0..=QWEN_MAX_SESSION_RETRIES {
         match execute_qwen_streaming_attempt(
@@ -1532,7 +1532,7 @@ fn build_simple_exec_args(prompt: &str) -> Vec<String> {
     ]
 }
 
-fn build_stream_exec_args(
+pub(crate) fn build_stream_exec_args(
     prompt: &str,
     model: Option<&str>,
     resume_strategy: &QwenResumeStrategy,
@@ -1566,9 +1566,15 @@ fn build_stream_exec_args(
     args
 }
 
-fn normalize_resume_strategy(session_id: Option<&str>) -> Result<QwenResumeStrategy, String> {
+pub(crate) fn normalize_resume_strategy(
+    session_id: Option<&str>,
+    working_dir: &str,
+) -> Result<QwenResumeStrategy, String> {
     let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(QwenResumeStrategy::Continue);
+        if has_prior_qwen_chat_cache(working_dir) {
+            return Ok(QwenResumeStrategy::Continue);
+        }
+        return Ok(QwenResumeStrategy::Fresh);
     };
 
     if !is_valid_session_id(session_id) {
@@ -1579,6 +1585,76 @@ fn normalize_resume_strategy(session_id: Option<&str>) -> Result<QwenResumeStrat
     }
 
     Ok(QwenResumeStrategy::Resume(session_id.to_string()))
+}
+
+fn has_prior_qwen_chat_cache(working_dir: &str) -> bool {
+    let Some(chats_dir) = qwen_chat_cache_dir_for_working_dir(working_dir) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(chats_dir) else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.is_file()
+            && path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+    })
+}
+
+fn qwen_chat_cache_dir_for_working_dir(working_dir: &str) -> Option<PathBuf> {
+    let home = qwen_home_dir()?;
+    Some(
+        home.join(".qwen")
+            .join("projects")
+            .join(qwen_project_cache_key(working_dir))
+            .join("chats"),
+    )
+}
+
+pub(crate) fn qwen_project_cache_key(working_dir: &str) -> String {
+    normalize_qwen_working_dir(working_dir)
+        .to_string_lossy()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
+}
+
+fn normalize_qwen_working_dir(working_dir: &str) -> PathBuf {
+    let expanded = expand_home_dir(working_dir);
+    std::fs::canonicalize(&expanded).unwrap_or(expanded)
+}
+
+fn qwen_home_dir() -> Option<PathBuf> {
+    std::env::var_os("QWEN_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(dirs::home_dir)
+}
+
+fn expand_home_dir(path: &str) -> PathBuf {
+    if path == "~" {
+        return qwen_home_dir().unwrap_or_else(|| PathBuf::from(path));
+    }
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Some(home) = qwen_home_dir() {
+            return home.join(stripped);
+        }
+    }
+    PathBuf::from(path)
 }
 
 fn is_valid_session_id(session_id: &str) -> bool {
@@ -1765,10 +1841,51 @@ mod tests {
         QWEN_CODE_SYSTEM_SETTINGS_ENV, QwenAttemptState, QwenResumeStrategy,
         build_stream_exec_args, compose_qwen_prompt, create_system_settings_override,
         extract_text_from_json_output, normalize_resume_strategy, process_qwen_json_event,
-        resolve_allowed_core_tools,
+        qwen_project_cache_key, resolve_allowed_core_tools,
     };
     use crate::services::agent_protocol::StreamMessage;
     use serde_json::json;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn with_temp_qwen_home<F>(f: F)
+    where
+        F: FnOnce(&TempDir, &TempDir),
+    {
+        let _guard = crate::services::discord::runtime_store::lock_test_env();
+        let temp_home = TempDir::new().unwrap();
+        let temp_project = TempDir::new().unwrap();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+
+        unsafe {
+            std::env::set_var("HOME", temp_home.path());
+            std::env::set_var("USERPROFILE", temp_home.path());
+        }
+
+        f(&temp_home, &temp_project);
+
+        match prev_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match prev_userprofile {
+            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
+        }
+    }
+
+    fn create_prior_qwen_chat_cache(temp_home: &TempDir, working_dir: &TempDir) {
+        let chats_dir = temp_home
+            .path()
+            .join(".qwen")
+            .join("projects")
+            .join(qwen_project_cache_key(working_dir.path().to_str().unwrap()))
+            .join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+        fs::write(chats_dir.join("turn-1.jsonl"), "{\"type\":\"result\"}\n").unwrap();
+    }
 
     #[test]
     fn compose_qwen_prompt_includes_authoritative_sections() {
@@ -1888,11 +2005,24 @@ mod tests {
     }
 
     #[test]
-    fn normalize_resume_strategy_defaults_to_continue() {
-        assert!(matches!(
-            normalize_resume_strategy(None).unwrap(),
-            QwenResumeStrategy::Continue
-        ));
+    fn normalize_resume_strategy_defaults_to_fresh_without_prior_cache() {
+        with_temp_qwen_home(|_temp_home, working_dir| {
+            assert!(matches!(
+                normalize_resume_strategy(None, working_dir.path().to_str().unwrap()).unwrap(),
+                QwenResumeStrategy::Fresh
+            ));
+        });
+    }
+
+    #[test]
+    fn normalize_resume_strategy_uses_continue_with_prior_cache() {
+        with_temp_qwen_home(|temp_home, working_dir| {
+            create_prior_qwen_chat_cache(temp_home, working_dir);
+            assert!(matches!(
+                normalize_resume_strategy(None, working_dir.path().to_str().unwrap()).unwrap(),
+                QwenResumeStrategy::Continue
+            ));
+        });
     }
 
     #[test]
