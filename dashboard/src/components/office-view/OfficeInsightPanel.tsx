@@ -377,7 +377,7 @@ function StatChip({
     <button
       type="button"
       onClick={interactive ? onClick : undefined}
-      className="w-full rounded-2xl text-left"
+      className="min-w-0 w-full rounded-2xl text-left"
       disabled={!interactive}
       style={{ cursor: interactive ? "pointer" : "default" }}
     >
@@ -385,7 +385,8 @@ function StatChip({
         label={label}
         value={<span className="text-sm font-semibold">{value}</span>}
         tone={tone}
-        className="h-full min-w-0"
+        className="h-full w-full"
+        style={{ minWidth: 0 }}
       />
     </button>
   );
