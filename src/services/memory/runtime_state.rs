@@ -7,7 +7,8 @@ use crate::runtime_layout;
 use crate::services::discord::settings::MemoryBackendKind;
 
 const MEM0_SEARCH_PATH: &str = "/v2/memories/search";
-const MEMENTO_HEALTH_PATH: &str = "/v1/health";
+const MEMENTO_HEALTH_PATH: &str = "/health";
+const MEMENTO_MCP_PATH: &str = "/mcp";
 const MEM0_HEALTH_USER_ID: &str = "agentdesk-healthcheck";
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const FAILURE_THRESHOLD: u8 = 3;
@@ -128,7 +129,7 @@ fn mem0_runtime_config() -> Option<Mem0RuntimeConfig> {
 
 fn memento_runtime_config() -> Option<MementoRuntimeConfig> {
     let config = runtime_memory_backend_config()?;
-    let endpoint = config.mcp.endpoint.trim().to_string();
+    let endpoint = normalize_memento_endpoint(&config.mcp.endpoint);
     let access_key_env = config.mcp.access_key_env.trim().to_string();
     if endpoint.is_empty() || access_key_env.is_empty() {
         return None;
@@ -139,6 +140,14 @@ fn memento_runtime_config() -> Option<MementoRuntimeConfig> {
         access_key,
         workspace: env_var_value("MEMENTO_WORKSPACE"),
     })
+}
+
+fn normalize_memento_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix(MEMENTO_MCP_PATH)
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 fn sync_configured_backends(state: &mut MemoryBackendRuntimeState) {

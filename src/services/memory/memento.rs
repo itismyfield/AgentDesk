@@ -1,6 +1,8 @@
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use reqwest::StatusCode;
 use serde_json::{Map, Value, json};
 
 use super::{
@@ -11,12 +13,17 @@ use crate::runtime_layout;
 use crate::services::discord::DispatchProfile;
 use crate::services::discord::settings::ResolvedMemorySettings;
 
-const MEMENTO_CONTEXT_PATH: &str = "/v1/context";
-const MEMENTO_DISTILL_PATH: &str = "/v1/distill";
-const MEMENTO_WORKSPACES_PATH: &str = "/v1/workspaces";
+const MEMENTO_MCP_PATH: &str = "/mcp";
+const MEMENTO_PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_WORKING_MEMORY_LINES: usize = 6;
 const MAX_MEMORY_LINES: usize = 6;
 const MAX_SKIP_LINES: usize = 4;
+
+#[derive(Clone, Debug)]
+struct CachedMcpSession {
+    endpoint: String,
+    session_id: String,
+}
 
 #[derive(Clone)]
 struct MementoRuntimeConfig {
@@ -30,6 +37,7 @@ pub(crate) struct MementoBackend {
     client: reqwest::Client,
     settings: ResolvedMemorySettings,
     local: LocalMemoryBackend,
+    mcp_session: Arc<Mutex<Option<CachedMcpSession>>>,
 }
 
 impl MementoBackend {
@@ -38,6 +46,7 @@ impl MementoBackend {
             client: reqwest::Client::new(),
             settings,
             local: LocalMemoryBackend,
+            mcp_session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -46,7 +55,7 @@ impl MementoBackend {
             "AGENTDESK runtime root is unavailable; skipping memento backend".to_string()
         })?;
         let config = runtime_layout::load_memory_backend(&root);
-        let endpoint = config.mcp.endpoint.trim().trim_end_matches('/').to_string();
+        let endpoint = normalize_memento_endpoint(&config.mcp.endpoint);
         if endpoint.is_empty() {
             return Err("memento endpoint is not configured; skipping memento backend".to_string());
         }
@@ -72,17 +81,11 @@ impl MementoBackend {
         &self,
         builder: reqwest::RequestBuilder,
         config: &MementoRuntimeConfig,
-        workspace: &str,
     ) -> reqwest::RequestBuilder {
-        let builder = builder
+        builder
             .header("Authorization", format!("Bearer {}", config.access_key))
-            .header("Accept", "application/json");
-
-        if workspace.trim().is_empty() {
-            builder
-        } else {
-            builder.header("X-Memento-Workspace", workspace)
-        }
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
     }
 
     fn resolve_workspace(
@@ -103,56 +106,184 @@ impl MementoBackend {
         format!("agentdesk-{}", sanitize_workspace_segment(role_id))
     }
 
-    async fn ensure_workspace(
-        &self,
-        config: &MementoRuntimeConfig,
-        workspace: &str,
-    ) -> Result<(), String> {
-        let url = format!("{}{}", config.endpoint, MEMENTO_WORKSPACES_PATH);
-        let response = self
-            .auth_request(self.client.post(url), config, "")
-            .json(&json!({ "name": workspace }))
-            .send()
-            .await
-            .map_err(|err| format!("memento workspace init request failed: {err}"))?;
-
-        if response.status().is_success() || response.status() == StatusCode::CONFLICT {
-            return Ok(());
+    fn resolve_agent_id(&self, role_id: &str, channel_id: u64) -> String {
+        let role_id = role_id.trim();
+        if role_id.is_empty() || role_id == UNBOUND_MEMORY_ROLE_ID {
+            return format!("agentdesk-channel-{channel_id}");
         }
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Err(format!(
-            "memento workspace init failed with {status}: {body}"
-        ))
+        role_id.to_string()
     }
 
-    async fn post_json_with_workspace_retry(
+    fn cached_session_id(&self, endpoint: &str) -> Option<String> {
+        let guard = self
+            .mcp_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .as_ref()
+            .filter(|session| session.endpoint == endpoint)
+            .map(|session| session.session_id.clone())
+    }
+
+    fn store_session_id(&self, endpoint: &str, session_id: String) {
+        let mut guard = self
+            .mcp_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(CachedMcpSession {
+            endpoint: endpoint.to_string(),
+            session_id,
+        });
+    }
+
+    fn clear_session_id(&self, endpoint: &str) {
+        let mut guard = self
+            .mcp_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard
+            .as_ref()
+            .map(|session| session.endpoint == endpoint)
+            .unwrap_or(false)
+        {
+            *guard = None;
+        }
+    }
+
+    fn capture_session_id(
         &self,
         config: &MementoRuntimeConfig,
-        workspace: &str,
-        path: &str,
-        body: &Value,
-        label: &str,
-    ) -> Result<reqwest::Response, String> {
-        let url = format!("{}{}", config.endpoint, path);
-        let mut retried_after_init = false;
+        response: &reqwest::Response,
+    ) -> Option<String> {
+        response
+            .headers()
+            .get("MCP-Session-Id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                let session_id = value.to_string();
+                self.store_session_id(&config.endpoint, session_id.clone());
+                session_id
+            })
+    }
 
-        loop {
+    async fn initialize_session(&self, config: &MementoRuntimeConfig) -> Result<String, String> {
+        let response = self
+            .auth_request(self.client.post(mcp_url(&config.endpoint)), config)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MEMENTO_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "agentdesk",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                    "accessKey": config.access_key,
+                }
+            }))
+            .send()
+            .await
+            .map_err(|err| format!("memento initialize request failed: {err}"))?;
+
+        let session_id = self.capture_session_id(config, &response);
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|err| format!("memento initialize response read failed: {err}"))?;
+
+        if !status.is_success() {
+            return Err(format!("memento initialize failed with {status}: {text}"));
+        }
+
+        let payload: Value = serde_json::from_str(&text).map_err(|err| {
+            format!("memento initialize response decode failed: {err}; body={text}")
+        })?;
+        if let Some(error) = payload.get("error") {
+            return Err(format!(
+                "memento initialize rpc failed: {}",
+                render_rpc_error(error)
+            ));
+        }
+
+        session_id.ok_or_else(|| {
+            format!("memento initialize succeeded without MCP-Session-Id header; body={text}")
+        })
+    }
+
+    async fn ensure_session(&self, config: &MementoRuntimeConfig) -> Result<String, String> {
+        if let Some(session_id) = self.cached_session_id(&config.endpoint) {
+            return Ok(session_id);
+        }
+        self.initialize_session(config).await
+    }
+
+    async fn call_tool(
+        &self,
+        config: &MementoRuntimeConfig,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<Value, String> {
+        let mut session_id = self.ensure_session(config).await?;
+
+        for attempt in 0..2 {
             let response = self
-                .auth_request(self.client.post(url.clone()), config, workspace)
-                .json(body)
+                .auth_request(self.client.post(mcp_url(&config.endpoint)), config)
+                .header("MCP-Session-Id", session_id.as_str())
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": arguments.clone(),
+                    }
+                }))
                 .send()
                 .await
-                .map_err(|err| format!("memento {label} request failed: {err}"))?;
+                .map_err(|err| format!("memento {tool_name} request failed: {err}"))?;
 
-            if response.status() != StatusCode::NOT_FOUND || retried_after_init {
-                return Ok(response);
+            self.capture_session_id(config, &response);
+
+            let status = response.status();
+            let text = response
+                .text()
+                .await
+                .map_err(|err| format!("memento {tool_name} response read failed: {err}"))?;
+
+            if !status.is_success() {
+                if attempt == 0 && is_session_error(&text) {
+                    self.clear_session_id(&config.endpoint);
+                    session_id = self.initialize_session(config).await?;
+                    continue;
+                }
+                return Err(format!("memento {tool_name} failed with {status}: {text}"));
             }
 
-            self.ensure_workspace(config, workspace).await?;
-            retried_after_init = true;
+            let payload: Value = serde_json::from_str(&text).map_err(|err| {
+                format!("memento {tool_name} response decode failed: {err}; body={text}")
+            })?;
+
+            if let Some(error) = payload.get("error") {
+                let detail = render_rpc_error(error);
+                if attempt == 0 && is_session_error(&detail) {
+                    self.clear_session_id(&config.endpoint);
+                    session_id = self.initialize_session(config).await?;
+                    continue;
+                }
+                return Err(format!("memento {tool_name} rpc failed: {detail}"));
+            }
+
+            return extract_tool_result(&payload, tool_name);
         }
+
+        Err(format!(
+            "memento {tool_name} failed after retrying session initialization"
+        ))
     }
 
     async fn fetch_context(
@@ -161,70 +292,40 @@ impl MementoBackend {
         config: &MementoRuntimeConfig,
         workspace: &str,
     ) -> Result<Option<String>, String> {
-        let body = json!({
-            "message": request.user_text,
-            "include": ["working_memory", "memories", "skip_list", "identity"],
-            "include_graph": false,
-        });
-        let response = self
-            .post_json_with_workspace_retry(
-                config,
-                workspace,
-                MEMENTO_CONTEXT_PATH,
-                &body,
-                "context",
-            )
-            .await?;
-
-        if response.status() != StatusCode::OK {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("memento context failed with {status}: {body}"));
+        let agent_id = self.resolve_agent_id(&request.role_id, request.channel_id);
+        let mut args = Map::new();
+        args.insert("agentId".to_string(), json!(agent_id));
+        args.insert("sessionId".to_string(), json!(request.session_id));
+        args.insert("structured".to_string(), json!(true));
+        if !workspace.trim().is_empty() {
+            args.insert("workspace".to_string(), json!(workspace));
         }
-
-        let text = response
-            .text()
-            .await
-            .map_err(|err| format!("memento context response read failed: {err}"))?;
-        let payload: Value = serde_json::from_str(&text)
-            .map_err(|err| format!("memento context response decode failed: {err}; body={text}"))?;
+        let payload = self
+            .call_tool(config, "context", Value::Object(args))
+            .await?;
         Ok(format_context_payload_for_external_recall(&payload))
     }
 
-    async fn distill_transcript(
+    async fn reflect_transcript(
         &self,
         request: &ReflectRequest,
         config: &MementoRuntimeConfig,
         workspace: &str,
     ) -> Result<(), String> {
-        let transcript = format!(
-            "[System]: Session ended via {} for provider={} role_id={} channel_id={} session_id={}\n{}",
-            request.reason.as_str(),
-            request.provider.as_str(),
-            request.role_id,
-            request.channel_id,
-            request.session_id,
-            request.transcript.trim()
+        let agent_id = self.resolve_agent_id(&request.role_id, request.channel_id);
+        let mut args = Map::new();
+        args.insert("agentId".to_string(), json!(agent_id));
+        args.insert("sessionId".to_string(), json!(request.session_id));
+        args.insert(
+            "summary".to_string(),
+            json!([build_reflect_summary(request)]),
         );
-        let body = json!({ "transcript": transcript });
-
-        let response = self
-            .post_json_with_workspace_retry(
-                config,
-                workspace,
-                MEMENTO_DISTILL_PATH,
-                &body,
-                "distill",
-            )
-            .await?;
-
-        if response.status().is_success() {
-            return Ok(());
+        if !workspace.trim().is_empty() {
+            args.insert("workspace".to_string(), json!(workspace));
         }
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Err(format!("memento distill failed with {status}: {body}"))
+        self.call_tool(config, "reflect", Value::Object(args))
+            .await
+            .map(|_| ())
     }
 }
 
@@ -233,6 +334,82 @@ fn env_var_value(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_memento_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix(MEMENTO_MCP_PATH)
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn mcp_url(endpoint: &str) -> String {
+    format!(
+        "{}{}",
+        normalize_memento_endpoint(endpoint),
+        MEMENTO_MCP_PATH
+    )
+}
+
+fn render_rpc_error(error: &Value) -> String {
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown rpc error".to_string());
+    match error.get("code").and_then(Value::as_i64) {
+        Some(code) => format!("{message} (code={code})"),
+        None => message,
+    }
+}
+
+fn is_session_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("session required")
+        || message.contains("session not found")
+        || message.contains("session expired")
+}
+
+fn extract_tool_result(payload: &Value, tool_name: &str) -> Result<Value, String> {
+    if payload
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(format!("memento {tool_name} returned isError=true"));
+    }
+
+    let text = payload
+        .get("result")
+        .and_then(|result| result.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find_map(|item| item.get("text").and_then(Value::as_str))
+        })
+        .ok_or_else(|| {
+            format!("memento {tool_name} response missing result.content[0].text: {payload}")
+        })?;
+    let parsed: Value = serde_json::from_str(text).map_err(|err| {
+        format!("memento {tool_name} content decode failed: {err}; content={text}")
+    })?;
+    if parsed
+        .get("success")
+        .and_then(Value::as_bool)
+        .map(|success| !success)
+        .unwrap_or(false)
+    {
+        let error = parsed
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown tool error");
+        return Err(format!("memento {tool_name} tool failed: {error}"));
+    }
+    Ok(parsed)
 }
 
 fn sanitize_workspace_segment(value: &str) -> String {
@@ -259,6 +436,73 @@ fn sanitize_workspace_segment(value: &str) -> String {
 
 fn normalize_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    if max_chars <= 3 {
+        return trimmed.chars().take(max_chars).collect();
+    }
+    let mut shortened = trimmed.chars().take(max_chars - 3).collect::<String>();
+    shortened.push_str("...");
+    shortened
+}
+
+fn summarize_transcript_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line == "[Stopped]" || line.starts_with("[System]:") {
+        return None;
+    }
+    let (prefix, content) = if let Some(rest) = line.strip_prefix("[User]:") {
+        ("User: ", rest)
+    } else if let Some(rest) = line.strip_prefix("[Assistant]:") {
+        ("Assistant: ", rest)
+    } else if let Some(rest) = line.strip_prefix("[Tool]:") {
+        ("Tool: ", rest)
+    } else {
+        ("", line)
+    };
+    let content = normalize_whitespace(content);
+    if content.is_empty() {
+        return None;
+    }
+    Some(format!("{prefix}{}", truncate_text(&content, 120)))
+}
+
+fn summarize_transcript_for_reflect(transcript: &str) -> Option<String> {
+    let mut lines = Vec::new();
+    for line in transcript.lines().rev() {
+        let Some(line) = summarize_transcript_line(line) else {
+            continue;
+        };
+        if lines.iter().any(|existing| existing == &line) {
+            continue;
+        }
+        lines.push(line);
+        if lines.len() >= 4 {
+            break;
+        }
+    }
+    lines.reverse();
+    if lines.is_empty() {
+        None
+    } else {
+        Some(truncate_text(&lines.join(" | "), 320))
+    }
+}
+
+fn build_reflect_summary(request: &ReflectRequest) -> String {
+    summarize_transcript_for_reflect(&request.transcript).unwrap_or_else(|| {
+        format!(
+            "Session ended via {} for role_id={} channel_id={}",
+            request.reason.as_str(),
+            request.role_id,
+            request.channel_id
+        )
+    })
 }
 
 fn dedup_lines<I>(items: I, limit: usize) -> Vec<String>
@@ -365,6 +609,47 @@ fn format_memory_line(item: &Map<String, Value>) -> Option<(String, String)> {
     Some((content, line))
 }
 
+fn format_ranked_memory_line(item: &Map<String, Value>) -> Option<(String, String)> {
+    let content = item
+        .get("content")
+        .or_else(|| item.get("title"))
+        .and_then(Value::as_str)
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty())?;
+    let score = item
+        .get("score")
+        .or_else(|| item.get("importance"))
+        .and_then(Value::as_f64);
+    let memory_type = item
+        .get("type")
+        .and_then(Value::as_str)
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty());
+    let topic = item
+        .get("topic")
+        .and_then(Value::as_str)
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty());
+
+    let mut line = match score {
+        Some(score) => format!("({score:.2}) {content}"),
+        None => content.clone(),
+    };
+    if let Some(memory_type) = memory_type {
+        line.push_str(&format!(" [type: {memory_type}]"));
+    }
+    if let Some(topic) = topic {
+        line.push_str(&format!(" [topic: {topic}]"));
+    }
+
+    Some((content, line))
+}
+
+fn format_core_memory_line(label: &str, item: &Map<String, Value>) -> Option<(String, String)> {
+    let (dedup_key, line) = format_ranked_memory_line(item)?;
+    Some((format!("{label}:{dedup_key}"), format!("[{label}] {line}")))
+}
+
 fn format_skip_line(item: &Map<String, Value>) -> Option<(String, String)> {
     let skip_item = item
         .get("item")
@@ -424,6 +709,28 @@ fn format_context_payload_for_external_recall(payload: &Value) -> Option<String>
         ));
     }
 
+    let working_session_lines = payload
+        .get("working")
+        .and_then(Value::as_object)
+        .and_then(|working| working.get("current_session"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            dedup_lines(
+                items
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .filter_map(|item| format_core_memory_line("session", item)),
+                MAX_WORKING_MEMORY_LINES,
+            )
+        })
+        .unwrap_or_default();
+    if !working_session_lines.is_empty() {
+        sections.push(format!(
+            "Current session context from Memento:\n- {}",
+            working_session_lines.join("\n- ")
+        ));
+    }
+
     let memory_lines = payload
         .get("memories")
         .and_then(Value::as_object)
@@ -446,6 +753,85 @@ fn format_context_payload_for_external_recall(payload: &Value) -> Option<String>
         ));
     }
 
+    let ranked_memory_lines = payload
+        .get("rankedInjection")
+        .and_then(Value::as_object)
+        .and_then(|ranked| ranked.get("items"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            dedup_lines(
+                items
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .filter_map(format_ranked_memory_line),
+                MAX_MEMORY_LINES,
+            )
+        })
+        .unwrap_or_default();
+    if !ranked_memory_lines.is_empty() {
+        sections.push(format!(
+            "Ranked context from Memento:\n- {}",
+            ranked_memory_lines.join("\n- ")
+        ));
+    }
+
+    let core_memory_lines = payload
+        .get("core")
+        .and_then(Value::as_object)
+        .map(|core| {
+            let categories = [
+                ("preferences", "preference"),
+                ("errors", "error"),
+                ("decisions", "decision"),
+                ("procedures", "procedure"),
+            ];
+            dedup_lines(
+                categories.into_iter().flat_map(|(field, label)| {
+                    core.get(field)
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flat_map(move |items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_object)
+                                .filter_map(move |item| format_core_memory_line(label, item))
+                        })
+                }),
+                MAX_MEMORY_LINES,
+            )
+        })
+        .unwrap_or_default();
+    if !core_memory_lines.is_empty() {
+        sections.push(format!(
+            "Core memory from Memento:\n- {}",
+            core_memory_lines.join("\n- ")
+        ));
+    }
+
+    if ranked_memory_lines.is_empty() {
+        let anchor_lines = payload
+            .get("anchors")
+            .and_then(Value::as_object)
+            .and_then(|anchors| anchors.get("permanent"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                dedup_lines(
+                    items
+                        .iter()
+                        .filter_map(Value::as_object)
+                        .filter_map(format_ranked_memory_line),
+                    MAX_MEMORY_LINES,
+                )
+            })
+            .unwrap_or_default();
+        if !anchor_lines.is_empty() {
+            sections.push(format!(
+                "Anchored memory from Memento:\n- {}",
+                anchor_lines.join("\n- ")
+            ));
+        }
+    }
+
     let skip_lines = payload
         .get("skip_matches")
         .and_then(Value::as_array)
@@ -464,6 +850,17 @@ fn format_context_payload_for_external_recall(payload: &Value) -> Option<String>
             "Skip list warnings from Memento:\n- {}",
             skip_lines.join("\n- ")
         ));
+    }
+
+    if let Some(suggestion) = payload
+        .get("_memento_hint")
+        .and_then(Value::as_object)
+        .and_then(|hint| hint.get("suggestion"))
+        .and_then(Value::as_str)
+        .map(normalize_whitespace)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!("Memento hint:\n{suggestion}"));
     }
 
     if sections.len() == 1 {
@@ -552,7 +949,7 @@ impl MemoryBackend for MementoBackend {
 
             match tokio::time::timeout(
                 Duration::from_millis(self.settings.capture_timeout_ms),
-                self.distill_transcript(&request, &config, &workspace),
+                self.reflect_transcript(&request, &config, &workspace),
             )
             .await
             {
@@ -640,32 +1037,49 @@ mod tests {
         restore_env("MEMENTO_WORKSPACE", previous_workspace);
     }
 
-    async fn spawn_fixed_response_server(
+    struct MockHttpResponse {
         status_line: &'static str,
-        body: &'static str,
+        headers: Vec<(&'static str, &'static str)>,
+        body: String,
+    }
+
+    async fn spawn_response_sequence_server(
+        responses: Vec<MockHttpResponse>,
     ) -> (
         String,
-        tokio::sync::oneshot::Receiver<String>,
+        tokio::sync::oneshot::Receiver<Vec<String>>,
         tokio::task::JoinHandle<()>,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let response = format!(
-            "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        let (requests_tx, requests_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
+            let mut requests = Vec::new();
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0u8; 32768];
                 let n = stream.read(&mut buf).await.unwrap_or(0);
-                let _ = request_tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
-                let _ = stream.write_all(response.as_bytes()).await;
+                requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+
+                let mut raw_response = format!(
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n",
+                    response.status_line,
+                    response.body.len()
+                );
+                for (header, value) in response.headers {
+                    raw_response.push_str(&format!("{header}: {value}\r\n"));
+                }
+                raw_response.push_str("\r\n");
+                raw_response.push_str(&response.body);
+
+                let _ = stream.write_all(raw_response.as_bytes()).await;
                 let _ = stream.shutdown().await;
             }
+            let _ = requests_tx.send(requests);
         });
-        (format!("http://{}", addr), request_rx, handle)
+        (format!("http://{}", addr), requests_rx, handle)
     }
 
     async fn spawn_hanging_http_server() -> (String, tokio::task::JoinHandle<()>) {
@@ -704,41 +1118,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memento_recall_formats_context_endpoint_payload() {
-        let (base_url, request_rx, handle) = spawn_fixed_response_server(
-            "200 OK",
-            r#"{
-                "working_memory": {
-                    "items": [
-                        {
-                            "category": "active_work",
-                            "title": "Finish #344",
-                            "next_action": "Replace placeholder Memento backend",
-                            "tags": ["agentdesk", "memory"]
-                        }
-                    ]
-                },
-                "memories": {
-                    "matches": [
-                        {
-                            "id": "m1",
-                            "content": "Use /v1/health for Memento health checks.",
-                            "type": "decision",
-                            "tags": ["memento", "health"],
-                            "score": 0.93
-                        }
-                    ]
-                },
-                "skip_matches": [
+    async fn test_memento_recall_calls_context_tool_over_mcp() {
+        let context_content = serde_json::to_string(&json!({
+            "success": true,
+            "structured": true,
+            "working": {
+                "current_session": [
                     {
-                        "item": "fallback-only memento",
-                        "reason": "Real transport already exists now",
-                        "expires": null
+                        "content": "Replace placeholder Memento backend",
+                        "type": "procedure"
+                    }
+                ]
+            },
+            "core": {
+                "preferences": [],
+                "errors": [],
+                "decisions": [
+                    {
+                        "content": "Use /health for Memento health checks.",
+                        "type": "decision",
+                        "topic": "memento"
                     }
                 ],
-                "identity": "I keep AgentDesk memory behavior coherent across sessions."
-            }"#,
-        )
+                "procedures": []
+            },
+            "rankedInjection": {
+                "items": [
+                    {
+                        "content": "Finish #344",
+                        "type": "procedure",
+                        "score": 0.93
+                    }
+                ]
+            },
+            "_memento_hint": {
+                "suggestion": "Remember to clear resolved errors."
+            }
+        }))
+        .unwrap();
+        let initialize_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": MEMENTO_PROTOCOL_VERSION
+            }
+        }))
+        .unwrap();
+        let tool_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": context_content
+                    }
+                ],
+                "isError": false
+            }
+        }))
+        .unwrap();
+        let (base_url, request_rx, handle) = spawn_response_sequence_server(vec![
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-123")],
+                body: initialize_response,
+            },
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-123")],
+                body: tool_response,
+            },
+        ])
         .await;
         let (_guard, _temp, previous_root, previous_key, previous_workspace) =
             install_memento_runtime(&base_url, None);
@@ -755,22 +1206,29 @@ mod tests {
             })
             .await;
 
-        let request_dump = request_rx.await.unwrap();
+        let requests = request_rx.await.unwrap();
         handle.abort();
         restore_memento_runtime(previous_root, previous_key, previous_workspace);
 
-        let request_dump_lower = request_dump.to_lowercase();
-        assert!(request_dump_lower.contains("post /v1/context"));
-        assert!(request_dump_lower.contains("x-memento-workspace: agentdesk-project-agentdesk"));
-        assert!(request_dump.contains("\"message\":\"What do we know about #344?\""));
+        assert_eq!(requests.len(), 2);
+        let init_request_lower = requests[0].to_lowercase();
+        assert!(init_request_lower.contains("post /mcp"));
+        assert!(requests[0].contains("\"method\":\"initialize\""));
+
+        let tool_request_lower = requests[1].to_lowercase();
+        assert!(tool_request_lower.contains("post /mcp"));
+        assert!(tool_request_lower.contains("mcp-session-id: session-123"));
+        assert!(requests[1].contains("\"method\":\"tools/call\""));
+        assert!(requests[1].contains("\"name\":\"context\""));
+        assert!(requests[1].contains("\"workspace\":\"agentdesk-project-agentdesk\""));
+        assert!(requests[1].contains("\"agentId\":\"project-agentdesk\""));
+        assert!(requests[1].contains("\"sessionId\":\"session-1\""));
+        assert!(requests[1].contains("\"structured\":true"));
         let external_recall = recall.external_recall.unwrap_or_default();
         assert!(external_recall.contains("Finish #344"));
         assert!(external_recall.contains("Replace placeholder Memento backend"));
-        assert!(external_recall.contains("Use /v1/health for Memento health checks."));
-        assert!(external_recall.contains("fallback-only memento"));
-        assert!(
-            external_recall.contains("I keep AgentDesk memory behavior coherent across sessions.")
-        );
+        assert!(external_recall.contains("Use /health for Memento health checks."));
+        assert!(external_recall.contains("Remember to clear resolved errors."));
         assert!(recall.shared_knowledge.is_none());
         assert!(recall.longterm_catalog.is_none());
         assert!(recall.warnings.is_empty());
@@ -811,9 +1269,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memento_reflect_posts_distill_transcript() {
-        let (base_url, request_rx, handle) =
-            spawn_fixed_response_server("201 Created", r#"{"stored":[{"id":"abc123"}]}"#).await;
+    async fn test_memento_reflect_calls_reflect_tool_over_mcp() {
+        let reflect_content = serde_json::to_string(&json!({
+            "success": true,
+            "count": 1
+        }))
+        .unwrap();
+        let initialize_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": MEMENTO_PROTOCOL_VERSION
+            }
+        }))
+        .unwrap();
+        let tool_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": reflect_content
+                    }
+                ],
+                "isError": false
+            }
+        }))
+        .unwrap();
+        let (base_url, request_rx, handle) = spawn_response_sequence_server(vec![
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-456")],
+                body: initialize_response,
+            },
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-456")],
+                body: tool_response,
+            },
+        ])
+        .await;
         let (_guard, _temp, previous_root, previous_key, previous_workspace) =
             install_memento_runtime(&base_url, None);
         let backend = MementoBackend::new(memento_settings());
@@ -829,16 +1325,20 @@ mod tests {
             })
             .await;
 
-        let request_dump = request_rx.await.unwrap();
+        let requests = request_rx.await.unwrap();
         handle.abort();
         restore_memento_runtime(previous_root, previous_key, previous_workspace);
 
-        let request_dump_lower = request_dump.to_lowercase();
-        assert!(request_dump_lower.contains("post /v1/distill"));
-        assert!(request_dump_lower.contains("x-memento-workspace: agentdesk-project-agentdesk"));
-        assert!(request_dump.contains("idle_expiry"));
-        assert!(request_dump.contains("[User]: hi"));
-        assert!(request_dump.contains("[Assistant]: hello"));
+        assert_eq!(requests.len(), 2);
+        let tool_request_lower = requests[1].to_lowercase();
+        assert!(tool_request_lower.contains("post /mcp"));
+        assert!(tool_request_lower.contains("mcp-session-id: session-456"));
+        assert!(requests[1].contains("\"method\":\"tools/call\""));
+        assert!(requests[1].contains("\"name\":\"reflect\""));
+        assert!(requests[1].contains("\"workspace\":\"agentdesk-project-agentdesk\""));
+        assert!(requests[1].contains("\"agentId\":\"project-agentdesk\""));
+        assert!(requests[1].contains("\"sessionId\":\"session-1\""));
+        assert!(requests[1].contains("User: hi | Assistant: hello"));
         assert_eq!(result, CaptureResult::default());
     }
 
