@@ -21,48 +21,67 @@ import { SettingsProvider, useSettings } from "./contexts/SettingsContext";
 
 const OfficeView = lazy(() => import("./components/OfficeView"));
 const DashboardPageView = lazy(() => import("./components/DashboardPageView"));
-const AgentManagerView = lazy(() => import("./components/AgentManagerView"));
-const MeetingMinutesView = lazy(() => import("./components/MeetingMinutesView"));
-const SkillCatalogView = lazy(() => import("./components/SkillCatalogView"));
 const KanbanTab = lazy(() => import("./components/agent-manager/KanbanTab"));
-const SettingsView = lazy(() => import("./components/SettingsView"));
-const OnboardingWizard = lazy(() => import("./components/OnboardingWizard"));
+const ControlCenterView = lazy(() => import("./components/ControlCenterView"));
 import OfficeSelectorBar from "./components/OfficeSelectorBar";
-const OfficeManagerModal = lazy(() => import("./components/OfficeManagerModal"));
 const AgentInfoCard = lazy(() => import("./components/agent-manager/AgentInfoCard"));
 import { useSpriteMap } from "./components/AgentAvatar";
 import { useI18n } from "./i18n";
-import { type Notification, useNotifications, ToastOverlay } from "./components/NotificationCenter";
+import {
+  ToastOverlay,
+  type Notification,
+  useNotifications,
+} from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
 import {
+  Activity,
   Building2,
-  LayoutDashboard,
-  Users,
-  FileText,
-  Puzzle,
+  KanbanSquare,
+  SlidersHorizontal,
   Wifi,
   WifiOff,
-  Settings,
-  KanbanSquare,
-  Menu,
-  ChevronRight,
 } from "lucide-react";
-const PulseView = lazy(() => import("./components/PulseView"));
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
 
-import { VIEW_REGISTRY, NAV_ROUTES, type ViewMode } from "./app/routes";
+type ViewMode = "office" | "pulse" | "kanban" | "more";
+type ControlTab = "agents" | "departments" | "offices" | "settings" | "meetings";
+type AgentsPane = "directory" | "dispatch";
+type KanbanPulseFocus = "review" | "blocked" | "requested" | "stalled";
 
-// SM breakpoint (640px) matches Tailwind's `sm:` — used to switch Pulse vs full Dashboard
-function useIsMobile(breakpoint = 640) {
-  const [mobile, setMobile] = useState(() => window.matchMedia(`(max-width: ${breakpoint - 1}px)`).matches);
-  useEffect(() => {
-    const mql = window.matchMedia(`(max-width: ${breakpoint - 1}px)`);
-    const handler = (e: MediaQueryListEvent) => setMobile(e.matches);
-    mql.addEventListener("change", handler);
-    return () => mql.removeEventListener("change", handler);
-  }, [breakpoint]);
-  return mobile;
+interface ShellRoute {
+  id: ViewMode;
+  labelKo: string;
+  labelEn: string;
+  shortcutKey: string;
+  loadingKo: string;
+  loadingEn: string;
 }
+
+interface PaletteRoute {
+  id: string;
+  labelKo: string;
+  labelEn: string;
+  icon: string;
+}
+
+const VIEW_ROUTES: ShellRoute[] = [
+  { id: "office", labelKo: "오피스", labelEn: "Office", shortcutKey: "o", loadingKo: "오피스 로딩 중...", loadingEn: "Loading Office..." },
+  { id: "pulse", labelKo: "펄스", labelEn: "Pulse", shortcutKey: "p", loadingKo: "펄스 로딩 중...", loadingEn: "Loading Pulse..." },
+  { id: "kanban", labelKo: "칸반", labelEn: "Kanban", shortcutKey: "b", loadingKo: "칸반 로딩 중...", loadingEn: "Loading Kanban..." },
+  { id: "more", labelKo: "컨트롤", labelEn: "Control", shortcutKey: "m", loadingKo: "컨트롤 로딩 중...", loadingEn: "Loading Control..." },
+];
+
+const PALETTE_ROUTES: PaletteRoute[] = [
+  { id: "office", labelKo: "오피스", labelEn: "Office", icon: "🏢" },
+  { id: "pulse", labelKo: "펄스", labelEn: "Pulse", icon: "📊" },
+  { id: "kanban", labelKo: "칸반", labelEn: "Kanban", icon: "📋" },
+  { id: "more", labelKo: "컨트롤", labelEn: "Control", icon: "🎛️" },
+  { id: "control_agents", labelKo: "에이전트", labelEn: "Agents", icon: "👥" },
+  { id: "control_departments", labelKo: "부서", labelEn: "Departments", icon: "🏢" },
+  { id: "control_offices", labelKo: "오피스 관리", labelEn: "Offices", icon: "🏬" },
+  { id: "control_meetings", labelKo: "회의 기록", labelEn: "Meeting Records", icon: "📝" },
+  { id: "control_settings", labelKo: "설정", labelEn: "Settings", icon: "⚙️" },
+];
 
 function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {
   const totalIssues = meeting.proposed_issues?.length ?? 0;
@@ -81,8 +100,6 @@ function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {
   return pending > 0 || failed > 0;
 }
 
-// ── Bootstrap data shape ──
-
 interface BootstrapData {
   offices: Office[];
   agents: Agent[];
@@ -98,8 +115,6 @@ interface BootstrapData {
   taskDispatches: TaskDispatch[];
   selectedOfficeId: string | null;
 }
-
-// ── Root component: bootstrap then render providers ──
 
 export default function App() {
   const [data, setData] = useState<BootstrapData | null>(null);
@@ -120,50 +135,69 @@ export default function App() {
   }, [pushNotification]);
 
   useEffect(() => {
+    api.onApiError((url, error) => {
+      const apiPath = url.replace(/^\/api\//, "");
+      pushNotification(`API error: ${apiPath} - ${error.message}`, "error");
+    });
+    return () => api.onApiError(null);
+  }, [pushNotification]);
+
+  useEffect(() => {
     (async () => {
       const partial: string[] = [];
       try {
         await api.getSession();
-        const off = await api.getOffices();
-        const defaultOfficeId = off.length > 0 ? off[0].id : undefined;
-        const [allAg, ag, allDep, dep, ses, st, set, rtm, logs, cards, dispatches] = await Promise.all([
-          api.getAgents(),
-          api.getAgents(defaultOfficeId),
-          api.getDepartments(),
-          api.getDepartments(defaultOfficeId),
-          api.getDispatchedSessions(true),
-          api.getStats(defaultOfficeId),
-          api.getSettings(),
-          api.getRoundTableMeetings().catch(() => { partial.push("meetings"); return [] as RoundTableMeeting[]; }),
-          api.getAuditLogs(12).catch(() => { partial.push("audit logs"); return [] as AuditLogEntry[]; }),
-          api.getKanbanCards().catch(() => { partial.push("kanban"); return [] as KanbanCard[]; }),
-          api.getTaskDispatches({ limit: 200 }).catch(() => { partial.push("dispatches"); return [] as TaskDispatch[]; }),
-        ]);
-        if (partial.length > 0) {
-          pushNotification(`Failed to load: ${partial.join(", ")}`, "warning");
-        }
-        const resolvedSettings = set.companyName
-          ? ({ ...DEFAULT_SETTINGS, ...set } as CompanySettings)
+        const offices = await api.getOffices();
+        const defaultOfficeId = offices.length > 0 ? offices[0].id : undefined;
+        const [allAgents, agents, allDepartments, departments, sessions, stats, settings, meetings, logs, cards, dispatches] =
+          await Promise.all([
+            api.getAgents(),
+            api.getAgents(defaultOfficeId),
+            api.getDepartments(),
+            api.getDepartments(defaultOfficeId),
+            api.getDispatchedSessions(true),
+            api.getStats(defaultOfficeId),
+            api.getSettings(),
+            api.getRoundTableMeetings().catch(() => [] as RoundTableMeeting[]),
+            api.getAuditLogs(12).catch(() => [] as AuditLogEntry[]),
+            api.getKanbanCards().catch(() => [] as KanbanCard[]),
+            api.getTaskDispatches({ limit: 200 }).catch(() => [] as TaskDispatch[]),
+          ]);
+        const resolvedSettings = settings.companyName
+          ? ({ ...DEFAULT_SETTINGS, ...settings } as CompanySettings)
           : DEFAULT_SETTINGS;
         setData({
-          offices: off,
-          agents: ag,
-          allAgents: allAg,
-          departments: dep,
-          allDepartments: allDep,
-          sessions: ses,
-          stats: st,
+          offices,
+          agents,
+          allAgents,
+          departments,
+          allDepartments,
+          sessions,
+          stats,
           settings: resolvedSettings,
-          roundTableMeetings: rtm,
+          roundTableMeetings: meetings,
           auditLogs: logs,
           kanbanCards: cards,
           taskDispatches: dispatches,
           selectedOfficeId: defaultOfficeId ?? null,
         });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error("Bootstrap failed:", e);
-        setBootstrapError(msg);
+      } catch (error) {
+        console.error("Bootstrap failed:", error);
+        setData({
+          offices: [],
+          agents: [],
+          allAgents: [],
+          departments: [],
+          allDepartments: [],
+          sessions: [],
+          stats: null,
+          settings: DEFAULT_SETTINGS,
+          roundTableMeetings: [],
+          auditLogs: [],
+          kanbanCards: [],
+          taskDispatches: [],
+          selectedOfficeId: null,
+        });
       }
     })();
   }, [pushNotification]);
@@ -178,35 +212,22 @@ export default function App() {
           }
           break;
         }
-        case "kanban_card_updated": {
+        case "kanban_card_updated":
           break;
-        }
       }
     },
     [pushNotification],
   );
 
-  const { wsConnected, wsRef } = useDashboardSocket(handleWsEvent);
-
+  const { wsConnected } = useDashboardSocket(handleWsEvent);
   const { t } = useI18n();
 
   if (!data) {
     return (
-      <div className="flex items-center justify-center h-screen bg-th-bg-primary text-th-text-muted">
+      <div className="flex h-screen items-center justify-center bg-gray-900 text-gray-400">
         <div className="text-center">
-          <div className="text-4xl mb-4">🐾</div>
-          <div>{bootstrapError
-            ? t({ ko: `로딩 실패: ${bootstrapError}`, en: `Load failed: ${bootstrapError}` })
-            : t({ ko: "AgentDesk 대시보드 로딩 중...", en: "Loading AgentDesk Dashboard..." })
-          }</div>
-          {bootstrapError && (
-            <button
-              className="mt-4 px-4 py-2 rounded-lg bg-surface-medium text-th-text-primary text-sm"
-              onClick={() => window.location.reload()}
-            >
-              {t({ ko: "새로고침", en: "Reload" })}
-            </button>
-          )}
+          <div className="mb-4 text-4xl">🐾</div>
+          <div>{t({ ko: "AgentDesk 대시보드 로딩 중...", en: "Loading AgentDesk Dashboard..." })}</div>
         </div>
       </div>
     );
@@ -229,9 +250,7 @@ export default function App() {
         <KanbanProvider initialCards={data.kanbanCards} initialDispatches={data.taskDispatches}>
           <AppShell
             wsConnected={wsConnected}
-            wsRef={wsRef}
             notifications={notifications}
-            pushNotification={pushNotification}
             dismissNotification={dismissNotification}
           />
         </KanbanProvider>
@@ -240,31 +259,20 @@ export default function App() {
   );
 }
 
-// ── Shell: view routing + layout ──
-
 interface AppShellProps {
   wsConnected: boolean;
-  wsRef: React.RefObject<WebSocket | null>;
   notifications: Notification[];
-  pushNotification: (msg: string, level: Notification["type"]) => void;
   dismissNotification: (id: string) => void;
 }
 
-// Views reachable from the mobile "More" tab
-const MORE_VIEWS = new Set<ViewMode>(["agents", "meetings", "skills", "settings"]);
-
-function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismissNotification }: AppShellProps) {
+function AppShell({ wsConnected, notifications, dismissNotification }: AppShellProps) {
   const [view, setView] = useState<ViewMode>("office");
-  const [showOfficeManager, setShowOfficeManager] = useState(false);
+  const [controlTab, setControlTab] = useState<ControlTab>("agents");
+  const [agentsPane, setAgentsPane] = useState<AgentsPane>("directory");
+  const [kanbanPulseFocus, setKanbanPulseFocus] = useState<KanbanPulseFocus | null>(null);
   const [officeInfoAgent, setOfficeInfoAgent] = useState<Agent | null>(null);
   const [showCmdPalette, setShowCmdPalette] = useState(false);
-  const [showMobileMore, setShowMobileMore] = useState(false);
-  const isMobile = useIsMobile();
-
-  // Reset mobile-more overlay when viewport switches to desktop
-  useEffect(() => {
-    if (!isMobile) setShowMobileMore(false);
-  }, [isMobile]);
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
 
   const { settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr } = useSettings();
   const {
@@ -275,7 +283,6 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
     allAgents,
     departments,
     allDepartments,
-    sessions,
     setSessions,
     roundTableMeetings,
     setRoundTableMeetings,
@@ -295,18 +302,113 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
   const { kanbanCards, taskDispatches, upsertKanbanCard, setKanbanCards } = useKanban();
 
   const spriteMap = useSpriteMap(agents);
+  const unreadCount = notifications.filter((notification) => Date.now() - notification.ts < 60_000).length;
+  const unresolvedMeetingsCount = roundTableMeetings.filter(hasUnresolvedMeetingIssues).length;
 
-  // I7: Global command palette (Cmd+K)
+  const resolveTheme = useCallback(() => {
+    if (settings.theme !== "auto") return settings.theme;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }, [settings.theme]);
+
+  const viewFallbackLabel = useMemo(
+    () =>
+      Object.fromEntries(
+        VIEW_ROUTES.map((route) => [route.id, isKo ? route.loadingKo : route.loadingEn]),
+      ) as Record<ViewMode, string>,
+    [isKo],
+  );
+
+  const moreBadge = unresolvedMeetingsCount > 0 ? unresolvedMeetingsCount : unreadCount || undefined;
+  const moreBadgeColor = unresolvedMeetingsCount > 0 ? "bg-amber-500" : unreadCount > 0 ? "bg-red-500" : undefined;
+
+  const navItems: Array<{ id: ViewMode; icon: React.ReactNode; label: string; badge?: number; badgeColor?: string }> = [
+    { id: "office", icon: <Building2 size={20} />, label: isKo ? "오피스" : "Office" },
+    { id: "pulse", icon: <Activity size={20} />, label: isKo ? "펄스" : "Pulse" },
+    { id: "kanban", icon: <KanbanSquare size={20} />, label: isKo ? "칸반" : "Kanban" },
+    { id: "more", icon: <SlidersHorizontal size={20} />, label: isKo ? "컨트롤" : "Control", badge: moreBadge, badgeColor: moreBadgeColor },
+  ];
+
+  const handleNavigate = useCallback(
+    (nextView: ViewMode) => {
+      setView(nextView);
+      if (nextView === "pulse") refreshStats();
+    },
+    [refreshStats],
+  );
+
+  const handlePaletteNavigate = useCallback(
+    (routeId: string) => {
+      if (routeId === "office" || routeId === "pulse" || routeId === "kanban" || routeId === "more") {
+        handleNavigate(routeId);
+        return;
+      }
+
+      setView("more");
+      if (routeId === "control_departments") {
+        setControlTab("departments");
+      } else if (routeId === "control_offices") {
+        setControlTab("offices");
+      } else if (routeId === "control_settings") {
+        setControlTab("settings");
+      } else if (routeId === "control_meetings") {
+        setControlTab("meetings");
+      } else {
+        setControlTab("agents");
+        setAgentsPane("directory");
+      }
+    },
+    [handleNavigate],
+  );
+
+  const openPulseKanbanSignal = useCallback((signal: KanbanPulseFocus) => {
+    setKanbanPulseFocus(signal);
+    setView("kanban");
+  }, []);
+
+  const openDispatchSessions = useCallback(() => {
+    setControlTab("agents");
+    setAgentsPane("dispatch");
+    setView("more");
+  }, []);
+
+  const openMeetingsView = useCallback(() => {
+    setControlTab("meetings");
+    setView("more");
+  }, []);
+
+  const openSettingsView = useCallback(() => {
+    setControlTab("settings");
+    setView("more");
+  }, []);
+
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setShowCmdPalette((v) => !v);
+    const handler = (event: KeyboardEvent) => {
+      const tag = (event.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      if ((event.metaKey || event.ctrlKey) && event.key === "k") {
+        event.preventDefault();
+        setShowCmdPalette((prev) => !prev);
+        return;
+      }
+
+      if (event.key === "?" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        setShowShortcutHelp((prev) => !prev);
+        return;
+      }
+
+      if (event.altKey && !event.metaKey && !event.ctrlKey) {
+        const route = VIEW_ROUTES.find((item) => item.shortcutKey === event.key.toLowerCase());
+        if (!route) return;
+        event.preventDefault();
+        handleNavigate(route.id);
       }
     };
+
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [handleNavigate]);
 
   const handleOfficeChanged = useCallback(() => {
     refreshOffices();
@@ -317,56 +419,13 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
     refreshAuditLogs();
   }, [refreshOffices, refreshAgents, refreshAllAgents, refreshDepartments, refreshAllDepartments, refreshAuditLogs]);
 
-  const newMeetingsCount = roundTableMeetings.filter(hasUnresolvedMeetingIssues).length;
-  const viewFallbackLabel = useMemo(() =>
-    Object.fromEntries(VIEW_REGISTRY.map((r) => [r.id, isKo ? r.loadingKo : r.loadingEn])) as Record<ViewMode, string>,
-  [isKo]);
-
-  // Desktop sidebar icon map (all views)
-  const navIconMap: Record<string, React.ReactNode> = {
-    office: <Building2 size={20} />,
-    dashboard: <LayoutDashboard size={20} />,
-    kanban: <KanbanSquare size={20} />,
-    agents: <Users size={20} />,
-    meetings: <FileText size={20} />,
-    skills: <Puzzle size={20} />,
-    settings: <Settings size={20} />,
-  };
-  const navBadges: Record<string, { badge?: number; badgeColor?: string }> = {
-    meetings: { badge: newMeetingsCount || undefined, badgeColor: "bg-amber-500" },
-  };
-  const navItems = NAV_ROUTES.map((r) => ({
-    id: r.id,
-    icon: navIconMap[r.id] ?? <span>{r.icon}</span>,
-    label: isKo ? r.labelKo : r.labelEn,
-    ...navBadges[r.id],
-  }));
-
-  // Mobile 4-tab definitions
-  const mobileActiveTab = showMobileMore ? "more" : MORE_VIEWS.has(view) ? "more" : view;
-  const mobileMoreBadge = newMeetingsCount || undefined;
-
-  const handleMobileNav = useCallback((tabId: string) => {
-    if (tabId === "more") {
-      setShowMobileMore((v) => !v);
-    } else {
-      setShowMobileMore(false);
-      setView(tabId as ViewMode);
-      if (tabId === "dashboard") refreshStats();
-    }
-  }, [refreshStats]);
-
-  const handleMobileMoreSelect = useCallback((viewId: ViewMode) => {
-    setShowMobileMore(false);
-    setView(viewId);
-    if (viewId === "settings") return;
-  }, []);
+  const showOfficeSelector =
+    offices.length > 0 && (view === "office" || (view === "more" && controlTab !== "settings" && controlTab !== "meetings"));
 
   return (
-    <div className="flex sm:fixed sm:inset-0 min-h-dvh bg-th-bg-primary">
-      {/* Sidebar (hidden on mobile) */}
-      <nav className="hidden sm:flex w-[4.5rem] bg-th-nav-bg border-r border-th-card-border flex-col items-center py-4 gap-1">
-        <div className="text-2xl mb-4">🐾</div>
+    <div className="flex fixed inset-0 bg-gray-900">
+      <nav className="hidden w-[4.5rem] flex-col items-center gap-1 border-r border-gray-800 bg-gray-950 py-4 sm:flex">
+        <div className="mb-4 text-2xl">🐾</div>
         {navItems.map((item) => (
           <NavBtn
             key={item.id}
@@ -374,184 +433,190 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
             active={view === item.id}
             badge={item.badge}
             badgeColor={item.badgeColor}
-            onClick={() => { setView(item.id); if (item.id === "dashboard") refreshStats(); }}
+            onClick={() => handleNavigate(item.id)}
             label={item.label}
           />
         ))}
         <div className="flex-1" />
         <div
-          className="w-10 h-10 flex items-center justify-center rounded-lg"
+          className="flex h-10 w-10 items-center justify-center rounded-lg"
           title={wsConnected ? (isKo ? "서버 연결됨" : "Server connected") : (isKo ? "서버 연결 끊김" : "Server disconnected")}
         >
-          {(refreshing || refreshingStats)
-            ? <div className="w-4 h-4 rounded-full border-2 border-th-text-muted border-t-indigo-400 animate-spin" title={isKo ? "데이터 갱신 중..." : "Refreshing..."} />
-            : wsConnected
-              ? <Wifi size={16} className="text-emerald-500" />
-              : <WifiOff size={16} className="text-red-400 animate-pulse" />}
+          {wsConnected ? <Wifi size={16} className="text-emerald-500" /> : <WifiOff size={16} className="animate-pulse text-red-400" />}
         </div>
       </nav>
 
-      {/* Main content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Office selector bar — hide on settings/kanban views */}
-        {offices.length > 0 && view !== "settings" && view !== "kanban" && (
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {showOfficeSelector && (
           <OfficeSelectorBar
             offices={offices}
             selectedOfficeId={selectedOfficeId}
             onSelectOffice={setSelectedOfficeId}
-            onManageOffices={() => setShowOfficeManager(true)}
+            onManageOffices={() => {
+              setView("more");
+              setControlTab("offices");
+            }}
             isKo={isKo}
           />
         )}
 
-        {/* Dataset status banners — loading and error per dataset */}
-        {Object.entries(datasetStates).some(([, s]) => s.loading) && (
-          <div className="px-3 py-1 text-xs bg-indigo-500/10 text-indigo-400 border-b border-indigo-500/20 flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full border-2 border-indigo-400/40 border-t-indigo-400 animate-spin shrink-0" />
-            <span>{isKo ? "갱신 중:" : "Refreshing:"}</span>
-            {Object.entries(datasetStates)
-              .filter(([, s]) => s.loading)
-              .map(([key]) => <span key={key} className="px-1.5 py-0.5 rounded bg-indigo-500/20">{key}</span>)}
-          </div>
-        )}
-        {Object.entries(datasetStates).some(([, s]) => s.error) && (
-          <div className="px-3 py-1 text-xs bg-red-500/10 text-red-400 border-b border-red-500/20 flex items-center gap-2">
-            <span>{isKo ? "로드 실패:" : "Failed:"}</span>
-            {Object.entries(datasetStates)
-              .filter(([, s]) => s.error)
-              .map(([key, s]) => <span key={key} className="px-1.5 py-0.5 rounded bg-red-500/20" title={s.error ?? undefined}>{key}</span>)}
-          </div>
-        )}
+        <main className="mb-14 flex min-h-0 flex-1 flex-col overflow-hidden sm:mb-0">
+          <Suspense fallback={<ViewSkeleton label={viewFallbackLabel[view]} />}>
+            {view === "office" && (
+              <OfficeView
+                agents={agentsWithDispatched}
+                departments={departments}
+                language={settings.language}
+                theme={resolveTheme()}
+                subAgents={subAgents}
+                notifications={notifications}
+                auditLogs={auditLogs}
+                activeMeeting={roundTableMeetings.find((meeting) => meeting.status === "in_progress") ?? null}
+                kanbanCards={kanbanCards}
+                onNavigateToKanban={() => handleNavigate("kanban")}
+                onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                onSelectDepartment={() => {
+                  setView("more");
+                  setControlTab("departments");
+                }}
+                customDeptThemes={settings.roomThemes}
+              />
+            )}
 
-        <main className="flex-1 min-h-0 flex flex-col overflow-hidden mb-14 sm:mb-0">
-          {/* Mobile "More" menu overlay */}
-          {showMobileMore && (
-            <div className="sm:hidden flex-1 overflow-y-auto p-4">
-              <MobileMoreMenu
-                isKo={isKo}
-                activeView={view}
-                meetingBadge={newMeetingsCount}
-                onSelect={handleMobileMoreSelect}
-                wsConnected={wsConnected}
+            {view === "pulse" && (
+              <DashboardPageView
+                stats={stats}
+                agents={agents}
+                sessions={visibleDispatchedSessions}
+                meetings={roundTableMeetings}
+                settings={settings}
+                onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
+                onOpenKanbanSignal={openPulseKanbanSignal}
+                onOpenDispatchSessions={openDispatchSessions}
+                onOpenMeetings={openMeetingsView}
+                onOpenSettings={openSettingsView}
+              />
+            )}
+
+            {view === "kanban" && (
+              <div className="h-full overflow-auto p-4 pb-40 sm:p-6">
+                <KanbanTab
+                  tr={(ko: string, en: string) => (settings.language === "ko" ? ko : en)}
+                  locale={settings.language}
+                  cards={kanbanCards}
+                  dispatches={taskDispatches}
+                  agents={allAgents}
+                  departments={allDepartments}
+                  onAssignIssue={async (payload: {
+                    github_repo: string;
+                    github_issue_number: number;
+                    github_issue_url?: string | null;
+                    title: string;
+                    description?: string | null;
+                    assignee_agent_id: string;
+                  }) => {
+                    const assigned = await api.assignKanbanIssue(payload);
+                    upsertKanbanCard(assigned);
+                  }}
+                  onUpdateCard={async (id: string, patch: Partial<KanbanCard> & { before_card_id?: string | null }) => {
+                    const updated = await api.updateKanbanCard(id, patch);
+                    upsertKanbanCard(updated);
+                  }}
+                  onRetryCard={async (id: string, payload?: { assignee_agent_id?: string | null; request_now?: boolean }) => {
+                    const updated = await api.retryKanbanCard(id, payload);
+                    upsertKanbanCard(updated);
+                  }}
+                  onRedispatchCard={async (id: string, payload?: { reason?: string | null }) => {
+                    const updated = await api.redispatchKanbanCard(id, payload);
+                    upsertKanbanCard(updated);
+                  }}
+                onDeleteCard={async (id: string) => {
+                  await api.deleteKanbanCard(id);
+                  setKanbanCards((prev) => prev.filter((card) => card.id !== id));
+                }}
+                onPatchDeferDod={async (id, payload) => {
+                  const updated = await api.patchKanbanDeferDod(id, payload);
+                  upsertKanbanCard(updated);
+                }}
+                externalStatusFocus={kanbanPulseFocus}
+                onClearPulseFocus={() => setKanbanPulseFocus(null)}
               />
             </div>
-          )}
-          {!showMobileMore && (
-            <Suspense
-              fallback={
-                <div className="flex items-center justify-center h-full text-gray-500">
-                  {viewFallbackLabel[view]}
-                </div>
-              }
-            >
-              {view === "office" && (
-                <OfficeView
-                  agents={agentsWithDispatched}
-                  departments={departments}
-                  language={settings.language}
-                  theme={settings.theme === "auto" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : settings.theme}
-                  subAgents={subAgents}
-                  notifications={notifications}
-                  auditLogs={auditLogs}
-                  activeMeeting={roundTableMeetings.find((m) => m.status === "in_progress") ?? null}
-                  kanbanCards={kanbanCards}
-                  onNavigateToKanban={() => setView("kanban")}
-                  onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
-                  onSelectDepartment={() => { setView("agents"); }}
-                  customDeptThemes={settings.roomThemes}
-                />
-              )}
-              {view === "dashboard" && (
-                  <DashboardPageView
-                    stats={stats}
-                    agents={agents}
-                    settings={settings}
-                    onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
-                  />
-              )}
-              {view === "agents" && (
-                <AgentManagerView
-                  agents={agents}
-                  departments={departments}
-                  language={settings.language}
-                  officeId={selectedOfficeId}
-                  onAgentsChange={() => { refreshAgents(); refreshAllAgents(); refreshOffices(); }}
-                  onDepartmentsChange={() => { refreshDepartments(); refreshAllDepartments(); refreshOffices(); }}
-                  sessions={visibleDispatchedSessions}
-                  onAssign={async (id, patch) => {
-                    const updated = await api.assignDispatchedSession(id, patch);
-                    setSessions((prev) =>
-                      prev.map((s) => (s.id === updated.id ? updated : s)),
-                    );
-                  }}
-                />
-              )}
-              {view === "kanban" && (
-                <div className="h-full overflow-auto p-4 sm:p-6 pb-40">
-                  <KanbanTab
-                    tr={(ko: string, en: string) => settings.language === "ko" ? ko : en}
-                    locale={settings.language}
-                    cards={kanbanCards}
-                    dispatches={taskDispatches}
-                    agents={allAgents}
-                    departments={allDepartments}
-                    onAssignIssue={async (payload) => {
-                      const assigned = await api.assignKanbanIssue(payload);
-                      upsertKanbanCard(assigned);
-                    }}
-                    onUpdateCard={async (id, patch) => {
-                      const updated = await api.updateKanbanCard(id, patch);
-                      upsertKanbanCard(updated);
-                    }}
-                    onRetryCard={async (id, payload) => {
-                      const updated = await api.retryKanbanCard(id, payload);
-                      upsertKanbanCard(updated);
-                    }}
-                    onRedispatchCard={async (id, payload) => {
-                      const updated = await api.redispatchKanbanCard(id, payload);
-                      upsertKanbanCard(updated);
-                    }}
-                    onDeleteCard={async (id) => {
-                      await api.deleteKanbanCard(id);
-                      setKanbanCards((prev) => prev.filter((card) => card.id !== id));
-                    }}
-                  />
-                </div>
-              )}
-              {view === "meetings" && (
-                <MeetingMinutesView
-                  meetings={roundTableMeetings}
-                  onRefresh={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
-                />
-              )}
-              {view === "skills" && <SkillCatalogView />}
-              {view === "settings" && (
-                <SettingsView settings={settings} onSave={async (patch) => {
+            )}
+
+            {view === "more" && (
+              <ControlCenterView
+                controlTab={controlTab}
+                onControlTabChange={setControlTab}
+                agentsPane={agentsPane}
+                onAgentsPaneChange={setAgentsPane}
+                isKo={isKo}
+                language={settings.language}
+                officeId={selectedOfficeId}
+                offices={offices}
+                selectedOfficeId={selectedOfficeId}
+                allAgents={allAgents}
+                agents={agents}
+                departments={departments}
+                sessions={visibleDispatchedSessions}
+                onAssign={async (id, patch) => {
+                  const updated = await api.assignDispatchedSession(id, patch);
+                  setSessions((prev) => prev.map((session) => (session.id === updated.id ? updated : session)));
+                }}
+                onAgentsChange={() => {
+                  refreshAgents();
+                  refreshAllAgents();
+                  refreshOffices();
+                }}
+                onDepartmentsChange={() => {
+                  refreshDepartments();
+                  refreshAllDepartments();
+                  refreshOffices();
+                }}
+                onOfficesChange={handleOfficeChanged}
+                meetings={roundTableMeetings}
+                onRefreshMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
+                settings={settings}
+                onSaveSettings={async (patch) => {
                   await api.saveSettings(patch);
                   setSettings((prev) => ({ ...prev, ...patch } as CompanySettings));
                   refreshAuditLogs();
-                }} isKo={isKo} />
-              )}
-            </Suspense>
-          )}
+                }}
+                notifications={notifications}
+                onDismissNotification={dismissNotification}
+              />
+            )}
+          </Suspense>
         </main>
-
       </div>
 
-      {/* Mobile bottom tab bar: 4 tabs (Office / Pulse / Kanban / More) */}
-      <nav className="sm:hidden fixed bottom-0 left-0 right-0 bg-th-nav-bg border-t border-th-card-border flex justify-around items-center h-14 z-50">
-        {(refreshing || refreshingStats) && (
-          <div className="absolute top-0 left-0 right-0 h-0.5 overflow-hidden">
-            <div className="h-full bg-indigo-400 animate-[loading-bar_1.5s_ease-in-out_infinite]" />
-          </div>
-        )}
-        <MobileTabBtn id="office" icon={<Building2 size={20} />} label={isKo ? "오피스" : "Office"} active={mobileActiveTab === "office"} onClick={handleMobileNav} />
-        <MobileTabBtn id="dashboard" icon={<LayoutDashboard size={20} />} label={isKo ? "대시보드" : "Dashboard"} active={mobileActiveTab === "dashboard"} onClick={handleMobileNav} />
-        <MobileTabBtn id="kanban" icon={<KanbanSquare size={20} />} label={isKo ? "칸반" : "Kanban"} active={mobileActiveTab === "kanban"} onClick={handleMobileNav} />
-        <MobileTabBtn id="more" icon={<Menu size={20} />} label={isKo ? "더보기" : "More"} active={mobileActiveTab === "more"} badge={mobileMoreBadge} badgeColor="bg-amber-500" onClick={handleMobileNav} />
+      {!wsConnected && (
+        <div className="fixed left-0 right-0 top-0 z-[90] flex items-center justify-center gap-2 border-b border-red-500/20 bg-red-500/15 px-3 py-1.5 text-center text-xs text-red-400 sm:left-[4.5rem]">
+          <WifiOff size={12} className="animate-pulse" />
+          <span>{isKo ? "서버 연결 끊김 — 재연결 시도 중..." : "Server disconnected — reconnecting..."}</span>
+        </div>
+      )}
+
+      <nav className="fixed bottom-0 left-0 right-0 z-50 flex h-14 items-center justify-around border-t border-gray-800 bg-gray-950 sm:hidden">
+        {navItems.map((item) => (
+          <button
+            key={item.id}
+            onClick={() => handleNavigate(item.id)}
+            className={`relative flex h-full flex-1 flex-col items-center justify-center text-[10px] ${
+              view === item.id ? "text-indigo-400" : "text-gray-500"
+            }`}
+          >
+            {item.icon}
+            <span className="mt-0.5">{item.label}</span>
+            {item.badge !== undefined && item.badge > 0 && (
+              <span className={`absolute right-1/4 top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full text-[8px] text-white ${item.badgeColor || "bg-emerald-500"}`}>
+                {item.badge > 9 ? "9+" : item.badge}
+              </span>
+            )}
+          </button>
+        ))}
       </nav>
 
-      {/* Agent Info Card (from Office View click) */}
       <Suspense fallback={null}>
         {officeInfoAgent && (
           <AgentInfoCard
@@ -562,12 +627,16 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
             tr={tr}
             departments={departments}
             onClose={() => setOfficeInfoAgent(null)}
-            onAgentUpdated={() => { refreshAgents(); refreshAllAgents(); refreshOffices(); refreshAuditLogs(); }}
+            onAgentUpdated={() => {
+              refreshAgents();
+              refreshAllAgents();
+              refreshOffices();
+              refreshAuditLogs();
+            }}
           />
         )}
       </Suspense>
 
-      {/* I7: Command Palette */}
       <Suspense fallback={null}>
         {showCmdPalette && (
           <CommandPalette
@@ -575,32 +644,64 @@ function AppShell({ wsConnected, wsRef, notifications, pushNotification, dismiss
             departments={departments}
             isKo={isKo}
             onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
-            onNavigate={(v) => setView(v as ViewMode)}
+            onNavigate={handlePaletteNavigate}
             onClose={() => setShowCmdPalette(false)}
+            routes={PALETTE_ROUTES}
+            departmentRouteId="control_departments"
           />
         )}
       </Suspense>
 
-      {/* Office Manager Modal */}
-      <Suspense fallback={null}>
-        {showOfficeManager && (
-          <OfficeManagerModal
-            offices={offices}
-            allAgents={allAgents}
-            isKo={isKo}
-            onClose={() => setShowOfficeManager(false)}
-            onChanged={handleOfficeChanged}
-          />
-        )}
-      </Suspense>
-
-      {/* Toast overlay for API errors and warnings */}
       <ToastOverlay notifications={notifications} onDismiss={dismissNotification} />
+
+      {showShortcutHelp && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center" onClick={() => setShowShortcutHelp(false)}>
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Keyboard shortcuts"
+            className="relative mx-4 w-full max-w-md space-y-4 rounded-2xl border border-[var(--th-border)] bg-[var(--th-surface)] p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold" style={{ color: "var(--th-text-heading)" }}>
+                {isKo ? "키보드 단축키" : "Keyboard Shortcuts"}
+              </h3>
+              <button
+                onClick={() => setShowShortcutHelp(false)}
+                className="flex h-11 w-11 items-center justify-center rounded-lg text-[var(--th-text-muted)] hover:bg-white/5"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between" style={{ color: "var(--th-text-muted)" }}>
+                <span>{isKo ? "명령 팔레트" : "Command Palette"}</span>
+                <kbd className="rounded bg-black/10 px-2 py-0.5 text-xs">⌘K</kbd>
+              </div>
+              <div className="flex justify-between" style={{ color: "var(--th-text-muted)" }}>
+                <span>{isKo ? "이 도움말" : "This help"}</span>
+                <kbd className="rounded bg-black/10 px-2 py-0.5 text-xs">?</kbd>
+              </div>
+              <hr style={{ borderColor: "var(--th-border)" }} />
+              <div className="text-xs font-semibold uppercase" style={{ color: "var(--th-text-muted)" }}>
+                {isKo ? "뷰 전환" : "View Navigation"}
+              </div>
+              {VIEW_ROUTES.map((route) => (
+                <div key={route.id} className="flex justify-between" style={{ color: "var(--th-text-muted)" }}>
+                  <span>{isKo ? route.labelKo : route.labelEn}</span>
+                  <kbd className="rounded bg-black/10 px-2 py-0.5 text-xs">Alt+{route.shortcutKey.toUpperCase()}</kbd>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
-// ── Desktop sidebar NavBtn ──
 
 function NavBtn({
   icon,
@@ -621,121 +722,25 @@ function NavBtn({
     <button
       onClick={onClick}
       title={label}
-      className={`relative w-14 rounded-lg flex flex-col items-center justify-center gap-0.5 py-1.5 transition-colors ${
-        active
-          ? "bg-indigo-600 text-white"
-          : "text-th-text-muted hover:text-th-text-primary hover:bg-surface-hover"
+      className={`relative flex w-14 flex-col items-center justify-center gap-0.5 rounded-lg py-1.5 transition-colors ${
+        active ? "bg-indigo-600 text-white" : "text-gray-500 hover:bg-gray-800 hover:text-gray-300"
       }`}
     >
       {icon}
       <span className="text-xs leading-tight">{label}</span>
       {badge !== undefined && badge > 0 && (
-        <span className={`absolute -top-1 -right-0.5 ${badgeColor || "bg-emerald-500"} text-white text-xs w-4 h-4 rounded-full flex items-center justify-center`}>
-          {badge}
+        <span className={`absolute -right-0.5 -top-1 flex h-4 w-4 items-center justify-center rounded-full text-[10px] text-white ${badgeColor || "bg-emerald-500"}`}>
+          {badge > 9 ? "9+" : badge}
         </span>
       )}
     </button>
   );
 }
 
-// ── Mobile bottom tab button ──
-
-function MobileTabBtn({
-  id,
-  icon,
-  label,
-  active,
-  badge,
-  badgeColor,
-  onClick,
-}: {
-  id: string;
-  icon: React.ReactNode;
-  label: string;
-  active: boolean;
-  badge?: number;
-  badgeColor?: string;
-  onClick: (id: string) => void;
-}) {
+function ViewSkeleton({ label }: { label: string }) {
   return (
-    <button
-      onClick={() => onClick(id)}
-      className={`relative flex flex-col items-center justify-center flex-1 h-full text-xs ${
-        active ? "text-indigo-400" : "text-th-text-muted"
-      }`}
-    >
-      {icon}
-      <span className="mt-0.5">{label}</span>
-      {badge !== undefined && badge > 0 && (
-        <span className={`absolute top-1 right-1/4 ${badgeColor || "bg-emerald-500"} text-white text-xs w-3.5 h-3.5 rounded-full flex items-center justify-center`}>
-          {badge}
-        </span>
-      )}
-    </button>
-  );
-}
-
-// ── Mobile "More" menu ──
-
-const MORE_MENU_ITEMS: Array<{ id: ViewMode; icon: React.ReactNode; labelKo: string; labelEn: string; desc_ko: string; desc_en: string }> = [
-  { id: "agents", icon: <Users size={20} />, labelKo: "직원", labelEn: "Staff", desc_ko: "에이전트·부서 관리", desc_en: "Agents & departments" },
-  { id: "meetings", icon: <FileText size={20} />, labelKo: "회의", labelEn: "Meetings", desc_ko: "라운드테이블 회의록", desc_en: "Round-table minutes" },
-  { id: "skills", icon: <Puzzle size={20} />, labelKo: "스킬", labelEn: "Skills", desc_ko: "스킬 카탈로그", desc_en: "Skill catalog" },
-  { id: "settings", icon: <Settings size={20} />, labelKo: "설정", labelEn: "Settings", desc_ko: "테마·언어·런타임 설정", desc_en: "Theme, language & runtime" },
-];
-
-function MobileMoreMenu({
-  isKo,
-  activeView,
-  meetingBadge,
-  onSelect,
-  wsConnected,
-}: {
-  isKo: boolean;
-  activeView: ViewMode;
-  meetingBadge: number;
-  onSelect: (view: ViewMode) => void;
-  wsConnected: boolean;
-}) {
-  return (
-    <div className="space-y-2">
-      <h2 className="text-xs font-semibold uppercase tracking-widest px-1 mb-3" style={{ color: "var(--th-text-muted)" }}>
-        {isKo ? "더보기" : "More"}
-      </h2>
-      {MORE_MENU_ITEMS.map((item) => (
-        <button
-          key={item.id}
-          onClick={() => onSelect(item.id)}
-          className="w-full flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-colors"
-          style={{
-            background: activeView === item.id ? "var(--th-card-bg)" : "transparent",
-            border: `1px solid ${activeView === item.id ? "var(--th-card-border)" : "transparent"}`,
-          }}
-        >
-          <span className="text-th-text-muted">{item.icon}</span>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
-                {isKo ? item.labelKo : item.labelEn}
-              </span>
-              {item.id === "meetings" && meetingBadge > 0 && (
-                <span className="bg-amber-500 text-white text-xs w-4 h-4 rounded-full flex items-center justify-center">
-                  {meetingBadge}
-                </span>
-              )}
-            </div>
-            <div className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
-              {isKo ? item.desc_ko : item.desc_en}
-            </div>
-          </div>
-          <ChevronRight size={16} className="text-th-text-muted shrink-0" />
-        </button>
-      ))}
-      <div className="mt-4 px-1 flex items-center gap-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-        {wsConnected
-          ? <><Wifi size={12} className="text-emerald-500" /> <span>{isKo ? "서버 연결됨" : "Connected"}</span></>
-          : <><WifiOff size={12} className="text-red-400" /> <span>{isKo ? "연결 끊김" : "Disconnected"}</span></>}
-      </div>
+    <div className="flex h-full items-center justify-center text-gray-500">
+      {label}
     </div>
   );
 }

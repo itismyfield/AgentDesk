@@ -388,9 +388,14 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <FileText className="text-amber-400" size={24} />
-          <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
-            {t({ ko: "라운드 테이블 회의", en: "Round Table Meeting" })}
-          </h1>
+          <div>
+            <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
+              {t({ ko: "회의 기록", en: "Meeting Records" })}
+            </h1>
+            <p className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "라운드 테이블 상세와 후속 일감 상태를 함께 관리합니다.", en: "Manage round-table details and follow-up issue status together." })}
+            </p>
+          </div>
           <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(245,158,11,0.15)", color: "#fbbf24" }}>
             {meetings.length}
           </span>

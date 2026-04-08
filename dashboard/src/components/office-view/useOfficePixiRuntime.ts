@@ -62,10 +62,15 @@ export function useOfficePixiRuntime({
   activeMeeting,
   customDeptThemes,
   currentTheme,
-  disabled,
+  disabled = false,
 }: UseOfficePixiRuntimeParams): void {
   useEffect(() => {
-    if (disabled) return;
+    if (disabled) {
+      const element = containerRef.current;
+      if (element) element.innerHTML = "";
+      return;
+    }
+
     const element = containerRef.current;
     if (!element) return;
 

@@ -137,9 +137,10 @@ function formatTimeRemaining(resetsAt: string | null): string {
 
 interface RateLimitWidgetProps {
   t: TFunction;
+  onOpenSettings?: () => void;
 }
 
-export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
+export default function RateLimitWidget({ t, onOpenSettings }: RateLimitWidgetProps) {
   const [data, setData] = useState<RateLimitData | null>(null);
   const [thresholds, setThresholds] = useState({ warning: 80, danger: 95 });
 
@@ -176,7 +177,37 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
   if (!data || !data.providers || data.providers.length === 0) return null;
 
   return (
-    <div className="game-panel relative overflow-hidden px-3 py-2 sm:px-4 sm:py-2.5">
+    <div className="game-panel relative overflow-hidden px-3 py-3 sm:px-4 sm:py-3.5">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] sm:text-xs font-bold uppercase tracking-wider" style={{ color: "#60a5fa" }}>
+            {t({ ko: "운영 Weather", en: "OPERATING WEATHER", ja: "運用 WEATHER", zh: "运营 WEATHER" })}
+          </div>
+          <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+            {t({
+              ko: "Provider 버킷과 stale 캐시 상태",
+              en: "Provider buckets and stale cache status",
+              ja: "Provider バケットと stale キャッシュ状態",
+              zh: "Provider bucket 与 stale cache 状态",
+            })}
+          </div>
+        </div>
+        {onOpenSettings && (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="shrink-0 rounded-lg px-3 py-2 text-[11px] font-medium"
+            style={{
+              color: "#93c5fd",
+              border: "1px solid rgba(96,165,250,0.35)",
+              background: "rgba(59,130,246,0.12)",
+            }}
+          >
+            {t({ ko: "임계치 설정", en: "Thresholds", ja: "閾値設定", zh: "阈值设置" })}
+          </button>
+        )}
+      </div>
+
       <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-x-6">
         {data.providers.map((provider) => {
           const accent = getAccent(provider.provider);

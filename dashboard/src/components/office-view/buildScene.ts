@@ -34,6 +34,7 @@ export function buildOfficeScene(context: BuildOfficeSceneContext): void {
     roomRectsRef,
     deliveriesRef,
     deliveryLayerRef,
+    eventBubblesRef,
     prevAssignRef,
     agentPosRef,
     spriteMapRef,
@@ -75,6 +76,7 @@ export function buildOfficeScene(context: BuildOfficeSceneContext): void {
   animItemsRef.current = [];
   roomRectsRef.current = [];
   agentPosRef.current.clear();
+  eventBubblesRef.current = [];
   breakAnimItemsRef.current = [];
   subCloneAnimItemsRef.current = [];
   subCloneBurstParticlesRef.current = [];
@@ -95,6 +97,7 @@ export function buildOfficeScene(context: BuildOfficeSceneContext): void {
     customDeptThemes: customThemes,
     activeMeeting,
     activeIssueByAgent,
+    blockedAgentIds,
   } = dataRef.current;
 
   const previousSubSnapshot = subCloneSnapshotRef.current;
@@ -297,6 +300,7 @@ export function buildOfficeScene(context: BuildOfficeSceneContext): void {
     addedWorkingSubIds,
     nextSubSnapshot,
     activeIssueByAgent,
+    blockedAgentIds,
   });
   subCloneSnapshotRef.current = nextSubSnapshot;
 

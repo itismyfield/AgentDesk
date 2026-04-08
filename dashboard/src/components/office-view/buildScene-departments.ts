@@ -66,6 +66,7 @@ interface BuildDepartmentRoomsParams {
   addedWorkingSubIds: Set<string>;
   nextSubSnapshot: Map<string, { parentAgentId: string; x: number; y: number }>;
   activeIssueByAgent?: Map<string, ActiveIssueInfo>;
+  blockedAgentIds?: Set<string>;
 }
 
 export function buildDepartmentRooms({
@@ -91,6 +92,7 @@ export function buildDepartmentRooms({
   addedWorkingSubIds,
   nextSubSnapshot,
   activeIssueByAgent,
+  blockedAgentIds,
 }: BuildDepartmentRoomsParams): void {
   departments.forEach((dept, deptIdx) => {
     const { rx, ry, rw: roomW, rh: roomH, deptAgentRows } = deptLayouts[deptIdx];
@@ -234,6 +236,7 @@ export function buildDepartmentRooms({
           nextSubSnapshot,
           themeAccent: theme.accent,
           activeIssue: activeIssueByAgent?.get(agent.id),
+          isBlocked: blockedAgentIds?.has(agent.id) ?? false,
         });
       }
     });

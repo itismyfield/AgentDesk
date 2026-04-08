@@ -6,7 +6,7 @@ import {
 } from "./auto-queue-actions";
 
 describe("auto-queue-actions", () => {
-  it("passes the selected agent to reset and generate", async () => {
+  it("passes the selected repo and agent to reset and generate", async () => {
     const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
     const generateAutoQueue = vi
       .fn()
@@ -19,7 +19,10 @@ describe("auto-queue-actions", () => {
       "priority-sort",
     );
 
-    expect(resetAutoQueue).toHaveBeenCalledWith("agent-selected");
+    expect(resetAutoQueue).toHaveBeenCalledWith({
+      repo: "test-repo",
+      agentId: "agent-selected",
+    });
     expect(generateAutoQueue).toHaveBeenCalledWith(
       "test-repo",
       "agent-selected",
@@ -27,11 +30,20 @@ describe("auto-queue-actions", () => {
     );
   });
 
-  it("passes the selected agent to reset-only actions", async () => {
+  it("passes the selected scope to reset-only actions", async () => {
     const resetAutoQueue = vi.fn().mockResolvedValue({ ok: true });
 
-    await resetAutoQueueForSelection({ resetAutoQueue }, "agent-selected");
+    await resetAutoQueueForSelection(
+      { resetAutoQueue },
+      "test-repo",
+      "agent-selected",
+      "run-123",
+    );
 
-    expect(resetAutoQueue).toHaveBeenCalledWith("agent-selected");
+    expect(resetAutoQueue).toHaveBeenCalledWith({
+      repo: "test-repo",
+      agentId: "agent-selected",
+      runId: "run-123",
+    });
   });
 });

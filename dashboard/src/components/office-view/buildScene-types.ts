@@ -8,6 +8,8 @@ import type { SupportedLocale } from "./themes-locale";
 export interface ActiveIssueInfo {
   number: number;
   url: string;
+  startedAt?: number;
+  title?: string;
 }
 
 export interface DataSnapshot {
@@ -20,6 +22,7 @@ export interface DataSnapshot {
   customDeptThemes?: Record<string, { floor1: number; floor2: number; wall: number; accent: number }>;
   activeMeeting?: RoundTableMeeting | null;
   activeIssueByAgent?: Map<string, ActiveIssueInfo>;
+  blockedAgentIds?: Set<string>;
 }
 
 export interface CallbackSnapshot {
@@ -38,6 +41,7 @@ export interface AnimItem {
   deskG?: Graphics;
   bedG?: Graphics;
   blanketG?: Graphics;
+  blocked?: boolean;
 }
 
 export interface BreakAnimItem {
@@ -72,6 +76,7 @@ export interface BuildOfficeSceneContext {
   roomRectsRef: MutableRefObject<RoomRect[]>;
   deliveriesRef: MutableRefObject<Delivery[]>;
   deliveryLayerRef: MutableRefObject<Container | null>;
+  eventBubblesRef: MutableRefObject<Array<{ container: Container; createdAt: number; duration: number; baseY: number }>>;
   prevAssignRef: MutableRefObject<Set<string>>;
   agentPosRef: MutableRefObject<Map<string, { x: number; y: number }>>;
   spriteMapRef: MutableRefObject<Map<string, number>>;

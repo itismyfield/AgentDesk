@@ -11,6 +11,20 @@ import {
 import { hashStr } from "./drawing-core";
 import { drawDesk } from "./drawing-furniture-a";
 
+function formatElapsed(startMs: number): string {
+  const ms = Date.now() - startMs;
+  if (ms < 0) return "";
+  const totalMin = Math.floor(ms / 60000);
+  if (totalMin < 60) return `${totalMin}m`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h >= 24) {
+    const d = Math.floor(h / 24);
+    return `${d}d${h % 24}h`;
+  }
+  return m > 0 ? `${h}h${m}m` : `${h}h`;
+}
+
 interface RenderDeskAgentAndSubClonesParams {
   room: Container;
   textures: Record<string, Texture>;
@@ -31,6 +45,7 @@ interface RenderDeskAgentAndSubClonesParams {
   nextSubSnapshot: Map<string, { parentAgentId: string; x: number; y: number }>;
   themeAccent: number;
   activeIssue?: ActiveIssueInfo;
+  isBlocked?: boolean;
 }
 
 export function renderDeskAgentAndSubClones({
@@ -53,6 +68,7 @@ export function renderDeskAgentAndSubClones({
   nextSubSnapshot,
   themeAccent,
   activeIssue,
+  isBlocked = false,
 }: RenderDeskAgentAndSubClonesParams): void {
   const spriteNum = spriteMap.get(agent.id) ?? (hashStr(agent.id) % 13) + 1;
   const charContainer = new Container();
@@ -128,7 +144,19 @@ export function renderDeskAgentAndSubClones({
     deskG,
     bedG,
     blanketG,
+    blocked: isBlocked,
   });
+
+  if (isBlocked) {
+    const haloG = new Graphics();
+    haloG.circle(ax, charFeetY - TARGET_CHAR_H / 2, 22).fill({ color: 0xef4444, alpha: 0.08 });
+    haloG.circle(ax, charFeetY - TARGET_CHAR_H / 2, 22).stroke({ width: 1.5, color: 0xef4444, alpha: 0.5 });
+    room.addChild(haloG);
+    const blockedBadge = new Text({ text: "🚫", style: new TextStyle({ fontSize: 9 }) });
+    blockedBadge.anchor.set(0.5, 0.5);
+    blockedBadge.position.set(ax - 18, charFeetY - TARGET_CHAR_H + 8);
+    room.addChild(blockedBadge);
+  }
 
   const activeTask = tasks.find((task) => task.assigned_agent_id === agent.id && task.status === "in_progress");
   const workingSubs = subAgents.filter((sub) => sub.parentAgentId === agent.id && sub.status === "working");
@@ -144,6 +172,9 @@ export function renderDeskAgentAndSubClones({
       bubbleLines.push(`🔧 #${activeIssue.number}`);
     }
     bubbleLines.push(`💬 ${txt}`);
+    if (activeIssue?.startedAt) {
+      bubbleLines.push(`⏱ ${formatElapsed(activeIssue.startedAt)}`);
+    }
     if (workingSubs.length > 1) {
       bubbleLines.push(`+${workingSubs.length - 1} linked`);
     }

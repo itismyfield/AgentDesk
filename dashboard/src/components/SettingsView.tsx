@@ -72,6 +72,124 @@ const CATEGORIES: Array<{
   },
 ];
 
+interface ConfigEntry {
+  key: string;
+  value: string | null;
+  category: string;
+  label_ko: string;
+  label_en: string;
+  default?: string | null;
+}
+
+type ConfigEditValue = string | boolean;
+
+const BOOLEAN_CONFIG_KEYS = new Set([
+  "review_enabled",
+  "counter_model_review_enabled",
+  "pm_decision_gate_enabled",
+]);
+
+const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string }> = {
+  kanban_manager_channel_id: {
+    ko: "칸반 상태 변경과 자동화 명령을 수신하는 Discord 채널입니다.",
+    en: "Discord channel used for kanban state changes and automation commands.",
+  },
+  deadlock_manager_channel_id: {
+    ko: "교착 상태나 멈춤 감지를 보고하는 Discord 채널입니다.",
+    en: "Discord channel that receives deadlock and stalled-work alerts.",
+  },
+  review_enabled: {
+    ko: "리뷰 단계를 전체 파이프라인에 적용할지 결정합니다.",
+    en: "Controls whether the review step is enforced across the pipeline.",
+  },
+  counter_model_review_enabled: {
+    ko: "다른 모델을 이용한 교차 리뷰를 자동으로 붙입니다.",
+    en: "Automatically adds cross-review using a different model provider.",
+  },
+  max_review_rounds: {
+    ko: "한 작업이 반복 리뷰를 수행할 수 있는 최대 횟수입니다.",
+    en: "Maximum number of repeated review rounds allowed for one task.",
+  },
+  pm_decision_gate_enabled: {
+    ko: "PM 판단 게이트를 거쳐야 다음 단계로 전환됩니다.",
+    en: "Requires PM decision gate approval before the next transition.",
+  },
+  server_port: {
+    ko: "릴리즈 서버가 바인딩되는 API 포트입니다.",
+    en: "API port used by the release server.",
+  },
+  requested_timeout_min: {
+    ko: "requested 상태에서 오래 머무는 카드를 경고하는 기준입니다.",
+    en: "Timeout threshold for cards stuck in requested state.",
+  },
+  in_progress_stale_min: {
+    ko: "in_progress 상태가 정체로 간주되는 기준 시간입니다.",
+    en: "Threshold for considering in-progress work stale.",
+  },
+  max_chain_depth: {
+    ko: "디스패치가 재귀적으로 이어질 수 있는 최대 깊이입니다.",
+    en: "Maximum recursive depth allowed for chained dispatches.",
+  },
+  context_compact_percent: {
+    ko: "컨텍스트를 compact 대상으로 보는 사용률 기준입니다.",
+    en: "Usage threshold that triggers context compaction.",
+  },
+  context_clear_percent: {
+    ko: "컨텍스트를 clear 대상으로 보는 잔여율 기준입니다.",
+    en: "Remaining-capacity threshold that triggers context clearing.",
+  },
+  context_clear_idle_minutes: {
+    ko: "유휴 상태일 때 컨텍스트를 비우기 전까지 기다리는 시간입니다.",
+    en: "Idle duration before clearing context state.",
+  },
+};
+
+const SYSTEM_CATEGORY_LABELS = {
+  pipeline: { ko: "파이프라인", en: "Pipeline" },
+  review: { ko: "리뷰", en: "Review" },
+  timeout: { ko: "칸반 타임아웃", en: "Kanban Timeouts" },
+  dispatch: { ko: "디스패치", en: "Dispatch" },
+  context: { ko: "컨텍스트 관리", en: "Context Management" },
+  system: { ko: "시스템", en: "System" },
+} as const;
+
+const SYSTEM_CATEGORY_DESCRIPTIONS = {
+  pipeline: {
+    ko: "칸반 진행과 의사결정 흐름에 직접 영향을 주는 값입니다.",
+    en: "Values that directly affect kanban flow and decision gates.",
+  },
+  review: {
+    ko: "리뷰 단계의 사용 여부와 반복 횟수를 정의합니다.",
+    en: "Defines review enablement and review repetition limits.",
+  },
+  timeout: {
+    ko: "정체 상태 감지와 자동 알림 타이밍을 조정합니다.",
+    en: "Tunes stale detection and automatic alert timing.",
+  },
+  dispatch: {
+    ko: "작업 디스패치가 얼마나 깊게 확장될지 제한합니다.",
+    en: "Limits how far task dispatching can fan out.",
+  },
+  context: {
+    ko: "컨텍스트 압축과 정리 임계값을 관리합니다.",
+    en: "Manages thresholds for context compaction and clearing.",
+  },
+  system: {
+    ko: "서버 자체 동작에 필요한 핵심 시스템 값입니다.",
+    en: "Core system values required for server behavior.",
+  },
+} as const;
+
+function isBooleanConfigKey(key: string): boolean {
+  return BOOLEAN_CONFIG_KEYS.has(key);
+}
+
+function parseBooleanConfigValue(value: string | boolean | null | undefined): boolean {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
+}
+
 function formatUnit(value: number, unit: string): string {
   if (unit === "s" && value >= 60) {
     const m = Math.floor(value / 60);
@@ -106,9 +224,8 @@ export default function SettingsView({
   const [rcDirty, setRcDirty] = useState(false);
 
   // ── kv_meta Config state ──
-  interface ConfigEntry { key: string; value: string | null; category: string; label_ko: string; label_en: string; }
   const [configEntries, setConfigEntries] = useState<ConfigEntry[]>([]);
-  const [configEdits, setConfigEdits] = useState<Record<string, string>>({});
+  const [configEdits, setConfigEdits] = useState<Record<string, ConfigEditValue>>({});
   const [configSaving, setConfigSaving] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
 
@@ -172,7 +289,7 @@ export default function SettingsView({
 
   return (
     <div
-      className="p-6 max-w-2xl mx-auto space-y-6 overflow-auto h-full pb-40"
+      className="mx-auto h-full max-w-2xl min-w-0 space-y-6 overflow-x-hidden overflow-y-auto p-6 pb-40"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <h2 className="text-xl font-bold" style={{ color: "var(--th-text)" }}>
@@ -361,37 +478,87 @@ export default function SettingsView({
             {["pipeline", "review", "timeout", "dispatch", "context", "system"].map((cat) => {
               const items = configEntries.filter((e) => e.category === cat);
               if (items.length === 0) return null;
-              const catLabel: Record<string, string> = {
-                pipeline: tr("파이프라인", "Pipeline"),
-                review: tr("리뷰", "Review"),
-                timeout: tr("칸반 타임아웃", "Kanban Timeouts"),
-                dispatch: tr("디스패치", "Dispatch"),
-                context: tr("컨텍스트 관리", "Context Management"),
-                system: tr("시스템", "System"),
-              };
+              const catLabel = SYSTEM_CATEGORY_LABELS[cat as keyof typeof SYSTEM_CATEGORY_LABELS];
+              const catDescription = SYSTEM_CATEGORY_DESCRIPTIONS[cat as keyof typeof SYSTEM_CATEGORY_DESCRIPTIONS];
               return (
-                <div key={cat} className="mb-4">
-                  <h4 className="text-sm font-medium mb-2" style={{ color: "var(--th-text-secondary)" }}>
-                    {catLabel[cat] || cat}
+                <div key={cat} className="mb-4 rounded-2xl border p-4" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.12)" }}>
+                  <h4 className="text-sm font-medium mb-1" style={{ color: "var(--th-text-secondary)" }}>
+                    {catLabel ? tr(catLabel.ko, catLabel.en) : cat}
                   </h4>
+                  {catDescription && (
+                    <p className="mb-3 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                      {tr(catDescription.ko, catDescription.en)}
+                    </p>
+                  )}
                   <div className="space-y-2">
-                    {items.map((entry) => (
-                      <div key={entry.key} className="rounded-xl border px-4 py-3 space-y-1.5" style={{ borderColor: "rgba(148,163,184,0.2)" }}>
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
-                            {isKo ? entry.label_ko : entry.label_en}
-                          </span>
-                          <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>{entry.key}</span>
+                    {items.map((entry) => {
+                      const description = SYSTEM_CONFIG_DESCRIPTIONS[entry.key];
+                      const hasLocalEdit = Object.prototype.hasOwnProperty.call(configEdits, entry.key);
+                      const currentValue = hasLocalEdit ? configEdits[entry.key] : (entry.value ?? entry.default ?? "");
+                      const defaultLabel = entry.default ?? tr("없음", "None");
+                      return (
+                        <div key={entry.key} className="rounded-xl border px-4 py-3 space-y-2" style={{ borderColor: "rgba(148,163,184,0.2)", background: "var(--th-surface)" }}>
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+                                {isKo ? entry.label_ko : entry.label_en}
+                              </div>
+                              {description && (
+                                <div className="mt-1 text-xs leading-relaxed" style={{ color: "var(--th-text-muted)" }}>
+                                  {isKo ? description.ko : description.en}
+                                </div>
+                              )}
+                            </div>
+                            <span className="shrink-0 text-[10px]" style={{ color: "var(--th-text-muted)" }}>{entry.key}</span>
+                          </div>
+
+                          {isBooleanConfigKey(entry.key) ? (
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={parseBooleanConfigValue(currentValue)}
+                              onClick={() => setConfigEdits((prev) => ({ ...prev, [entry.key]: !parseBooleanConfigValue(currentValue) }))}
+                              className="flex w-full items-center justify-between rounded-xl border px-3 py-3 text-left transition-colors"
+                              style={{
+                                borderColor: parseBooleanConfigValue(currentValue) ? "rgba(52,211,153,0.35)" : "rgba(148,163,184,0.24)",
+                                background: parseBooleanConfigValue(currentValue) ? "rgba(16,185,129,0.12)" : "rgba(15,23,42,0.2)",
+                              }}
+                            >
+                              <div>
+                                <div className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>
+                                  {parseBooleanConfigValue(currentValue) ? tr("활성화됨", "Enabled") : tr("비활성화됨", "Disabled")}
+                                </div>
+                                <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+                                  {tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}
+                                </div>
+                              </div>
+                              <span
+                                className="relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors"
+                                style={{ background: parseBooleanConfigValue(currentValue) ? "#10b981" : "rgba(148,163,184,0.32)" }}
+                              >
+                                <span
+                                  className="absolute h-5 w-5 rounded-full bg-white transition-transform"
+                                  style={{ transform: parseBooleanConfigValue(currentValue) ? "translateX(1.55rem)" : "translateX(0.3rem)" }}
+                                />
+                              </span>
+                            </button>
+                          ) : (
+                            <label className="block">
+                              <input
+                                type="text"
+                                className="w-full rounded-lg px-3 py-2 text-sm bg-white/5 border"
+                                style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                                value={String(currentValue)}
+                                onChange={(e) => setConfigEdits((prev) => ({ ...prev, [entry.key]: e.target.value }))}
+                              />
+                              <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                                {tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}
+                              </div>
+                            </label>
+                          )}
                         </div>
-                        <input
-                          type="text"
-                          className="w-full rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
-                          style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
-                          defaultValue={entry.value ?? ""}
-                          onChange={(e) => setConfigEdits((prev) => ({ ...prev, [entry.key]: e.target.value }))}
-                        />
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               );

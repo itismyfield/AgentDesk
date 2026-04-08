@@ -48,8 +48,8 @@ function makeSession(overrides: Partial<DispatchedSession> = {}): DispatchedSess
 
 describe("office-session-overlay", () => {
   it("linked thread session overlays parent agent and stays out of dispatched staff", () => {
-    const agent = makeAgent();
-    const session = makeSession();
+  const agent = makeAgent();
+  const session = makeSession();
 
     const overlaid = applySessionOverlay([agent], [session]);
     const subAgents = deriveSubAgents([session]);
@@ -79,7 +79,6 @@ describe("office-session-overlay", () => {
       last_seen_at: 50,
       connected_at: 10,
     });
-
     const overlaid = applySessionOverlay([agent], [newerSession, olderSession]);
     expect(overlaid[0].current_thread_channel_id).toBe("9999999999");
     expect(overlaid[0].session_info).toBe("rework 중");

@@ -3,6 +3,13 @@ import { Search } from "lucide-react";
 import type { Agent, Department } from "../types";
 import { PALETTE_ROUTES } from "../app/routes";
 
+interface PaletteRoute {
+  id: string;
+  labelKo: string;
+  labelEn: string;
+  icon: string;
+}
+
 interface CommandPaletteProps {
   agents: Agent[];
   departments: Department[];
@@ -10,6 +17,8 @@ interface CommandPaletteProps {
   onSelectAgent: (agent: Agent) => void;
   onNavigate: (view: string) => void;
   onClose: () => void;
+  routes: PaletteRoute[];
+  departmentRouteId?: string;
 }
 
 export default function CommandPalette({
@@ -19,6 +28,8 @@ export default function CommandPalette({
   onSelectAgent,
   onNavigate,
   onClose,
+  routes,
+  departmentRouteId = "control",
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -36,11 +47,10 @@ export default function CommandPalette({
     const items: ResultItem[] = [];
     const q = query.toLowerCase().trim();
 
-    // Navigation items from route registry
-    const navs = PALETTE_ROUTES.map((r) => ({
-      id: r.id,
-      label: tr(r.labelKo, r.labelEn),
-      icon: r.icon,
+    const navs = routes.map((route) => ({
+      id: route.id,
+      label: tr(route.labelKo, route.labelEn),
+      icon: route.icon,
     }));
 
     if (!q) {
@@ -76,7 +86,7 @@ export default function CommandPalette({
     }
 
     return items.slice(0, 12);
-  }, [query, agents, departments, isKo]);
+  }, [query, agents, departments, isKo, routes]);
 
   useEffect(() => {
     setSelectedIndex(0);
@@ -88,7 +98,7 @@ export default function CommandPalette({
     } else if (item.type === "agent") {
       onSelectAgent(item.agent);
     } else if (item.type === "dept") {
-      onNavigate("agents");
+      onNavigate(departmentRouteId);
     }
     onClose();
   };

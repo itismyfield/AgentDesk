@@ -16,10 +16,10 @@ export default function TooltipLabel({ text, tooltip, className }: TooltipLabelP
   }, [open]);
 
   return (
-    <span className={`relative inline-flex items-center gap-1 min-w-0 ${className || ""}`}>
+    <span className={`relative flex max-w-full min-w-0 items-center gap-1 ${className || ""}`}>
       <button
         type="button"
-        className="truncate text-left"
+        className="min-w-0 flex-1 truncate text-left"
         title={tooltip}
         aria-label={tooltip}
         onMouseEnter={() => setOpen(true)}
@@ -41,7 +41,7 @@ export default function TooltipLabel({ text, tooltip, className }: TooltipLabelP
 
       {open && (
         <span
-          className="absolute z-30 left-0 top-full mt-1 px-2 py-1 rounded-md text-xs whitespace-nowrap"
+          className="absolute left-0 top-full z-30 mt-1 max-w-[min(18rem,calc(100vw-3rem))] rounded-md px-2 py-1 text-[10px] whitespace-normal break-words"
           style={{
             background: "var(--th-card-bg)",
             color: "var(--th-text-primary)",
