@@ -865,7 +865,7 @@ export default function MeetingMinutesView({
       className={
         embedded
           ? "space-y-4"
-          : "mx-auto max-w-4xl space-y-6 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
+          : "mx-auto w-full max-w-4xl min-w-0 space-y-6 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
       }
       style={
         embedded

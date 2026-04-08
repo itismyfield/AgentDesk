@@ -345,7 +345,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
           }}
         >
           <div
-            className="mx-auto max-w-[440px] rounded-2xl p-3 sm:p-4 font-mono text-xs sm:text-xs"
+            className="mx-auto w-full max-w-[440px] min-w-0 rounded-2xl p-3 font-mono text-xs sm:p-4 sm:text-xs"
             style={{
               background: "#fefdf8",
               color: "#1a1a1a",

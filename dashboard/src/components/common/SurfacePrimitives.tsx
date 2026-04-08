@@ -390,7 +390,7 @@ export function SurfaceTabCard({
       type="button"
       onClick={onClick}
       className={joinClasses(
-        "min-w-[180px] rounded-2xl border px-4 py-3 text-left transition-colors",
+        "w-full min-w-0 rounded-2xl border px-4 py-3 text-left transition-colors sm:w-auto sm:min-w-[180px]",
         className,
       )}
       style={{

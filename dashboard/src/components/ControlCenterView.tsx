@@ -110,6 +110,15 @@ export default function ControlCenterView({
       || offices.find((office) => office.id === selectedOfficeId)?.name
       || selectedOfficeId
     : t("전체", "All");
+  const organizationPaneSummary = organizationPane === "dispatch"
+    ? t(
+      "실시간 파견 세션을 확인하고, 부서 연결과 상태 점검을 한 흐름에서 처리합니다.",
+      "Review live dispatched sessions, department links, and runtime status from one flow.",
+    )
+    : t(
+      "에이전트 프로필, XP, 스킬, provider, 오피스 소속을 한 곳에서 관리합니다.",
+      "Manage agent profiles, XP, skills, providers, and office membership from one surface.",
+    );
 
   const sections = useMemo(() => [
     {
@@ -253,7 +262,7 @@ export default function ControlCenterView({
           </SurfaceSection>
         </div>
 
-        <div className="flex gap-2 overflow-x-auto px-4 pb-4">
+        <div className="grid grid-cols-1 gap-2 px-4 pb-4 sm:flex sm:overflow-x-auto">
           {sections.map((section) => (
             <SurfaceTabCard
               key={section.id}
@@ -287,7 +296,7 @@ export default function ControlCenterView({
               touchAction: "pan-y",
             }}
           >
-            <div className="mx-auto max-w-5xl px-4 pt-4 sm:px-6">
+            <div className="mx-auto w-full max-w-5xl min-w-0 px-4 pt-4 sm:px-6">
               <SurfaceSection
                 eyebrow={t("인력 운영", "Staff Ops")}
                 title={t("에이전트 운영 표면", "Agent Operations Surface")}
@@ -295,19 +304,19 @@ export default function ControlCenterView({
                   "디렉터리 편집과 파견 세션 운영을 같은 흐름 안에서 전환합니다.",
                   "Switch between directory editing and dispatch session operations within one workflow.",
                 )}
-                badge={agentsPane === "dispatch" ? t("파견 세션", "Dispatch") : t("디렉터리", "Directory")}
+                badge={organizationPane === "dispatch" ? t("파견 세션", "Dispatch") : t("디렉터리", "Directory")}
                 actions={(
                   <>
                     <SurfaceSegmentButton
-                      onClick={() => onAgentsPaneChange("directory")}
-                      active={agentsPane === "directory"}
+                      onClick={() => onOrganizationPaneChange("directory")}
+                      active={organizationPane === "directory"}
                       tone="info"
                     >
                       {t("에이전트 디렉터리", "Agent Directory")}
                     </SurfaceSegmentButton>
                     <SurfaceSegmentButton
-                      onClick={() => onAgentsPaneChange("dispatch")}
-                      active={agentsPane === "dispatch"}
+                      onClick={() => onOrganizationPaneChange("dispatch")}
+                      active={organizationPane === "dispatch"}
                       tone="success"
                     >
                       {t("파견 세션", "Dispatch Sessions")}
@@ -316,22 +325,22 @@ export default function ControlCenterView({
                 )}
                 className="rounded-[28px] p-4 sm:p-5"
                 style={{
-                  borderColor: agentsPane === "dispatch"
+                  borderColor: organizationPane === "dispatch"
                     ? "color-mix(in srgb, var(--th-accent-primary) 20%, var(--th-border) 80%)"
                     : "color-mix(in srgb, var(--th-accent-info) 20%, var(--th-border) 80%)",
-                  background: agentsPane === "dispatch"
+                  background: organizationPane === "dispatch"
                     ? "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-accent-primary-soft) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)"
                     : "linear-gradient(180deg, color-mix(in srgb, var(--th-card-bg) 95%, var(--th-badge-sky-bg) 5%) 0%, color-mix(in srgb, var(--th-bg-surface) 96%, transparent) 100%)",
                 }}
               >
                 <p className="mt-4 text-sm leading-6 break-words" style={{ color: "var(--th-text-muted)" }}>
-                  {agentsPaneSummary}
+                  {organizationPaneSummary}
                 </p>
               </SurfaceSection>
             </div>
 
             {organizationPane === "dispatch" && (
-              <div className="mx-auto max-w-5xl px-4 pb-40 pt-4 sm:px-6">
+              <div className="mx-auto w-full max-w-5xl min-w-0 px-4 pb-40 pt-4 sm:px-6">
                 <SurfaceCard
                   className="rounded-3xl p-4 sm:p-5"
                   style={{

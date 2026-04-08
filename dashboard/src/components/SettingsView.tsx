@@ -855,7 +855,7 @@ export default function SettingsView({
 
   return (
     <div
-      className="mx-auto max-w-5xl min-w-0 space-y-6 overflow-x-hidden px-4 py-5 pb-40 sm:h-full sm:overflow-y-auto sm:px-6"
+      className="mx-auto w-full max-w-5xl min-w-0 space-y-6 overflow-x-hidden px-4 py-5 pb-40 sm:h-full sm:overflow-y-auto sm:px-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <section

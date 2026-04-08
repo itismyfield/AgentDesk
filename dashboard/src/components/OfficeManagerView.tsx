@@ -259,7 +259,7 @@ export default function OfficeManagerView({
 
   return (
     <div
-      className="mx-auto max-w-6xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
+      className="mx-auto w-full max-w-6xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:h-full sm:overflow-y-auto sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       <SurfaceSection

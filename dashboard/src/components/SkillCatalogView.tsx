@@ -120,7 +120,7 @@ export default function SkillCatalogView({ embedded = false }: { embedded?: bool
 
   return (
     <div
-      className="mx-auto h-full max-w-5xl min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
+      className="mx-auto h-full w-full max-w-5xl min-w-0 overflow-x-hidden overflow-y-auto p-4 pb-40 sm:p-6"
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       {content}

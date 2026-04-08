@@ -289,7 +289,7 @@ export default function AgentManagerView({
 
   return (
     <div
-      className={`mx-auto max-w-5xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:p-6 ${
+      className={`mx-auto w-full max-w-5xl min-w-0 space-y-4 overflow-x-hidden p-4 pb-40 sm:p-6 ${
         scrollable ? "sm:h-full sm:overflow-y-auto" : ""
       }`}
       style={{
