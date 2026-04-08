@@ -327,6 +327,7 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                 display_name: def.display_name.clone(),
                 keywords: def.keywords.clone().unwrap_or_default(),
                 prompt_file,
+                provider: def.provider.as_deref().and_then(ProviderKind::from_str),
             }
         })
         .collect();

@@ -23,6 +23,7 @@ pub(super) struct MeetingParticipant {
     pub role_id: String,
     pub prompt_file: String,
     pub display_name: String,
+    pub provider_override: Option<ProviderKind>,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +117,7 @@ pub(super) struct MeetingAgentConfig {
     pub display_name: String,
     pub keywords: Vec<String>,
     pub prompt_file: String,
+    pub provider: Option<ProviderKind>,
 }
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -724,8 +726,11 @@ async fn select_participants(
     primary_provider: ProviderKind,
     reviewer_provider: ProviderKind,
 ) -> Result<Vec<MeetingParticipant>, String> {
-    let agents_desc: Vec<String> = config
-        .available_agents
+    let mut candidate_agents = config.available_agents.clone();
+    ensure_provider_candidate(&mut candidate_agents, &primary_provider);
+    ensure_provider_candidate(&mut candidate_agents, &reviewer_provider);
+
+    let agents_desc: Vec<String> = candidate_agents
         .iter()
         .map(|a| {
             format!(
@@ -747,11 +752,14 @@ async fn select_participants(
 
 규칙:
 - 2~5명 선정
+- 진행 모델({})과 교차검증 모델({})은 반드시 포함
 - 안건과 관련된 전문성을 가진 에이전트만 선택
 - JSON 배열로만 응답 (다른 텍스트 없이)
 - 형식: ["role_id1", "role_id2", ...]"#,
         agenda,
-        agents_desc.join("\n")
+        agents_desc.join("\n"),
+        primary_provider.as_str(),
+        reviewer_provider.as_str()
     );
 
     let initial_response =
@@ -798,6 +806,7 @@ async fn select_participants(
 
 규칙:
 - 리뷰가 타당하면 반영하고, 타당하지 않으면 유지하라
+- 진행 모델({primary})과 교차검증 모델({reviewer})은 반드시 포함하라
 - 최종 결과는 2~5명이어야 한다
 - JSON 배열로만 응답하라
 - 형식: ["role_id1", "role_id2", ...]"#,
@@ -805,23 +814,34 @@ async fn select_participants(
         agents = agents_desc.join("\n"),
         initial = serde_json::to_string(&initial_selected).unwrap_or_else(|_| "[]".to_string()),
         review = review_notes.trim(),
+        primary = primary_provider.as_str(),
+        reviewer = reviewer_provider.as_str(),
     );
 
     let final_response =
         provider_exec::execute_simple(primary_provider.clone(), finalize_prompt).await?;
     let selected = parse_json_array_fragment(&final_response)?;
+    let selected = normalize_participant_role_ids(
+        &selected,
+        &candidate_agents,
+        &primary_provider,
+        &reviewer_provider,
+    );
 
     let participants: Vec<MeetingParticipant> = selected
         .iter()
         .filter_map(|role_id| {
-            config
-                .available_agents
+            candidate_agents
                 .iter()
                 .find(|a| &a.role_id == role_id)
                 .map(|a| MeetingParticipant {
                     role_id: a.role_id.clone(),
                     prompt_file: a.prompt_file.clone(),
                     display_name: a.display_name.clone(),
+                    provider_override: a
+                        .provider
+                        .clone()
+                        .filter(|provider| a.role_id.eq_ignore_ascii_case(provider.as_str())),
                 })
         })
         .collect();
@@ -834,6 +854,78 @@ async fn select_participants(
     }
 
     Ok(participants)
+}
+
+fn ensure_provider_candidate(candidates: &mut Vec<MeetingAgentConfig>, provider: &ProviderKind) {
+    if candidates
+        .iter()
+        .any(|candidate| candidate.role_id.eq_ignore_ascii_case(provider.as_str()))
+    {
+        return;
+    }
+    candidates.push(MeetingAgentConfig {
+        role_id: provider.as_str().to_string(),
+        display_name: provider.display_name().to_string(),
+        keywords: vec![
+            "provider".to_string(),
+            "cross-check".to_string(),
+            "reasoning".to_string(),
+        ],
+        prompt_file: String::new(),
+        provider: Some(provider.clone()),
+    });
+}
+
+fn normalize_participant_role_ids(
+    selected: &[String],
+    candidates: &[MeetingAgentConfig],
+    primary_provider: &ProviderKind,
+    reviewer_provider: &ProviderKind,
+) -> Vec<String> {
+    let valid_role_ids: std::collections::HashSet<String> = candidates
+        .iter()
+        .map(|candidate| candidate.role_id.clone())
+        .collect();
+    let mut normalized = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for required in [primary_provider.as_str(), reviewer_provider.as_str()] {
+        if valid_role_ids.contains(required) && seen.insert(required.to_string()) {
+            normalized.push(required.to_string());
+        }
+    }
+
+    for role_id in selected {
+        let role_id = role_id.trim();
+        if role_id.is_empty() || !valid_role_ids.contains(role_id) {
+            continue;
+        }
+        if seen.insert(role_id.to_string()) {
+            normalized.push(role_id.to_string());
+        }
+        if normalized.len() == 5 {
+            break;
+        }
+    }
+
+    normalized
+}
+
+fn resolve_turn_providers(
+    participant: &MeetingParticipant,
+    primary_provider: &ProviderKind,
+    reviewer_provider: &ProviderKind,
+) -> (ProviderKind, ProviderKind) {
+    let speaker_provider = participant
+        .provider_override
+        .clone()
+        .unwrap_or_else(|| primary_provider.clone());
+    let critique_provider = if speaker_provider == *reviewer_provider {
+        primary_provider.clone()
+    } else {
+        reviewer_provider.clone()
+    };
+    (speaker_provider, critique_provider)
 }
 
 /// Run one round: each participant speaks in order
@@ -976,6 +1068,8 @@ async fn execute_agent_turn(
     } else {
         String::new()
     };
+    let (speaker_provider, critique_provider) =
+        resolve_turn_providers(participant, &primary_provider, &reviewer_provider);
 
     let draft_prompt = format!(
         r#"당신은 라운드 테이블 회의에 참여한 {name}입니다.
@@ -1012,7 +1106,7 @@ async fn execute_agent_turn(
         },
     );
 
-    let draft = provider_exec::execute_simple(primary_provider.clone(), draft_prompt).await?;
+    let draft = provider_exec::execute_simple(speaker_provider.clone(), draft_prompt).await?;
 
     let critique_prompt = format!(
         r#"당신은 회의 발언 초안을 비판적으로 검토하는 리뷰어다.
@@ -1053,7 +1147,7 @@ async fn execute_agent_turn(
         },
         draft = draft.trim(),
     );
-    let critique = provider_exec::execute_simple(reviewer_provider, critique_prompt).await?;
+    let critique = provider_exec::execute_simple(critique_provider, critique_prompt).await?;
 
     let final_prompt = format!(
         r#"당신은 라운드 테이블 회의에 참여한 {name}입니다.
@@ -1097,7 +1191,7 @@ async fn execute_agent_turn(
         critique = critique.trim(),
     );
 
-    provider_exec::execute_simple(primary_provider, final_prompt)
+    provider_exec::execute_simple(speaker_provider, final_prompt)
         .await
         .map(|text| truncate_for_meeting(&text, 1500))
 }
@@ -1637,9 +1731,10 @@ pub(super) async fn handle_meeting_command(
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveMeetingSlot, Meeting, MeetingStatus, MeetingUtterance, ProviderKind,
-        build_meeting_status_payload, effective_round_count, meeting_slot_state,
-        parse_meeting_start_text,
+        ActiveMeetingSlot, Meeting, MeetingAgentConfig, MeetingParticipant, MeetingStatus,
+        MeetingUtterance, ProviderKind, build_meeting_status_payload, effective_round_count,
+        meeting_slot_state, normalize_participant_role_ids, parse_meeting_start_text,
+        resolve_turn_providers,
     };
     use serde_json::json;
 
@@ -1760,5 +1855,81 @@ mod tests {
 
         let payload = build_meeting_status_payload(&meeting).expect("payload");
         assert_eq!(payload.get("total_rounds"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn test_normalize_participant_role_ids_forces_primary_and_reviewer_first() {
+        let candidates = vec![
+            MeetingAgentConfig {
+                role_id: "openclaw-brain".to_string(),
+                display_name: "Brain".to_string(),
+                keywords: vec![],
+                prompt_file: String::new(),
+                provider: Some(ProviderKind::Codex),
+            },
+            MeetingAgentConfig {
+                role_id: "gemini".to_string(),
+                display_name: "Gemini".to_string(),
+                keywords: vec![],
+                prompt_file: String::new(),
+                provider: Some(ProviderKind::Gemini),
+            },
+            MeetingAgentConfig {
+                role_id: "qwen".to_string(),
+                display_name: "Qwen Code".to_string(),
+                keywords: vec![],
+                prompt_file: String::new(),
+                provider: Some(ProviderKind::Qwen),
+            },
+        ];
+        let selected = vec!["openclaw-brain".to_string()];
+
+        let normalized = normalize_participant_role_ids(
+            &selected,
+            &candidates,
+            &ProviderKind::Gemini,
+            &ProviderKind::Qwen,
+        );
+
+        assert_eq!(
+            normalized,
+            vec![
+                "gemini".to_string(),
+                "qwen".to_string(),
+                "openclaw-brain".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resolve_turn_providers_uses_primary_to_review_reviewer_persona() {
+        let participant = MeetingParticipant {
+            role_id: "qwen".to_string(),
+            prompt_file: String::new(),
+            display_name: "Qwen Code".to_string(),
+            provider_override: Some(ProviderKind::Qwen),
+        };
+
+        let (speaker, critic) =
+            resolve_turn_providers(&participant, &ProviderKind::Gemini, &ProviderKind::Qwen);
+
+        assert_eq!(speaker, ProviderKind::Qwen);
+        assert_eq!(critic, ProviderKind::Gemini);
+    }
+
+    #[test]
+    fn test_resolve_turn_providers_keeps_primary_for_regular_agent() {
+        let participant = MeetingParticipant {
+            role_id: "openclaw-brain".to_string(),
+            prompt_file: String::new(),
+            display_name: "Brain".to_string(),
+            provider_override: None,
+        };
+
+        let (speaker, critic) =
+            resolve_turn_providers(&participant, &ProviderKind::Gemini, &ProviderKind::Qwen);
+
+        assert_eq!(speaker, ProviderKind::Gemini);
+        assert_eq!(critic, ProviderKind::Qwen);
     }
 }

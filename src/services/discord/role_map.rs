@@ -272,11 +272,16 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                     .collect()
             })
             .unwrap_or_default();
+        let provider = agent
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .and_then(ProviderKind::from_str);
         available_agents.push(MeetingAgentConfig {
             role_id: role_id.to_string(),
             display_name: display_name.to_string(),
             keywords,
             prompt_file,
+            provider,
         });
     }
 
