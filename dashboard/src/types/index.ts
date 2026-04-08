@@ -639,17 +639,9 @@ export type OfficePackProfiles = Partial<Record<WorkflowPackKey, OfficePackProfi
 export interface CompanySettings {
   companyName: string;
   ceoName: string;
-  autoUpdateEnabled?: boolean;
-  autoUpdateNoticePending?: boolean;
-  oauthAutoSwap?: boolean;
   theme: "dark" | "light" | "auto";
   language: UiLanguage;
-  officeWorkflowPack?: WorkflowPackKey;
-  providerModelConfig?: Record<string, ProviderModelConfig>;
   roomThemes?: Record<string, RoomTheme>;
-  messengerChannels?: MessengerChannelsConfig;
-  officePackProfiles?: OfficePackProfiles;
-  officePackHydratedPacks?: string[];
 }
 
 export const DEFAULT_SETTINGS: CompanySettings = {

@@ -22,6 +22,28 @@ interface ConfigField {
   step: number;
 }
 
+type ConfigEntry = {
+  key: string;
+  value: string | null;
+  category: string;
+  label_ko: string;
+  label_en: string;
+  default?: string | null;
+};
+
+type ConfigEditValue = string | boolean;
+type AuditNoteStatus = "read-only" | "managed-elsewhere" | "backend-contract";
+
+interface AuditNote {
+  id: string;
+  titleKo: string;
+  titleEn: string;
+  descriptionKo: string;
+  descriptionEn: string;
+  keys: string[];
+  status: AuditNoteStatus;
+}
+
 const CATEGORIES: Array<{
   titleKo: string;
   titleEn: string;
@@ -214,32 +236,11 @@ const CATEGORIES: Array<{
   },
 ];
 
-interface ConfigEntry {
-  key: string;
-  value: string | null;
-  category: string;
-  label_ko: string;
-  label_en: string;
-  default?: string | null;
-}
-
-type ConfigEditValue = string | boolean;
-type AuditNoteStatus = "read-only" | "managed-elsewhere" | "typed-only" | "backend-followup";
-
-interface AuditNote {
-  id: string;
-  titleKo: string;
-  titleEn: string;
-  descriptionKo: string;
-  descriptionEn: string;
-  keys: string[];
-  status: AuditNoteStatus;
-}
-
 const BOOLEAN_CONFIG_KEYS = new Set([
   "review_enabled",
   "counter_model_review_enabled",
   "pm_decision_gate_enabled",
+  "merge_automation_enabled",
   "narrate_progress",
 ]);
 
@@ -247,7 +248,6 @@ const NUMERIC_CONFIG_KEYS = new Set([
   "max_review_rounds",
   "requested_timeout_min",
   "in_progress_stale_min",
-  "max_chain_depth",
   "context_compact_percent",
   "context_compact_percent_codex",
   "context_compact_percent_claude",
@@ -281,6 +281,18 @@ const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string }> = {
     ko: "PM 판단 게이트를 거쳐야 다음 단계로 전환됩니다.",
     en: "Requires PM decision gate approval before the next transition.",
   },
+  merge_automation_enabled: {
+    ko: "허용된 작성자의 PR을 조건 충족 시 자동 머지합니다.",
+    en: "Automatically merges eligible PRs from allowed authors when checks pass.",
+  },
+  merge_strategy: {
+    ko: "자동 머지 시 사용할 GitHub 머지 전략입니다.",
+    en: "GitHub merge strategy used by merge automation.",
+  },
+  merge_allowed_authors: {
+    ko: "자동 머지를 허용할 작성자 목록입니다. 쉼표로 구분합니다.",
+    en: "Comma-separated list of authors allowed for automated merge.",
+  },
   server_port: {
     ko: "서버가 실제로 바인딩한 API 포트입니다. 부팅 시 설정 파일에서 다시 동기화되어 읽기 전용으로 취급해야 합니다.",
     en: "The actual API port bound by the server. It is synced from server config on boot and should be treated as read-only.",
@@ -292,10 +304,6 @@ const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string }> = {
   in_progress_stale_min: {
     ko: "in_progress 상태가 정체로 간주되는 기준 시간입니다.",
     en: "Threshold for considering in-progress work stale.",
-  },
-  max_chain_depth: {
-    ko: "디스패치가 재귀적으로 이어질 수 있는 최대 깊이입니다.",
-    en: "Maximum recursive depth allowed for chained dispatches.",
   },
   context_compact_percent: {
     ko: "공통 컨텍스트 compact 기준입니다.",
@@ -328,17 +336,17 @@ const SYSTEM_CATEGORY_META = {
     descriptionKo: "리뷰 단계 활성화와 반복 횟수를 정의합니다.",
     descriptionEn: "Defines review enablement and repetition limits.",
   },
+  automation: {
+    titleKo: "자동 머지",
+    titleEn: "Merge Automation",
+    descriptionKo: "자동 머지 허용 여부, 전략, 허용 작성자를 관리합니다.",
+    descriptionEn: "Manages merge automation enablement, strategy, and allowed authors.",
+  },
   timeout: {
     titleKo: "타임아웃",
     titleEn: "Timeouts",
     descriptionKo: "정체 감지와 자동 알림 시점을 조정합니다.",
     descriptionEn: "Tunes stale detection and automatic alert timing.",
-  },
-  dispatch: {
-    titleKo: "디스패치",
-    titleEn: "Dispatch",
-    descriptionKo: "작업 fan-out과 체인 깊이 한계를 관리합니다.",
-    descriptionEn: "Controls task fan-out and chain-depth limits.",
   },
   context: {
     titleKo: "컨텍스트",
@@ -357,12 +365,12 @@ const SYSTEM_CATEGORY_META = {
 const AUDIT_NOTES: AuditNote[] = [
   {
     id: "settings-json-merge",
-    titleKo: "회사 설정 JSON은 전체 덮어쓰기 모델",
-    titleEn: "Company settings JSON uses full replacement",
-    descriptionKo: "`/api/settings`는 patch merge가 아니라 body 전체를 저장합니다. 설정 UI는 반드시 현재 값과 patch를 합친 merged object를 보내야 hidden key 손실을 막을 수 있습니다.",
-    descriptionEn: "`/api/settings` stores the full body rather than merging patches. The settings UI must send a merged object to avoid losing hidden keys.",
+    titleKo: "회사 설정 JSON은 full replace 계약",
+    titleEn: "Company settings JSON uses a full-replace contract",
+    descriptionKo: "`/api/settings`는 body 전체를 저장하고, 정리 대상 legacy key는 서버에서 제거합니다. UI는 merged object를 보내고 저장 후 재조회해 서버 canonical state를 다시 맞춥니다.",
+    descriptionEn: "`/api/settings` stores the full body and strips retired legacy keys on the server. The UI sends a merged object and re-fetches afterward to align with the canonical server state.",
     keys: ["settings"],
-    status: "backend-followup",
+    status: "backend-contract",
   },
   {
     id: "server-port-readonly",
@@ -372,15 +380,6 @@ const AUDIT_NOTES: AuditNote[] = [
     descriptionEn: "`src/server/mod.rs` rewrites it from `config.server.port` on every boot. Treating it as editable in the UI is misleading.",
     keys: ["server_port"],
     status: "read-only",
-  },
-  {
-    id: "context-clear-gap",
-    titleKo: "`context_clear_*`는 설명은 있지만 settings API에 없음",
-    titleEn: "`context_clear_*` is described but not exposed by settings API",
-    descriptionKo: "`SettingsView` 설명에는 등장하지만 `/api/settings/config` whitelist에는 없습니다. dead config인지, 빠진 API 항목인지 ADK 본체 정리가 필요합니다.",
-    descriptionEn: "The UI descriptions reference it, but `/api/settings/config` does not expose it. ADK core should decide whether it is dead config or a missing API field.",
-    keys: ["context_clear_percent", "context_clear_idle_minutes"],
-    status: "backend-followup",
   },
   {
     id: "onboarding-secrets",
@@ -410,49 +409,13 @@ const AUDIT_NOTES: AuditNote[] = [
     status: "managed-elsewhere",
   },
   {
-    id: "typed-only-company-settings",
-    titleKo: "타입에는 있지만 현재 소비/편집 경로가 확인되지 않은 회사 설정",
-    titleEn: "Company settings that exist in types but have no confirmed editor/consumer path",
-    descriptionKo: "현재 audit 기준으로 아래 필드들은 `CompanySettings` 타입에는 있지만 실제 사용처나 편집 화면이 확인되지 않았습니다. 제거/활성화/문서화 중 하나로 정리해야 합니다.",
-    descriptionEn: "In the current audit, the following fields exist in `CompanySettings` but have no confirmed editor or runtime consumer. They should be removed, activated, or documented.",
-    keys: [
-      "autoUpdateEnabled",
-      "autoUpdateNoticePending",
-      "oauthAutoSwap",
-      "officeWorkflowPack",
-      "providerModelConfig",
-      "messengerChannels",
-      "officePackProfiles",
-      "officePackHydratedPacks",
-    ],
-    status: "typed-only",
-  },
-  {
-    id: "merge-automation-gap",
-    titleKo: "merge automation 설정은 policy에서 읽지만 UI/API에는 없음",
-    titleEn: "Merge automation settings are consumed by policy but absent from UI/API",
-    descriptionKo: "`merge_automation_enabled`, `merge_strategy`, `merge_allowed_authors`는 `policies/merge-automation.js`에서 실제로 사용되지만 `/api/settings/config` whitelist와 현재 설정 UI에는 없습니다. 운영자가 dashboard에서 설정을 설명/수정할 수 있도록 ADK 본체 정리가 필요합니다.",
-    descriptionEn: "`merge_automation_enabled`, `merge_strategy`, and `merge_allowed_authors` are consumed by `policies/merge-automation.js`, but they are absent from `/api/settings/config` and the current settings UI. ADK core cleanup is needed so the dashboard can truthfully explain and edit them.",
+    id: "merge-automation-surface",
+    titleKo: "merge automation은 개별 정책 키 surface",
+    titleEn: "Merge automation now lives on the policy-key surface",
+    descriptionKo: "`merge_automation_enabled`, `merge_strategy`, `merge_allowed_authors`는 `/api/settings/config` whitelist와 대시보드 정책 섹션에서 함께 관리됩니다. YAML이 아니라 개별 `kv_meta` 키가 정본입니다.",
+    descriptionEn: "`merge_automation_enabled`, `merge_strategy`, and `merge_allowed_authors` are managed together through the `/api/settings/config` whitelist and the dashboard policy section. Their canonical source is the individual `kv_meta` surface, not YAML.",
     keys: ["merge_automation_enabled", "merge_strategy", "merge_allowed_authors"],
-    status: "backend-followup",
-  },
-  {
-    id: "workspace-fallback-gap",
-    titleKo: "`workspace`는 policy fallback에서 읽지만 정본이 아님",
-    titleEn: "`workspace` is read as a policy fallback but is not a canonical config surface",
-    descriptionKo: "`policies/timeouts.js`는 마지막 fallback으로 `agentdesk.config.get('workspace')`를 읽지만, `agentdesk.config.get()`은 `kv_meta`만 조회합니다. 실제 workspace 정본은 agent/session/runtime 쪽에 퍼져 있어서 일반 설정값처럼 설명하면 오해가 생깁니다.",
-    descriptionEn: "`policies/timeouts.js` reads `agentdesk.config.get('workspace')` as a final fallback, but `agentdesk.config.get()` only queries `kv_meta`. The real workspace source-of-truth lives across agent, session, and runtime surfaces, so presenting it as a normal setting would be misleading.",
-    keys: ["workspace"],
-    status: "backend-followup",
-  },
-  {
-    id: "max-chain-depth-consumer-gap",
-    titleKo: "`max_chain_depth`는 노출되지만 실제 소비처가 확인되지 않음",
-    titleEn: "`max_chain_depth` is exposed but has no confirmed runtime consumer",
-    descriptionKo: "`/api/settings/config` whitelist에는 포함되어 있지만, 현재 코드 검색 기준으로 실제 런타임 소비처는 확인되지 않았습니다. dead config인지 누락된 연결인지 ADK 본체에서 정리해야 합니다.",
-    descriptionEn: "It is included in the `/api/settings/config` whitelist, but the current code audit did not find a confirmed runtime consumer. ADK core should decide whether it is dead config or a missing integration.",
-    keys: ["max_chain_depth"],
-    status: "backend-followup",
+    status: "backend-contract",
   },
 ];
 
@@ -492,20 +455,17 @@ function auditStatusLabel(status: AuditNoteStatus, isKo: boolean): string {
   if (isKo) {
     if (status === "read-only") return "읽기 전용";
     if (status === "managed-elsewhere") return "별도 관리";
-    if (status === "typed-only") return "타입 전용 후보";
-    return "본체 정리 필요";
+    return "계약 명시";
   }
   if (status === "read-only") return "Read-only";
   if (status === "managed-elsewhere") return "Managed elsewhere";
-  if (status === "typed-only") return "Typed-only candidate";
-  return "Core cleanup needed";
+  return "Contract clarified";
 }
 
 function auditStatusClass(status: AuditNoteStatus): string {
   if (status === "read-only") return "border-slate-400/30 bg-slate-400/10 text-slate-200";
   if (status === "managed-elsewhere") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
-  if (status === "typed-only") return "border-amber-400/30 bg-amber-400/10 text-amber-100";
-  return "border-rose-400/30 bg-rose-400/10 text-rose-100";
+  return "border-sky-400/30 bg-sky-400/10 text-sky-100";
 }
 
 interface SectionHeadingProps {
@@ -799,8 +759,8 @@ export default function SettingsView({
             </h2>
             <p className="mt-3 max-w-3xl text-sm leading-6" style={{ color: "rgba(226,232,240,0.82)" }}>
               {tr(
-                "설정은 단순 입력 폼이 아니라 저장 위치와 적용 범위를 이해해야 안전하게 다룰 수 있습니다. 이 화면은 회사 설정, 즉시 반영 런타임 설정, 파이프라인 정책, 별도 관리 설정을 분리해서 보여줍니다.",
-                "Settings are safe only when their storage surface and effect scope are visible. This view separates company settings, live runtime tuning, pipeline policy keys, and settings managed elsewhere.",
+                "설정은 단순 입력 폼이 아니라 저장 위치와 적용 범위를 이해해야 안전하게 다룰 수 있습니다. 이 화면은 회사 설정, 즉시 반영 런타임 설정, 개별 정책 키, 별도 관리 surface를 분리해서 보여줍니다.",
+                "Settings are safe only when their storage surface and effect scope are visible. This view separates company settings, live runtime tuning, individual policy keys, and surfaces managed elsewhere.",
               )}
             </p>
           </div>
@@ -833,7 +793,7 @@ export default function SettingsView({
           <SummaryCard
             label={tr("정리 대상", "Audit Findings")}
             value={String(AUDIT_NOTES.length)}
-            description={tr("별도 관리/읽기 전용/정리 필요로 분류한 설정 이슈", "Settings that are managed elsewhere, read-only, or need core cleanup")}
+            description={tr("별도 관리/읽기 전용/계약 명시로 남긴 설정 메모", "Settings notes kept as managed-elsewhere, read-only, or contract clarifications")}
             accent="#fb7185"
           />
         </div>
@@ -853,8 +813,8 @@ export default function SettingsView({
           <SurfaceCard
             title={tr("회사 설정 JSON", "Company settings JSON")}
             body={tr(
-              "`/api/settings`가 `kv_meta['settings']` 전체 JSON을 저장합니다. 부분 patch가 아니라 full replace라서, 저장할 때 기존 값을 합친 merged object가 필요합니다.",
-              "`/api/settings` stores the full `kv_meta['settings']` JSON. It is a full replace rather than a patch merge, so callers must send a merged object.",
+              "`/api/settings`가 `kv_meta['settings']` 전체 JSON을 저장합니다. 부분 patch가 아니라 full replace라서, 저장할 때 기존 값을 합친 merged object가 필요하고 legacy key는 서버에서 제거됩니다.",
+              "`/api/settings` stores the full `kv_meta['settings']` JSON. It is a full replace rather than a patch merge, so callers must send a merged object and the server strips retired legacy keys.",
             )}
             footer={tr("source: kv_meta['settings']", "source: kv_meta['settings']")}
           />
@@ -869,8 +829,8 @@ export default function SettingsView({
           <SurfaceCard
             title={tr("정책/파이프라인 키", "Policy and pipeline keys")}
             body={tr(
-              "리뷰, 타임아웃, context compact 같은 값은 개별 `kv_meta` 키로 저장되고 `/api/settings/config` whitelist를 통해서만 노출됩니다.",
-              "Review, timeout, and context-compaction values are stored as individual `kv_meta` keys and only exposed through the `/api/settings/config` whitelist.",
+              "리뷰, 타임아웃, context compact, merge automation 값은 개별 `kv_meta` 키로 저장되고 `/api/settings/config` whitelist를 통해서만 노출됩니다.",
+              "Review, timeout, context-compaction, and merge automation values are stored as individual `kv_meta` keys and only exposed through the `/api/settings/config` whitelist.",
             )}
             footer={tr("source: individual kv_meta keys", "source: individual kv_meta keys")}
           />
@@ -889,11 +849,11 @@ export default function SettingsView({
         <SectionHeading
           eyebrow={tr("회사 설정", "Workspace Identity")}
           title={tr("브랜드/언어/테마", "Brand, language, and theme")}
-          description={tr(
-            "이 섹션은 대시보드가 사람에게 어떻게 보일지 결정합니다. 저장 시 현재 `settings` JSON 전체와 합쳐 저장하여 숨겨진 키를 지킵니다.",
-            "This section controls how the dashboard presents itself to people. Saves are merged with the current `settings` JSON so hidden keys are preserved.",
-          )}
-          badge={tr("full replace API → merged save", "full replace API → merged save")}
+            description={tr(
+              "이 섹션은 대시보드가 사람에게 어떻게 보일지 결정합니다. 저장 시 현재 `settings` JSON 전체와 합쳐 보내고, 서버 canonical state를 다시 불러와 숨겨진 키와 legacy key 정리를 동시에 맞춥니다.",
+              "This section controls how the dashboard presents itself to people. Saves are merged with the current `settings` JSON and then re-fetched so hidden keys stay intact while retired keys are stripped server-side.",
+            )}
+            badge={tr("full replace API → merged save", "full replace API → merged save")}
         />
 
         <div className="mt-5 grid gap-3 lg:grid-cols-2">
@@ -960,8 +920,8 @@ export default function SettingsView({
         <div className="mt-5 flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
           <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
             {tr(
-              "이 저장 버튼은 현재 회사 설정 patch를 기존 `settings` JSON과 합쳐 보냅니다. `roomThemes`처럼 화면에 안 보이는 키가 저장 중 사라지지 않도록 하기 위한 방어선입니다.",
-              "This save action merges the edited patch with the existing `settings` JSON. It prevents hidden keys such as `roomThemes` from being wiped during save.",
+              "이 저장 버튼은 현재 회사 설정 patch를 기존 `settings` JSON과 합쳐 보내고, 저장 후 서버 값을 다시 불러옵니다. `roomThemes` 같은 숨겨진 키는 보존하고 retired key는 서버 정본에 맞춰 제거합니다.",
+              "This save action merges the edited patch with the existing `settings` JSON and re-fetches the server value afterward. Hidden keys such as `roomThemes` are preserved while retired keys are removed to match the server canonical state.",
             )}
           </p>
           <button
@@ -1099,8 +1059,8 @@ export default function SettingsView({
           eyebrow={tr("파이프라인 정책", "Pipeline Policy")}
           title={tr("개별 `kv_meta` 키 관리", "Manage individual `kv_meta` keys")}
           description={tr(
-            "리뷰, 타임아웃, context compact, Discord 채널 연결 값은 일반 설정 JSON이 아니라 개별 `kv_meta` 키입니다. 여기서는 토글/숫자/문자열 타입을 분리해서 보여주고, read-only 항목은 편집 대신 현재 상태만 노출합니다.",
-            "Review, timeout, context-compaction, and Discord channel IDs are stored as individual `kv_meta` keys rather than the general settings JSON. This section separates toggles, numeric values, and read-only keys.",
+            "리뷰, 자동 머지, 타임아웃, context compact, Discord 채널 연결 값은 일반 설정 JSON이 아니라 개별 `kv_meta` 키입니다. 여기서는 토글/숫자/문자열 타입을 분리해서 보여주고, read-only 항목은 편집 대신 현재 상태만 노출합니다.",
+            "Review, merge automation, timeout, context-compaction, and Discord channel IDs are stored as individual `kv_meta` keys rather than the general settings JSON. This section separates toggles, numeric values, and read-only keys.",
           )}
           badge={tr("whitelisted API only", "whitelisted API only")}
         />
@@ -1205,6 +1165,24 @@ export default function SettingsView({
                                   />
                                 </span>
                               </button>
+                            ) : entry.key === "merge_strategy" ? (
+                              <>
+                                <select
+                                  disabled={readOnly}
+                                  className="w-full rounded-2xl px-3 py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-80"
+                                  style={inputStyle}
+                                  value={String(currentValue || "squash")}
+                                  onChange={(event) => handleConfigEdit(entry.key, event.target.value)}
+                                >
+                                  <option value="squash">squash</option>
+                                  <option value="merge">merge</option>
+                                  <option value="rebase">rebase</option>
+                                </select>
+                                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                                  <span>{tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}</span>
+                                  <span>{tr("GitHub auto-merge 전략과 1:1로 대응합니다.", "Maps directly to the GitHub auto-merge strategy.")}</span>
+                                </div>
+                              </>
                             ) : (
                               <>
                                 <input
@@ -1239,8 +1217,8 @@ export default function SettingsView({
             <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
               <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
                 {tr(
-                  "이 섹션은 whitelist된 개별 `kv_meta` 키만 편집합니다. `context_clear_*`처럼 설명은 있지만 API에 없는 항목은 아래 audit 섹션에서 별도 정리 대상으로 표시합니다.",
-                  "This section edits only whitelisted individual `kv_meta` keys. Items such as `context_clear_*` that are described but not exposed by the API are surfaced in the audit section below.",
+                  "이 섹션은 whitelist된 개별 `kv_meta` 키만 편집합니다. dead config였던 `max_chain_depth`와 `context_clear_*`는 surface에서 제거했고, merge automation도 이제 여기서 직접 설명/수정됩니다.",
+                  "This section edits only whitelisted individual `kv_meta` keys. Retired keys such as `max_chain_depth` and `context_clear_*` have been removed from the surface, and merge automation is now explained and editable here.",
                 )}
               </p>
               <button
@@ -1260,8 +1238,8 @@ export default function SettingsView({
           eyebrow={tr("감사 결과", "Audit Findings")}
           title={tr("별도 관리 / 정리 필요 항목", "Managed elsewhere / cleanup-needed items")}
           description={tr(
-            "이 항목들은 일반 설정창에서 바로 편집하지 않는 편이 맞거나, frontend만으로는 정본을 보장할 수 없는 후보들입니다. ADK 본체 쪽 정리 요청의 근거 목록으로도 사용합니다.",
-            "These items are either better managed outside the general settings form or cannot be made truthful from the frontend alone. This list also serves as the basis for ADK core cleanup requests.",
+            "이 항목들은 일반 설정창에서 바로 편집하지 않는 편이 맞거나, read-only/계약 메모로 남겨두는 편이 더 정확한 surface입니다.",
+            "These items are either better managed outside the general settings form or are more truthful when kept as read-only or contract notes.",
           )}
         />
 
