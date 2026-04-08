@@ -296,6 +296,13 @@ _sync_dev_credentials
 echo "▸ Ensuring global agentdesk CLI..."
 "$SCRIPT_DIR/ensure-agentdesk-cli.sh"
 
+# 3.10. Re-apply optional local launchd env overrides before restart.
+DEV_LAUNCHD_ENV_FILE="$ADK_DEV/config/launchd.env"
+if [ -f "$DEV_LAUNCHD_ENV_FILE" ]; then
+    echo "▸ Syncing dev launchd env..."
+    sync_launchd_plist_environment_from_file "$HOME/Library/LaunchAgents/$PLIST.plist" "$DEV_LAUNCHD_ENV_FILE"
+fi
+
 # 4. Start dev
 echo "▸ Starting dev..."
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST.plist"

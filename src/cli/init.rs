@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{self, BufRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
@@ -280,15 +281,21 @@ fn default_agent_prompt(role_id: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
+    let root_dir =
+        dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
+    generate_launchd_plist_with_root(home, agentdesk_bin, &root_dir)
+}
+
+#[cfg(target_os = "macos")]
+fn generate_launchd_plist_with_root(home: &Path, agentdesk_bin: &Path, root_dir: &Path) -> String {
     let home_str = home.display();
     let bin_str = agentdesk_bin.display();
     let label = dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL;
-    // Use AGENTDESK_ROOT_DIR if set, otherwise default to ~/.adk/release
-    let root_dir =
-        dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
     let root_str = root_dir.display();
     let logs_dir = root_dir.join("logs");
     let logs_str = logs_dir.display();
+    let extra_env_xml =
+        render_launchd_env_entries_xml(&root_dir.join("config").join("launchd.env"));
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -317,6 +324,7 @@ fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
     <string>{home_str}</string>
     <key>AGENTDESK_ROOT_DIR</key>
     <string>{root_str}</string>
+{extra_env_xml}
   </dict>
   <key>StandardOutPath</key>
   <string>{logs_str}/dcserver.stdout.log</string>
@@ -325,6 +333,68 @@ fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
 </dict>
 </plist>"#
     )
+}
+
+#[cfg(target_os = "macos")]
+fn render_launchd_env_entries_xml(env_file: &Path) -> String {
+    let mut xml = String::new();
+    for (key, value) in read_launchd_env_entries(env_file) {
+        let _ = writeln!(xml, "    <key>{}</key>", xml_escape(&key));
+        let _ = writeln!(xml, "    <string>{}</string>", xml_escape(&value));
+    }
+    xml
+}
+
+fn read_launchd_env_entries(env_file: &Path) -> Vec<(String, String)> {
+    let Ok(contents) = fs::read_to_string(env_file) else {
+        return Vec::new();
+    };
+
+    contents
+        .lines()
+        .filter_map(parse_launchd_env_line)
+        .collect()
+}
+
+fn parse_launchd_env_line(line: &str) -> Option<(String, String)> {
+    let mut line = line.trim().trim_end_matches('\r');
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+
+    if let Some(rest) = line.strip_prefix("export ") {
+        line = rest.trim();
+    }
+
+    let (key, value) = line.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty()
+        || !key.chars().enumerate().all(|(idx, ch)| {
+            ch == '_' || ch.is_ascii_alphanumeric() && (idx > 0 || !ch.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+
+    let mut value = value.trim().to_string();
+    if value.len() >= 2 {
+        let quoted_with_double = value.starts_with('"') && value.ends_with('"');
+        let quoted_with_single = value.starts_with('\'') && value.ends_with('\'');
+        if quoted_with_double || quoted_with_single {
+            value = value[1..value.len() - 1].to_string();
+        }
+    }
+
+    Some((key.to_string(), value))
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 // ── Bot settings generation ────────────────────────────────────────
@@ -723,6 +793,50 @@ mod tests {
         let dev_idx = script.find(".adk/dev/bin/agentdesk").unwrap();
         assert!(release_idx < dev_idx);
         assert!(script.contains("exec \"$candidate\" \"$@\""));
+    }
+
+    #[test]
+    fn parse_launchd_env_line_accepts_plain_and_export_forms() {
+        assert_eq!(
+            parse_launchd_env_line("MEMENTO_ACCESS_KEY=abc123"),
+            Some(("MEMENTO_ACCESS_KEY".to_string(), "abc123".to_string()))
+        );
+        assert_eq!(
+            parse_launchd_env_line("export MEMENTO_ACCESS_KEY=\"abc123\""),
+            Some(("MEMENTO_ACCESS_KEY".to_string(), "abc123".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_launchd_env_line_skips_comments_and_invalid_keys() {
+        assert_eq!(parse_launchd_env_line("# comment"), None);
+        assert_eq!(parse_launchd_env_line("1BAD=value"), None);
+        assert_eq!(parse_launchd_env_line("NO_EQUALS"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generate_launchd_plist_includes_optional_launchd_env_entries() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root_dir = temp_dir.path().join(".adk").join("release");
+        let config_dir = root_dir.join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("launchd.env"),
+            "MEMENTO_ACCESS_KEY=abc123\nexport SAMPLE_FLAG=\"enabled\"\n",
+        )
+        .unwrap();
+
+        let plist = generate_launchd_plist_with_root(
+            temp_dir.path(),
+            &root_dir.join("bin").join("agentdesk"),
+            &root_dir,
+        );
+
+        assert!(plist.contains("<key>MEMENTO_ACCESS_KEY</key>"));
+        assert!(plist.contains("<string>abc123</string>"));
+        assert!(plist.contains("<key>SAMPLE_FLAG</key>"));
+        assert!(plist.contains("<string>enabled</string>"));
     }
 }
 

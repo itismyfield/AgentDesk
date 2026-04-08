@@ -368,6 +368,12 @@ else
     echo "▸ Release database exists — preserving release data (skip copy)"
 fi
 
+REL_LAUNCHD_ENV_FILE="$ADK_REL/config/launchd.env"
+if [ -f "$REL_LAUNCHD_ENV_FILE" ]; then
+    echo "▸ Syncing release launchd env..."
+    sync_launchd_plist_environment_from_file "$HOME/Library/LaunchAgents/$PLIST_REL.plist" "$REL_LAUNCHD_ENV_FILE"
+fi
+
 # Start release
 echo "▸ Starting release..."
 xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
