@@ -523,100 +523,6 @@ pub(super) async fn catch_up_missed_messages(
     }
 }
 
-/// Execute durable handoff turns saved before a restart.
-/// Runs after tmux watcher restore and pending queue restore, but before
-/// restart report flush. Skips channels that already have pending queue messages
-/// (user intent takes priority over automatic follow-up).
-pub(super) async fn kickoff_idle_queues(
-    ctx: &serenity::Context,
-    shared: &Arc<SharedData>,
-    token: &str,
-    provider: &ProviderKind,
-) {
-    // Collect channels with queued items that are idle (no active turn)
-    let channels_to_kick: Vec<(ChannelId, Intervention, bool)> = {
-        let mut data = shared.core.lock().await;
-        let mut result = Vec::new();
-        let channel_ids: Vec<ChannelId> = data.intervention_queue.keys().cloned().collect();
-        for channel_id in channel_ids {
-            // Skip if active turn already running — it will dequeue when done
-            if data.cancel_tokens.contains_key(&channel_id) {
-                continue;
-            }
-            if let Some(queue) = data.intervention_queue.get_mut(&channel_id)
-                && let Some(intervention) = dequeue_next_soft_intervention(queue)
-            {
-                let has_more = has_soft_intervention(queue);
-                // Write-through: update disk after dequeue
-                if queue.is_empty() {
-                    save_channel_queue(provider, channel_id, &[]);
-                    data.intervention_queue.remove(&channel_id);
-                } else {
-                    save_channel_queue(provider, channel_id, queue);
-                }
-                result.push((channel_id, intervention, has_more));
-            }
-        }
-        result
-    };
-
-    if channels_to_kick.is_empty() {
-        return;
-    }
-
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
-        "  [{ts}] 🚀 KICKOFF: starting turns for {} idle channel(s) with queued messages",
-        channels_to_kick.len()
-    );
-
-    for (channel_id, intervention, has_more) in channels_to_kick {
-        let owner_name = if intervention.author_id.get() <= 1 {
-            "system".to_string()
-        } else {
-            intervention
-                .author_id
-                .to_user(&ctx.http)
-                .await
-                .map(|u| u.name.clone())
-                .unwrap_or_else(|_| format!("user-{}", intervention.author_id.get()))
-        };
-
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] 🚀 KICKOFF: starting queued turn for channel {}",
-            channel_id
-        );
-
-        if let Err(e) = router::handle_text_message(
-            ctx,
-            channel_id,
-            intervention.message_id,
-            intervention.author_id,
-            &owner_name,
-            &intervention.text,
-            shared,
-            token,
-            true,     // reply_to_user_message
-            has_more, // defer_watcher_resume
-            false,    // wait_for_completion — don't block, let channels run concurrently
-            None,     // reply_context
-        )
-        .await
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
-                channel_id
-            );
-            // Requeue so the message is not lost
-            let mut data = shared.core.lock().await;
-            let queue = data.intervention_queue.entry(channel_id).or_default();
-            requeue_intervention_front(queue, intervention);
-        }
-    }
-}
-
 pub(super) fn schedule_deferred_idle_queue_kickoff(
     shared: Arc<SharedData>,
     provider: ProviderKind,
@@ -634,7 +540,7 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
                 "  [{ts}] 🚀 Deferred drain: kicking off idle queues for channel {} ({reason})",
                 channel_id
             );
-            kickoff_idle_queues(ctx, &shared, tok, &provider).await;
+            super::kickoff_idle_queues(ctx, &shared, tok, &provider).await;
         } else {
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(

@@ -271,6 +271,7 @@ pub(super) async fn handle_model_picker_interaction(
         &data.provider,
         pending_model.as_deref(),
         Some(notice),
+        working_dir.as_deref(),
     );
     let components = super::commands::build_model_picker_components_from_snapshot(
         &snapshot,

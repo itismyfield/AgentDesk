@@ -2416,6 +2416,15 @@ mod tests {
     use super::*;
     use crate::services::memory::RecallResponse;
 
+    fn sample_recall() -> RecallResponse {
+        RecallResponse {
+            shared_knowledge: Some("[Shared Knowledge]".to_string()),
+            longterm_catalog: Some("- notes.md".to_string()),
+            external_recall: Some("[External Recall]".to_string()),
+            warnings: Vec::new(),
+        }
+    }
+
     fn make_session(
         current_path: Option<String>,
         remote_profile_name: Option<String>,
@@ -2433,15 +2442,6 @@ mod tests {
             last_active: tokio::time::Instant::now(),
             worktree: None,
             born_generation: 0,
-        }
-    }
-
-    fn sample_recall() -> RecallResponse {
-        RecallResponse {
-            shared_knowledge: Some("[Shared Knowledge]".to_string()),
-            longterm_catalog: Some("- notes.md".to_string()),
-            external_recall: Some("[External Recall]".to_string()),
-            warnings: Vec::new(),
         }
     }
 

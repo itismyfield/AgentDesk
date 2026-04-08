@@ -107,7 +107,7 @@ pub async fn send_handler(State(state): State<AppState>, body: Bytes) -> Respons
     };
 
     let body_str = String::from_utf8_lossy(&body);
-    let (status_str, response_body) = health::handle_send(registry, &body_str).await;
+    let (status_str, response_body) = health::handle_send(registry, &state.db, &body_str).await;
     let status = parse_status_code(status_str);
     let json: serde_json::Value =
         serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));

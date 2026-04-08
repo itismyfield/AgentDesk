@@ -48,9 +48,7 @@ fn test_api_router(
 }
 
 fn env_lock() -> MutexGuard<'static, ()> {
-    crate::services::discord::runtime_store::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    crate::services::discord::runtime_store::lock_test_env()
 }
 
 struct EnvVarGuard {
@@ -109,6 +107,26 @@ fn setup_test_repo() -> (tempfile::TempDir, RepoDirOverride) {
             _env: env,
         },
     )
+}
+
+fn git_commit(repo_dir: &std::path::Path, message: &str) -> String {
+    let filename = format!(
+        "commit-{}.txt",
+        message
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect::<String>()
+    );
+    std::fs::write(repo_dir.join(filename), format!("{message}\n")).unwrap();
+    run_git(repo_dir, &["add", "."]);
+    run_git(repo_dir, &["commit", "-m", message]);
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 #[tokio::test]
@@ -3342,13 +3360,21 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
 
 #[tokio::test]
 async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
-    let (_repo, _repo_guard) = setup_test_repo();
     crate::pipeline::ensure_loaded();
+    let _env_lock = env_lock();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-rereview");
     set_pmd_channel(&db, "pmd-chan-123");
     ensure_auto_queue_tables(&db);
+
+    let repo = tempfile::tempdir().unwrap();
+    run_git(repo.path(), &["init", "-b", "main"]);
+    run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+    run_git(repo.path(), &["config", "user.name", "Test"]);
+    run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+    let expected_commit = git_commit(repo.path(), "fix: review target (#269)");
+    let _repo_dir = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
 
     let completed_commit = "1111111111111111111111111111111111111269";
     {
@@ -3467,7 +3493,29 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
             |row| row.get(0),
         )
         .unwrap();
+    let reviewed_commit = conn
+        .query_row(
+            "SELECT context FROM task_dispatches WHERE id = ?1",
+            [&review_dispatch_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+        .and_then(|context| {
+            serde_json::from_str::<serde_json::Value>(&context)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("reviewed_commit")
+                        .and_then(|entry| entry.as_str())
+                        .map(str::to_string)
+                })
+        });
     assert_eq!(dispatch_status, "pending");
+    assert_eq!(
+        reviewed_commit.as_deref(),
+        Some(expected_commit.as_str()),
+        "reviewed_commit should be recovered from the repo fallback chain"
+    );
 
     let (entry_status, entry_dispatch_id): (String, String) = conn
         .query_row(

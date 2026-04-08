@@ -220,9 +220,10 @@ pub(super) fn format_skills_notice(provider: &ProviderKind, skills: &[(String, S
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_tool_name, convert_markdown_tables, filter_codex_tool_logs,
+        canonical_tool_name, convert_markdown_tables, filter_codex_tool_logs, format_skills_notice,
         normalize_allowed_tools,
     };
+    use crate::services::provider::ProviderKind;
 
     #[test]
     fn test_canonical_tool_name_is_case_insensitive() {
@@ -339,9 +340,6 @@ mod tests {
 
     #[test]
     fn test_format_skills_notice_adds_progressive_disclosure_guidance() {
-        use super::format_skills_notice;
-        use crate::services::provider::ProviderKind;
-
         let notice = format_skills_notice(
             &ProviderKind::Codex,
             &[(
@@ -355,6 +353,18 @@ mod tests {
         assert!(notice.contains("descriptions only"));
         assert!(notice.contains("`SKILL.md`"));
         assert!(notice.contains("`references/`"));
+    }
+
+    #[test]
+    fn test_format_skills_notice_mentions_qwen_local_skills() {
+        let notice = format_skills_notice(
+            &ProviderKind::Qwen,
+            &[("deploy".to_string(), "Ship the current branch".to_string())],
+        );
+
+        assert!(notice.contains("Available local Qwen skills"));
+        assert!(notice.contains("`SKILL.md`"));
+        assert!(notice.contains("/deploy: Ship the current branch"));
     }
 
     #[test]

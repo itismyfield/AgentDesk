@@ -43,7 +43,7 @@ fn managed_session_reset_behavior(provider: &ProviderKind) -> ManagedSessionRese
 }
 
 async fn resolve_session_key_for_clear(
-    http: &serenity::Http,
+    http: &std::sync::Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
     provider: &ProviderKind,
@@ -54,69 +54,64 @@ async fn resolve_session_key_for_clear(
         return Some(key);
     }
 
-    let guild_channel =
+    let live_channel_name =
         channel_id
             .to_channel(http)
             .await
             .ok()
             .and_then(|channel| match channel {
-                serenity::Channel::Guild(guild_channel) => Some(guild_channel),
+                serenity::Channel::Guild(guild_channel) => Some(guild_channel.name),
                 _ => None,
-            })?;
-    let thread_parent = resolve_thread_parent_for_clear(http, &guild_channel).await;
+            });
+    let channel_name = fallback_channel_name_for_clear(
+        live_channel_name.as_deref(),
+        super::super::resolve_thread_parent(http, channel_id).await,
+        channel_id,
+    )?;
     Some(build_fallback_session_key_for_clear(
         &shared.token_hash,
         provider,
-        channel_id,
-        &guild_channel.name,
-        thread_parent,
+        &channel_name,
     ))
 }
 
-async fn resolve_thread_parent_for_clear(
-    http: &serenity::Http,
-    guild_channel: &serenity::GuildChannel,
-) -> Option<(serenity::ChannelId, Option<String>)> {
-    use serenity::model::channel::ChannelType;
-
-    match guild_channel.kind {
-        ChannelType::PublicThread | ChannelType::PrivateThread => {
-            let parent_id = guild_channel.parent_id?;
-            let parent_name =
-                parent_id
-                    .to_channel(http)
-                    .await
-                    .ok()
-                    .and_then(|channel| match channel {
-                        serenity::Channel::Guild(parent_channel) => Some(parent_channel.name),
-                        _ => None,
-                    });
-            Some((parent_id, parent_name))
-        }
-        _ => None,
+fn fallback_channel_name_for_clear(
+    live_channel_name: Option<&str>,
+    thread_parent: Option<(serenity::ChannelId, Option<String>)>,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    if let Some((parent_id, parent_name)) = thread_parent {
+        let parent_name = parent_name.unwrap_or_else(|| parent_id.get().to_string());
+        return Some(super::super::synthetic_thread_channel_name(
+            &parent_name,
+            channel_id,
+        ));
     }
+
+    live_channel_name.map(ToOwned::to_owned)
 }
 
 fn build_fallback_session_key_for_clear(
     token_hash: &str,
     provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    live_channel_name: &str,
-    thread_parent: Option<(serenity::ChannelId, Option<String>)>,
+    channel_name: &str,
 ) -> String {
-    let channel_name = match thread_parent {
-        Some((parent_id, parent_name)) => {
-            let parent = parent_name.unwrap_or_else(|| parent_id.get().to_string());
-            super::super::synthetic_thread_channel_name(&parent, channel_id)
-        }
-        None => live_channel_name.to_string(),
-    };
-    let tmux_name = provider.build_tmux_session_name(&channel_name);
+    let tmux_name = provider.build_tmux_session_name(channel_name);
     super::super::adk_session::build_namespaced_session_key(token_hash, provider, &tmux_name)
 }
 
+fn clear_pending_queue_persistence(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: serenity::ChannelId,
+    dispatch_role_overrides: &dashmap::DashMap<serenity::ChannelId, serenity::ChannelId>,
+) {
+    dispatch_role_overrides.remove(&channel_id);
+    super::super::save_channel_queue(provider, token_hash, channel_id, &[], None);
+}
+
 pub(in crate::services::discord) async fn reset_provider_session_if_pending(
-    http: &serenity::Http,
+    http: &std::sync::Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
@@ -157,7 +152,7 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
 }
 
 pub(in crate::services::discord) async fn clear_channel_session_state(
-    http: &serenity::Http,
+    http: &std::sync::Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
@@ -192,6 +187,12 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     };
 
     shared.model_session_reset_pending.remove(&channel_id);
+    clear_pending_queue_persistence(
+        provider,
+        &shared.token_hash,
+        channel_id,
+        &shared.dispatch_role_overrides,
+    );
 
     if let Some(token) = cancel_token {
         cancel_active_token(&token, true, clear_source);
@@ -286,8 +287,9 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!("  [{ts}] ◀ [{user_name}] /clear");
 
+    let http = ctx.serenity_context().http.clone();
     clear_channel_session_state(
-        ctx.http(),
+        &http,
         &ctx.data().shared,
         &ctx.data().provider,
         ctx.channel_id(),
@@ -365,11 +367,18 @@ pub(in crate::services::discord) async fn cmd_down(
 mod tests {
     use super::{
         ManagedSessionClearBehavior, ManagedSessionResetBehavior,
-        build_fallback_session_key_for_clear, managed_session_clear_behavior,
+        build_fallback_session_key_for_clear, clear_pending_queue_persistence,
+        fallback_channel_name_for_clear, managed_session_clear_behavior,
         managed_session_reset_behavior,
     };
+    use crate::services::discord::{Intervention, InterventionMode, save_channel_queue};
     use crate::services::provider::ProviderKind;
-    use poise::serenity_prelude::ChannelId;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    use std::sync::{LazyLock, Mutex};
+    use std::time::Instant;
+
+    static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 
     #[test]
     fn managed_session_clear_behavior_matches_provider_transport() {
@@ -413,14 +422,7 @@ mod tests {
 
     #[test]
     fn fallback_clear_key_uses_namespaced_session_key() {
-        let channel_id = ChannelId::new(123);
-        let key = build_fallback_session_key_for_clear(
-            "tokenxyz",
-            &ProviderKind::Codex,
-            channel_id,
-            "adk-cdx",
-            None,
-        );
+        let key = build_fallback_session_key_for_clear("tokenxyz", &ProviderKind::Codex, "adk-cdx");
         let expected_tmux = ProviderKind::Codex.build_tmux_session_name("adk-cdx");
         let expected = crate::services::discord::adk_session::build_namespaced_session_key(
             "tokenxyz",
@@ -431,27 +433,84 @@ mod tests {
     }
 
     #[test]
-    fn fallback_clear_key_uses_synthetic_thread_name_for_threads() {
-        let channel_id = ChannelId::new(1479671301387059200);
-        let key = build_fallback_session_key_for_clear(
-            "tokenxyz",
-            &ProviderKind::Codex,
+    fn fallback_channel_name_for_clear_uses_synthetic_thread_name() {
+        let channel_id = ChannelId::new(12345);
+        let channel_name = fallback_channel_name_for_clear(
+            Some("thread-title"),
+            Some((ChannelId::new(777), Some("agentdesk-codex".to_string()))),
             channel_id,
-            "review-thread-live-name",
-            Some((
-                ChannelId::new(1479671301387059201),
-                Some("adk-cdx".to_string()),
-            )),
         );
-        let synthetic_name =
-            crate::services::discord::synthetic_thread_channel_name("adk-cdx", channel_id);
-        let expected_tmux = ProviderKind::Codex.build_tmux_session_name(&synthetic_name);
-        let expected = crate::services::discord::adk_session::build_namespaced_session_key(
-            "tokenxyz",
-            &ProviderKind::Codex,
-            &expected_tmux,
+
+        assert_eq!(channel_name.as_deref(), Some("agentdesk-codex-t12345"));
+    }
+
+    #[test]
+    fn fallback_channel_name_for_clear_uses_parent_id_when_name_missing() {
+        let channel_id = ChannelId::new(12345);
+        let channel_name =
+            fallback_channel_name_for_clear(None, Some((ChannelId::new(777), None)), channel_id);
+
+        assert_eq!(channel_name.as_deref(), Some("777-t12345"));
+    }
+
+    #[test]
+    fn fallback_channel_name_for_clear_uses_live_name_for_non_threads() {
+        let channel_id = ChannelId::new(12345);
+        let channel_name =
+            fallback_channel_name_for_clear(Some("agentdesk-qwen"), None, channel_id);
+
+        assert_eq!(channel_name.as_deref(), Some("agentdesk-qwen"));
+    }
+
+    #[test]
+    fn clear_queue_persistence_removes_snapshot_and_override() {
+        let _lock = TEST_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "clear_hash";
+        let channel_id = ChannelId::new(999);
+        let override_channel = ChannelId::new(1000);
+        let overrides: dashmap::DashMap<ChannelId, ChannelId> = dashmap::DashMap::new();
+        overrides.insert(channel_id, override_channel);
+
+        let queue = vec![Intervention {
+            author_id: UserId::new(1),
+            message_id: MessageId::new(2),
+            text: "queued".to_string(),
+            mode: InterventionMode::Soft,
+            created_at: Instant::now(),
+        }];
+        save_channel_queue(
+            &provider,
+            token_hash,
+            channel_id,
+            &queue,
+            Some(override_channel.get()),
         );
-        assert_eq!(key, expected);
+
+        let file = tmp
+            .path()
+            .join("runtime")
+            .join("discord_pending_queue")
+            .join(provider.as_str())
+            .join(token_hash)
+            .join(format!("{}.json", channel_id.get()));
+        assert!(file.exists(), "queue snapshot should exist before clear");
+
+        clear_pending_queue_persistence(&provider, token_hash, channel_id, &overrides);
+
+        assert!(
+            !file.exists(),
+            "queue snapshot should be removed when the channel is cleared"
+        );
+        assert!(
+            overrides.get(&channel_id).is_none(),
+            "dispatch override should be removed with the queue snapshot"
+        );
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
 }
 
