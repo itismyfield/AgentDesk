@@ -121,7 +121,11 @@ GET    /api/meetings/:id
 
 # 설정
 GET    /api/settings
-PATCH  /api/settings
+PUT    /api/settings
+GET    /api/settings/config
+PATCH  /api/settings/config
+GET    /api/settings/runtime-config
+PUT    /api/settings/runtime-config
 
 # 상태
 GET    /api/health
@@ -590,7 +594,6 @@ kanban:
   timeout_requested_minutes: 45
   timeout_in_progress_minutes: 100
   max_review_rounds: 3
-  max_chain_depth: 5
 
 auto_queue:
   enabled: true
@@ -601,6 +604,22 @@ rate_limits:
   warning_percent: 60
   danger_percent: 85
 ```
+
+### 설정 정본(surface) 구분
+
+- `kv_meta['settings']`
+  - 회사 설정 JSON 정본
+  - `/api/settings`는 patch merge가 아니라 full replace 계약
+  - 저장 시 legacy key는 서버에서 제거
+- `kv_meta['runtime-config']`
+  - 폴링 주기, cache TTL 같은 즉시 반영 숫자 설정
+  - `/api/settings/runtime-config`로 읽고 쓴다
+- 개별 `kv_meta` 키
+  - 리뷰, 타임아웃, context compact, merge automation, Discord 채널 ID
+  - `/api/settings/config` whitelist를 통해서만 노출/수정
+- 온보딩 전용 key/API
+  - 토큰, provider, 초기 Discord 설정
+  - 일반 settings form이 아니라 `/api/onboarding/*`와 wizard가 정본
 
 ---
 
@@ -727,4 +746,3 @@ PCD kanban-crud.ts reward → policies/reward-policy.js
 ```
 
 ---
-
