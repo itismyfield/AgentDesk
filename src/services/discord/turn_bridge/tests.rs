@@ -201,6 +201,41 @@ fn memento_reflect_request_requires_loaded_unreflected_session() {
 }
 
 #[test]
+fn memento_reflect_request_handles_local_session_reset_once() {
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        ..ResolvedMemorySettings::default()
+    };
+    let mut session = sample_session();
+
+    let request = take_memento_reflect_request(
+        &mut session,
+        &settings,
+        &ProviderKind::Codex,
+        None,
+        42,
+        SessionEndReason::LocalSessionReset,
+    )
+    .expect("local session reset should trigger one reflect");
+
+    assert_eq!(request.reason, SessionEndReason::LocalSessionReset);
+    assert!(session.memento_reflected);
+
+    let duplicate = take_memento_reflect_request(
+        &mut session,
+        &settings,
+        &ProviderKind::Codex,
+        None,
+        42,
+        SessionEndReason::LocalSessionReset,
+    );
+    assert!(
+        duplicate.is_none(),
+        "reflect must stay one-shot after reset"
+    );
+}
+
+#[test]
 fn memento_reflect_request_skips_other_backends_or_missing_state() {
     let mut unloaded = sample_session();
     unloaded.memento_context_loaded = false;
