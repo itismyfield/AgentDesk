@@ -5,12 +5,17 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Duration;
 
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
+use crate::db::agents::AgentChannelBindings;
+use crate::db::session_transcripts::SessionTranscriptSearchHit;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
+use crate::utils::format::safe_prefix;
 
 const STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL: &str = "-6 hours";
+const SEARCH_SUMMARY_MODEL: &str = "haiku";
 
 /// Extract parent channel name from a thread channel name.
 /// Thread names follow the convention `{parent}-t{thread_id}` where thread_id
@@ -32,6 +37,32 @@ fn parse_channel_name_from_session_key(session_key: &str) -> Option<String> {
     Some(channel_name)
 }
 
+fn parse_thread_channel_id_from_session_key(session_key: &str) -> Option<String> {
+    parse_channel_name_from_session_key(session_key).and_then(|channel_name| {
+        parse_thread_channel_name(&channel_name).map(|(_, thread_id)| thread_id.to_string())
+    })
+}
+
+fn normalize_thread_channel_id(thread_channel_id: Option<&str>) -> Option<String> {
+    let trimmed = thread_channel_id?.trim();
+    if trimmed.len() < 15 || !trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn load_dispatch_thread_id(conn: &rusqlite::Connection, dispatch_id: &str) -> Option<String> {
+    let thread_id: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    normalize_thread_channel_id(thread_id.as_deref())
+}
+
 fn resolve_agent_id_from_channel_name(
     conn: &rusqlite::Connection,
     channel_name: &str,
@@ -41,28 +72,57 @@ fn resolve_agent_id_from_channel_name(
     }
 
     conn.query_row(
-        "SELECT id FROM agents WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1",
+        "SELECT id FROM agents
+         WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1
+            OR discord_channel_cc = ?1 OR discord_channel_cdx = ?1",
         [channel_name],
         |row| row.get(0),
     )
     .ok()
     .or_else(|| {
         let mut stmt = conn
-            .prepare("SELECT id, discord_channel_id, discord_channel_alt FROM agents")
+            .prepare(
+                "SELECT id, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+                 FROM agents",
+            )
             .ok()?;
         let mut rows = stmt.query([]).ok()?;
         while let Ok(Some(row)) = rows.next() {
             let id: String = row.get(0).ok()?;
-            let ch_id: String = row.get::<_, Option<String>>(1).ok()?.unwrap_or_default();
-            let ch_alt: String = row.get::<_, Option<String>>(2).ok()?.unwrap_or_default();
-            if (!ch_id.is_empty() && channel_name.contains(&ch_id))
-                || (!ch_alt.is_empty() && channel_name.contains(&ch_alt))
+            let bindings = AgentChannelBindings {
+                provider: row.get(1).ok()?,
+                discord_channel_id: row.get(2).ok()?,
+                discord_channel_alt: row.get(3).ok()?,
+                discord_channel_cc: row.get(4).ok()?,
+                discord_channel_cdx: row.get(5).ok()?,
+            };
+            if bindings
+                .all_channels()
+                .iter()
+                .any(|channel| channel_name.contains(channel))
             {
                 return Some(id);
             }
         }
         None
     })
+}
+
+fn spawn_auto_queue_activate_for_agent(agent_id: String) {
+    let port = crate::config::load_graceful().server.port;
+    tokio::spawn(async move {
+        // Let the session/dispatch cleanup commit before queue activation probes.
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        let url = crate::config::local_api_url(port, "/api/auto-queue/activate");
+        let _ = reqwest::Client::new()
+            .post(&url)
+            .json(&serde_json::json!({
+                "agent_id": agent_id,
+                "active_only": true,
+            }))
+            .send()
+            .await;
+    });
 }
 
 // ── Query / Body types ────────────────────────────────────────
@@ -84,6 +144,7 @@ pub struct UpdateDispatchedSessionBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct HookSessionBody {
     pub session_key: String,
     pub status: Option<String>,
@@ -94,6 +155,7 @@ pub struct HookSessionBody {
     pub tokens: Option<u64>,
     pub cwd: Option<String>,
     pub dispatch_id: Option<String>,
+    pub thread_channel_id: Option<String>,
     pub claude_session_id: Option<String>,
     pub session_id: Option<String>,
 }
@@ -104,7 +166,153 @@ pub struct DeleteSessionQuery {
     pub provider: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchSessionsQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SearchSummary {
+    model: &'static str,
+    text: String,
+}
+
+fn summary_requested(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if value == "0" || value == "false" || value == "no"
+    )
+}
+
+fn build_search_summary_prompt(query: &str, hits: &[SessionTranscriptSearchHit]) -> String {
+    let mut sections = Vec::new();
+    for (idx, hit) in hits.iter().take(8).enumerate() {
+        let user = safe_prefix(hit.user_message.trim(), 700);
+        let assistant = safe_prefix(hit.assistant_message.trim(), 900);
+        let snippet = safe_prefix(hit.snippet.trim(), 220);
+        sections.push(format!(
+            "[{index}] session_key={session_key}\nprovider={provider}\nagent_id={agent_id}\ncreated_at={created_at}\nsnippet={snippet}\n\nUser:\n{user}\n\nAssistant:\n{assistant}",
+            index = idx + 1,
+            session_key = hit.session_key.as_deref().unwrap_or("-"),
+            provider = hit.provider.as_deref().unwrap_or("-"),
+            agent_id = hit.agent_id.as_deref().unwrap_or("-"),
+            created_at = hit.created_at,
+            snippet = if snippet.is_empty() { "-" } else { snippet },
+        ));
+    }
+
+    format!(
+        "당신은 AgentDesk의 과거 세션 검색 결과를 요약하는 분석기입니다.\n\
+         검색어: {query}\n\n\
+         규칙:\n\
+         - 검색 결과에 실제로 나온 정보만 사용합니다.\n\
+         - 추측하지 않습니다.\n\
+         - 한국어로 3개 이하 bullet로 답합니다.\n\
+         - 반복 설명 대신 공통 주제, 관련 이슈/기능, 눈에 띄는 결론만 압축합니다.\n\n\
+         검색 결과:\n{results}",
+        results = sections.join("\n\n---\n\n")
+    )
+}
+
+async fn summarize_search_hits(
+    query: &str,
+    hits: &[SessionTranscriptSearchHit],
+) -> Result<Option<SearchSummary>, String> {
+    if hits.is_empty() {
+        return Ok(None);
+    }
+
+    let prompt = build_search_summary_prompt(query, hits);
+    let task = tokio::task::spawn_blocking(move || {
+        crate::services::claude::execute_command_simple_with_model(
+            &prompt,
+            Some(SEARCH_SUMMARY_MODEL),
+        )
+    });
+
+    let text = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .map_err(|_| "summary generation timed out".to_string())?
+        .map_err(|e| format!("summary task join failed: {e}"))?
+        .map_err(|e| format!("summary generation failed: {e}"))?;
+
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(SearchSummary {
+            model: SEARCH_SUMMARY_MODEL,
+            text,
+        }))
+    }
+}
+
 // ── Handlers ──────────────────────────────────────────────────
+
+/// GET /api/sessions/search?q=keyword
+pub async fn search_session_transcripts(
+    State(state): State<AppState>,
+    Query(params): Query<SearchSessionsQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let raw_query = params.q.trim();
+    if raw_query.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "q is required"})),
+        );
+    }
+
+    let conn = match state.db.read_conn() {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("db read_conn failed: {e}")})),
+            );
+        }
+    };
+
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
+    let (match_query, hits) =
+        match crate::db::session_transcripts::search_transcripts(&conn, raw_query, limit) {
+            Ok(result) => result,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("search failed: {e}")})),
+                );
+            }
+        };
+    drop(conn);
+
+    let want_summary = summary_requested(params.summary.as_deref());
+    let (summary, summary_error) = if want_summary && !hits.is_empty() {
+        match summarize_search_hits(raw_query, &hits).await {
+            Ok(summary) => (summary, None),
+            Err(e) => (None, Some(e)),
+        }
+    } else {
+        (None, None)
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "query": raw_query,
+            "match_query": match_query,
+            "count": hits.len(),
+            "summary_requested": want_summary,
+            "summary": summary.as_ref().map(|summary| json!({
+                "model": summary.model,
+                "text": summary.text,
+            })),
+            "summary_error": summary_error,
+            "results": hits,
+        })),
+    )
+}
 
 /// GET /api/dispatched-sessions
 pub async fn list_dispatched_sessions(
@@ -277,16 +485,18 @@ pub async fn hook_session(
     // For thread channels (e.g. "adk-cc-t1485400795435372796"), extract the parent channel
     // name ("adk-cc") and resolve using that.
     let session_key_channel_name = parse_channel_name_from_session_key(&body.session_key);
-    let thread_channel_id = body
-        .name
-        .as_deref()
-        .and_then(parse_thread_channel_name)
-        .map(|(_, tid)| tid.to_string())
+    let thread_channel_id = normalize_thread_channel_id(body.thread_channel_id.as_deref())
         .or_else(|| {
-            session_key_channel_name
+            body.name
                 .as_deref()
                 .and_then(parse_thread_channel_name)
                 .map(|(_, tid)| tid.to_string())
+        })
+        .or_else(|| parse_thread_channel_id_from_session_key(&body.session_key))
+        .or_else(|| {
+            body.dispatch_id
+                .as_deref()
+                .and_then(|dispatch_id| load_dispatch_thread_id(&conn, dispatch_id))
         });
 
     let agent_id = [body.name.as_deref(), session_key_channel_name.as_deref()]
@@ -305,25 +515,6 @@ pub async fn hook_session(
     // #107: Normalize empty claude_session_id to None (SQL NULL) so stale empty
     // strings are never persisted — prevents invalid --resume attempts after restart.
     let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
-    let idle_auto_complete_dispatch = if status == "idle" {
-        body.dispatch_id.as_ref().and_then(|did| {
-            conn.query_row(
-                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
-                [did],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .ok()
-            .and_then(|(dtype, dstatus)| {
-                // Only review dispatches are auto-completed on idle.
-                // implementation/rework require explicit completion via
-                // PATCH /api/dispatches/:id (turn_bridge calls this at turn end).
-                (dtype == "review" && dstatus == "pending").then_some(did.clone())
-            })
-        })
-    } else {
-        None
-    };
-
     // Check if session exists before upsert to determine new vs update for WS event
     let is_new_session: bool = conn
         .query_row(
@@ -372,33 +563,7 @@ pub async fn hook_session(
             let dispatch_id = body.dispatch_id.clone();
             drop(conn);
 
-            if let Some(ref did) = idle_auto_complete_dispatch {
-                if let Err(e) = crate::dispatch::finalize_dispatch(
-                    &state.db,
-                    &state.engine,
-                    did,
-                    "session_idle",
-                    Some(&json!({ "auto_completed": true })),
-                ) {
-                    tracing::warn!(
-                        "[session] Failed to auto-complete dispatch {} on idle: {}",
-                        did,
-                        e
-                    );
-                } else {
-                    tracing::info!(
-                        "[session] Auto-completed dispatch {} on idle session update",
-                        did
-                    );
-                    // Send any follow-up dispatch (e.g. review dispatch) that was
-                    // created by hooks during complete_dispatch to Discord.
-                    super::dispatches::queue_dispatch_followup(&state.db, did);
-                }
-            }
-
             // Capture card status BEFORE hook fires.
-            // If idle auto-completion created a new review dispatch, `latest_dispatch_id`
-            // has already moved forward and this intentionally becomes `None`.
             let pre_hook_card: Option<(String, String)> = dispatch_id.as_ref().and_then(|did| {
                 let conn = state.db.lock().ok()?;
                 conn.query_row(
@@ -468,30 +633,16 @@ pub async fn hook_session(
             }
 
             // NOTE: The additional idle-specific re-fire of OnDispatchCompleted was removed.
-            // complete_dispatch() already fires OnDispatchCompleted + handle_completed_dispatch_followups
-            // is spawned from the auto-complete path above (line ~252). Re-firing here caused
-            // double hook execution → duplicate review-decision dispatches.
+            // Dispatch finalization already fires OnDispatchCompleted elsewhere in the
+            // pipeline. Re-firing here caused duplicate hook execution and duplicate
+            // review-decision dispatches.
 
             // #179: When session transitions to idle, trigger auto-queue to dispatch next entry.
             // This closes the chain gap where onCardTerminal hasn't fired yet (card still in review)
             // but the agent is already idle and could start the next queued item.
             if status == "idle" {
                 if let Some(ref aid) = agent_id {
-                    let aid_clone = aid.clone();
-                    let port = crate::config::load_graceful().server.port;
-                    tokio::spawn(async move {
-                        // Small delay to let any in-flight card transitions settle
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                        let url = crate::config::local_api_url(port, "/api/auto-queue/activate");
-                        let _ = reqwest::Client::new()
-                            .post(&url)
-                            .json(&serde_json::json!({
-                                "agent_id": aid_clone,
-                                "active_only": true,
-                            }))
-                            .send()
-                            .await;
-                    });
+                    spawn_auto_queue_activate_for_agent(aid.clone());
                 }
             }
 
@@ -566,7 +717,7 @@ pub async fn hook_session(
                     if let Ok(agent) = conn.query_row(
                         "SELECT a.id, a.name, a.name_ko, s.status, s.session_info, \
                          a.cli_provider, a.avatar_emoji, a.department, \
-                         a.discord_channel_id, a.discord_channel_alt \
+                         a.discord_channel_id, a.discord_channel_alt, a.discord_channel_cc, a.discord_channel_cdx \
                          FROM agents a LEFT JOIN sessions s ON s.agent_id = a.id \
                          AND s.session_key = ?2 \
                          WHERE a.id = ?1",
@@ -583,6 +734,9 @@ pub async fn hook_session(
                                 "department": row.get::<_, Option<String>>(7)?,
                                 "discord_channel_id": row.get::<_, Option<String>>(8)?,
                                 "discord_channel_alt": row.get::<_, Option<String>>(9)?,
+                                "discord_channel_cc": row.get::<_, Option<String>>(10)?,
+                                "discord_channel_cdx": row.get::<_, Option<String>>(11)?,
+                                "discord_channel_id_codex": row.get::<_, Option<String>>(11)?,
                             }))
                         },
                     ) {
@@ -812,14 +966,62 @@ pub async fn clear_session_id_by_key(
     (StatusCode::OK, Json(json!({"cleared": changes})))
 }
 
+fn backfill_legacy_thread_channel_ids(conn: &rusqlite::Connection) -> usize {
+    let legacy_rows: Vec<(String, Option<String>)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT session_key, active_dispatch_id
+             FROM sessions
+             WHERE thread_channel_id IS NULL",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return 0,
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        }) {
+            Ok(rows) => rows,
+            Err(_) => return 0,
+        };
+        rows.filter_map(|row| row.ok()).collect()
+    };
+
+    let updates: Vec<(String, String)> = legacy_rows
+        .into_iter()
+        .filter_map(|(session_key, active_dispatch_id)| {
+            parse_thread_channel_id_from_session_key(&session_key)
+                .or_else(|| {
+                    active_dispatch_id
+                        .as_deref()
+                        .and_then(|dispatch_id| load_dispatch_thread_id(conn, dispatch_id))
+                })
+                .map(|thread_channel_id| (session_key, thread_channel_id))
+        })
+        .collect();
+
+    updates
+        .into_iter()
+        .map(|(session_key, thread_channel_id)| {
+            conn.execute(
+                "UPDATE sessions
+                 SET thread_channel_id = ?1
+                 WHERE session_key = ?2 AND thread_channel_id IS NULL",
+                rusqlite::params![thread_channel_id, session_key],
+            )
+            .unwrap_or(0)
+        })
+        .sum()
+}
+
 /// GC stale thread sessions from DB: idle/disconnected + older than 1 hour.
-/// Thread sessions are identified by having a non-NULL thread_channel_id.
+/// Legacy rows may only encode the Discord thread ID inside session_key, so
+/// backfill thread_channel_id before applying the normal thread-session GC.
 pub fn gc_stale_thread_sessions_db(conn: &rusqlite::Connection) -> usize {
+    let _ = backfill_legacy_thread_channel_ids(conn);
     conn.execute(
         "DELETE FROM sessions
          WHERE thread_channel_id IS NOT NULL
            AND status IN ('idle', 'disconnected')
-           AND last_heartbeat < datetime('now', '-1 hour')",
+           AND COALESCE(last_heartbeat, created_at) < datetime('now', '-1 hour')",
         [],
     )
     .unwrap_or(0)
@@ -973,15 +1175,19 @@ pub struct ForceKillBody {
     pub retry: bool,
 }
 
-/// POST /api/sessions/force-kill
-///
-/// Atomically: kill tmux session + clear inflight file + set session disconnected
-/// + mark active dispatch failed. Optionally creates a retry dispatch.
-pub async fn force_kill_session(
-    State(state): State<AppState>,
-    Json(body): Json<ForceKillBody>,
+#[derive(Deserialize)]
+pub struct ForceKillOptions {
+    /// If true, mark the dispatch as 'failed' and create a retry dispatch.
+    #[serde(default)]
+    pub retry: bool,
+}
+
+pub(crate) async fn force_kill_session_impl(
+    state: &AppState,
+    session_key: &str,
+    retry: bool,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let session_key = &body.session_key;
+    let session_key = session_key;
 
     // Parse tmux session name from session_key (format: "hostname:tmux_name")
     let tmux_name = match session_key.split_once(':') {
@@ -999,7 +1205,7 @@ pub async fn force_kill_session(
         crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_name);
 
     // Query session from DB
-    let (active_dispatch_id, _thread_channel_id) = {
+    let (active_dispatch_id, agent_id, _thread_channel_id) = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -1011,12 +1217,13 @@ pub async fn force_kill_session(
         };
 
         match conn.query_row(
-            "SELECT active_dispatch_id, thread_channel_id FROM sessions WHERE session_key = ?1",
+            "SELECT active_dispatch_id, agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
             [session_key],
             |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             },
         ) {
@@ -1096,7 +1303,7 @@ pub async fn force_kill_session(
             .ok();
 
             // Prepare retry metadata from the failed dispatch (read while lock held)
-            if body.retry {
+            if retry {
                 retry_meta = conn
                     .query_row(
                         "SELECT kanban_card_id, to_agent_id, dispatch_type, title, context, retry_count \
@@ -1158,6 +1365,17 @@ pub async fn force_kill_session(
         }
     }
 
+    let queue_activation_requested = if retry_dispatch_id.is_none() {
+        if let Some(ref aid) = agent_id {
+            spawn_auto_queue_activate_for_agent(aid.clone());
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     let ts = chrono::Local::now().format("%H:%M:%S");
     eprintln!(
         "  [{ts}] ⚡ force-kill: session={}, tmux_killed={}, inflight_cleared={}, dispatch_failed={:?}",
@@ -1172,8 +1390,31 @@ pub async fn force_kill_session(
             "inflight_cleared": inflight_cleared,
             "dispatch_failed": active_dispatch_id,
             "retry_dispatch_id": retry_dispatch_id,
+            "queue_activation_requested": queue_activation_requested,
         })),
     )
+}
+
+/// POST /api/sessions/{session_key}/force-kill
+///
+/// Atomically: kill tmux session + clear inflight file + set session disconnected
+/// + mark active dispatch failed. Optionally creates a retry dispatch.
+pub async fn force_kill_session(
+    State(state): State<AppState>,
+    Path(session_key): Path<String>,
+    Json(body): Json<ForceKillOptions>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    force_kill_session_impl(&state, &session_key, body.retry).await
+}
+
+/// POST /api/sessions/force-kill
+///
+/// Legacy body-based wrapper retained for compatibility with older policy scripts.
+pub async fn force_kill_session_legacy(
+    State(state): State<AppState>,
+    Json(body): Json<ForceKillBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    force_kill_session_impl(&state, &body.session_key, body.retry).await
 }
 
 /// Scan inflight directory for the provider and delete the file matching the given tmux_session_name.
@@ -1213,7 +1454,10 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::engine::PolicyEngine;
-    use std::sync::{Arc, Mutex};
+    use serde_json::Value;
+    use std::ffi::OsString;
+    use std::process::Command;
+    use std::sync::MutexGuard;
 
     fn test_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1225,6 +1469,378 @@ mod tests {
     fn test_engine(db: &Db) -> PolicyEngine {
         let config = crate::config::Config::default();
         PolicyEngine::new(&config, db.clone()).unwrap()
+    }
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        crate::services::discord::runtime_store::lock_test_env()
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn seed_card(conn: &rusqlite::Connection, card_id: &str, dispatch_id: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+             VALUES (?1, 'Force Kill Card', ?2, ?3, datetime('now'), datetime('now'))",
+            rusqlite::params![card_id, status, dispatch_id],
+        )
+        .unwrap();
+    }
+
+    fn seed_dispatch(
+        conn: &rusqlite::Connection,
+        dispatch_id: &str,
+        card_id: &str,
+        agent_id: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, retry_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'implementation', 'pending', 'Recover me', '{}', 0, datetime('now'), datetime('now'))",
+            rusqlite::params![dispatch_id, card_id, agent_id],
+        )
+        .unwrap();
+    }
+
+    fn seed_agent(conn: &rusqlite::Connection, agent_id: &str) {
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES (?1, ?2, 'codex', ?3, datetime('now'), datetime('now'))",
+            rusqlite::params![agent_id, format!("Agent {agent_id}"), "123456789012345678"],
+        )
+        .unwrap();
+    }
+
+    fn seed_session(
+        conn: &rusqlite::Connection,
+        session_key: &str,
+        agent_id: &str,
+        dispatch_id: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, status, active_dispatch_id, last_heartbeat, created_at)
+             VALUES (?1, ?2, 'working', ?3, datetime('now'), datetime('now'))",
+            rusqlite::params![session_key, agent_id, dispatch_id],
+        )
+        .unwrap();
+    }
+
+    fn seed_session_without_dispatch(
+        conn: &rusqlite::Connection,
+        session_key: &str,
+        agent_id: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, status, last_heartbeat, created_at)
+             VALUES (?1, ?2, 'working', datetime('now'), datetime('now'))",
+            rusqlite::params![session_key, agent_id],
+        )
+        .unwrap();
+    }
+
+    fn response_json(resp: Json<Value>) -> Value {
+        resp.0
+    }
+
+    #[tokio::test]
+    async fn search_session_transcripts_returns_fts_hits_without_summary() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let mut conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name) VALUES ('agent-search', 'Agent Search')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, agent_id, provider, status, created_at)
+                 VALUES ('host:search-1', 'agent-search', 'claude', 'idle', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            crate::db::session_transcripts::persist_turn_on_conn(
+                &mut conn,
+                crate::db::session_transcripts::PersistSessionTranscript {
+                    turn_id: "discord:search:1",
+                    session_key: Some("host:search-1"),
+                    channel_id: Some("1490559149790986270"),
+                    agent_id: None,
+                    provider: Some("claude"),
+                    dispatch_id: Some("dispatch-search"),
+                    user_message: "FTS5 세션검색 구현 상태 알려줘",
+                    assistant_message: "LLM 요약과 session transcript FTS 검색 API를 추가했습니다.",
+                },
+            )
+            .unwrap();
+        }
+
+        let (status, body) = search_session_transcripts(
+            State(state),
+            Query(SearchSessionsQuery {
+                q: "FTS5 요약".to_string(),
+                limit: Some(5),
+                summary: Some("0".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = response_json(body);
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["summary_requested"], false);
+        assert!(body["summary"].is_null());
+        assert_eq!(body["results"][0]["session_key"], "host:search-1");
+    }
+
+    #[tokio::test]
+    async fn search_session_transcripts_rejects_empty_query() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db, engine);
+
+        let (status, body) = search_session_transcripts(
+            State(state),
+            Query(SearchSessionsQuery {
+                q: "   ".to_string(),
+                limit: None,
+                summary: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body = response_json(body);
+        assert_eq!(body["error"], "q is required");
+    }
+
+    #[tokio::test]
+    async fn force_kill_session_path_route_retries_active_dispatch() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let conn = db.lock().unwrap();
+            seed_agent(&conn, "agent-force");
+            seed_card(&conn, "card-force", "dispatch-force", "requested");
+            seed_dispatch(&conn, "dispatch-force", "card-force", "agent-force");
+            seed_session(
+                &conn,
+                "host:codex-agent-force",
+                "agent-force",
+                "dispatch-force",
+            );
+        }
+
+        let (status, body) = force_kill_session(
+            State(state),
+            Path("host:codex-agent-force".to_string()),
+            Json(ForceKillOptions { retry: true }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = response_json(body);
+        let retry_dispatch_id = body["retry_dispatch_id"].as_str().unwrap().to_string();
+        assert!(!retry_dispatch_id.is_empty());
+        assert_eq!(body["queue_activation_requested"], false);
+
+        let conn = db.lock().unwrap();
+        let session_state: (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, active_dispatch_id FROM sessions WHERE session_key = ?1",
+                ["host:codex-agent-force"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(session_state.0, "disconnected");
+        assert!(session_state.1.is_none());
+
+        let old_dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = ?1",
+                ["dispatch-force"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_dispatch_status, "failed");
+
+        let new_dispatch: (String, i64) = conn
+            .query_row(
+                "SELECT status, retry_count FROM task_dispatches WHERE id = ?1",
+                [&retry_dispatch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(new_dispatch.0, "pending");
+        assert_eq!(new_dispatch.1, 1);
+    }
+
+    #[tokio::test]
+    async fn force_kill_session_legacy_wrapper_uses_same_core_without_retry() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let conn = db.lock().unwrap();
+            seed_agent(&conn, "agent-force-legacy");
+            seed_card(
+                &conn,
+                "card-force-legacy",
+                "dispatch-force-legacy",
+                "requested",
+            );
+            seed_dispatch(
+                &conn,
+                "dispatch-force-legacy",
+                "card-force-legacy",
+                "agent-force-legacy",
+            );
+            seed_session(
+                &conn,
+                "host:claude-agent-force-legacy",
+                "agent-force-legacy",
+                "dispatch-force-legacy",
+            );
+        }
+
+        let (status, body) = force_kill_session_legacy(
+            State(state),
+            Json(ForceKillBody {
+                session_key: "host:claude-agent-force-legacy".to_string(),
+                retry: false,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = response_json(body);
+        assert!(body["retry_dispatch_id"].is_null());
+        assert_eq!(body["queue_activation_requested"], true);
+
+        let conn = db.lock().unwrap();
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = ?1",
+                ["dispatch-force-legacy"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_status, "failed");
+    }
+
+    #[tokio::test]
+    async fn force_kill_session_clears_matching_inflight_and_live_tmux() {
+        let _env_lock = env_lock();
+        if Command::new("tmux").arg("-V").output().is_err() {
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let tmux_name = format!("AgentDesk-codex-force-kill-{}", std::process::id());
+        let session_key = format!("host:{tmux_name}");
+        let inflight_dir = temp
+            .path()
+            .join("runtime")
+            .join("discord_inflight")
+            .join("codex");
+        std::fs::create_dir_all(&inflight_dir).unwrap();
+        let inflight_path = inflight_dir.join("force-kill.json");
+        std::fs::write(
+            &inflight_path,
+            serde_json::to_string(&json!({
+                "tmux_session_name": tmux_name,
+                "channel_id": "123456789012345678"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let tmux_started = Command::new("tmux")
+            .args(["new-session", "-d", "-s", &tmux_name, "sleep 30"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !tmux_started {
+            return;
+        }
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+        {
+            let conn = db.lock().unwrap();
+            seed_agent(&conn, "agent-force-live");
+            seed_session_without_dispatch(&conn, &session_key, "agent-force-live");
+        }
+
+        let (status, body) = force_kill_session(
+            State(state),
+            Path(session_key.clone()),
+            Json(ForceKillOptions { retry: false }),
+        )
+        .await;
+
+        let body = response_json(body);
+        let tmux_still_alive = Command::new("tmux")
+            .args(["has-session", "-t", &tmux_name])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if tmux_still_alive {
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", &tmux_name])
+                .status();
+        }
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["tmux_killed"], true);
+        assert_eq!(body["inflight_cleared"], true);
+        assert_eq!(body["queue_activation_requested"], true);
+        assert!(
+            !tmux_still_alive,
+            "tmux session should be gone after force-kill"
+        );
+        assert!(
+            !inflight_path.exists(),
+            "matching inflight file should be deleted"
+        );
+
+        let conn = db.lock().unwrap();
+        let session_status: String = conn
+            .query_row(
+                "SELECT status FROM sessions WHERE session_key = ?1",
+                [&session_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_status, "disconnected");
     }
 
     #[tokio::test]
@@ -1264,6 +1880,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )
@@ -1283,6 +1900,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )
@@ -1356,6 +1974,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )
@@ -1375,6 +1994,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )
@@ -1409,7 +2029,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_hook_auto_completes_pending_review_dispatch() {
+    async fn idle_hook_does_not_auto_complete_pending_review_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);
         let state = AppState::test_state(db.clone(), engine);
@@ -1445,6 +2065,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )
@@ -1464,6 +2085,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )
@@ -1493,13 +2115,9 @@ mod tests {
             )
             .unwrap();
 
-        // review dispatches are auto-completed on idle (989043b)
-        assert_eq!(dispatch_status, "completed");
-        assert!(
-            dispatch_result
-                .unwrap_or_default()
-                .contains("\"completion_source\":\"session_idle\"")
-        );
+        // review dispatches must stay pending until an explicit review-verdict arrives
+        assert_eq!(dispatch_status, "pending");
+        assert!(dispatch_result.is_none());
         assert_eq!(active_dispatch_id, None);
     }
 
@@ -1540,6 +2158,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )
@@ -1559,6 +2178,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )
@@ -1603,6 +2223,177 @@ mod tests {
         assert_eq!(parse_thread_channel_name("test-t123"), None);
     }
 
+    #[test]
+    fn parse_thread_channel_id_from_session_key_extracts_thread_id() {
+        assert_eq!(
+            parse_thread_channel_id_from_session_key(
+                "mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011"
+            )
+            .as_deref(),
+            Some("1485506232256168011")
+        );
+    }
+
+    #[test]
+    fn parse_thread_channel_id_from_session_key_rejects_non_thread_suffix() {
+        assert_eq!(
+            parse_thread_channel_id_from_session_key("mac-mini:AgentDesk-claude-adk-cc-token-test"),
+            None
+        );
+    }
+
+    fn insert_gc_candidate_session(
+        conn: &rusqlite::Connection,
+        session_key: &str,
+        status: &str,
+        thread_channel_id: Option<&str>,
+        heartbeat_age_sql: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
+             VALUES (?1, 'codex', ?2, ?3, datetime('now', ?4), datetime('now', ?4))",
+            rusqlite::params![session_key, status, thread_channel_id, heartbeat_age_sql],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn gc_stale_thread_sessions_db_deletes_legacy_rows_without_touching_fixed_channels() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        let legacy_thread_session = "mac-mini:AgentDesk-codex-adk-cdx-t1490653467734446120";
+        let fixed_channel_session = "mac-mini:AgentDesk-claude-adk-cc-token-test";
+        let recent_thread_session = "mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796";
+
+        insert_gc_candidate_session(&conn, legacy_thread_session, "idle", None, "-2 hours");
+        insert_gc_candidate_session(
+            &conn,
+            fixed_channel_session,
+            "disconnected",
+            None,
+            "-2 hours",
+        );
+        insert_gc_candidate_session(&conn, recent_thread_session, "idle", None, "-10 minutes");
+
+        let deleted = gc_stale_thread_sessions_db(&conn);
+        assert_eq!(deleted, 1);
+
+        let legacy_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [legacy_thread_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_count, 0);
+
+        let fixed_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [fixed_channel_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fixed_count, 1);
+
+        let fixed_thread_channel_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_channel_id FROM sessions WHERE session_key = ?1",
+                [fixed_channel_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fixed_thread_channel_id, None);
+
+        let recent_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [recent_thread_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recent_count, 1);
+
+        let recent_thread_channel_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_channel_id FROM sessions WHERE session_key = ?1",
+                [recent_thread_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            recent_thread_channel_id.as_deref(),
+            Some("1485400795435372796")
+        );
+    }
+
+    #[test]
+    fn backfill_legacy_thread_channel_ids_uses_active_dispatch_thread_id() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-backfill', 'Backfill Card', 'in_progress', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, thread_id, created_at, updated_at)
+             VALUES ('dispatch-backfill', 'card-backfill', 'project-agentdesk', 'implementation', 'dispatched', 'Backfill dispatch', '1486333430516945008', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, provider, status, active_dispatch_id, last_heartbeat, created_at)
+             VALUES ('mac-mini:AgentDesk-codex-adk-cdx', 'codex', 'working', 'dispatch-backfill', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        let updated = backfill_legacy_thread_channel_ids(&conn);
+        assert_eq!(updated, 1);
+
+        let thread_channel_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_channel_id FROM sessions WHERE session_key = 'mac-mini:AgentDesk-codex-adk-cdx'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(thread_channel_id.as_deref(), Some("1486333430516945008"));
+    }
+
+    #[tokio::test]
+    async fn gc_thread_sessions_handler_reports_deleted_legacy_thread_rows() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let conn = db.lock().unwrap();
+            insert_gc_candidate_session(
+                &conn,
+                "mac-mini:AgentDesk-codex-adk-cdx-t1490653467734446120",
+                "idle",
+                None,
+                "-2 hours",
+            );
+        }
+
+        let (status, body) = gc_thread_sessions(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response_json(body)["gc_threads"], 1);
+
+        let conn = db.lock().unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
     #[tokio::test]
     async fn thread_session_resolves_agent_from_parent_channel() {
         let db = test_db();
@@ -1633,6 +2424,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: None,
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )
@@ -1681,6 +2473,56 @@ mod tests {
                 cwd: None,
                 dispatch_id: Some("dispatch-1".to_string()),
                 claude_session_id: None,
+                thread_channel_id: None,
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let (agent_id, thread_channel_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
+        assert_eq!(thread_channel_id.as_deref(), Some("1485506232256168011"));
+    }
+
+    #[tokio::test]
+    async fn thread_session_accepts_explicit_thread_channel_id_without_thread_name() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+                 VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let session_key = "mac-mini:AgentDesk-codex-adk-cdx";
+        let (status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: session_key.to_string(),
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("thread work".to_string()),
+                name: Some("adk-cdx".to_string()),
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: None,
+                claude_session_id: None,
+                thread_channel_id: Some("1485506232256168011".to_string()),
                 session_id: None,
             }),
         )
@@ -1729,6 +2571,7 @@ mod tests {
                 cwd: None,
                 dispatch_id: None,
                 claude_session_id: None,
+                thread_channel_id: None,
                 session_id: None,
             }),
         )

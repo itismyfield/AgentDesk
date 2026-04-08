@@ -869,7 +869,7 @@ mod tests {
     where
         F: FnOnce(&TempDir, &TempDir),
     {
-        let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let _guard = super::super::runtime_store::lock_test_env();
         let temp_home = TempDir::new().unwrap();
         let temp_project = TempDir::new().unwrap();
 

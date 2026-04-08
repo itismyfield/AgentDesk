@@ -16,6 +16,77 @@ var DEPLOY_MAX_RETRIES = 2;
 
 // ── Deploy execution via tmux ────────────────────────────────
 
+function parseJsonObject(raw) {
+  if (!raw) return {};
+  try {
+    var parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function firstNonEmptyString(values) {
+  for (var i = 0; i < values.length; i++) {
+    if (typeof values[i] === "string" && values[i].trim() !== "") {
+      return values[i];
+    }
+  }
+  return null;
+}
+
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+function getWorktreeForCard(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT result, context FROM task_dispatches " +
+    "WHERE kanban_card_id = ? " +
+    "  AND dispatch_type IN ('implementation', 'rework') " +
+    "  AND status = 'completed' " +
+    "ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+    [cardId]
+  );
+
+  if (rows.length === 0) {
+    return {
+      path: REPO_DIR,
+      branch: null,
+      source: "repo-root:no-completed-work-dispatch"
+    };
+  }
+
+  var result = parseJsonObject(rows[0].result);
+  var context = parseJsonObject(rows[0].context);
+  var path = firstNonEmptyString([
+    result.completed_worktree_path,
+    result.worktree_path,
+    context.worktree_path
+  ]);
+  var branch = firstNonEmptyString([
+    result.completed_branch,
+    result.worktree_branch,
+    result.branch,
+    context.worktree_branch,
+    context.branch
+  ]);
+
+  if (path) {
+    return {
+      path: path,
+      branch: branch,
+      source: "card-dispatch-context"
+    };
+  }
+
+  return {
+    path: REPO_DIR,
+    branch: branch,
+    source: "repo-root:no-worktree-in-dispatch-context"
+  };
+}
+
 function startDeploySession(cardId) {
   var sessionName = "adk-deploy-" + cardId.substring(0, 8);
 
@@ -26,10 +97,17 @@ function startDeploySession(cardId) {
     return sessionName;
   }
 
+  var worktree = getWorktreeForCard(cardId);
+  agentdesk.log.info(
+    "[deploy-pipeline] Worktree for card " + cardId + ": " + worktree.path +
+    " (source=" + worktree.source +
+    (worktree.branch ? " branch=" + worktree.branch : "") + ")"
+  );
+
   // Spawn deploy in detached tmux session.
   // deploy-dev.sh builds, stops dev, copies binary, restarts, health-checks.
   // After script exits, store exit code in tmux env for the tick to read.
-  var cmd = "cd " + REPO_DIR + " && scripts/deploy-dev.sh 2>&1; " +
+  var cmd = "cd " + shellQuote(worktree.path) + " && scripts/deploy-dev.sh 2>&1; " +
     "tmux set-environment -t " + sessionName + " DEPLOY_RESULT $?; " +
     "sleep 600";
 

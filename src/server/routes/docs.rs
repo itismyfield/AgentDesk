@@ -42,12 +42,36 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
         ),
         ep(
             "GET",
+            "/api/agents/{id}/turn",
+            "agents",
+            "Get active turn status and recent output for agent",
+        ),
+        ep(
+            "POST",
+            "/api/agents/{id}/turn/stop",
+            "agents",
+            "Stop the active turn for agent",
+        ),
+        ep(
+            "GET",
             "/api/agents/{id}/timeline",
             "agents",
             "Agent activity timeline",
         ),
         // Sessions
         ep("GET", "/api/sessions", "sessions", "List sessions"),
+        ep(
+            "GET",
+            "/api/sessions/search?q=keyword",
+            "sessions",
+            "Search persisted session transcripts with optional Haiku summary",
+        ),
+        ep(
+            "POST",
+            "/api/sessions/{session_key}/force-kill",
+            "sessions",
+            "Force-kill session, clear inflight state, fail active dispatch, and optionally retry",
+        ),
         // Policies
         ep("GET", "/api/policies", "policies", "List policies"),
         // Auth
@@ -151,7 +175,12 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
         ),
         // Dispatches
         ep("GET", "/api/dispatches", "dispatches", "List dispatches"),
-        ep("POST", "/api/dispatches", "dispatches", "Create dispatch"),
+        ep(
+            "POST",
+            "/api/dispatches",
+            "dispatches",
+            "Create dispatch (supports optional skip_outbox for bookkeeping-only dispatches)",
+        ),
         ep(
             "GET",
             "/api/dispatches/{id}",
@@ -293,6 +322,12 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
         // Offices
         ep("GET", "/api/offices", "offices", "List offices"),
         ep("POST", "/api/offices", "offices", "Create office"),
+        ep(
+            "PATCH",
+            "/api/offices/reorder",
+            "offices",
+            "Reorder offices",
+        ),
         ep("PATCH", "/api/offices/{id}", "offices", "Update office"),
         ep("DELETE", "/api/offices/{id}", "offices", "Delete office"),
         ep(

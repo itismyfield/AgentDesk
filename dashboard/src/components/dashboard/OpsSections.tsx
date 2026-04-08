@@ -52,7 +52,7 @@ export function DashboardDeptAndSquad({
           </span>
           {t({ ko: "부서 성과", en: "DEPT. PERFORMANCE", ja: "部署パフォーマンス", zh: "部门绩效" })}
           <span
-            className="ml-auto text-[9px] font-medium normal-case tracking-normal"
+            className="ml-auto text-xs font-medium normal-case tracking-normal"
             style={{ color: "var(--th-text-muted)" }}
           >
             {t({ ko: "부서별 성과", en: "by department", ja: "部署別", zh: "按部门" })}
@@ -72,7 +72,7 @@ export function DashboardDeptAndSquad({
             {deptData.map((dept) => (
               <article
                 key={dept.id}
-                className="group relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:bg-white/[0.04] hover:translate-x-1"
+                className="group relative overflow-hidden rounded-xl border border-surface-light bg-surface-subtle p-3 transition-all duration-200 hover:bg-surface-subtle hover:translate-x-1"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2.5">
@@ -86,12 +86,12 @@ export function DashboardDeptAndSquad({
                       {dept.name}
                     </span>
                   </div>
-                  <span className={`rounded-md border px-2 py-0.5 text-[10px] font-black ${dept.color.badge}`}>
+                  <span className={`rounded-md border px-2 py-0.5 text-xs font-black ${dept.color.badge}`}>
                     {dept.ratio}%
                   </span>
                 </div>
 
-                <div className="mt-2.5 relative h-2 overflow-hidden rounded-full border border-white/[0.06] bg-white/[0.04]">
+                <div className="mt-2.5 relative h-2 overflow-hidden rounded-full border border-surface-light bg-surface-subtle">
                   <div
                     className={`xp-bar-fill h-full rounded-full bg-gradient-to-r ${dept.color.bar} transition-all duration-700`}
                     style={{ width: `${dept.ratio}%` }}
@@ -99,7 +99,7 @@ export function DashboardDeptAndSquad({
                 </div>
 
                 <div
-                  className="mt-1.5 flex justify-between text-[9px] font-semibold uppercase tracking-wider"
+                  className="mt-1.5 flex justify-between text-xs font-semibold uppercase tracking-wider"
                   style={{ color: "var(--th-text-muted)" }}
                 >
                   <span>
@@ -129,7 +129,7 @@ export function DashboardDeptAndSquad({
             </span>
             {t({ ko: "스쿼드", en: "SQUAD", ja: "スクワッド", zh: "小队" })}
           </h2>
-          <div className="flex items-center gap-2 text-[10px]">
+          <div className="flex items-center gap-2 text-xs">
             <span className="flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-500/10 px-2 py-0.5 font-bold text-emerald-300">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
               {t({ ko: "ON", en: "ON", ja: "ON", zh: "在线" })} {numberFormatter.format(workingAgents.length)}
@@ -182,7 +182,7 @@ export function DashboardDeptAndSquad({
                   />
                 </div>
                 <span
-                  className="max-w-[52px] truncate text-center text-[9px] font-bold leading-tight"
+                  className="max-w-[52px] truncate text-center text-xs font-bold leading-tight"
                   style={{ color: isWorking ? "var(--th-text-primary)" : "var(--th-text-muted)" }}
                 >
                   {localeName(language, agent)}
@@ -232,14 +232,14 @@ export function DashboardMissionLog({
           </span>
           {t({ ko: "미션 로그", en: "MISSION LOG", ja: "ミッションログ", zh: "任务日志" })}
           <span
-            className="ml-2 text-[9px] font-medium normal-case tracking-normal"
+            className="ml-2 text-xs font-medium normal-case tracking-normal"
             style={{ color: "var(--th-text-muted)" }}
           >
             {t({ ko: "최근 활동", en: "Recent activity", ja: "最近の活動", zh: "最近活动" })}
           </span>
         </h2>
         <span
-          className="flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[10px] font-bold"
+          className="flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-bold"
           style={{
             borderColor: "var(--th-border)",
             background: "var(--th-bg-surface)",
@@ -273,7 +273,7 @@ export function DashboardMissionLog({
             return (
               <article
                 key={task.id}
-                className={`group grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-xl border border-white/[0.06] border-l-[3px] ${leftBorder} bg-white/[0.02] p-3 transition-all duration-200 hover:bg-white/[0.04] hover:translate-x-1`}
+                className={`group grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-xl border border-surface-light border-l-[3px] ${leftBorder} bg-surface-subtle p-3 transition-all duration-200 hover:bg-surface-subtle hover:translate-x-1`}
               >
                 {assignedAgent ? (
                   <AgentAvatar agent={assignedAgent} agents={agents} size={36} rounded="xl" />
@@ -297,7 +297,7 @@ export function DashboardMissionLog({
                   >
                     {task.title}
                   </p>
-                  <p className="mt-0.5 flex items-center gap-1.5 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                  <p className="mt-0.5 flex items-center gap-1.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
                     <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${statusInfo.dot}`} />
                     {assignedAgent
                       ? localeName(language, assignedAgent)
@@ -307,11 +307,11 @@ export function DashboardMissionLog({
 
                 <div className="flex flex-col items-end gap-1">
                   <span
-                    className={`rounded-md border px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${statusInfo.color}`}
+                    className={`rounded-md border px-2 py-0.5 text-xs font-black uppercase tracking-wider ${statusInfo.color}`}
                   >
                     {taskStatusLabel(task.status, t)}
                   </span>
-                  <span className="text-[9px] font-medium" style={{ color: "var(--th-text-muted)" }}>
+                  <span className="text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
                     {timeAgo(task.updated_at, localeTag)}
                   </span>
                 </div>

@@ -45,12 +45,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN sprite_number INTEGER DEFAULT NULL;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN description TEXT;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN system_prompt TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN discord_channel_cc TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN discord_channel_cdx TEXT;");
     // #135: Per-repo and per-agent pipeline override (JSON)
     let _ = conn.execute_batch("ALTER TABLE github_repos ADD COLUMN pipeline_config TEXT;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN pipeline_config TEXT;");
     let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN thread_id TEXT;");
     let _ =
         conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN retry_count INTEGER DEFAULT 0;");
+    let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN completed_at DATETIME;");
     let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN thread_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN primary_provider TEXT;");
     let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN reviewer_provider TEXT;");
@@ -58,6 +61,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN created_at INTEGER;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT;");
+    ensure_session_transcripts_schema(conn)?;
 
     // Office/department extended columns
     let _ = conn.execute_batch("ALTER TABLE offices ADD COLUMN name_ko TEXT;");
@@ -100,9 +104,22 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN suggestion_pending_at TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN review_entered_at TEXT;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN awaiting_dod_at TEXT;");
+    let _ = conn.execute_batch(
+        "UPDATE agents
+         SET discord_channel_cc = COALESCE(NULLIF(TRIM(discord_channel_cc), ''), NULLIF(TRIM(discord_channel_id), '')),
+             discord_channel_cdx = COALESCE(NULLIF(TRIM(discord_channel_cdx), ''), NULLIF(TRIM(discord_channel_alt), ''));
+         UPDATE agents
+         SET discord_channel_id = COALESCE(NULLIF(TRIM(discord_channel_id), ''), NULLIF(TRIM(discord_channel_cc), '')),
+             discord_channel_alt = COALESCE(NULLIF(TRIM(discord_channel_alt), ''), NULLIF(TRIM(discord_channel_cdx), ''));",
+    );
 
     // Backfill lifecycle timestamps for existing cards that predate these columns.
     // Uses updated_at as best-available approximation; future transitions will use exact timestamps.
+    let _ = conn.execute_batch(
+        "UPDATE task_dispatches
+         SET completed_at = COALESCE(completed_at, updated_at)
+         WHERE status = 'completed' AND completed_at IS NULL;",
+    );
     let _ = conn.execute_batch(
         "UPDATE kanban_cards SET requested_at = updated_at WHERE status = 'requested' AND requested_at IS NULL;
          UPDATE kanban_cards SET started_at = updated_at WHERE status = 'in_progress' AND started_at IS NULL;
@@ -596,10 +613,24 @@ pub fn seed_builtin_pipeline_stages(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    // #197: dev-deploy and e2e-test stages disabled until #197 is implemented.
-    // Re-enable when deploy-pipeline.js can handle these stages.
-    // ensure_pipeline_stage(conn, AGENTDESK_REPO_ID, "dev-deploy", 100, Some("review_pass"), Some("self"), Some("no_rs_changes"))?;
-    // ensure_pipeline_stage(conn, AGENTDESK_REPO_ID, "e2e-test", 200, None, Some("counter"), Some("no_rs_changes"))?;
+    ensure_pipeline_stage(
+        conn,
+        AGENTDESK_REPO_ID,
+        "dev-deploy",
+        100,
+        Some("review_pass"),
+        Some("self"),
+        Some("no_rs_changes"),
+    )?;
+    ensure_pipeline_stage(
+        conn,
+        AGENTDESK_REPO_ID,
+        "e2e-test",
+        200,
+        None,
+        Some("counter"),
+        Some("no_rs_changes"),
+    )?;
 
     Ok(())
 }
@@ -633,12 +664,154 @@ fn ensure_pipeline_stage(
     Ok(())
 }
 
+fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_transcripts (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            turn_id           TEXT NOT NULL UNIQUE,
+            session_key       TEXT,
+            channel_id        TEXT,
+            agent_id          TEXT,
+            provider          TEXT,
+            dispatch_id       TEXT,
+            user_message      TEXT NOT NULL DEFAULT '',
+            assistant_message TEXT NOT NULL DEFAULT '',
+            created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_transcripts_session_key
+            ON session_transcripts (session_key);
+        CREATE INDEX IF NOT EXISTS idx_session_transcripts_agent_id
+            ON session_transcripts (agent_id);
+        CREATE INDEX IF NOT EXISTS idx_session_transcripts_created_at
+            ON session_transcripts (created_at DESC);
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_transcripts_fts USING fts5(
+            session_transcript_id UNINDEXED,
+            content,
+            tokenize = 'unicode61'
+        );",
+    )?;
+    migrate_legacy_session_transcripts_agent_fk(conn)?;
+    Ok(())
+}
+
+fn migrate_legacy_session_transcripts_agent_fk(conn: &Connection) -> Result<()> {
+    let table_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'session_transcripts'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let needs_rebuild = table_sql
+        .as_deref()
+        .map(|sql| sql.contains("REFERENCES agents"))
+        .unwrap_or(false);
+    if !needs_rebuild {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS session_transcripts_fts;
+         ALTER TABLE session_transcripts RENAME TO session_transcripts_legacy;
+         CREATE TABLE session_transcripts (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            turn_id           TEXT NOT NULL UNIQUE,
+            session_key       TEXT,
+            channel_id        TEXT,
+            agent_id          TEXT,
+            provider          TEXT,
+            dispatch_id       TEXT,
+            user_message      TEXT NOT NULL DEFAULT '',
+            assistant_message TEXT NOT NULL DEFAULT '',
+            created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+         );
+         INSERT INTO session_transcripts (
+            id,
+            turn_id,
+            session_key,
+            channel_id,
+            agent_id,
+            provider,
+            dispatch_id,
+            user_message,
+            assistant_message,
+            created_at
+         )
+         SELECT
+            id,
+            turn_id,
+            session_key,
+            channel_id,
+            agent_id,
+            provider,
+            dispatch_id,
+            user_message,
+            assistant_message,
+            created_at
+         FROM session_transcripts_legacy;
+         DROP TABLE session_transcripts_legacy;
+         CREATE INDEX IF NOT EXISTS idx_session_transcripts_session_key
+            ON session_transcripts (session_key);
+         CREATE INDEX IF NOT EXISTS idx_session_transcripts_agent_id
+            ON session_transcripts (agent_id);
+         CREATE INDEX IF NOT EXISTS idx_session_transcripts_created_at
+            ON session_transcripts (created_at DESC);
+         CREATE VIRTUAL TABLE session_transcripts_fts USING fts5(
+            session_transcript_id UNINDEXED,
+            content,
+            tokenize = 'unicode61'
+         );
+         INSERT INTO session_transcripts_fts (session_transcript_id, content)
+         SELECT
+            id,
+            CASE
+                WHEN TRIM(user_message) <> '' AND TRIM(assistant_message) <> ''
+                    THEN 'user:' || char(10) || user_message || char(10) || char(10)
+                        || 'assistant:' || char(10) || assistant_message
+                WHEN TRIM(user_message) <> ''
+                    THEN 'user:' || char(10) || user_message
+                WHEN TRIM(assistant_message) <> ''
+                    THEN 'assistant:' || char(10) || assistant_message
+                ELSE ''
+            END
+         FROM session_transcripts;",
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn builtin_stage_rows(
+        conn: &Connection,
+    ) -> Vec<(String, i64, Option<String>, Option<String>, Option<String>)> {
+        conn.prepare(
+            "SELECT stage_name, stage_order, trigger_after, provider, skip_condition
+             FROM pipeline_stages
+             WHERE repo_id = ?1
+             ORDER BY stage_order ASC",
+        )
+        .unwrap()
+        .query_map([AGENTDESK_REPO_ID], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
     #[test]
-    fn migrate_does_not_backfill_disabled_agentdesk_pipeline_stages_for_existing_repo() {
+    fn migrate_seeds_builtin_agentdesk_pipeline_stages_for_existing_repo() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE kv_meta (
@@ -662,32 +835,29 @@ mod tests {
 
         migrate(&conn).unwrap();
 
-        let rows: Vec<(String, i64, Option<String>, Option<String>, Option<String>)> = conn
-            .prepare(
-                "SELECT stage_name, stage_order, trigger_after, provider, skip_condition
-                 FROM pipeline_stages
-                 WHERE repo_id = ?1
-                 ORDER BY stage_order ASC",
-            )
-            .unwrap()
-            .query_map([AGENTDESK_REPO_ID], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert!(rows.is_empty());
+        assert_eq!(
+            builtin_stage_rows(&conn),
+            vec![
+                (
+                    "dev-deploy".to_string(),
+                    100,
+                    Some("review_pass".to_string()),
+                    Some("self".to_string()),
+                    Some("no_rs_changes".to_string()),
+                ),
+                (
+                    "e2e-test".to_string(),
+                    200,
+                    None,
+                    Some("counter".to_string()),
+                    Some("no_rs_changes".to_string()),
+                ),
+            ]
+        );
     }
 
     #[test]
-    fn seed_builtin_pipeline_stages_is_noop_while_disabled() {
+    fn seed_builtin_pipeline_stages_is_idempotent_for_agentdesk_repo() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
         conn.execute(
@@ -706,6 +876,110 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(count, 2);
+        assert_eq!(
+            builtin_stage_rows(&conn),
+            vec![
+                (
+                    "dev-deploy".to_string(),
+                    100,
+                    Some("review_pass".to_string()),
+                    Some("self".to_string()),
+                    Some("no_rs_changes".to_string()),
+                ),
+                (
+                    "e2e-test".to_string(),
+                    200,
+                    None,
+                    Some("counter".to_string()),
+                    Some("no_rs_changes".to_string()),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn migrate_rebuilds_session_transcripts_without_agent_fk() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name) VALUES ('legacy-agent', 'Legacy Agent')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_transcripts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_id           TEXT NOT NULL UNIQUE,
+                session_key       TEXT,
+                channel_id        TEXT,
+                agent_id          TEXT REFERENCES agents(id),
+                provider          TEXT,
+                dispatch_id       TEXT,
+                user_message      TEXT NOT NULL DEFAULT '',
+                assistant_message TEXT NOT NULL DEFAULT '',
+                created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO session_transcripts (
+                turn_id,
+                session_key,
+                channel_id,
+                agent_id,
+                provider,
+                dispatch_id,
+                user_message,
+                assistant_message
+            ) VALUES (
+                'discord:legacy:1',
+                'host:legacy',
+                'legacy-channel',
+                'legacy-agent',
+                'codex',
+                'dispatch-legacy',
+                'legacy question',
+                'legacy answer'
+            );",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let table_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'session_transcripts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!table_sql.contains("REFERENCES agents"));
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_transcripts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_transcripts_fts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(fts_count, 1);
     }
 }

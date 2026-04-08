@@ -143,6 +143,9 @@ export default function OfficeManagerModal({
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={tr("오피스 관리", "Manage Offices")}
         className="rounded-xl w-full max-w-lg mx-4 max-h-[80vh] flex flex-col"
         style={{
           background: "var(--th-card-bg)",
@@ -166,7 +169,7 @@ export default function OfficeManagerModal({
             {view === "agents" &&
               `${agentsOffice?.icon ?? ""} ${isKo ? agentsOffice?.name_ko : agentsOffice?.name} — ${tr("멤버 관리", "Manage Members")}`}
           </h2>
-          <button onClick={onClose} className="p-1 hover:bg-white/10 rounded">
+          <button onClick={onClose} className="p-1 hover:bg-surface-hover rounded">
             <X size={18} style={{ color: "var(--th-text-muted)" }} />
           </button>
         </div>
@@ -203,7 +206,7 @@ export default function OfficeManagerModal({
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => openAgents(o)}
-                      className="p-1.5 rounded hover:bg-white/10"
+                      className="p-1.5 rounded hover:bg-surface-hover"
                       title={tr("멤버 관리", "Manage Members")}
                     >
                       <Settings2
@@ -213,7 +216,7 @@ export default function OfficeManagerModal({
                     </button>
                     <button
                       onClick={() => openEdit(o)}
-                      className="p-1.5 rounded hover:bg-white/10 text-xs"
+                      className="p-1.5 rounded hover:bg-surface-hover text-xs"
                       style={{ color: "var(--th-text-secondary)" }}
                     >
                       {tr("편집", "Edit")}
@@ -239,7 +242,7 @@ export default function OfficeManagerModal({
 
               <button
                 onClick={openCreate}
-                className="w-full flex items-center justify-center gap-2 p-3 rounded-lg border-dashed transition-colors hover:bg-white/5"
+                className="w-full flex items-center justify-center gap-2 p-3 rounded-lg border-dashed transition-colors hover:bg-surface-subtle"
                 style={{
                   border: "1px dashed var(--th-input-border)",
                   color: "var(--th-text-secondary)",
@@ -306,8 +309,8 @@ export default function OfficeManagerModal({
                       onClick={() => setFormIcon(ic)}
                       className={`w-8 h-8 rounded flex items-center justify-center text-base transition-all ${
                         formIcon === ic
-                          ? "ring-2 ring-indigo-500 bg-white/10"
-                          : "hover:bg-white/10"
+                          ? "ring-2 ring-indigo-500 bg-surface-hover"
+                          : "hover:bg-surface-hover"
                       }`}
                     >
                       {ic}
@@ -370,7 +373,7 @@ export default function OfficeManagerModal({
                     onClick={() => toggleAgent(a.id)}
                     disabled={saving}
                     className={`w-full flex items-center gap-3 p-2.5 rounded-lg transition-all text-left ${
-                      inOffice ? "bg-indigo-500/10" : "hover:bg-white/5"
+                      inOffice ? "bg-indigo-500/10" : "hover:bg-surface-subtle"
                     }`}
                     style={{
                       border: inOffice
@@ -419,7 +422,7 @@ export default function OfficeManagerModal({
           {view !== "list" && (
             <button
               onClick={() => setView("list")}
-              className="px-3 py-1.5 rounded-lg text-sm hover:bg-white/10"
+              className="px-3 py-1.5 rounded-lg text-sm hover:bg-surface-hover"
               style={{ color: "var(--th-text-secondary)" }}
             >
               {tr("뒤로", "Back")}
@@ -441,7 +444,7 @@ export default function OfficeManagerModal({
           {view === "list" && (
             <button
               onClick={onClose}
-              className="px-3 py-1.5 rounded-lg text-sm hover:bg-white/10"
+              className="px-3 py-1.5 rounded-lg text-sm hover:bg-surface-hover"
               style={{ color: "var(--th-text-secondary)" }}
             >
               {tr("닫기", "Close")}
@@ -450,7 +453,7 @@ export default function OfficeManagerModal({
           {view === "agents" && (
             <button
               onClick={onClose}
-              className="px-3 py-1.5 rounded-lg text-sm hover:bg-white/10"
+              className="px-3 py-1.5 rounded-lg text-sm hover:bg-surface-hover"
               style={{ color: "var(--th-text-secondary)" }}
             >
               {tr("완료", "Done")}

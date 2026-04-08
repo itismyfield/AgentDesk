@@ -10,7 +10,6 @@ import type { FormData } from "./agent-manager/types";
 import AgentsTab from "./agent-manager/AgentsTab";
 import DepartmentsTab from "./agent-manager/DepartmentsTab";
 import AgentFormModal from "./agent-manager/AgentFormModal";
-import AgentInfoCard from "./agent-manager/AgentInfoCard";
 import DepartmentFormModal from "./agent-manager/DepartmentFormModal";
 import { SessionPanel } from "./session-panel/SessionPanel";
 
@@ -75,7 +74,6 @@ export default function AgentManagerView({
 
   // ── Agent modal state ──
   const [agentModal, setAgentModal] = useState<{ open: boolean; editAgent: Agent | null }>({ open: false, editAgent: null });
-  const [infoAgent, setInfoAgent] = useState<Agent | null>(null);
   const [form, setForm] = useState<FormData>(BLANK);
 
   // ── Department modal state ──
@@ -131,8 +129,19 @@ export default function AgentManagerView({
     setAgentModal({ open: true, editAgent: null });
   }, []);
 
-  const openAgentInfo = useCallback((agent: Agent) => {
-    setInfoAgent(agent);
+  const openEditAgent = useCallback((agent: Agent) => {
+    setForm({
+      name: agent.name,
+      name_ko: agent.name_ko ?? "",
+      name_ja: agent.name_ja ?? "",
+      name_zh: agent.name_zh ?? "",
+      department_id: agent.department_id ?? "",
+      cli_provider: agent.cli_provider ?? "claude",
+      avatar_emoji: agent.avatar_emoji ?? "🤖",
+      sprite_number: agent.sprite_number ?? null,
+      personality: agent.personality ?? "",
+    });
+    setAgentModal({ open: true, editAgent: agent });
   }, []);
 
   const handleSaveAgent = useCallback(async () => {
@@ -375,7 +384,7 @@ export default function AgentManagerView({
             spriteMap={spriteMap}
             confirmDeleteId={confirmDeleteId}
             setConfirmDeleteId={setConfirmDeleteId}
-            onEditAgent={openAgentInfo}
+            onEditAgent={openEditAgent}
             onEditDepartment={openEditDept}
             onDeleteAgent={handleDeleteAgent}
             saving={saving}
@@ -405,7 +414,7 @@ export default function AgentManagerView({
         />
       )}
 
-      {/* Agent create modal (new agents only) */}
+      {/* Agent create/edit modal */}
       {agentModal.open && (
         <AgentFormModal
           isKo={isKo}
@@ -414,24 +423,10 @@ export default function AgentManagerView({
           form={form}
           setForm={setForm}
           departments={departments}
-          isEdit={false}
+          isEdit={!!agentModal.editAgent}
           saving={saving}
           onSave={handleSaveAgent}
           onClose={() => setAgentModal({ open: false, editAgent: null })}
-        />
-      )}
-
-      {/* Agent info card (read-only) */}
-      {infoAgent && (
-        <AgentInfoCard
-          agent={infoAgent}
-          spriteMap={spriteMap}
-          isKo={isKo}
-          locale={locale}
-          tr={tr}
-          departments={departments}
-          onClose={() => setInfoAgent(null)}
-          onAgentUpdated={onAgentsChange}
         />
       )}
 

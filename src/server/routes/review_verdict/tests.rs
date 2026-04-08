@@ -22,6 +22,21 @@ fn test_engine(db: &Db) -> PolicyEngine {
     PolicyEngine::new(&config, db.clone()).unwrap()
 }
 
+struct WorktreeCommitOverrideGuard;
+
+impl WorktreeCommitOverrideGuard {
+    fn set(commit: &str) -> Self {
+        super::decision_route::set_test_worktree_commit_override(Some(commit.to_string()));
+        Self
+    }
+}
+
+impl Drop for WorktreeCommitOverrideGuard {
+    fn drop(&mut self) {
+        super::decision_route::clear_test_worktree_commit_override();
+    }
+}
+
 fn seed_review_card(db: &Db, dispatch_id: &str) {
     let conn = db.lock().unwrap();
     conn.execute(
@@ -41,6 +56,19 @@ fn seed_review_card(db: &Db, dispatch_id: &str) {
         [dispatch_id],
     )
     .unwrap();
+}
+
+fn count_active_dispatches(db: &Db, card_id: &str, dispatch_type: &str) -> i64 {
+    db.lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type = ?2 \
+             AND status IN ('pending', 'dispatched')",
+            rusqlite::params![card_id, dispatch_type],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 #[tokio::test]
@@ -757,6 +785,180 @@ async fn accept_on_done_card_fails_closed_without_stranding() {
 }
 
 #[tokio::test]
+async fn accept_skip_rework_falls_back_to_rework_when_direct_review_creates_no_dispatch() {
+    let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) \
+             VALUES ('agent-nocm', 'Agent No Counter', '123', '')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
+             review_status, suggestion_pending_at, github_issue_number, created_at, updated_at) \
+             VALUES ('card-skip-fallback', 'Skip Rework Fallback', 'review', 'agent-nocm', \
+             'rd-skip-fallback', 'suggestion_pending', datetime('now', '-10 minutes'), 246, \
+             datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, \
+             title, context, completed_at, created_at, updated_at) \
+             VALUES ('review-skip-fallback', 'card-skip-fallback', 'agent-nocm', 'review', \
+             'completed', '[Review R1]', '{\"reviewed_commit\":\"aaa1111\"}', \
+             datetime('now', '-5 minutes'), datetime('now', '-10 minutes'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, \
+             title, created_at, updated_at) \
+             VALUES ('rd-skip-fallback', 'card-skip-fallback', 'agent-nocm', 'review-decision', \
+             'pending', '[Decision] card-skip-fallback', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-skip-fallback".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            dispatch_id: Some("rd-skip-fallback".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "accept should fall back to rework");
+    assert_eq!(
+        body.0["direct_review_created"],
+        serde_json::Value::Bool(false),
+        "skip_rework fallback should not report a direct review dispatch"
+    );
+    assert_eq!(
+        body.0["rework_dispatch_created"],
+        serde_json::Value::Bool(true),
+        "skip_rework fallback must create a rework dispatch"
+    );
+
+    let conn = db.lock().unwrap();
+    let card_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-skip-fallback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let rd_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'rd-skip-fallback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(conn);
+
+    assert_eq!(card_status, "in_progress");
+    assert_eq!(rd_status, "completed");
+    assert_eq!(
+        count_active_dispatches(&db, "card-skip-fallback", "review"),
+        0
+    );
+    assert_eq!(
+        count_active_dispatches(&db, "card-skip-fallback", "rework"),
+        1
+    );
+    assert_eq!(
+        count_active_dispatches(&db, "card-skip-fallback", "review-decision"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn accept_rework_failure_keeps_review_decision_pending() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, review_status, \
+             created_at, updated_at) \
+             VALUES ('card-no-agent', 'No Agent Rework Failure', 'review', 'rd-no-agent', \
+             'suggestion_pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, \
+             title, created_at, updated_at) \
+             VALUES ('rd-no-agent', 'card-no-agent', 'ghost-agent', 'review-decision', 'pending', \
+             '[Decision] card-no-agent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), engine);
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-no-agent".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            dispatch_id: Some("rd-no-agent".to_string()),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "accept must fail closed when rework dispatch creation is impossible"
+    );
+    assert!(
+        body.0["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no follow-up dispatch created")
+    );
+    assert_eq!(
+        body.0["pending_dispatch_id"],
+        serde_json::Value::String("rd-no-agent".to_string())
+    );
+
+    let conn = db.lock().unwrap();
+    let rd_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'rd-no-agent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        rd_status, "pending",
+        "fail-closed accept must leave the review-decision dispatch pending"
+    );
+    assert_eq!(count_active_dispatches(&db, "card-no-agent", "review"), 0);
+    assert_eq!(count_active_dispatches(&db, "card-no-agent", "rework"), 0);
+    assert_eq!(
+        count_active_dispatches(&db, "card-no-agent", "review-decision"),
+        1
+    );
+}
+
+#[tokio::test]
 async fn dismiss_then_late_accept_does_not_reopen() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -1190,5 +1392,211 @@ async fn accept_updates_canonical_review_state() {
         last_decision.as_deref(),
         Some("accept"),
         "last_decision should be accept"
+    );
+
+    // #266: Verify kanban_cards.review_status is cleared to NULL after accept
+    let review_status: Option<String> = conn
+        .query_row(
+            "SELECT review_status FROM kanban_cards WHERE id = 'card-rs'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        review_status, None,
+        "#266: review_status should be NULL after accept (was suggestion_pending)"
+    );
+}
+
+/// #266: Regression test — suggestion_pending review_status must be cleared
+/// when a review-decision accept triggers rework (non-terminal transition).
+#[tokio::test]
+async fn accept_clears_suggestion_pending_review_status() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
+             review_status, suggestion_pending_at, created_at, updated_at) \
+             VALUES ('card-266', 'Suggestion Pending Bug', 'review', 'agent-1', 'rd-266', \
+             'suggestion_pending', datetime('now', '-10 minutes'), datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('rd-266', 'card-266', 'agent-1', 'review-decision', 'pending', 'RD #266', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+
+    let (status, _) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-266".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            dispatch_id: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "accept should succeed");
+
+    let conn = db.lock().unwrap();
+    let (review_status, suggestion_pending_at): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT review_status, suggestion_pending_at FROM kanban_cards WHERE id = 'card-266'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        review_status, None,
+        "#266: review_status must be NULL after accept, not suggestion_pending"
+    );
+    assert_eq!(
+        suggestion_pending_at, None,
+        "#266: suggestion_pending_at must be NULL after accept"
+    );
+}
+
+#[test]
+fn latest_completed_review_lookup_prefers_completed_at() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-rv', 'Agent RV', '123', '456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at) \
+             VALUES ('card-review-ts', 'Review Timestamp Card', 'review', 'agent-rv', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, completed_at, created_at, updated_at) \
+             VALUES ('review-older-finish', 'card-review-ts', 'agent-rv', 'review', 'completed', '[Review R1]', \
+             '{\"reviewed_commit\":\"old1111\"}', datetime('now', '-20 minutes'), datetime('now', '-30 minutes'), datetime('now', '-1 minute'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, completed_at, created_at, updated_at) \
+             VALUES ('review-newer-finish', 'card-review-ts', 'agent-rv', 'review', 'completed', '[Review R2]', \
+             '{\"reviewed_commit\":\"new2222\"}', datetime('now', '-5 minutes'), datetime('now', '-40 minutes'), datetime('now', '-10 minutes'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let conn = db.lock().unwrap();
+    let latest_context: Option<String> = conn
+        .query_row(
+            "SELECT context FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type = 'review' AND status = 'completed' \
+             ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC, rowid DESC LIMIT 1",
+            ["card-review-ts"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let latest_reviewed_commit = latest_context
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(&ctx).ok())
+        .and_then(|value| {
+            value
+                .get("reviewed_commit")
+                .and_then(|commit| commit.as_str())
+                .map(str::to_string)
+        });
+
+    assert_eq!(
+        latest_reviewed_commit,
+        Some("new2222".to_string()),
+        "skip_rework lookup must follow completed_at rather than a stale updated_at"
+    );
+}
+
+/// #266: When the agent already committed new work during the review-decision
+/// turn (skip_rework / direct_review_created path), OnReviewEnter sets
+/// review_status='reviewing'. The accept cleanup must NOT clear it.
+#[tokio::test]
+async fn accept_direct_review_preserves_reviewing_status() {
+    let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
+             review_status, suggestion_pending_at, github_issue_number, created_at, updated_at) \
+             VALUES ('card-266dr', 'Direct Review Path', 'review', 'agent-1', 'rd-266dr', \
+             'suggestion_pending', datetime('now', '-10 minutes'), 266, datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        // Completed review dispatch with reviewed_commit (needed for skip_rework detection)
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, \
+             context, completed_at, created_at, updated_at) \
+             VALUES ('review-prev', 'card-266dr', 'agent-1', 'review', 'completed', '[Review R1]', \
+             '{\"reviewed_commit\":\"aaa1111\"}', datetime('now', '-5 minutes'), datetime('now', '-10 minutes'), datetime('now'))",
+            [],
+        ).unwrap();
+        // Pending review-decision dispatch
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+             VALUES ('rd-266dr', 'card-266dr', 'agent-1', 'review-decision', 'pending', 'RD #266 direct', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+
+    let (status, body) = submit_review_decision(
+        State(state),
+        Json(ReviewDecisionBody {
+            card_id: "card-266dr".to_string(),
+            decision: "accept".to_string(),
+            comment: None,
+            dispatch_id: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "accept should succeed");
+    let resp: serde_json::Value = serde_json::from_value(body.0).unwrap();
+    assert_eq!(
+        resp.get("direct_review_created"),
+        Some(&serde_json::Value::Bool(true)),
+        "skip_rework accept must create a direct review dispatch"
+    );
+    assert_eq!(
+        resp.get("rework_dispatch_created"),
+        Some(&serde_json::Value::Bool(false)),
+        "skip_rework accept must not create a rework dispatch"
+    );
+
+    let conn = db.lock().unwrap();
+    let review_status: Option<String> = conn
+        .query_row(
+            "SELECT review_status FROM kanban_cards WHERE id = 'card-266dr'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        review_status,
+        Some("reviewing".to_string()),
+        "#266: direct-review accept must preserve review_status='reviewing' set by OnReviewEnter"
     );
 }

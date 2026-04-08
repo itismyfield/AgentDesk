@@ -5,7 +5,7 @@ import {
   applySessionOverlay,
   deriveDispatchedAsAgents,
   deriveSubAgents,
-} from "./office-session-overlay.ts";
+} from "./office-session-overlay";
 
 function makeAgent(overrides: Partial<Agent> = {}): Agent {
   return {
@@ -51,9 +51,9 @@ describe("office-session-overlay", () => {
   const agent = makeAgent();
   const session = makeSession();
 
-  const overlaid = applySessionOverlay([agent], [session]);
-  const subAgents = deriveSubAgents([session]);
-  const dispatched = deriveDispatchedAsAgents([session]);
+    const overlaid = applySessionOverlay([agent], [session]);
+    const subAgents = deriveSubAgents([session]);
+    const dispatched = deriveDispatchedAsAgents([session]);
 
     expect(overlaid[0].status).toBe("working");
     expect(overlaid[0].activity_source).toBe("agentdesk");

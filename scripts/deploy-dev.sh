@@ -24,6 +24,8 @@ DEV_DEPLOY_DETACHED_CHILD="${AGENTDESK_DEPLOY_DEV_DETACHED_CHILD:-0}"
 DEV_DEPLOY_LOG_PATH="${AGENTDESK_DEPLOY_DEV_LOG_PATH:-}"
 DEV_DEPLOY_TEST_MODE="${AGENTDESK_DEPLOY_DEV_TEST_MODE:-0}"
 DEV_DEPLOY_DELAY_SECS="${AGENTDESK_DEPLOY_DEV_DELAY_SECS:-2}"
+DEV_HEALTH_RETRIES="${AGENTDESK_DEPLOY_DEV_HEALTH_RETRIES:-20}"
+DEV_HEALTH_DELAY_SECS="${AGENTDESK_DEPLOY_DEV_HEALTH_DELAY_SECS:-2}"
 
 echo "═══ ADK Dev Deploy ═══"
 
@@ -267,6 +269,7 @@ sudo "$FW" --unblockapp "$ADK_DEV/bin/agentdesk" 2>/dev/null || true
 
 # 3.6. Symlink dashboard dist
 mkdir -p "$ADK_DEV/dashboard"
+rm -rf "$ADK_DEV/dashboard/dist"
 ln -sfn "$REPO/dashboard/dist" "$ADK_DEV/dashboard/dist"
 
 # 3.7. Sync policies used by the dev runtime.
@@ -286,14 +289,29 @@ echo "▸ Ensuring global agentdesk CLI..."
 # 4. Start dev
 echo "▸ Starting dev..."
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST.plist"
-sleep 3
 
 # 5. Health check
-DEV_PORT="${AGENTDESK_DEV_PORT:-$ADK_DEFAULT_PORT}"
-if curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${DEV_PORT}/api/health" | grep -q '"status":"healthy"'; then
+DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
+echo "▸ Waiting for dev health on :${DEV_PORT}..."
+DEV_HEALTHY=false
+
+for i in $(seq 1 "$DEV_HEALTH_RETRIES"); do
+    HEALTH_JSON=$(curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${DEV_PORT}/api/health" 2>/dev/null || true)
+    if echo "$HEALTH_JSON" | grep -q '"status":"healthy"'; then
+        DEV_HEALTHY=true
+        break
+    fi
+
+    echo "  ▸ Attempt $i/$DEV_HEALTH_RETRIES — not healthy yet"
+    if [ "$i" -lt "$DEV_HEALTH_RETRIES" ]; then
+        sleep "$DEV_HEALTH_DELAY_SECS"
+    fi
+done
+
+if [ "$DEV_HEALTHY" = true ]; then
     echo "✓ Dev is healthy on :${DEV_PORT}"
 else
-    echo "✗ Health check failed — check logs: $ADK_DEV/logs/"
+    echo "✗ Health check failed after $DEV_HEALTH_RETRIES attempts — check logs: $ADK_DEV/logs/"
     exit 1
 fi
 

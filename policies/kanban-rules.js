@@ -353,6 +353,24 @@ var rules = {
       return;
     }
 
+    var workResult = {};
+    try { workResult = JSON.parse(dispatch.result || "{}"); } catch(e) {}
+    if ((dispatch.dispatch_type === "implementation" || dispatch.dispatch_type === "rework")
+        && workResult.work_outcome === "noop") {
+      var noopMeta = _loadCardMetadata(dispatch.kanban_card_id);
+      noopMeta.work_resolution_status = "noop";
+      noopMeta.work_resolution_result = workResult;
+      agentdesk.db.execute(
+        "UPDATE kanban_cards SET metadata = ?, blocked_reason = NULL WHERE id = ?",
+        [JSON.stringify(noopMeta), dispatch.kanban_card_id]
+      );
+      agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null, awaiting_dod_at: null});
+      agentdesk.reviewState.sync(card.id, "idle");
+      agentdesk.kanban.setStatus(card.id, "done", true);
+      agentdesk.log.info("[kanban] " + card.id + " " + dispatch.dispatch_type + " noop → done");
+      return;
+    }
+
     // Rework dispatches — skip gate, go directly to review
     if (dispatch.dispatch_type === "rework") {
       agentdesk.kanban.setStatus(card.id, reviewState);
@@ -449,6 +467,20 @@ var rules = {
     // #255: requested is a dispatch-free preflight state. Dispatch is created separately
     // by auto-queue, which triggers DispatchAttached to advance requested → in_progress.
     if (payload.to === initialState && payload.from !== initialState) {
+      var metaBeforePreflight = _loadCardMetadata(payload.card_id);
+      if (metaBeforePreflight.skip_preflight_once === "pmd_reopen") {
+        delete metaBeforePreflight.skip_preflight_once;
+        metaBeforePreflight.preflight_status = "skipped";
+        metaBeforePreflight.preflight_summary = "Skipped for PMD reopen";
+        metaBeforePreflight.preflight_checked_at = new Date().toISOString();
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET metadata = ? WHERE id = ?",
+          [JSON.stringify(metaBeforePreflight), payload.card_id]
+        );
+        agentdesk.log.info("[preflight] Skipped for PMD reopen: " + payload.card_id);
+        return;
+      }
+
       var preflight = _runPreflight(payload.card_id);
       // Store preflight result in metadata without clobbering unrelated keys.
       _mergeCardMetadata(payload.card_id, {
@@ -483,51 +515,9 @@ var rules = {
       agentdesk.log.info("[kanban] card " + payload.card_id + " entered blocked state");
     }
 
-    // → pendingState: create pm-decision dispatch + notify PMD
+    // → pendingState: log only (pm-decision dispatch removed — not effective in practice)
     if (payload.to === pendingState) {
-      var blockInfo = agentdesk.db.query(
-        "SELECT blocked_reason, assigned_agent_id, title FROM kanban_cards WHERE id = ?",
-        [payload.card_id]
-      );
-      var reason = "PM 결정 필요";
-      var agentId = "";
-      var title = payload.card_id;
-      if (blockInfo.length > 0) {
-        reason = blockInfo[0].blocked_reason || reason;
-        agentId = blockInfo[0].assigned_agent_id || "";
-        title = blockInfo[0].title || title;
-      }
-
-      // #267: Create pm-decision dispatch to PMD — the dispatch itself
-      // sends a notification via dispatch outbox, so only fall back to
-      // the canonical pm_pending buffer when dispatch creation fails.
-      var dispatchSent = false;
-      var pmdChannel = agentdesk.config.get("kanban_manager_channel_id");
-      if (pmdChannel) {
-        var pmdAgent = agentdesk.db.query(
-          "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? LIMIT 1",
-          [pmdChannel, pmdChannel]
-        );
-        if (pmdAgent.length > 0) {
-          try {
-            agentdesk.dispatch.create(
-              payload.card_id,
-              pmdAgent[0].id,
-              "pm-decision",
-              "[PM Decision] " + title
-            );
-            dispatchSent = true;
-          } catch (e) {
-            agentdesk.log.warn("[kanban] pm-decision dispatch failed: " + e);
-          }
-        } else {
-          agentdesk.log.warn("[kanban] PMD agent not found for channel " + pmdChannel + " — skipping pm-decision dispatch");
-        }
-      }
-
-      if (!dispatchSent) {
-        notifyPMD(payload.card_id, reason);
-      }
+      agentdesk.log.info("[kanban] card " + payload.card_id + " entered pendingState via force-transition");
     }
   },
 

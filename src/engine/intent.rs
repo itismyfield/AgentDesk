@@ -67,6 +67,7 @@ pub struct IntentExecutionResult {
 }
 
 /// Info about a dispatch created by intent execution.
+#[allow(dead_code)]
 pub struct CreatedDispatch {
     pub dispatch_id: String,
     pub card_id: String,
@@ -248,10 +249,7 @@ fn execute_transition(
 
     // Auto-queue sync for terminal states
     if pipeline.is_terminal(to) {
-        conn.execute(
-            "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ?1 AND status = 'dispatched'",
-            [card_id],
-        ).ok();
+        crate::engine::ops::sync_auto_queue_terminal_on_conn(&conn, card_id);
     }
 
     // #117/#158: Sync canonical review state via unified entrypoint

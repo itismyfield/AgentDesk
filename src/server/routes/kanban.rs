@@ -19,6 +19,15 @@ pub(super) const CARD_SELECT: &str = "SELECT kc.id, kc.repo_id, kc.title, kc.sta
     kc.owner_agent_id, kc.requester_agent_id, kc.parent_card_id, kc.sort_order, kc.depth \
     FROM kanban_cards kc LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id";
 
+/// Latest meaningful activity for in-progress stall detection.
+///
+/// We intentionally consider the newest of:
+/// - latest dispatch creation time (fresh dispatch / redispatch)
+/// - card.updated_at (manual or pipeline-driven re-entry to in_progress)
+/// - started_at fallback for legacy rows
+pub(crate) const STALLED_ACTIVITY_AT_SQL: &str =
+    "MAX(COALESCE(td.created_at, ''), COALESCE(kc.updated_at, ''), COALESCE(kc.started_at, ''))";
+
 // ── Query / Body types ─────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -59,12 +68,14 @@ pub struct AssignCardBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct RetryCardBody {
     pub assignee_agent_id: Option<String>,
     pub request_now: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct RedispatchCardBody {
     pub reason: Option<String>,
 }
@@ -93,6 +104,68 @@ pub struct AssignIssueBody {
     pub title: String,
     pub description: Option<String>,
     pub assignee_agent_id: String,
+}
+
+fn load_retry_dispatch_spec(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> Option<(String, String, String)> {
+    let card_row: (Option<String>, String, Option<String>) = conn
+        .query_row(
+            "SELECT assigned_agent_id, title, latest_dispatch_id FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok()?;
+
+    let (card_agent_id, card_title, latest_dispatch_id) = card_row;
+    let latest_dispatch = latest_dispatch_id
+        .as_deref()
+        .and_then(|dispatch_id| {
+            conn.query_row(
+                "SELECT to_agent_id, dispatch_type, title FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .ok()
+        })
+        .or_else(|| {
+            conn.query_row(
+                "SELECT to_agent_id, dispatch_type, title
+             FROM task_dispatches
+             WHERE kanban_card_id = ?1
+             ORDER BY datetime(created_at) DESC, rowid DESC
+             LIMIT 1",
+                [card_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .ok()
+        });
+
+    let (dispatch_agent_id, dispatch_type, dispatch_title) =
+        latest_dispatch.unwrap_or((None, None, None));
+
+    let effective_agent_id = dispatch_agent_id.or(card_agent_id).unwrap_or_default();
+    let effective_dispatch_type = dispatch_type
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "implementation".to_string());
+    let effective_title = dispatch_title
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(card_title);
+
+    Some((effective_agent_id, effective_dispatch_type, effective_title))
 }
 
 // ── Handlers ───────────────────────────────────────────────────
@@ -650,6 +723,17 @@ pub async fn retry_card(
             );
         }
 
+        let (stored_agent_id, retry_dispatch_type, retry_title) =
+            match load_retry_dispatch_spec(&conn, &id) {
+                Some(spec) => spec,
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": "card not found"})),
+                    );
+                }
+            };
+
         conn.execute_batch("BEGIN").ok();
 
         // Cancel existing pending/dispatched dispatch
@@ -732,28 +816,24 @@ pub async fn retry_card(
         }
         // Note: status → 'requested' is handled by create_dispatch() below
 
-        // Get card info for dispatch creation
-        let (card_title, card_id_owned) = (
-            conn.query_row(
-                "SELECT title FROM kanban_cards WHERE id = ?1",
-                [&id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap_or_default(),
-            id.clone(),
-        );
+        let dispatch_agent_id = if agent_id_for_dispatch.is_empty() {
+            stored_agent_id
+        } else {
+            agent_id_for_dispatch
+        };
+        let card_id_owned = id.clone();
         drop(conn);
 
         // Create dispatch directly (bypass policy to avoid from===requested skip)
-        if !agent_id_for_dispatch.is_empty() {
+        if !dispatch_agent_id.is_empty() {
             let _retry_result = crate::dispatch::create_dispatch(
                 &state.db,
                 &state.engine,
                 &card_id_owned,
-                &agent_id_for_dispatch,
-                "implementation",
-                &card_title,
-                &json!({"retry": true}),
+                &dispatch_agent_id,
+                &retry_dispatch_type,
+                &retry_title,
+                &json!({"retry": true, "preserved_dispatch_type": retry_dispatch_type.clone()}),
             );
         }
     } // drop conn lock
@@ -789,6 +869,16 @@ pub async fn redispatch_card(
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+
+        let (agent_id, dispatch_type, dispatch_title) = match load_retry_dispatch_spec(&conn, &id) {
+            Some(spec) => spec,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "card not found"})),
                 );
             }
         };
@@ -849,14 +939,6 @@ pub async fn redispatch_card(
             );
         }
 
-        // Get agent + title for direct dispatch creation
-        let (agent_id, card_title): (String, String) = conn
-            .query_row(
-                "SELECT COALESCE(assigned_agent_id, ''), title FROM kanban_cards WHERE id = ?1",
-                [&id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap_or_default();
         let card_id_owned = id.clone();
         drop(conn);
 
@@ -867,9 +949,9 @@ pub async fn redispatch_card(
                 &state.engine,
                 &card_id_owned,
                 &agent_id,
-                "implementation",
-                &card_title,
-                &json!({"redispatch": true}),
+                &dispatch_type,
+                &dispatch_title,
+                &json!({"redispatch": true, "preserved_dispatch_type": dispatch_type.clone()}),
             );
         }
     }
@@ -1015,7 +1097,7 @@ pub async fn defer_dod(
     // #128: Check if all DoD items are now complete AND card is awaiting_dod.
     // If so, clear awaiting_dod and restart review (fire on_enter hooks).
     let restart_review_state: Option<String>;
-    let should_restart_review = {
+    {
         let (card_status, review_status): (String, Option<String>) = conn
             .query_row(
                 "SELECT status, review_status FROM kanban_cards WHERE id = ?1",
@@ -1231,8 +1313,8 @@ pub async fn stalled_cards(State(state): State<AppState>) -> (StatusCode, Json<s
 
     let mut stmt = match conn.prepare(&format!(
         "{CARD_SELECT}
-         WHERE kc.status = 'in_progress' AND kc.started_at IS NOT NULL AND kc.started_at < datetime('now', '-2 hours'){}
-         ORDER BY kc.started_at ASC",
+         WHERE kc.status = 'in_progress' AND {STALLED_ACTIVITY_AT_SQL} < datetime('now', '-2 hours'){}
+         ORDER BY {STALLED_ACTIVITY_AT_SQL} ASC",
         repo_filter
     )) {
         Ok(s) => s,
@@ -2160,9 +2242,23 @@ pub async fn rereview_card(
         if sync_result.contains("\"error\"") {
             tracing::warn!("[kanban] rereview review_state_sync cleanup failed: {sync_result}");
         }
+
+        // #272: Explicitly clear approach_change_round so a new re-review cycle
+        // starts with clean state.  The generic sync uses COALESCE (preserves old
+        // value when NULL is passed), so we do a targeted UPDATE here instead of
+        // widening the idle-sync semantics which would affect timeout / gate-failure
+        // paths that also sync to "idle".
+        if let Err(e) = conn.execute(
+            "UPDATE card_review_state SET approach_change_round = NULL WHERE card_id = ?1",
+            [&id],
+        ) {
+            tracing::warn!("[kanban] rereview approach_change_round reset failed: {e}");
+        }
     }
 
-    if current_status != "review" {
+    let transitioned_into_review = current_status != "review";
+
+    if transitioned_into_review {
         if let Err(e) = crate::kanban::transition_status_with_opts(
             &state.db,
             &state.engine,
@@ -2186,7 +2282,7 @@ pub async fn rereview_card(
         .ok()
         .and_then(|conn| find_active_review_dispatch_id(&conn, &id));
 
-    if review_dispatch_id.is_none() {
+    if review_dispatch_id.is_none() && !transitioned_into_review {
         let _ = state
             .engine
             .fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": id }));
@@ -2279,12 +2375,18 @@ pub async fn rereview_card(
     if !crate::pipeline::get().is_terminal("review")
         && crate::pipeline::get().is_terminal(&current_status)
     {
-        if let Some(url) = gh_url {
-            tokio::spawn(async move {
-                if let Err(e) = crate::github::reopen_issue_by_url(&url).await {
-                    tracing::warn!("[kanban] Failed to reopen GitHub issue {url}: {e}");
-                }
-            });
+        if let Some(url) = gh_url.as_deref() {
+            if let Err(e) = crate::github::reopen_issue_by_url(url).await {
+                tracing::warn!("[kanban] Failed to reopen GitHub issue {url}: {e}");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "error": format!("github issue reopen failed before rereview response: {e}"),
+                        "rereviewed": false,
+                        "github_issue_url": url,
+                    })),
+                );
+            }
         }
     }
 
@@ -2429,10 +2531,20 @@ pub async fn batch_rereview(
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ReopenBody {
     pub review_status: Option<String>,
     pub dispatch_type: Option<String>,
     pub reason: Option<String>,
+    pub reset_full: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchTransitionBody {
+    pub issue_numbers: Option<Vec<i64>>,
+    pub card_ids: Option<Vec<String>>,
+    pub status: String,
+    pub cancel_dispatches: Option<bool>,
 }
 
 /// POST /api/kanban-cards/:id/reopen
@@ -2446,6 +2558,8 @@ pub async fn reopen_card(
     headers: HeaderMap,
     Json(body): Json<ReopenBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let reset_full = body.reset_full.unwrap_or(false);
+
     // ── Auth: same two-factor check as force-transition ──
     let config = crate::config::load_graceful();
     if let Some(expected_token) = config.server.auth_token.as_deref() {
@@ -2557,79 +2671,138 @@ pub async fn reopen_card(
             pipeline.initial_state().to_string()
         });
 
+    {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        if let Err(e) = mark_pmd_reopen_skip_preflight_on_conn(&conn, &id) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to stage PMD reopen preflight skip: {e}")})),
+            );
+        }
+    }
+
     // ── Transition terminal → work state (force=true bypasses terminal guard) ──
     let reason = body.reason.as_deref().unwrap_or("reopen via API");
-    match crate::kanban::transition_status_with_opts(
-        &state.db,
-        &state.engine,
-        &id,
-        &reopen_target,
-        &format!("pmd:reopen({})", reason),
-        true,
-    ) {
-        Ok(result) => {
+    match {
+        let result = crate::kanban::transition_status_with_opts(
+            &state.db,
+            &state.engine,
+            &id,
+            &reopen_target,
+            &format!("pmd:reopen({})", reason),
+            true,
+        );
+        result.map(|result| (result.from, result.to))
+    } {
+        Ok((from_status, to_status)) => {
             crate::kanban::correct_tn_to_fn_on_reopen(&state.db, &id);
 
-            // ── Post-transition cleanup: clear completed_at and optional recovery fields ──
-            let conn = match state.db.lock() {
-                Ok(c) => c,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{e}")})),
-                    );
-                }
-            };
+            let (gh_url, card, cleanup_counts): (
+                Option<String>,
+                Result<serde_json::Value, String>,
+                (usize, usize),
+            ) = {
+                // ── Post-transition cleanup: clear completed_at and optional recovery fields ──
+                let conn = match state.db.lock() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("{e}")})),
+                        );
+                    }
+                };
 
-            // Always clear completed_at on reopen
-            conn.execute(
-                "UPDATE kanban_cards SET completed_at = NULL, updated_at = datetime('now') WHERE id = ?1",
-                [&id],
-            )
-            .ok();
+                let cleanup_counts = if reset_full {
+                    match cleanup_force_transition_revert_on_conn(&conn, &id, &reopen_target) {
+                        Ok(counts) => {
+                            crate::server::routes::dispatches::clear_all_threads(&conn, &id);
+                            if let Err(e) = clear_reopen_preflight_cache_on_conn(&conn, &id) {
+                                return (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(
+                                        json!({"error": format!("failed to clear reopen cache: {e}")}),
+                                    ),
+                                );
+                            }
+                            counts
+                        }
+                        Err(e) => {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error": format!("{e}")})),
+                            );
+                        }
+                    }
+                } else {
+                    (0, 0)
+                };
 
-            // #155: Optional review_status via intent
-            if let Some(ref rs) = body.review_status {
-                crate::engine::transition::execute_intent_on_conn(
-                    &conn,
-                    &crate::engine::transition::TransitionIntent::SetReviewStatus {
-                        card_id: id.clone(),
-                        review_status: Some(rs.clone()),
-                    },
+                // Always clear completed_at on reopen
+                conn.execute(
+                    "UPDATE kanban_cards SET completed_at = NULL, updated_at = datetime('now') WHERE id = ?1",
+                    [&id],
                 )
                 .ok();
-            }
 
-            // Reactivate auto_queue_entries that were marked done
-            conn.execute(
-                "UPDATE auto_queue_entries SET status = 'dispatched', completed_at = NULL \
-                 WHERE kanban_card_id = ?1 AND status = 'done'",
-                [&id],
-            )
-            .ok();
+                // #155: Optional review_status via intent
+                if let Some(ref rs) = body.review_status {
+                    crate::engine::transition::execute_intent_on_conn(
+                        &conn,
+                        &crate::engine::transition::TransitionIntent::SetReviewStatus {
+                            card_id: id.clone(),
+                            review_status: Some(rs.clone()),
+                        },
+                    )
+                    .ok();
+                }
 
-            // Re-open GitHub issue if linked
-            let gh_url: Option<String> = conn
-                .query_row(
-                    "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
+                // Reactivate auto_queue_entries that were marked done
+                conn.execute(
+                    "UPDATE auto_queue_entries SET status = 'dispatched', completed_at = NULL \
+                     WHERE kanban_card_id = ?1 AND status = 'done'",
                     [&id],
-                    |row| row.get(0),
                 )
-                .ok()
-                .flatten();
+                .ok();
 
-            let card = conn.query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
-                card_row_to_json(row)
-            });
-            drop(conn);
+                // Re-open GitHub issue if linked
+                let gh_url: Option<String> = conn
+                    .query_row(
+                        "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )
+                    .ok()
+                    .flatten();
 
-            // Async: reopen GitHub issue
-            if let Some(url) = gh_url {
-                tokio::spawn(async move {
-                    if let Err(e) = crate::github::reopen_issue_by_url(&url).await {
-                        tracing::warn!("[kanban] Failed to reopen GitHub issue {url}: {e}");
-                    }
-                });
+                let card = conn
+                    .query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
+                        card_row_to_json(row)
+                    })
+                    .map_err(|e| format!("{e}"));
+                (gh_url, card, cleanup_counts)
+            };
+
+            if let Some(url) = gh_url.as_deref() {
+                if let Err(e) = crate::github::reopen_issue_by_url(url).await {
+                    tracing::warn!("[kanban] Failed to reopen GitHub issue {url}: {e}");
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({
+                            "error": format!("github issue reopen failed before reopen response: {e}"),
+                            "reopened": false,
+                            "github_issue_url": url,
+                        })),
+                    );
+                }
             }
 
             match card {
@@ -2644,23 +2817,221 @@ pub async fn reopen_card(
                         Json(json!({
                             "card": c,
                             "reopened": true,
-                            "from": result.from,
-                            "to": result.to,
+                            "reset_full": reset_full,
+                            "cancelled_dispatches": cleanup_counts.0,
+                            "skipped_auto_queue_entries": cleanup_counts.1,
+                            "from": from_status,
+                            "to": to_status,
                             "reason": reason,
                         })),
                     )
                 }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                ),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
             }
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
+        Err(e) => {
+            if let Ok(conn) = state.db.lock() {
+                let _ = clear_pmd_reopen_skip_preflight_on_conn(&conn, &id);
+            }
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
     }
+}
+
+/// POST /api/kanban-cards/batch-transition
+///
+/// PMD-only endpoint. Applies the same force semantics as force-transition to
+/// multiple cards, resolving targets by either explicit card IDs or GitHub
+/// issue numbers. Returns per-card success/failure details.
+pub async fn batch_transition(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BatchTransitionBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let config = crate::config::load_graceful();
+    if let Some(expected_token) = config.server.auth_token.as_deref() {
+        if !expected_token.is_empty() {
+            let provided = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "));
+            if provided != Some(expected_token) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "batch-transition requires explicit Bearer token"})),
+                );
+            }
+        }
+    }
+
+    let caller_channel = headers
+        .get("x-channel-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let pmd_channel: String = {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        conn.query_row(
+            "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_default()
+    };
+
+    if pmd_channel.is_empty() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "kanban_manager_channel_id not configured"})),
+        );
+    }
+
+    if caller_channel != pmd_channel {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error": "batch-transition requires X-Channel-Id matching kanban_manager_channel_id"}),
+            ),
+        );
+    }
+
+    let has_issue_numbers = body
+        .issue_numbers
+        .as_ref()
+        .is_some_and(|nums| !nums.is_empty());
+    let has_card_ids = body.card_ids.as_ref().is_some_and(|ids| !ids.is_empty());
+    if !has_issue_numbers && !has_card_ids {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "batch-transition requires issue_numbers or card_ids"})),
+        );
+    }
+
+    let mut targets: Vec<(String, Option<i64>)> = Vec::new();
+    let mut results = Vec::new();
+
+    if let Some(card_ids) = body.card_ids.as_ref() {
+        for card_id in card_ids {
+            targets.push((card_id.clone(), None));
+        }
+    }
+
+    if let Some(issue_numbers) = body.issue_numbers.as_ref() {
+        let conn = match state.db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        for issue_number in issue_numbers {
+            let mut stmt = match conn.prepare(
+                "SELECT id FROM kanban_cards WHERE github_issue_number = ?1 ORDER BY id ASC",
+            ) {
+                Ok(stmt) => stmt,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("{e}")})),
+                    );
+                }
+            };
+            let card_ids: Vec<String> = stmt
+                .query_map([issue_number], |row| row.get(0))
+                .ok()
+                .map(|rows| rows.filter_map(|row| row.ok()).collect())
+                .unwrap_or_default();
+            if card_ids.is_empty() {
+                results.push(json!({
+                    "issue_number": issue_number,
+                    "ok": false,
+                    "error": format!("card not found for issue #{issue_number}"),
+                }));
+                continue;
+            }
+            for card_id in card_ids {
+                targets.push((card_id, Some(*issue_number)));
+            }
+        }
+        drop(conn);
+    }
+
+    for (card_id, issue_number) in targets {
+        match crate::kanban::transition_status_with_opts(
+            &state.db,
+            &state.engine,
+            &card_id,
+            &body.status,
+            "pmd:batch-transition",
+            true,
+        ) {
+            Ok(result) => {
+                let (cancelled_dispatches, skipped_auto_queue_entries) =
+                    if force_transition_needs_cleanup(&body.status, body.cancel_dispatches) {
+                        let conn = match state.db.lock() {
+                            Ok(c) => c,
+                            Err(e) => {
+                                results.push(json!({
+                                    "card_id": card_id,
+                                    "issue_number": issue_number,
+                                    "ok": false,
+                                    "error": format!("{e}"),
+                                }));
+                                continue;
+                            }
+                        };
+                        match cleanup_force_transition_revert_on_conn(&conn, &card_id, &body.status)
+                        {
+                            Ok(counts) => counts,
+                            Err(e) => {
+                                results.push(json!({
+                                    "card_id": card_id,
+                                    "issue_number": issue_number,
+                                    "ok": false,
+                                    "error": format!("batch-transition cleanup failed: {e}"),
+                                }));
+                                continue;
+                            }
+                        }
+                    } else {
+                        (0, 0)
+                    };
+
+                results.push(json!({
+                    "card_id": card_id,
+                    "issue_number": issue_number,
+                    "ok": true,
+                    "from": result.from,
+                    "to": result.to,
+                    "cancelled_dispatches": cancelled_dispatches,
+                    "skipped_auto_queue_entries": skipped_auto_queue_entries,
+                }));
+            }
+            Err(e) => {
+                results.push(json!({
+                    "card_id": card_id,
+                    "issue_number": issue_number,
+                    "ok": false,
+                    "error": format!("{e}"),
+                }));
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!({ "results": results })))
 }
 
 // ── PMD-only force transition ────────────────────────────────────
@@ -2668,6 +3039,146 @@ pub async fn reopen_card(
 #[derive(Debug, Deserialize)]
 pub struct ForceTransitionBody {
     pub status: String,
+    pub cancel_dispatches: Option<bool>,
+}
+
+fn force_transition_needs_cleanup(target_status: &str, cancel_dispatches: Option<bool>) -> bool {
+    matches!(target_status, "backlog" | "ready") && cancel_dispatches.unwrap_or(true)
+}
+
+fn cleanup_force_transition_revert_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    target_status: &str,
+) -> anyhow::Result<(usize, usize)> {
+    super::auto_queue::ensure_tables(conn);
+    let reason = format!("force-transition to {target_status}");
+    let cancelled_dispatches =
+        crate::dispatch::cancel_active_dispatches_for_card_on_conn(conn, card_id, Some(&reason))?;
+    let skipped_auto_queue_entries =
+        crate::engine::ops::skip_live_auto_queue_entries_for_card_on_conn(conn, card_id)?;
+
+    crate::engine::transition::execute_intent_on_conn(
+        conn,
+        &crate::engine::transition::TransitionIntent::SetLatestDispatchId {
+            card_id: card_id.to_string(),
+            dispatch_id: None,
+        },
+    )?;
+    crate::engine::transition::execute_intent_on_conn(
+        conn,
+        &crate::engine::transition::TransitionIntent::SetReviewStatus {
+            card_id: card_id.to_string(),
+            review_status: None,
+        },
+    )?;
+    conn.execute(
+        "UPDATE kanban_cards \
+         SET review_round = 0, review_notes = NULL, suggestion_pending_at = NULL, \
+             review_entered_at = NULL, awaiting_dod_at = NULL, updated_at = datetime('now') \
+         WHERE id = ?1",
+        [card_id],
+    )?;
+    conn.execute(
+        "INSERT INTO card_review_state (
+            card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
+            decided_by, decided_at, approach_change_round, review_entered_at, updated_at
+         ) VALUES (
+            ?1, 0, 'idle', NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL, datetime('now')
+         )
+         ON CONFLICT(card_id) DO UPDATE SET
+            review_round = 0,
+            state = 'idle',
+            pending_dispatch_id = NULL,
+            last_verdict = NULL,
+            last_decision = NULL,
+            decided_by = NULL,
+            decided_at = NULL,
+            approach_change_round = NULL,
+            review_entered_at = NULL,
+            updated_at = datetime('now')",
+        [card_id],
+    )?;
+
+    Ok((cancelled_dispatches, skipped_auto_queue_entries))
+}
+
+fn load_card_metadata_map_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let metadata_raw: Option<String> = conn.query_row(
+        "SELECT metadata FROM kanban_cards WHERE id = ?1",
+        [card_id],
+        |row| row.get(0),
+    )?;
+
+    match metadata_raw {
+        Some(raw) if !raw.trim().is_empty() => {
+            let value: serde_json::Value = serde_json::from_str(&raw)?;
+            Ok(value.as_object().cloned().unwrap_or_default())
+        }
+        _ => Ok(serde_json::Map::new()),
+    }
+}
+
+fn save_card_metadata_map_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    if metadata.is_empty() {
+        conn.execute(
+            "UPDATE kanban_cards SET metadata = NULL WHERE id = ?1",
+            [card_id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
+            rusqlite::params![serde_json::to_string(metadata)?, card_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn mark_pmd_reopen_skip_preflight_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
+    metadata.insert(
+        "skip_preflight_once".to_string(),
+        serde_json::Value::String("pmd_reopen".to_string()),
+    );
+    save_card_metadata_map_on_conn(conn, card_id, &metadata)
+}
+
+fn clear_pmd_reopen_skip_preflight_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
+    metadata.remove("skip_preflight_once");
+    save_card_metadata_map_on_conn(conn, card_id, &metadata)
+}
+
+fn clear_reopen_preflight_cache_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
+    for key in [
+        "skip_preflight_once",
+        "preflight_status",
+        "preflight_summary",
+        "preflight_checked_at",
+        "consultation_status",
+        "consultation_result",
+    ] {
+        metadata.remove(key);
+    }
+    save_card_metadata_map_on_conn(conn, card_id, &metadata)
 }
 
 /// POST /api/kanban-cards/:id/force-transition
@@ -2743,15 +3254,39 @@ pub async fn force_transition(
         );
     }
 
-    match crate::kanban::transition_status_with_opts(
-        &state.db,
-        &state.engine,
-        &id,
-        &body.status,
-        "pmd",
-        true,
-    ) {
+    let needs_cleanup = force_transition_needs_cleanup(&body.status, body.cancel_dispatches);
+    let target_status = body.status;
+    let mut cleanup_counts = (0, 0);
+
+    let transition_result = if needs_cleanup {
+        crate::kanban::transition_status_with_opts_and_on_conn(
+            &state.db,
+            &state.engine,
+            &id,
+            &target_status,
+            "pmd",
+            true,
+            |conn| {
+                cleanup_counts =
+                    cleanup_force_transition_revert_on_conn(conn, &id, &target_status)?;
+                Ok(())
+            },
+        )
+    } else {
+        crate::kanban::transition_status_with_opts(
+            &state.db,
+            &state.engine,
+            &id,
+            &target_status,
+            "pmd",
+            true,
+        )
+    };
+
+    match transition_result {
         Ok(result) => {
+            let (cancelled_dispatches, skipped_auto_queue_entries) = cleanup_counts;
+
             let conn = state.db.lock().unwrap();
             let card = conn.query_row(&format!("{CARD_SELECT} WHERE kc.id = ?1"), [&id], |row| {
                 card_row_to_json(row)
@@ -2766,9 +3301,14 @@ pub async fn force_transition(
                     );
                     (
                         StatusCode::OK,
-                        Json(
-                            json!({"card": c, "forced": true, "from": result.from, "to": result.to}),
-                        ),
+                        Json(json!({
+                            "card": c,
+                            "forced": true,
+                            "from": result.from,
+                            "to": result.to,
+                            "cancelled_dispatches": cancelled_dispatches,
+                            "skipped_auto_queue_entries": skipped_auto_queue_entries
+                        })),
                     )
                 }
                 Err(e) => (

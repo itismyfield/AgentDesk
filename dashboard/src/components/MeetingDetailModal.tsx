@@ -59,6 +59,9 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={meeting.agenda}
         className="w-full max-w-2xl max-h-[85vh] rounded-2xl border shadow-2xl overflow-hidden flex flex-col"
         style={{ background: "var(--th-surface)", borderColor: "var(--th-border)" }}
       >
@@ -72,7 +75,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
               {meeting.participant_names.map((name) => (
                 <span
                   key={name}
-                  className="text-[10px] px-2 py-0.5 rounded-full font-medium"
+                  className="text-xs px-2 py-0.5 rounded-full font-medium"
                   style={{ background: "rgba(99,102,241,0.15)", color: "#818cf8" }}
                 >
                   {name}
@@ -82,7 +85,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                 {new Date(meeting.started_at).toLocaleDateString(locale)}
               </span>
               {(meeting.primary_provider || meeting.reviewer_provider) && (
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}>
+                <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}>
                   {formatProviderFlow(meeting.primary_provider, meeting.reviewer_provider)}
                 </span>
               )}
@@ -90,8 +93,9 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/10 transition-colors shrink-0"
+            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-surface-hover transition-colors shrink-0"
             style={{ color: "var(--th-text-muted)" }}
+            aria-label="Close"
           >
             ✕
           </button>
@@ -136,7 +140,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                   Summary
                 </div>
                 {(meeting.primary_provider || meeting.reviewer_provider) && (
-                  <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                  <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                     {providerFlowCaption(meeting.primary_provider, meeting.reviewer_provider, t)}
                   </div>
                 )}
@@ -163,7 +167,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                 {/* Round divider */}
                 <div className="flex items-center gap-3 mb-3">
                   <div className="flex-1 h-px" style={{ background: "var(--th-border)" }} />
-                  <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+                  <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
                     Round {round}
                   </span>
                   <div className="flex-1 h-px" style={{ background: "var(--th-border)" }} />
@@ -185,7 +189,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                         className="rounded-xl p-3 text-sm"
                         style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)" }}
                       >
-                        <div className="text-[10px] font-semibold mb-1" style={{ color: "#818cf8" }}>
+                        <div className="text-xs font-semibold mb-1" style={{ color: "#818cf8" }}>
                           {entry.speaker_name}
                         </div>
                         <MarkdownContent content={entry.content} />
@@ -202,7 +206,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
         <div className="flex justify-end p-4 border-t" style={{ borderColor: "var(--th-border)" }}>
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-lg text-sm font-medium border transition-colors hover:bg-white/5"
+            className="px-4 py-2 rounded-lg text-sm font-medium border transition-colors hover:bg-surface-subtle"
             style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
           >
             {t({ ko: "닫기", en: "Close" })}
@@ -219,7 +223,7 @@ function MetaCard({ label, value }: { label: string; value: string }) {
       className="rounded-xl px-3 py-2"
       style={{ background: "var(--th-bg-surface)", border: "1px solid var(--th-border)" }}
     >
-      <div className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+      <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
         {label}
       </div>
       <div className="text-sm font-medium mt-1" style={{ color: "var(--th-text)" }}>
@@ -241,7 +245,7 @@ function EntryBubble({ entry, spriteNum }: { entry: RoundTableEntry; spriteNum: 
         />
       </div>
       <div className="flex-1 min-w-0">
-        <div className="text-[10px] font-semibold mb-0.5" style={{ color: "var(--th-text-muted)" }}>
+        <div className="text-xs font-semibold mb-0.5" style={{ color: "var(--th-text-muted)" }}>
           {entry.speaker_name}
         </div>
         <div

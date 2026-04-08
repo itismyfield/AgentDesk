@@ -3,6 +3,40 @@ pub mod sync;
 pub mod triage;
 
 use crate::db::Db;
+use crate::services::platform::binary_resolver::{
+    apply_runtime_path, resolve_binary_with_login_shell,
+};
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+const GH_PATH_OVERRIDE_ENV: &str = "AGENTDESK_GH_PATH";
+
+fn gh_path() -> Option<String> {
+    if let Some(override_path) = std::env::var_os(GH_PATH_OVERRIDE_ENV).filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(override_path).to_string_lossy().to_string());
+    }
+
+    static GH_PATH: OnceLock<Option<String>> = OnceLock::new();
+    GH_PATH
+        .get_or_init(|| resolve_binary_with_login_shell("gh"))
+        .clone()
+}
+
+fn gh_command() -> Result<std::process::Command, String> {
+    let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
+    let mut command = std::process::Command::new(&gh);
+    apply_runtime_path(&mut command);
+    Ok(command)
+}
+
+fn tokio_gh_command() -> Result<tokio::process::Command, String> {
+    let gh = gh_path().ok_or_else(|| "gh CLI is not available".to_string())?;
+    let mut command = tokio::process::Command::new(&gh);
+    if let Some(path) = crate::services::platform::merged_runtime_path() {
+        command.env("PATH", path);
+    }
+    Ok(command)
+}
 
 /// Check whether the `gh` CLI is available on this system.
 pub fn gh_available() -> bool {
@@ -47,10 +81,12 @@ pub async fn reopen_issue_by_url(url: &str) -> Result<(), String> {
     let number = &rest[slash_pos + "/issues/".len()..];
 
     // gh issue reopen <number> --repo <owner/repo>
-    let output = tokio::process::Command::new("gh")
-        .args(["issue", "reopen", number, "--repo", repo])
-        .output()
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.kill_on_drop(true);
+    cmd.args(["issue", "reopen", number, "--repo", repo]);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
         .await
+        .map_err(|_| format!("gh issue reopen timed out after 5s: {repo}#{number}"))?
         .map_err(|e| format!("gh exec: {e}"))?;
 
     if !output.status.success() {
@@ -121,7 +157,6 @@ pub struct RepoRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     fn test_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

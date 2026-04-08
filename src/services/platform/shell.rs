@@ -2,6 +2,8 @@
 //!
 //! Abstracts `bash -c` (Unix) vs `cmd /C` (Windows) behind a unified API.
 
+#![allow(dead_code)]
+
 use std::process::{Command, Output};
 
 /// Execute a shell command string using the platform's default shell.
@@ -137,6 +139,102 @@ pub fn git_head_commit(repo_dir: &str) -> Option<String> {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// List tracked paths with local modifications in a git repo/worktree.
+///
+/// Untracked files are ignored because they do not participate in commit
+/// resolution until they are added.
+pub fn git_tracked_change_paths(repo_dir: &str) -> Option<Vec<String>> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let paths = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_end();
+            if trimmed.len() < 4 {
+                return None;
+            }
+            let path = trimmed[3..]
+                .rsplit_once(" -> ")
+                .map(|(_, new_path)| new_path)
+                .unwrap_or(&trimmed[3..])
+                .trim();
+            (!path.is_empty()).then(|| path.to_string())
+        })
+        .collect::<Vec<_>>();
+    Some(paths)
+}
+
+/// Find the most recent commit whose subject matches `(#issue_number)`.
+///
+/// Searches the last 20 commits to avoid expensive log scans.  Returns `None`
+/// when no matching commit is found or git is unavailable.
+pub fn git_latest_commit_for_issue(repo_dir: &str, issue_number: i64) -> Option<String> {
+    let pattern = format!("(#{})", issue_number);
+    Command::new("git")
+        .args(["log", "--format=%H %s", "-20"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .find(|line| line.contains(&pattern))
+                .and_then(|line| line.split_whitespace().next())
+                .map(str::to_string)
+        })
+}
+
+/// Find the best commit for a dispatch that started at `since_iso` (ISO-8601).
+///
+/// Strategy (most reliable first):
+/// 1. If `issue_number` is set, find the newest commit **after** `since_iso`
+///    whose subject contains `(#issue_number)`.
+/// 2. Otherwise, find the newest commit after `since_iso` (any subject).
+/// 3. If nothing was committed since `since_iso`, return `None` so the caller
+///    can fall back to `git_head_commit`.
+///
+/// `since_iso` is inclusive (`--after`).  Searches at most 50 recent commits.
+pub fn git_best_commit_for_dispatch(
+    repo_dir: &str,
+    since_iso: &str,
+    issue_number: Option<i64>,
+) -> Option<String> {
+    let output = Command::new("git")
+        .args(["log", "--format=%H %s", "--after", since_iso, "-50"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    // 1) Issue-scoped match within the time window
+    if let Some(issue_number) = issue_number {
+        let pattern = format!("(#{})", issue_number);
+        if let Some(sha) = lines
+            .iter()
+            .find(|line| line.contains(&pattern))
+            .and_then(|line| line.split_whitespace().next())
+        {
+            return Some(sha.to_string());
+        }
+    }
+
+    // 2) Newest commit in the time window (first line = most recent)
+    lines
+        .first()
+        .and_then(|line| line.split_whitespace().next())
+        .map(str::to_string)
 }
 
 /// Get the current branch name from a git directory (repo or worktree).
@@ -657,5 +755,40 @@ mod tests {
 
         let found = find_latest_commit_for_issue(repo_dir, 269).unwrap();
         assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn git_tracked_change_paths_returns_empty_for_clean_repo() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+
+        let paths = git_tracked_change_paths(repo_dir).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn git_tracked_change_paths_ignores_untracked_and_reports_modified_files() {
+        let (repo, _origin) = setup_test_repo();
+        let repo_dir = repo.path().to_str().unwrap();
+        let tracked = repo.path().join("tracked.txt");
+        let untracked = repo.path().join("untracked.txt");
+
+        std::fs::write(&tracked, "v1\n").unwrap();
+        Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add tracked fixture"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+
+        std::fs::write(&tracked, "v2\n").unwrap();
+        std::fs::write(&untracked, "scratch\n").unwrap();
+
+        let paths = git_tracked_change_paths(repo_dir).unwrap();
+        assert_eq!(paths, vec!["tracked.txt".to_string()]);
     }
 }

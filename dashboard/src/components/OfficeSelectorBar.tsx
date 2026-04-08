@@ -31,7 +31,7 @@ export default function OfficeSelectorBar({
         className={`px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-all ${
           selectedOfficeId === null
             ? "bg-indigo-600 text-white"
-            : "hover:bg-white/10"
+            : "hover:bg-surface-hover"
         }`}
         style={
           selectedOfficeId !== null
@@ -49,7 +49,7 @@ export default function OfficeSelectorBar({
           className={`px-2.5 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1 ${
             selectedOfficeId === o.id
               ? "text-white"
-              : "hover:bg-white/10"
+              : "hover:bg-surface-hover"
           }`}
           style={
             selectedOfficeId === o.id
@@ -61,7 +61,7 @@ export default function OfficeSelectorBar({
           <span>{isKo ? o.name_ko || o.name : o.name}</span>
           {o.agent_count !== undefined && o.agent_count > 0 && (
             <span
-              className="ml-0.5 text-[10px] opacity-70"
+              className="ml-0.5 text-xs opacity-70"
               style={
                 selectedOfficeId === o.id
                   ? undefined
@@ -76,7 +76,7 @@ export default function OfficeSelectorBar({
 
       <button
         onClick={onManageOffices}
-        className="ml-auto p-1.5 rounded-md hover:bg-white/10 transition-colors shrink-0"
+        className="ml-auto p-1.5 rounded-md hover:bg-surface-hover transition-colors shrink-0"
         style={{ color: "var(--th-text-muted)" }}
         title={isKo ? "오피스 관리" : "Manage Offices"}
       >

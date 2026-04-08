@@ -11,6 +11,8 @@ interface SettingsContextValue {
   setSettings: React.Dispatch<React.SetStateAction<CompanySettings>>;
   stats: DashboardStats | null;
   refreshStats: () => void;
+  /** True while stats refresh is in flight */
+  refreshingStats: boolean;
   isKo: boolean;
   locale: UiLanguage;
   tr: (ko: string, en: string) => string;
@@ -32,8 +34,13 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
   const [settings, setSettings] = useState<CompanySettings>(initialSettings);
   const [stats, setStats] = useState<DashboardStats | null>(initialStats);
 
+  const [refreshingStats, setRefreshingStats] = useState(false);
   const refreshStats = useCallback(() => {
-    api.getStats(selectedOfficeId ?? undefined).then(setStats).catch(() => {});
+    setRefreshingStats(true);
+    api.getStats(selectedOfficeId ?? undefined)
+      .then(setStats)
+      .catch(() => {})
+      .finally(() => setRefreshingStats(false));
   }, [selectedOfficeId]);
 
   // Reload stats when office selection changes (skip mount — bootstrap data is fresh)
@@ -62,9 +69,12 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
     return () => window.removeEventListener("pcd-ws-event", handleWs);
   }, [refreshStats]);
 
-  // Auto theme detection from system preference
+  // Apply theme to DOM — handles auto (system preference) and explicit dark/light
   useEffect(() => {
-    if (settings.theme !== "auto") return;
+    if (settings.theme !== "auto") {
+      document.documentElement.dataset.theme = settings.theme;
+      return;
+    }
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const apply = () => {
       document.documentElement.dataset.theme = mq.matches ? "dark" : "light";
@@ -79,7 +89,7 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
   const tr = useCallback((ko: string, en: string) => (settings.language === "ko" ? ko : en), [settings.language]);
 
   return (
-    <SettingsContext.Provider value={{ settings, setSettings, stats, refreshStats, isKo, locale, tr }}>
+    <SettingsContext.Provider value={{ settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr }}>
       {children}
     </SettingsContext.Provider>
   );

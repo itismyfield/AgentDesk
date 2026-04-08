@@ -379,7 +379,7 @@ export default function SettingsView({
             <h2 className="text-xl font-bold mb-1" style={{ color: "var(--th-text)" }}>
               {tr("런타임 설정", "Runtime Config")}
             </h2>
-            <p className="text-[11px] mb-4" style={{ color: "var(--th-text-muted)" }}>
+            <p className="text-xs mb-4" style={{ color: "var(--th-text-muted)" }}>
               {tr("변경 즉시 반영 (재시작 불필요)", "Changes apply immediately (no restart needed)")}
             </p>
           </div>
@@ -408,7 +408,7 @@ export default function SettingsView({
                           {!isDefault && (
                             <button
                               onClick={() => handleRcReset(f.key)}
-                              className="text-[10px] px-1.5 py-0.5 rounded"
+                              className="text-xs px-1.5 py-0.5 rounded"
                               style={{ color: "var(--th-text-muted)", background: "var(--th-bg-surface)" }}
                               title={`${tr("기본값", "Default")}: ${formatUnit(def, f.unit)}`}
                             >
@@ -445,7 +445,7 @@ export default function SettingsView({
                         />
                       </div>
                       {!isDefault && (
-                        <div className="text-[10px] mt-0.5" style={{ color: "var(--th-text-muted)" }}>
+                        <div className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
                           {tr("기본값", "Default")}: {formatUnit(def, f.unit)}
                         </div>
                       )}
@@ -596,7 +596,7 @@ export default function SettingsView({
       <div className="mt-8 pt-6 border-t" style={{ borderColor: "rgba(148,163,184,0.15)" }}>
         <button
           onClick={() => setShowOnboarding(true)}
-          className="px-6 py-2.5 rounded-xl text-sm font-medium border hover:bg-white/5 transition-colors"
+          className="px-6 py-2.5 rounded-xl text-sm font-medium border hover:bg-surface-subtle transition-colors"
           style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
         >
           {tr("온보딩 재수행", "Re-run Onboarding")}
@@ -607,13 +607,13 @@ export default function SettingsView({
       </div>
 
       {showOnboarding && (
-        <div className="fixed inset-0 z-50 bg-[#0a0e1a] overflow-y-auto">
+        <div className="fixed inset-0 z-50 bg-[#0a0e1a] overflow-y-auto" role="dialog" aria-modal="true" aria-label="Onboarding wizard">
           <div className="min-h-screen flex items-start justify-center pt-8 pb-16">
             <div className="w-full max-w-2xl">
               <div className="flex justify-end px-4 mb-2">
                 <button
                   onClick={() => setShowOnboarding(false)}
-                  className="text-sm px-3 py-1 rounded-lg border"
+                  className="text-sm px-4 py-2.5 rounded-lg border min-h-[44px]"
                   style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-muted)" }}
                 >
                   ✕ {tr("닫기", "Close")}

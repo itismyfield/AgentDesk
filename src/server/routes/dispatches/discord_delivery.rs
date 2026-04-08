@@ -3,6 +3,73 @@ use super::resolve_channel_alias;
 use super::thread_reuse::{
     clear_thread_for_channel, get_thread_for_channel, set_thread_for_channel, try_reuse_thread,
 };
+use crate::db::agents::{
+    resolve_agent_channel_for_provider_on_conn, resolve_agent_dispatch_channel_on_conn,
+};
+
+fn review_source_provider_from_context(dispatch_context: Option<&str>) -> Option<String> {
+    dispatch_context
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+        .and_then(|ctx| {
+            ctx.get("from_provider")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        })
+}
+
+fn latest_completed_review_provider_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> Option<String> {
+    let review_context: Option<String> = conn
+        .query_row(
+            "SELECT context FROM task_dispatches \
+             WHERE kanban_card_id = ?1 AND dispatch_type = 'review' AND status = 'completed' \
+             ORDER BY COALESCE(completed_at, updated_at) DESC, updated_at DESC, rowid DESC LIMIT 1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    review_source_provider_from_context(review_context.as_deref())
+}
+
+fn resolve_agent_channel_with_provider_override_on_conn(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    dispatch_type: Option<&str>,
+    provider_override: Option<&str>,
+) -> rusqlite::Result<Option<String>> {
+    if let Some(provider) = provider_override.filter(|provider| !provider.trim().is_empty()) {
+        if let Some(channel) =
+            resolve_agent_channel_for_provider_on_conn(conn, agent_id, Some(provider))?
+        {
+            return Ok(Some(channel));
+        }
+    }
+    resolve_agent_dispatch_channel_on_conn(conn, agent_id, dispatch_type)
+}
+
+pub(super) fn resolve_dispatch_delivery_channel_on_conn(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    card_id: &str,
+    dispatch_type: Option<&str>,
+    dispatch_context: Option<&str>,
+) -> rusqlite::Result<Option<String>> {
+    let provider_override = if dispatch_type == Some("review-decision") {
+        review_source_provider_from_context(dispatch_context)
+            .or_else(|| latest_completed_review_provider_on_conn(conn, card_id))
+    } else {
+        None
+    };
+    resolve_agent_channel_with_provider_override_on_conn(
+        conn,
+        agent_id,
+        dispatch_type,
+        provider_override.as_deref(),
+    )
+}
 
 /// Send a dispatch notification to the target agent's Discord channel.
 /// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
@@ -82,20 +149,35 @@ async fn send_dispatch_to_discord_inner(
     card_id: &str,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    // Determine dispatch type to choose the right channel
-    let dispatch_type: Option<String> = {
+    // Determine dispatch type + status before attempting Discord delivery.
+    let (dispatch_type, dispatch_status, dispatch_context): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = {
         let conn = match db.lock() {
             Ok(c) => c,
-            Err(_) => return Err("db lock failed for dispatch type query".into()),
+            Err(_) => return Err("db lock failed for dispatch metadata query".into()),
         };
         conn.query_row(
-            "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
+            "SELECT dispatch_type, status, context FROM task_dispatches WHERE id = ?1",
             [dispatch_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .ok()
-        .flatten()
+        .map_err(|_| format!("dispatch {dispatch_id} not found"))?
     };
+
+    if !matches!(
+        dispatch_status.as_deref(),
+        Some("pending") | Some("dispatched")
+    ) {
+        tracing::info!(
+            "[dispatch] Skipping Discord send for dispatch {} with non-deliverable status {:?}",
+            dispatch_id,
+            dispatch_status
+        );
+        return Ok(());
+    }
 
     // For review dispatches, use the alternate channel (counter-model)
     let use_alt = use_counter_model_channel(dispatch_type.as_deref());
@@ -136,17 +218,15 @@ async fn send_dispatch_to_discord_inner(
             Ok(c) => c,
             Err(_) => return Err("db lock failed for channel lookup".into()),
         };
-        let col = if use_alt {
-            "discord_channel_alt"
-        } else {
-            "discord_channel_id"
-        };
-        conn.query_row(
-            &format!("SELECT {col} FROM agents WHERE id = ?1"),
-            [agent_id],
-            |row| row.get(0),
+        resolve_dispatch_delivery_channel_on_conn(
+            &conn,
+            agent_id,
+            card_id,
+            dispatch_type.as_deref(),
+            dispatch_context.as_deref(),
         )
         .ok()
+        .flatten()
     };
 
     let channel_id = match channel_id {
@@ -192,28 +272,19 @@ async fn send_dispatch_to_discord_inner(
         .unwrap_or_default()
     };
 
+    let dispatch_context_json = dispatch_context
+        .as_deref()
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok());
+
     // For review dispatches, look up reviewed commit SHA, branch, and target provider from context
     let (reviewed_commit, target_provider, review_branch): (
         Option<String>,
         Option<String>,
         Option<String>,
     ) = if use_alt {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return Err("db lock failed for context query".into()),
-        };
-        let ctx: Option<String> = conn
-            .query_row(
-                "SELECT context FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-        let ctx_val: serde_json::Value = ctx
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::json!({}));
+        let ctx_val = dispatch_context_json
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
         (
             ctx_val
                 .get("reviewed_commit")
@@ -231,17 +302,6 @@ async fn send_dispatch_to_discord_inner(
     } else {
         (None, None, None)
     };
-
-    // Read dispatch context for reason/source info
-    let dispatch_context: Option<String> = db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT context FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten()
-    });
 
     let message = format_dispatch_message(
         dispatch_id,
@@ -271,6 +331,62 @@ async fn send_dispatch_to_discord_inner(
     let client = reqwest::Client::new();
     let dispatch_type_label = dispatch_type.as_deref().unwrap_or("implementation");
     let message = prefix_dispatch_message(dispatch_type_label, &message);
+
+    // #359: Slot-pooled auto-queue threads live in auto_queue_slots.thread_id_map
+    // and outlive a specific run/group assignment. Prefer that binding first.
+    let slot_thread_binding: Option<((String, i64), String)> = db.lock().ok().and_then(|conn| {
+        let row: Option<(String, Option<i64>, Option<String>)> = conn
+            .query_row(
+                "SELECT e.agent_id, e.slot_index, s.thread_id_map \
+                 FROM auto_queue_entries e \
+                 JOIN auto_queue_runs r ON e.run_id = r.id \
+                 LEFT JOIN auto_queue_slots s
+                   ON s.agent_id = e.agent_id
+                  AND s.slot_index = e.slot_index \
+                 WHERE e.dispatch_id = ?1 \
+                   AND r.unified_thread = 1 \
+                   AND e.slot_index IS NOT NULL",
+                [dispatch_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok()
+            .or_else(|| {
+                conn.query_row(
+                    "SELECT e.agent_id, e.slot_index, s.thread_id_map \
+                     FROM auto_queue_entries e \
+                     JOIN auto_queue_runs r ON e.run_id = r.id \
+                     LEFT JOIN auto_queue_slots s
+                       ON s.agent_id = e.agent_id
+                      AND s.slot_index = e.slot_index \
+                     WHERE e.kanban_card_id = ?1 \
+                       AND e.status IN ('pending', 'dispatched') \
+                       AND r.unified_thread = 1 \
+                       AND e.slot_index IS NOT NULL \
+                     ORDER BY CASE e.status WHEN 'dispatched' THEN 0 ELSE 1 END, e.priority_rank ASC \
+                     LIMIT 1",
+                    [card_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .ok()
+            });
+        row.and_then(|(agent_id, slot_index, thread_map)| {
+            let slot_index = slot_index?;
+            let thread_id = thread_map
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|map| {
+                    map.get(&channel_id_num.to_string())
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
+            thread_id.map(|thread_id| ((agent_id, slot_index), thread_id))
+        })
+    });
+    let slot_thread_id = slot_thread_binding
+        .as_ref()
+        .map(|(_, thread_id)| thread_id.clone());
+    let slot_binding = slot_thread_binding
+        .as_ref()
+        .map(|((agent_id, slot_index), _)| (agent_id.clone(), *slot_index));
 
     // #145/#140: Look up per-channel unified thread via dispatch_id path
     // #140: For parallel runs (thread_group_count > 1), threads are grouped:
@@ -329,7 +445,9 @@ async fn send_dispatch_to_discord_inner(
     });
 
     // Try to reuse existing thread for this card (channel-specific)
-    let existing_thread_id: Option<String> = if unified_thread_id.is_some() {
+    let existing_thread_id: Option<String> = if slot_thread_id.is_some() {
+        slot_thread_id.clone()
+    } else if unified_thread_id.is_some() {
         unified_thread_id.clone()
     } else {
         let conn = match db.lock() {
@@ -356,6 +474,35 @@ async fn send_dispatch_to_discord_inner(
         {
             if reused {
                 return Ok(());
+            }
+        }
+    }
+
+    if slot_thread_id.is_some() {
+        if let Some((agent_id, slot_index)) = slot_binding.as_ref() {
+            if let Ok(conn) = db.lock() {
+                let existing: String = conn
+                    .query_row(
+                        "SELECT COALESCE(thread_id_map, '{}')
+                         FROM auto_queue_slots
+                         WHERE agent_id = ?1 AND slot_index = ?2",
+                        rusqlite::params![agent_id, slot_index],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or_else(|_| "{}".to_string());
+                if let Ok(mut map) = serde_json::from_str::<serde_json::Value>(&existing) {
+                    if let Some(obj) = map.as_object_mut() {
+                        obj.remove(&channel_id_num.to_string());
+                        conn.execute(
+                            "UPDATE auto_queue_slots
+                             SET thread_id_map = ?1,
+                                 updated_at = datetime('now')
+                             WHERE agent_id = ?2 AND slot_index = ?3",
+                            rusqlite::params![map.to_string(), agent_id, slot_index],
+                        )
+                        .ok();
+                    }
+                }
             }
         }
     }
@@ -544,6 +691,31 @@ async fn send_dispatch_to_discord_inner(
                             )
                             .ok();
                             set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
+                            if let Some((agent_id, slot_index)) = slot_binding.as_ref() {
+                                let existing_slot_map: String = conn
+                                    .query_row(
+                                        "SELECT COALESCE(thread_id_map, '{}')
+                                         FROM auto_queue_slots
+                                         WHERE agent_id = ?1 AND slot_index = ?2",
+                                        rusqlite::params![agent_id, slot_index],
+                                        |row| row.get(0),
+                                    )
+                                    .unwrap_or_else(|_| "{}".to_string());
+                                let mut slot_map: serde_json::Value =
+                                    serde_json::from_str::<serde_json::Value>(&existing_slot_map)
+                                        .ok()
+                                        .filter(|v: &serde_json::Value| v.is_object())
+                                        .unwrap_or_else(|| serde_json::json!({}));
+                                slot_map[channel_id_num.to_string()] = serde_json::json!(thread_id);
+                                conn.execute(
+                                    "UPDATE auto_queue_slots
+                                     SET thread_id_map = ?1,
+                                         updated_at = datetime('now')
+                                     WHERE agent_id = ?2 AND slot_index = ?3",
+                                    rusqlite::params![slot_map.to_string(), agent_id, slot_index],
+                                )
+                                .ok();
+                            }
                             // #141/#140: Store unified thread per channel in JSON map
                             // Save when: no existing thread for this channel (unified_thread_id is None)
                             // AND this card belongs to a unified run
@@ -696,26 +868,39 @@ async fn send_dispatch_to_discord_inner(
 pub(super) async fn send_review_result_to_primary(
     db: &crate::db::Db,
     card_id: &str,
+    review_dispatch_id: &str,
     verdict: &str,
 ) -> Result<(), String> {
     // Look up card info
-    let (agent_id, title, issue_url, channel_id): (String, String, Option<String>, String) = {
+    let (agent_id, title, issue_url): (String, String, Option<String>) = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for card lookup".into()),
         };
         let result = conn.query_row(
-            "SELECT kc.assigned_agent_id, kc.title, kc.github_issue_url, a.discord_channel_id \
+            "SELECT kc.assigned_agent_id, kc.title, kc.github_issue_url \
              FROM kanban_cards kc \
-             JOIN agents a ON kc.assigned_agent_id = a.id \
              WHERE kc.id = ?1",
             [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         );
         match result {
             Ok(r) => r,
             Err(_) => return Err(format!("card {card_id} not found or missing agent")),
         }
+    };
+    let review_dispatch_context: Option<String> = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return Err("db lock failed for review dispatch lookup".into()),
+        };
+        conn.query_row(
+            "SELECT context FROM task_dispatches WHERE id = ?1",
+            [review_dispatch_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
     };
 
     // For improve/rework/reject: create a review-decision dispatch via the
@@ -746,13 +931,33 @@ pub(super) async fn send_review_result_to_primary(
             }
         }
 
+        let review_context_json = review_dispatch_context
+            .as_deref()
+            .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok());
+        let mut decision_context = serde_json::Map::new();
+        decision_context.insert("verdict".to_string(), serde_json::json!(verdict));
+        if let Some(provider) = review_context_json
+            .as_ref()
+            .and_then(|ctx| ctx.get("from_provider"))
+            .and_then(|value| value.as_str())
+        {
+            decision_context.insert("from_provider".to_string(), serde_json::json!(provider));
+        }
+        if let Some(provider) = review_context_json
+            .as_ref()
+            .and_then(|ctx| ctx.get("target_provider"))
+            .and_then(|value| value.as_str())
+        {
+            decision_context.insert("target_provider".to_string(), serde_json::json!(provider));
+        }
+
         return match crate::dispatch::create_dispatch_core(
             db,
             card_id,
             &agent_id,
             "review-decision",
             &format!("[리뷰 검토] {title}"),
-            &serde_json::json!({"verdict": verdict}),
+            &serde_json::Value::Object(decision_context),
         ) {
             Ok((id, _old_status, _reused)) => {
                 if let Ok(conn) = db.lock() {
@@ -784,6 +989,23 @@ pub(super) async fn send_review_result_to_primary(
             }
         };
     }
+
+    let channel_id = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return Err("db lock failed for primary channel lookup".into()),
+        };
+        resolve_dispatch_delivery_channel_on_conn(
+            &conn,
+            &agent_id,
+            card_id,
+            Some("review-decision"),
+            review_dispatch_context.as_deref(),
+        )
+        .ok()
+        .flatten()
+        .ok_or_else(|| format!("agent {agent_id} missing review followup discord channel"))?
+    };
 
     // Resolve channel ID (may be a name alias)
     let channel_id_num: u64 = match channel_id.parse() {

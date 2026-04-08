@@ -1,1 +1,1 @@
-/Users/itismyfield/ObsidianVault/RemoteVault/99_Skills/agentdesk-runtime-ops/SKILL.md
+../../../../../../.agentdesk/skills/agentdesk-runtime-ops/SKILL.md

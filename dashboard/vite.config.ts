@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -60,6 +61,9 @@ function manualChunks(id: string) {
 }
 
 export default defineConfig({
+  test: {
+    exclude: ["e2e/**", "node_modules/**"],
+  },
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },

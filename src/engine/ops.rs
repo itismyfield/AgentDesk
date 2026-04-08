@@ -56,6 +56,7 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
     // ── agentdesk.message ────────────────────────────────────────
     let db_for_pipeline = db.clone();
     let db_for_dm_reply = db.clone();
+    let db_for_agents = db.clone();
     register_message_ops(ctx, db)?;
 
     // ── agentdesk.exec ──────────────────────────────────────────
@@ -66,6 +67,9 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
 
     // ── agentdesk.dmReply ────────────────────────────────────
     register_dm_reply_ops(ctx, db_for_dm_reply)?;
+
+    // ── agentdesk.agents ─────────────────────────────────────────
+    register_agent_ops(ctx, db_for_agents)?;
 
     Ok(())
 }
@@ -581,7 +585,6 @@ fn dispatch_create_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     fn test_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1011,7 +1014,7 @@ fn message_queue_raw(db: &Db, target: &str, content: &str, bot: &str, source: &s
 
 // ── Kanban ops ────────────────────────────────────────────────────
 //
-// agentdesk.kanban.setStatus(cardId, newStatus) — updates card status
+// agentdesk.kanban.setStatus(cardId, newStatus, force?) — updates card status
 // and fires appropriate hooks (OnCardTransition, OnCardTerminal, OnReviewEnter).
 // This replaces direct SQL UPDATEs in policies to ensure hooks always fire.
 
@@ -1022,11 +1025,14 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let db_set = db.clone();
     kanban_obj.set(
         "__setStatusRaw",
-        Function::new(ctx.clone(), move |card_id: String, new_status: String| -> String {
+        Function::new(
+            ctx.clone(),
+            move |card_id: String, new_status: String, force: Option<bool>| -> String {
             let conn = match db_set.separate_conn() {
                 Ok(c) => c,
                 Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
             };
+            let force = force.unwrap_or(false);
 
             // Get current status
             let old_status: String = match conn.query_row(
@@ -1068,7 +1074,7 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
             // Only this specific gate is checked — other gates (has_active_dispatch,
             // review_rework) and force_only transitions are used legitimately by
             // policies and must not be blocked here. PMD bypasses via force-transition API.
-            if pipeline.is_terminal(&new_status) {
+            if pipeline.is_terminal(&new_status) && !force {
                 if let Some(t) = pipeline.find_transition(&old_status, &new_status) {
                     let needs_review_pass = t.gates.iter().any(|g| {
                         pipeline.gates.get(g.as_str())
@@ -1128,10 +1134,7 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
             // Also update auto_queue_entries if terminal
             if pipeline.is_terminal(&new_status) {
-                conn.execute(
-                    "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ?1 AND status = 'dispatched'",
-                    [&card_id],
-                ).ok();
+                sync_auto_queue_terminal_on_conn(&conn, &card_id);
             }
 
             // #117/#158: Sync canonical review state via unified entrypoint
@@ -1145,6 +1148,111 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
 
             format!(
                 r#"{{"ok":true,"changed":true,"from":"{}","to":"{}","card_id":"{}"}}"#,
+                old_status, new_status, card_id
+            )
+        })?,
+    )?;
+
+    let db_reopen = db.clone();
+    kanban_obj.set(
+        "__reopenRaw",
+        Function::new(ctx.clone(), move |card_id: String, new_status: String| -> String {
+            let conn = match db_reopen.separate_conn() {
+                Ok(c) => c,
+                Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
+            };
+
+            let old_status: String = match conn.query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [&card_id],
+                |row| row.get(0),
+            ) {
+                Ok(s) => s,
+                Err(_) => return r#"{"error":"card not found"}"#.to_string(),
+            };
+
+            crate::pipeline::ensure_loaded();
+            let repo_id: Option<String> = conn
+                .query_row(
+                    "SELECT repo_id FROM kanban_cards WHERE id = ?1",
+                    [&card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            let agent_id: Option<String> = conn
+                .query_row(
+                    "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1",
+                    [&card_id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            let effective =
+                crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref());
+            let pipeline = &effective;
+
+            if !pipeline.is_terminal(&old_status) {
+                return format!(
+                    r#"{{"error":"reopen requires terminal card (current: {})"}}"#,
+                    old_status
+                );
+            }
+            if pipeline.is_terminal(&new_status) {
+                return format!(
+                    r#"{{"error":"reopen target must be non-terminal (target: {})"}}"#,
+                    new_status
+                );
+            }
+            if old_status == new_status {
+                return format!(r#"{{"ok":true,"changed":false,"status":"{}"}}"#, new_status);
+            }
+
+            let clock_extra = match pipeline.clock_for_state(&new_status) {
+                Some(clock) if clock.mode.as_deref() == Some("coalesce") => {
+                    format!(", {} = COALESCE({}, datetime('now'))", clock.set, clock.set)
+                }
+                Some(clock) => format!(", {} = datetime('now')", clock.set),
+                None => String::new(),
+            };
+
+            let sql = format!(
+                "UPDATE kanban_cards SET status = ?1, completed_at = NULL, updated_at = datetime('now'){} WHERE id = ?2",
+                clock_extra
+            );
+            if let Err(e) = conn.execute(&sql, rusqlite::params![new_status, card_id]) {
+                return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
+            }
+
+            conn.execute(
+                "UPDATE auto_queue_entries SET status = 'dispatched', completed_at = NULL \
+                 WHERE kanban_card_id = ?1 AND status = 'done'",
+                [&card_id],
+            )
+            .ok();
+
+            crate::kanban::correct_tn_to_fn_on_reopen(&db_reopen, &card_id);
+
+            let has_hooks = pipeline
+                .hooks_for_state(&new_status)
+                .map_or(false, |h| !h.on_enter.is_empty() || !h.on_exit.is_empty());
+            let is_review_enter = pipeline.hooks_for_state(&new_status).map_or(false, |h| {
+                h.on_enter.iter().any(|n| n == "OnReviewEnter")
+            });
+            if !has_hooks {
+                review_state_sync_on_conn(
+                    &conn,
+                    &serde_json::json!({"card_id": card_id, "state": "idle"}).to_string(),
+                );
+            } else if is_review_enter {
+                review_state_sync_on_conn(
+                    &conn,
+                    &serde_json::json!({"card_id": card_id, "state": "reviewing"}).to_string(),
+                );
+            }
+
+            format!(
+                r#"{{"ok":true,"changed":true,"from":"{}","to":"{}","card_id":"{}","reopened":true}}"#,
                 old_status, new_status, card_id
             )
         })?,
@@ -1299,10 +1407,11 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         r#"
         (function() {
             var raw = agentdesk.kanban.__setStatusRaw;
+            var reopenRaw = agentdesk.kanban.__reopenRaw;
             var getRaw = agentdesk.kanban.__getCardRaw;
             agentdesk.kanban.__pendingTransitions = [];
-            agentdesk.kanban.setStatus = function(cardId, newStatus) {
-                var result = JSON.parse(raw(cardId, newStatus));
+            agentdesk.kanban.setStatus = function(cardId, newStatus, force) {
+                var result = JSON.parse(raw(cardId, newStatus, !!force));
                 if (result.error) throw new Error(result.error);
                 if (result.changed) {
                     agentdesk.kanban.__pendingTransitions.push({
@@ -1313,6 +1422,21 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                     agentdesk.log.info("[setStatus] " + result.card_id + " " + result.from + " -> " + result.to + " (pendingLen=" + agentdesk.kanban.__pendingTransitions.length + ")");
                 } else {
                     agentdesk.log.info("[setStatus] " + cardId + " -> " + newStatus + " (no-change)");
+                }
+                return result;
+            };
+            agentdesk.kanban.reopen = function(cardId, newStatus) {
+                var result = JSON.parse(reopenRaw(cardId, newStatus));
+                if (result.error) throw new Error(result.error);
+                if (result.changed) {
+                    agentdesk.kanban.__pendingTransitions.push({
+                        card_id: result.card_id,
+                        from: result.from,
+                        to: result.to
+                    });
+                    agentdesk.log.info("[reopen] " + result.card_id + " " + result.from + " -> " + result.to + " (pendingLen=" + agentdesk.kanban.__pendingTransitions.length + ")");
+                } else {
+                    agentdesk.log.info("[reopen] " + cardId + " -> " + newStatus + " (no-change)");
                 }
                 return result;
             };
@@ -1487,6 +1611,44 @@ pub fn review_state_sync(db: &Db, json_str: &str) -> String {
     review_state_sync_on_conn(&conn, json_str)
 }
 
+/// Best-effort auto-queue cleanup for terminal cards.
+///
+/// When a card finishes, its active dispatch entry should become `done` and any
+/// stale pending copies in active or paused runs should be skipped so they do
+/// not block other runs.
+pub(crate) fn sync_auto_queue_terminal_on_conn(conn: &rusqlite::Connection, card_id: &str) {
+    conn.execute(
+        "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') \
+         WHERE kanban_card_id = ?1 AND status = 'dispatched'",
+        [card_id],
+    )
+    .ok();
+    conn.execute(
+        "UPDATE auto_queue_entries SET status = 'skipped', completed_at = datetime('now') \
+         WHERE kanban_card_id = ?1 AND status = 'pending' \
+         AND run_id IN (SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused'))",
+        [card_id],
+    )
+    .ok();
+}
+
+/// Skip live auto-queue entries for a card after PMD explicitly backs the card out.
+///
+/// Only active/paused runs are touched. Generated or future runs stay intact so
+/// PMD can intentionally re-queue the card later after fixing prerequisites.
+pub(crate) fn skip_live_auto_queue_entries_for_card_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE auto_queue_entries \
+         SET status = 'skipped', dispatch_id = NULL, dispatched_at = NULL, completed_at = datetime('now') \
+         WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched') \
+         AND run_id IN (SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused'))",
+        [card_id],
+    )
+}
+
 /// Same as `review_state_sync` but operates on an already-acquired connection.
 /// Use this inside transactions or when a lock is already held (#158).
 pub fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &str) -> String {
@@ -1561,6 +1723,13 @@ pub fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &str) ->
 // agentdesk.exec(command, args) → stdout string
 // Runs a local command synchronously. Limited to safe commands.
 
+fn exec_override_env_var(cmd: &str) -> String {
+    format!(
+        "AGENTDESK_{}_PATH",
+        cmd.replace('-', "_").to_ascii_uppercase()
+    )
+}
+
 fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
 
@@ -1574,7 +1743,13 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
             }
 
             let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
-            match std::process::Command::new(&cmd).args(&args).output() {
+            let command_path = std::env::var_os(exec_override_env_var(&cmd))
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| std::ffi::OsString::from(&cmd));
+            match std::process::Command::new(&command_path)
+                .args(&args)
+                .output()
+            {
                 Ok(output) if output.status.success() => {
                     String::from_utf8_lossy(&output.stdout).trim().to_string()
                 }
@@ -2208,4 +2383,103 @@ fn dm_reply_read_consumed_raw(db: &Db, user_id: &str) -> String {
         Err(rusqlite::Error::QueryReturnedNoRows) => r#"{"ok":false}"#.to_string(),
         Err(e) => format!(r#"{{"error":"query failed: {e}"}}"#),
     }
+}
+
+// ── Agent channel resolution ops (#304) ─────────────────────────
+//
+// Exposes Rust channel resolution logic to JS policies so they don't
+// query legacy columns directly.
+
+fn register_agent_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+    let ad: Object<'js> = ctx.globals().get("agentdesk")?;
+    let agents_obj = Object::new(ctx.clone())?;
+
+    // __resolvePrimaryChannel(agentId) -> channelId | ""
+    let db_primary = db.clone();
+    agents_obj.set(
+        "__resolvePrimaryChannel",
+        Function::new(ctx.clone(), move |agent_id: String| -> String {
+            match db_primary.separate_conn() {
+                Ok(conn) => {
+                    match crate::db::agents::resolve_agent_primary_channel_on_conn(&conn, &agent_id)
+                    {
+                        Ok(Some(ch)) => ch,
+                        _ => String::new(),
+                    }
+                }
+                Err(_) => String::new(),
+            }
+        })?,
+    )?;
+
+    // __resolveCounterModelChannel(agentId) -> channelId | ""
+    let db_counter = db.clone();
+    agents_obj.set(
+        "__resolveCounterModelChannel",
+        Function::new(ctx.clone(), move |agent_id: String| -> String {
+            match db_counter.separate_conn() {
+                Ok(conn) => {
+                    match crate::db::agents::resolve_agent_counter_model_channel_on_conn(
+                        &conn, &agent_id,
+                    ) {
+                        Ok(Some(ch)) => ch,
+                        _ => String::new(),
+                    }
+                }
+                Err(_) => String::new(),
+            }
+        })?,
+    )?;
+
+    // __resolveDispatchChannel(agentId, dispatchType) -> channelId | ""
+    let db_dispatch = db;
+    agents_obj.set(
+        "__resolveDispatchChannel",
+        Function::new(
+            ctx.clone(),
+            move |agent_id: String, dispatch_type: String| -> String {
+                match db_dispatch.separate_conn() {
+                    Ok(conn) => {
+                        let dtype = if dispatch_type.is_empty() {
+                            None
+                        } else {
+                            Some(dispatch_type.as_str())
+                        };
+                        match crate::db::agents::resolve_agent_dispatch_channel_on_conn(
+                            &conn, &agent_id, dtype,
+                        ) {
+                            Ok(Some(ch)) => ch,
+                            _ => String::new(),
+                        }
+                    }
+                    Err(_) => String::new(),
+                }
+            },
+        )?,
+    )?;
+
+    ad.set("agents", agents_obj)?;
+
+    // JS convenience wrappers
+    ctx.eval::<(), _>(
+        r#"
+(function() {
+    var a = agentdesk.agents;
+    a.resolvePrimaryChannel = function(agentId) {
+        var ch = a.__resolvePrimaryChannel(agentId);
+        return ch || null;
+    };
+    a.resolveCounterModelChannel = function(agentId) {
+        var ch = a.__resolveCounterModelChannel(agentId);
+        return ch || null;
+    };
+    a.resolveDispatchChannel = function(agentId, dispatchType) {
+        var ch = a.__resolveDispatchChannel(agentId, dispatchType || "");
+        return ch || null;
+    };
+})();
+"#,
+    )?;
+
+    Ok(())
 }

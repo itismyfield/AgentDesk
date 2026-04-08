@@ -2,7 +2,7 @@
 # deploy-dashboard.sh — Build and deploy dashboard to dev or release runtime.
 # Usage: deploy-dashboard.sh [dev|release]
 #   dev     → symlink (instant, hot-reload friendly)
-#   release → copy to ~/.adk/release/dashboard/dist/
+#   release → atomic swap to ~/.adk/release/dashboard/dist/
 #   (default: release)
 set -euo pipefail
 
@@ -25,18 +25,31 @@ if [[ "$TARGET" == "dev" ]]; then
 elif [[ "$TARGET" == "release" ]]; then
     ADK_REL="$HOME/.adk/release"
     DEST="$ADK_REL/dashboard/dist"
-    mkdir -p "$DEST"
-    # Clean old assets to avoid hash collision
-    rm -rf "$DEST/assets"
-    cp -r "$DASHBOARD_SRC/dist/"* "$DEST/"
-    echo "  ✓ Deployed → $DEST/"
-    # Verify
-    if [[ -f "$DEST/index.html" ]]; then
-        echo "  ✓ index.html present"
-    else
-        echo "  ✗ ERROR: index.html missing at $DEST" >&2
+    DEST_TMP="$ADK_REL/dashboard/dist.new"
+    DEST_OLD="$ADK_REL/dashboard/dist.old"
+
+    # Atomic swap: copy to temp dir, then rename
+    rm -rf "$DEST_TMP" "$DEST_OLD"
+    mkdir -p "$DEST_TMP"
+    cp -r "$DASHBOARD_SRC/dist/"* "$DEST_TMP/"
+
+    # Verify before swap
+    if [[ ! -f "$DEST_TMP/index.html" ]]; then
+        echo "  ✗ ERROR: index.html missing in staging dir" >&2
+        rm -rf "$DEST_TMP"
         exit 1
     fi
+
+    # Swap: old → dist.old, new → dist (near-atomic on same filesystem)
+    # Keep dist.old so in-flight clients can still load previous chunks
+    rm -rf "$DEST_OLD"
+    if [[ -d "$DEST" ]]; then
+        mv "$DEST" "$DEST_OLD"
+    fi
+    mv "$DEST_TMP" "$DEST"
+
+    echo "  ✓ Deployed → $DEST/ (atomic swap, previous build kept in dist.old)"
+    echo "  ✓ index.html present"
 else
     echo "Usage: deploy-dashboard.sh [dev|release]" >&2
     exit 1

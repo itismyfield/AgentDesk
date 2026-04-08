@@ -98,7 +98,7 @@ export default function PipelineOverrideEditor({
       className="rounded-2xl border p-3 sm:p-4 space-y-3"
       style={{
         borderColor: "rgba(251,191,36,0.35)",
-        backgroundColor: "rgba(15,23,42,0.65)",
+        backgroundColor: "var(--th-bg-surface)",
       }}
     >
       <button
@@ -165,7 +165,7 @@ export default function PipelineOverrideEditor({
             rows={12}
             className="w-full rounded-lg p-3 text-xs font-mono resize-y"
             style={{
-              backgroundColor: "rgba(2,6,23,0.8)",
+              backgroundColor: "var(--th-bg-surface)",
               color: "var(--th-text-primary)",
               border: "1px solid rgba(148,163,184,0.2)",
             }}
@@ -237,7 +237,7 @@ export default function PipelineOverrideEditor({
           </div>
 
           <p
-            className="text-[10px]"
+            className="text-xs"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr(

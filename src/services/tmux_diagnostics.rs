@@ -172,6 +172,7 @@ pub fn should_recreate_session_after_stdin_error(err: &str) -> bool {
 }
 
 /// Helper: returns true if tmux pane list output indicates at least one live pane.
+#[allow(dead_code)]
 pub fn pane_list_has_live_pane(output: &str) -> bool {
     output.lines().any(|line| line.trim() == "0")
 }

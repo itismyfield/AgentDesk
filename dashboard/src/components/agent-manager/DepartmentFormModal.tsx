@@ -207,6 +207,9 @@ export default function DepartmentFormModal({
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={isEdit ? tr("부서 정보 수정", "Edit Department") : tr("신규 부서 추가", "Add Department")}
         className="w-full max-w-lg rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200 max-h-[85vh] overflow-y-auto"
         style={{
           background: "var(--th-card-bg)",
@@ -222,8 +225,9 @@ export default function DepartmentFormModal({
           </h3>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors"
+            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors"
             style={{ color: "var(--th-text-muted)" }}
+            aria-label="Close"
           >
             ✕
           </button>
@@ -264,7 +268,7 @@ export default function DepartmentFormModal({
                   key={c}
                   type="button"
                   onClick={() => setForm({ ...form, color: c })}
-                  className="w-7 h-7 rounded-full transition-all hover:scale-110"
+                  className="w-11 h-11 rounded-full transition-all hover:scale-110"
                   style={{
                     background: c,
                     outline: form.color === c ? `2px solid ${c}` : "2px solid transparent",
@@ -353,7 +357,7 @@ export default function DepartmentFormModal({
               className={`${inputCls} resize-none`}
               style={inputStyle}
             />
-            <p className="text-[10px] mt-1" style={{ color: "var(--th-text-muted)" }}>
+            <p className="text-xs mt-1" style={{ color: "var(--th-text-muted)" }}>
               {tr(
                 "소속 에이전트의 작업 실행 시 공통으로 적용되는 시스템 프롬프트",
                 "Applied as shared system prompt when agents in this department execute tasks",

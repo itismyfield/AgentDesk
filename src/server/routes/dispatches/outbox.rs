@@ -263,7 +263,13 @@ pub(crate) async fn handle_completed_dispatch_followups(
         // Only send_review_result_to_primary for explicit verdicts (pass/improve/reject)
         // submitted via the verdict API — these have a real "verdict" field in the result.
         if verdict != "unknown" {
-            super::discord_delivery::send_review_result_to_primary(db, &card_id, &verdict).await?;
+            super::discord_delivery::send_review_result_to_primary(
+                db,
+                &card_id,
+                dispatch_id,
+                &verdict,
+            )
+            .await?;
         } else {
             println!(
                 "  [{ts}] ⏭ REVIEW-FOLLOWUP: skipping send_review_result_to_primary (verdict=unknown)"
@@ -337,8 +343,8 @@ pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
 
 pub(crate) fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
     // "review", "e2e-test" (#197), and "consultation" (#256) go to the counter-model channel.
-    // "review-decision" is sent to the original agent's primary channel
-    // so it reuses the implementation thread.
+    // "review-decision" is routed back to the original implementation provider
+    // so it reuses the implementation-side thread rather than the reviewer channel.
     matches!(
         dispatch_type,
         Some("review") | Some("e2e-test") | Some("consultation")
@@ -423,7 +429,7 @@ pub(super) fn format_dispatch_message(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    if use_alt {
+    if dispatch_type == Some("review") {
         let mut message = format!(
             "DISPATCH:{dispatch_id} [{type_label}] - {title}\n\
              ⚠️ 검토 전용 — 작업 착수 금지\n\
@@ -477,6 +483,34 @@ pub(super) fn format_dispatch_message(
             message.push('\n');
             message.push_str(&issue_link);
         }
+        message
+    } else if matches!(dispatch_type, Some("implementation") | Some("rework")) {
+        let mut message = if !issue_link.is_empty() {
+            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")
+        } else {
+            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}")
+        };
+        message.push_str(
+            "\n\n구현이 불필요하고 현재 worktree에 tracked 변경이 전혀 없을 때만 응답 첫 줄에 반드시 `OUTCOME: noop`를 적고 근거를 설명하세요.\n\
+             tracked 변경이 남아 있으면 noop 완료가 거부되므로 먼저 commit 또는 정리를 해야 합니다.\n\
+             이 marker가 있으면 일반 완료 대신 non-implementation terminal path로 처리됩니다.",
+        );
+        message
+    } else if use_alt {
+        let mut message = if !issue_link.is_empty() {
+            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")
+        } else {
+            format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}")
+        };
+        let base_url = crate::config::local_api_url(crate::config::load_graceful().server.port, "");
+        message.push_str(&format!(
+            "\n\n작업을 마치면 일반 dispatch 완료 API로 종료하세요.\n\
+             리뷰 전용 verdict 절차를 쓰지 말고 아래 완료 경로를 그대로 사용하세요.\n\
+             완료 예시:\n\
+             `curl -sf -X PATCH {base_url}/api/dispatches/{dispatch_id} \
+             -H \"Content-Type: application/json\" \
+             -d '{{\"status\":\"completed\",\"result\":{{\"summary\":\"결과 요약\"}}}}'`"
+        ));
         message
     } else if !issue_link.is_empty() {
         format!("DISPATCH:{dispatch_id} [{type_label}] - {title}{reason_suffix}\n{issue_link}")

@@ -95,7 +95,6 @@ fn infer_priority(labels: &[super::sync::GhLabel]) -> &'static str {
 mod tests {
     use super::*;
     use crate::github::sync::{GhIssue, GhLabel};
-    use std::sync::{Arc, Mutex};
 
     fn test_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

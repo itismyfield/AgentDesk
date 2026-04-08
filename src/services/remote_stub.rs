@@ -2,6 +2,8 @@
 //! SSH/SFTP functionality is not available in AgentDesk — only types are provided
 //! so that other modules (claude, codex) compile without modification.
 
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -142,6 +142,7 @@ pub fn sync_github_issues_for_repo(
 }
 
 /// Sync all registered repos (orchestration function).
+#[allow(dead_code)]
 pub fn sync_all_repos(db: &Db, engine: &crate::engine::PolicyEngine) -> Result<SyncResult, String> {
     let repos = super::list_repos(db)?;
     let mut total = SyncResult::default();
@@ -179,7 +180,6 @@ pub struct SyncResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     fn test_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

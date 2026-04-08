@@ -23,6 +23,7 @@ pub struct ListMessagesQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct CreateMessageBody {
     pub sender_type: Option<String>,
     pub sender_id: Option<String>,

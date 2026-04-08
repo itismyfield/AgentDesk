@@ -54,7 +54,7 @@ fn build_cron_jobs(state: &AppState, _agent_filter: Option<&str>) -> Vec<serde_j
         ),
         (
             "tick:5min",
-            "onTick5min — [R][B][F][G][H][ctx] non-critical reconciliation",
+            "onTick5min — [R][B][F][G][H][M][O] non-critical reconciliation + idle session cleanup",
             300_000,
             "5min",
         ),

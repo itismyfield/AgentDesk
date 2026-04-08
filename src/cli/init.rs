@@ -195,7 +195,7 @@ fn solo_org_yaml(channels: &[(String, String, String)]) -> String {
         r#"version: 1
 name: "My Agent Org"
 
-prompts_root: "prompts"
+prompts_root: "config"
 skills_root: "skills"
 
 agents:
@@ -223,7 +223,7 @@ fn small_team_org_yaml(channels: &[(String, String, String)]) -> String {
         r#"version: 1
 name: "Small Team Org"
 
-prompts_root: "prompts"
+prompts_root: "config"
 skills_root: "skills"
 
 agents:
@@ -533,11 +533,11 @@ pub fn handle_init(reconfigure: bool) {
         eprintln!("Failed to create directory {}: {}", root.display(), e);
         return;
     }
-    let config_dir = root.join("config");
-    if let Err(e) = fs::create_dir_all(&config_dir) {
-        eprintln!("Failed to create directory {}: {}", config_dir.display(), e);
+    if let Err(e) = crate::runtime_layout::ensure_runtime_layout(&root) {
+        eprintln!("Failed to prepare runtime layout {}: {}", root.display(), e);
         return;
     }
+    let config_dir = crate::runtime_layout::config_dir(&root);
 
     // org.yaml — fresh install uses template, reconfigure preserves existing
     let org_path = config_dir.join("org.yaml");
@@ -587,9 +587,14 @@ pub fn handle_init(reconfigure: bool) {
     println!("  [OK] {}", bs_path.display());
 
     // Create prompts
-    let prompts_root = root.join("prompts");
-    if let Err(e) = fs::create_dir_all(prompts_root.join("agents")) {
-        eprintln!("Failed to create prompts/agents directory: {}", e);
+    let prompts_root = config_dir.clone();
+    let agents_root = crate::runtime_layout::managed_agents_root(&root);
+    if let Err(e) = fs::create_dir_all(&agents_root) {
+        eprintln!(
+            "Failed to create {} directory: {}",
+            agents_root.display(),
+            e
+        );
         return;
     }
 
@@ -607,7 +612,7 @@ pub fn handle_init(reconfigure: bool) {
         if created_roles.contains(role) {
             continue;
         }
-        let role_dir = prompts_root.join("agents").join(role);
+        let role_dir = agents_root.join(role);
         if let Err(e) = fs::create_dir_all(&role_dir) {
             eprintln!("Failed to create directory {}: {}", role_dir.display(), e);
             return;
@@ -621,14 +626,6 @@ pub fn handle_init(reconfigure: bool) {
             println!("  [OK] {}", identity_path.display());
         }
         created_roles.push(role.clone());
-    }
-
-    // Create skills/memory dirs
-    for dir_name in ["skills", "memory"] {
-        if let Err(e) = fs::create_dir_all(root.join(dir_name)) {
-            eprintln!("Failed to create {} directory: {}", dir_name, e);
-            return;
-        }
     }
 
     // Binary setup + platform-specific service installation
@@ -683,7 +680,7 @@ pub fn handle_init(reconfigure: bool) {
             "  {} (bot_settings.json)",
             config_dir.join("bot_settings.json").display()
         );
-        println!("  {} (prompts)", root.join("prompts").display());
+        println!("  {} (agents)", agents_root.display());
         println!("\n다음 단계:");
         println!("  1. 프롬프트 파일을 편집하여 에이전트 성격을 정의하세요");
         println!("  2. Discord에서 봇에게 메시지를 보내 동작을 확인하세요");

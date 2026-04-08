@@ -23,6 +23,7 @@ pub enum ToolPolicyMode {
 }
 
 impl ToolPolicyMode {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Report => "report",

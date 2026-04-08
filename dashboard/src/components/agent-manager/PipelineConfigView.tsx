@@ -68,7 +68,7 @@ export default function PipelineConfigView({
       className="rounded-2xl border p-3 sm:p-4 space-y-3"
       style={{
         borderColor: "rgba(99,102,241,0.35)",
-        backgroundColor: "rgba(15,23,42,0.65)",
+        backgroundColor: "var(--th-bg-surface)",
       }}
     >
       <div className="flex items-center justify-between gap-2">
@@ -89,7 +89,7 @@ export default function PipelineConfigView({
             {tr("\uD30C\uC774\uD504\uB77C\uC778 \uC0C1\uD0DC\uBA38\uC2E0", "Pipeline State Machine")}
           </h3>
           <span
-            className="text-[11px] px-2 py-0.5 rounded-full"
+            className="text-xs px-2 py-0.5 rounded-full"
             style={{
               backgroundColor: "rgba(99,102,241,0.2)",
               color: "#818cf8",
@@ -100,7 +100,7 @@ export default function PipelineConfigView({
           </span>
           {activeLayers.length > 1 && (
             <span
-              className="text-[10px] px-1.5 py-0.5 rounded-full"
+              className="text-xs px-1.5 py-0.5 rounded-full"
               style={{
                 backgroundColor: "rgba(251,191,36,0.15)",
                 color: "#fbbf24",
@@ -117,7 +117,7 @@ export default function PipelineConfigView({
           {/* States visualization */}
           <div className="space-y-1.5">
             <div
-              className="text-[10px] font-medium uppercase tracking-wider"
+              className="text-xs font-medium uppercase tracking-wider"
               style={{ color: "var(--th-text-muted)" }}
             >
               {tr("\uC0C1\uD0DC", "States")}
@@ -134,31 +134,31 @@ export default function PipelineConfigView({
                 return (
                   <div
                     key={s.id}
-                    className="group relative px-2.5 py-1.5 rounded-lg border text-[11px]"
+                    className="group relative px-2.5 py-1.5 rounded-lg border text-xs"
                     style={{
                       borderColor: s.terminal
                         ? "rgba(34,197,94,0.4)"
                         : "rgba(148,163,184,0.25)",
                       backgroundColor: s.terminal
                         ? "rgba(34,197,94,0.08)"
-                        : "rgba(2,6,23,0.5)",
+                        : "var(--th-overlay-medium)",
                       color: s.terminal ? "#4ade80" : "var(--th-text-primary)",
                     }}
                   >
                     <span className="font-mono">{s.id}</span>
                     <span
-                      className="ml-1 text-[10px]"
+                      className="ml-1 text-xs"
                       style={{ color: "var(--th-text-muted)" }}
                     >
                       {s.label}
                     </span>
                     {hasHooks && (
-                      <span className="ml-1 text-[9px]" style={{ color: "#818cf8" }}>
+                      <span className="ml-1 text-xs" style={{ color: "#818cf8" }}>
                         [{hookBindings.on_enter.length}h]
                       </span>
                     )}
                     {timeout && (
-                      <span className="ml-1 text-[9px]" style={{ color: "#f59e0b" }}>
+                      <span className="ml-1 text-xs" style={{ color: "#f59e0b" }}>
                         {timeout.duration}
                       </span>
                     )}
@@ -167,7 +167,7 @@ export default function PipelineConfigView({
                     {(hasHooks || timeout) && (
                       <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block z-50">
                         <div
-                          className="bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-[10px] whitespace-nowrap space-y-0.5"
+                          className="bg-th-bg-primary border border-th-border rounded px-2 py-1.5 text-xs whitespace-nowrap space-y-0.5"
                           style={{ color: "var(--th-text-secondary)" }}
                         >
                           {hasHooks && (
@@ -199,7 +199,7 @@ export default function PipelineConfigView({
           {/* Transitions */}
           <div className="space-y-1.5">
             <div
-              className="text-[10px] font-medium uppercase tracking-wider"
+              className="text-xs font-medium uppercase tracking-wider"
               style={{ color: "var(--th-text-muted)" }}
             >
               {tr("\uC804\uD658 \uADDC\uCE59", "Transitions")}
@@ -208,8 +208,8 @@ export default function PipelineConfigView({
               {pipeline.transitions.map((t, i) => (
                 <div
                   key={i}
-                  className="flex items-center gap-1.5 text-[10px] px-2 py-1 rounded"
-                  style={{ backgroundColor: "rgba(2,6,23,0.4)" }}
+                  className="flex items-center gap-1.5 text-xs px-2 py-1 rounded"
+                  style={{ backgroundColor: "var(--th-overlay-subtle)" }}
                 >
                   <span className="font-mono" style={{ color: "var(--th-text-primary)" }}>
                     {t.from}
@@ -219,7 +219,7 @@ export default function PipelineConfigView({
                     {t.to}
                   </span>
                   <span
-                    className="px-1 py-0.5 rounded text-[9px]"
+                    className="px-1 py-0.5 rounded text-xs"
                     style={{
                       backgroundColor:
                         t.type === "free"
@@ -239,7 +239,7 @@ export default function PipelineConfigView({
                   </span>
                   {t.gates && t.gates.length > 0 && (
                     <span
-                      className="text-[9px]"
+                      className="text-xs"
                       style={{ color: "var(--th-text-muted)" }}
                     >
                       [{t.gates.join(",")}]
@@ -251,7 +251,7 @@ export default function PipelineConfigView({
           </div>
 
           {/* Layer info */}
-          <div className="flex items-center gap-2 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+          <div className="flex items-center gap-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
             <span>{tr("\uACC4\uCE35", "Layers")}:</span>
             {["default", "repo", "agent"].map((layer) => (
               <span

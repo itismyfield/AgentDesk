@@ -46,7 +46,7 @@ export default function PipelineProgress({ tr, cardId, currentStageId }: Props) 
 
   return (
     <div className="space-y-1.5">
-      <div className="text-[10px] font-medium" style={{ color: "var(--th-text-muted)" }}>
+      <div className="text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
         {tr("파이프라인", "Pipeline")}
         {currentStage && (
           <span className="ml-1.5" style={{ color: "#fbbf24" }}>
@@ -70,7 +70,7 @@ export default function PipelineProgress({ tr, cardId, currentStageId }: Props) 
             >
               {/* Tooltip on hover */}
               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block z-50">
-                <div className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[10px] whitespace-nowrap"
+                <div className="bg-th-bg-primary border border-th-border rounded px-2 py-1 text-xs whitespace-nowrap"
                   style={{ color: "var(--th-text-secondary)" }}>
                   {stage.stage_name}
                   {hist && (
@@ -83,7 +83,7 @@ export default function PipelineProgress({ tr, cardId, currentStageId }: Props) 
                     </span>
                   )}
                   {hist?.failure_reason && (
-                    <div className="text-[9px] max-w-[200px] truncate" style={{ color: "#f87171" }}>
+                    <div className="text-xs max-w-[200px] truncate" style={{ color: "#f87171" }}>
                       {hist.failure_reason}
                     </div>
                   )}
@@ -96,7 +96,7 @@ export default function PipelineProgress({ tr, cardId, currentStageId }: Props) 
 
       {/* Retry/failure info */}
       {history.some((h) => h.status === "retrying") && (
-        <div className="text-[10px]" style={{ color: "#f59e0b" }}>
+        <div className="text-xs" style={{ color: "#f59e0b" }}>
           {tr("재시도 중", "Retrying")} (
           {history.filter((h) => h.status === "retrying" || h.status === "failed").length}
           {tr("회", " attempts")})

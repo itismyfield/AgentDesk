@@ -8,6 +8,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
 use super::AppState;
+use super::kanban::STALLED_ACTIVITY_AT_SQL;
 use super::session_activity::SessionActivityResolver;
 
 #[derive(Debug, Deserialize)]
@@ -359,7 +360,13 @@ pub async fn get_stats(
             .unwrap_or(0);
         let stale_in_progress: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM kanban_cards WHERE status = 'in_progress' AND started_at IS NOT NULL AND started_at < datetime('now', '-100 minutes')",
+                &format!(
+                    "SELECT COUNT(*) \
+                     FROM kanban_cards kc \
+                     LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id \
+                     WHERE kc.status = 'in_progress' \
+                     AND {STALLED_ACTIVITY_AT_SQL} < datetime('now', '-100 minutes')"
+                ),
                 [],
                 |row| row.get(0),
             )

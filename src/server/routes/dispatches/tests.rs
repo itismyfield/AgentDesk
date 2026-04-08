@@ -3,6 +3,10 @@ use super::outbox::{
     prefix_dispatch_message, use_counter_model_channel,
 };
 use crate::db::Db;
+use crate::engine::PolicyEngine;
+use crate::server::routes::AppState;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
 
 fn test_db() -> Db {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -11,9 +15,15 @@ fn test_db() -> Db {
     crate::db::wrap_conn(conn)
 }
 
+fn test_engine(db: &Db) -> PolicyEngine {
+    let config = crate::config::Config::default();
+    PolicyEngine::new(&config, db.clone()).unwrap()
+}
+
 #[test]
 fn review_dispatch_uses_counter_model_channel() {
     assert!(use_counter_model_channel(Some("review")));
+    assert!(use_counter_model_channel(Some("e2e-test")));
     // #256: consultation dispatches go to counter-model channel
     assert!(use_counter_model_channel(Some("consultation")));
     // review-decision goes to the original agent's primary channel,
@@ -118,9 +128,55 @@ fn implementation_dispatch_message_stays_compact() {
             "[Implement feature #24](<https://github.com/itismyfield/AgentDesk/issues/24>)"
         )
     );
+    assert!(message.contains("`OUTCOME: noop`"));
     assert!(!message.contains("검토 전용"));
     // Implementation dispatches should NOT include verdict instructions
     assert!(!message.contains("review-verdict"));
+}
+
+#[test]
+fn e2e_test_dispatch_message_uses_general_completion_contract() {
+    let message = format_dispatch_message(
+        "dispatch-e2e",
+        "Run regression",
+        Some("https://github.com/itismyfield/AgentDesk/issues/340"),
+        Some(340),
+        true,
+        None,
+        Some("codex"),
+        None,
+        Some("e2e-test"),
+        None,
+    );
+
+    assert!(message.contains("[🧪 E2E 테스트]"));
+    assert!(message.contains("PATCH"));
+    assert!(message.contains("/api/dispatches/dispatch-e2e"));
+    assert!(!message.contains("검토 전용"));
+    assert!(!message.contains("review-verdict"));
+    assert!(!message.contains("VERDICT: pass|improve|reject|rework"));
+}
+
+#[test]
+fn consultation_dispatch_message_uses_general_completion_contract() {
+    let message = format_dispatch_message(
+        "dispatch-consult",
+        "Need investigation",
+        Some("https://github.com/itismyfield/AgentDesk/issues/256"),
+        Some(256),
+        true,
+        None,
+        Some("codex"),
+        None,
+        Some("consultation"),
+        None,
+    );
+
+    assert!(message.contains("PATCH"));
+    assert!(message.contains("/api/dispatches/dispatch-consult"));
+    assert!(!message.contains("검토 전용"));
+    assert!(!message.contains("review-verdict"));
+    assert!(!message.contains("VERDICT: pass|improve|reject|rework"));
 }
 
 #[test]
@@ -179,7 +235,6 @@ fn review_verdict_extraction_defaults_to_unknown() {
 }
 
 #[tokio::test]
-#[ignore] // CI: send_review_result_to_primary early-returns without local ADK runtime (channel resolution)
 async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
     // When a review dispatch has an explicit verdict (e.g. "improve"),
     // Rust creates a review-decision dispatch for the original agent.
@@ -187,7 +242,9 @@ async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
     {
         let conn = db.lock().unwrap();
         conn.execute(
-            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            "INSERT INTO agents (
+                id, name, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+             ) VALUES ('agent-1', 'Agent 1', 'claude', '123', '456', '123', '456')",
             [],
         )
         .unwrap();
@@ -198,14 +255,16 @@ async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
-             VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"improve\"}', datetime('now'), datetime('now'))",
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, context, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"improve\"}', '{\"from_provider\":\"codex\",\"target_provider\":\"claude\"}', datetime('now'), datetime('now'))",
             [],
         )
         .unwrap();
     }
 
-    handle_completed_dispatch_followups(&db, "dispatch-review").await;
+    handle_completed_dispatch_followups(&db, "dispatch-review")
+        .await
+        .expect("review followup should succeed");
 
     let conn = db.lock().unwrap();
     let latest_dispatch_id: String = conn
@@ -216,15 +275,62 @@ async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
         )
         .unwrap();
     assert_ne!(latest_dispatch_id, "dispatch-review");
-    let (dispatch_type, dispatch_status): (String, String) = conn
+    let (dispatch_type, dispatch_status, context): (String, String, Option<String>) = conn
         .query_row(
-            "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+            "SELECT dispatch_type, status, context FROM task_dispatches WHERE id = ?1",
             [&latest_dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
     assert_eq!(dispatch_type, "review-decision");
     assert_eq!(dispatch_status, "pending");
+    let context = context.expect("review-decision should persist provider routing context");
+    assert!(context.contains("\"from_provider\":\"codex\""));
+}
+
+#[test]
+fn review_decision_routing_falls_back_to_latest_completed_review_provider() {
+    let db = test_db();
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO agents (
+            id, name, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+         ) VALUES ('agent-1', 'Agent 1', 'claude', '123', '456', '123', '456')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+         VALUES ('card-route', 'Route test', 'review', 'agent-1', 'dispatch-rd', datetime('now'), datetime('now'))",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+         VALUES ('dispatch-review', 'card-route', 'agent-1', 'review', 'completed', '[Review R1] card-route', '{\"from_provider\":\"codex\",\"target_provider\":\"claude\"}', datetime('now', '-1 minute'), datetime('now', '-1 minute'))",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+         VALUES ('dispatch-rd', 'card-route', 'agent-1', 'review-decision', 'pending', '[리뷰 검토] card-route', datetime('now'), datetime('now'))",
+        [],
+    )
+    .unwrap();
+
+    let channel = super::discord_delivery::resolve_dispatch_delivery_channel_on_conn(
+        &conn,
+        "agent-1",
+        "card-route",
+        Some("review-decision"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        channel.as_deref(),
+        Some("456"),
+        "review-decision should route back to the implementation provider channel"
+    );
 }
 
 #[tokio::test]
@@ -253,7 +359,9 @@ async fn auto_completed_review_dispatch_skips_rust_followup() {
         .unwrap();
     }
 
-    handle_completed_dispatch_followups(&db, "dispatch-auto").await;
+    handle_completed_dispatch_followups(&db, "dispatch-auto")
+        .await
+        .expect("auto-completed review followup should succeed");
 
     let conn = db.lock().unwrap();
     let latest_dispatch_id: String = conn
@@ -307,7 +415,9 @@ async fn impl_dispatch_followup_detects_new_review_dispatch() {
     // ('dispatch-review') differs from the completed dispatch ('dispatch-impl')
     // and attempt send_dispatch_to_discord (which no-ops without bot token).
     // The key assertion: no panic, no error, and the review dispatch stays pending.
-    handle_completed_dispatch_followups(&db, "dispatch-impl").await;
+    handle_completed_dispatch_followups(&db, "dispatch-impl")
+        .await
+        .expect("implementation followup should succeed");
 
     let conn = db.lock().unwrap();
     // latest_dispatch_id should still point to the review dispatch
@@ -357,7 +467,9 @@ async fn thread_not_archived_when_card_not_done() {
         .unwrap();
     }
 
-    handle_completed_dispatch_followups(&db, "dispatch-impl").await;
+    handle_completed_dispatch_followups(&db, "dispatch-impl")
+        .await
+        .expect("thread reuse followup should succeed");
 
     // active_thread_id should still be set (NOT cleared) because card is not done
     let conn = db.lock().unwrap();
@@ -397,7 +509,9 @@ async fn thread_archived_and_cleared_when_card_done() {
         .unwrap();
     }
 
-    handle_completed_dispatch_followups(&db, "dispatch-final").await;
+    handle_completed_dispatch_followups(&db, "dispatch-final")
+        .await
+        .expect("done-card followup should succeed");
 
     // active_thread_id should be cleared when card is done
     let conn = db.lock().unwrap();
@@ -440,7 +554,9 @@ async fn review_followup_skips_generic_resend_for_explicit_verdict() {
         .unwrap();
     }
 
-    handle_completed_dispatch_followups(&db, "dispatch-review").await;
+    handle_completed_dispatch_followups(&db, "dispatch-review")
+        .await
+        .expect("explicit review verdict followup should succeed");
 
     let conn = db.lock().unwrap();
     // A review-decision dispatch should have been created
@@ -512,7 +628,7 @@ async fn no_notified_marker_when_discord_send_fails() {
     // Channel ID "1" is a valid u64 but not a real Discord channel.
     // Thread creation and fallback will both fail with Discord API errors.
     // No notified marker should be written.
-    super::discord_delivery::send_dispatch_to_discord(
+    let send_result = super::discord_delivery::send_dispatch_to_discord(
         &db,
         "agent-1",
         "Test card",
@@ -520,6 +636,10 @@ async fn no_notified_marker_when_discord_send_fails() {
         "dispatch-1",
     )
     .await;
+    assert!(
+        send_result.is_err(),
+        "bogus Discord channel should fail delivery"
+    );
 
     let conn = db.lock().unwrap();
     let marker_count: i64 = conn
@@ -571,8 +691,15 @@ async fn review_followup_does_not_create_dispatch_for_done_card() {
         ).unwrap();
     }
 
-    // This triggers send_review_result_to_primary for a done card
-    handle_completed_dispatch_followups(&db, "dispatch-review").await;
+    // This triggers send_review_result_to_primary for a done card.
+    // The done-card guard should reject creating a review-decision dispatch,
+    // but the original dispatch/card state must remain unchanged.
+    let result = handle_completed_dispatch_followups(&db, "dispatch-review").await;
+    let error = result.expect_err("done-card review followup must fail closed");
+    assert!(
+        error.contains("Cannot create review-decision dispatch for terminal card"),
+        "unexpected followup error: {error}"
+    );
 
     let conn = db.lock().unwrap();
     // latest_dispatch_id should NOT have changed (no new dispatch created)
@@ -743,4 +870,76 @@ fn unified_thread_parallel_format_parsed_correctly() {
         Some("aaa"),
         "parallel nested format must resolve to group 0 thread"
     );
+}
+
+#[tokio::test]
+async fn pending_dispatch_lookup_finds_review_thread_dispatch() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, active_thread_id, created_at, updated_at)
+             VALUES ('card-review', 'Review card', 'review', '999888777', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-review', 'review', 'pending', '[Review R1] card-review', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let (status, body) = super::get_pending_dispatch_for_thread(
+        State(state),
+        Query(std::collections::HashMap::from([(
+            "thread_id".to_string(),
+            "999888777".to_string(),
+        )])),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.0["dispatch_id"], "dispatch-review");
+}
+
+#[tokio::test]
+async fn pending_dispatch_lookup_finds_review_decision_thread_dispatch() {
+    let db = test_db();
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, channel_thread_map, active_thread_id, created_at, updated_at)
+             VALUES ('card-decision', 'Decision card', 'review', '{\"123456789\":\"999888777\"}', '999888777', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-review', 'card-decision', 'review', 'completed', '[Review R1] card-decision', datetime('now', '-1 minute'), datetime('now', '-1 minute'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-review-decision', 'card-decision', 'review-decision', 'pending', '[리뷰 검토] card-decision', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let (status, body) = super::get_pending_dispatch_for_thread(
+        State(state),
+        Query(std::collections::HashMap::from([(
+            "thread_id".to_string(),
+            "999888777".to_string(),
+        )])),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.0["dispatch_id"], "dispatch-review-decision");
 }

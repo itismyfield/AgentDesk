@@ -43,6 +43,7 @@ pub struct SessionData {
 }
 
 /// Get the AI sessions directory path ($AGENTDESK_ROOT_DIR/ai_sessions)
+#[allow(dead_code)]
 pub fn ai_sessions_dir() -> Option<PathBuf> {
     crate::cli::dcserver::agentdesk_runtime_root().map(|root| root.join("ai_sessions"))
 }

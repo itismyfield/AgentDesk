@@ -1,6 +1,61 @@
 use super::super::*;
-#[cfg(unix)]
-use crate::services::tmux_common::tmux_exact_target;
+use crate::services::memory::{
+    RecallRequest, RecallResponse, build_memory_backend, resolve_memory_role_id,
+    resolve_memory_session_id,
+};
+use crate::services::provider::{CancelToken, cancel_requested};
+use std::sync::Arc;
+
+const DISCORD_FORMATTING_REMINDER: &str = "<system-reminder>\n\
+     Discord formatting: minimize code blocks, keep messages concise.\n\
+     </system-reminder>";
+
+#[derive(Debug, PartialEq, Eq)]
+struct MemoryInjectionPlan<'a> {
+    shared_knowledge_for_context: Option<&'a str>,
+    shared_knowledge_for_system_prompt: Option<&'a str>,
+    external_recall_for_context: Option<&'a str>,
+    longterm_catalog_for_system_prompt: Option<&'a str>,
+}
+
+fn build_memory_injection_plan<'a>(
+    provider: &ProviderKind,
+    has_session_id: bool,
+    dispatch_profile: DispatchProfile,
+    memory_recall: &'a RecallResponse,
+) -> MemoryInjectionPlan<'a> {
+    let should_inject_shared_knowledge =
+        !has_session_id && dispatch_profile == DispatchProfile::Full;
+    let shared_knowledge_for_context =
+        if should_inject_shared_knowledge && !matches!(provider, ProviderKind::Claude) {
+            memory_recall.shared_knowledge.as_deref()
+        } else {
+            None
+        };
+    let shared_knowledge_for_system_prompt =
+        if should_inject_shared_knowledge && matches!(provider, ProviderKind::Claude) {
+            memory_recall.shared_knowledge.as_deref()
+        } else {
+            None
+        };
+    let external_recall_for_context = if dispatch_profile == DispatchProfile::Full {
+        memory_recall.external_recall.as_deref()
+    } else {
+        None
+    };
+    let longterm_catalog_for_system_prompt = if dispatch_profile == DispatchProfile::Full {
+        memory_recall.longterm_catalog.as_deref()
+    } else {
+        None
+    };
+
+    MemoryInjectionPlan {
+        shared_knowledge_for_context,
+        shared_knowledge_for_system_prompt,
+        external_recall_for_context,
+        longterm_catalog_for_system_prompt,
+    }
+}
 
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
@@ -19,13 +74,9 @@ pub(in crate::services::discord) async fn handle_text_message(
     // Get session info, allowed tools, and pending uploads
     let (session_info, provider, allowed_tools, pending_uploads) = {
         let mut data = shared.core.lock().await;
-        let info = data.sessions.get(&channel_id).and_then(|session| {
-            session.current_path.as_ref().map(|_| {
-                (
-                    session.session_id.clone(),
-                    session.current_path.clone().unwrap_or_default(),
-                )
-            })
+        let info = data.sessions.get_mut(&channel_id).and_then(|session| {
+            let current_path = session.validated_path(channel_id)?;
+            Some((session.session_id.clone(), current_path))
         });
         let uploads = data
             .sessions
@@ -85,6 +136,21 @@ pub(in crate::services::discord) async fn handle_text_message(
                         .canonicalize()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|_| ws_path.clone());
+                    // Resolve channel name from Discord API before worktree
+                    // creation so the path uses the real name, not "unknown".
+                    let (ch_name_api, cat_name) = resolve_channel_category(ctx, channel_id).await;
+                    let ch_name = match super::super::resolve_thread_parent(&ctx.http, channel_id)
+                        .await
+                    {
+                        Some((_parent_id, parent_name)) => {
+                            let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
+                            Some(super::super::synthetic_thread_channel_name(
+                                &parent, channel_id,
+                            ))
+                        }
+                        None => ch_name_api,
+                    };
+
                     // Check worktree: always use worktree for thread sessions,
                     // or when conflict detected with another session on same path.
                     let wt_info = {
@@ -124,22 +190,6 @@ pub(in crate::services::discord) async fn handle_text_message(
                         .as_ref()
                         .map(|wt| wt.worktree_path.clone())
                         .unwrap_or_else(|| canonical.clone());
-                    let (ch_name_resolved, cat_name) =
-                        resolve_channel_category(ctx, channel_id).await;
-                    // For thread channels, build a stable channel_name from the
-                    // parent channel name so resolve_agent_id_from_channel_name
-                    // can match it (same logic as bootstrap_thread_session).
-                    let ch_name = match super::super::resolve_thread_parent(&ctx.http, channel_id)
-                        .await
-                    {
-                        Some((_parent_id, parent_name)) => {
-                            let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
-                            Some(super::super::synthetic_thread_channel_name(
-                                &parent, channel_id,
-                            ))
-                        }
-                        None => ch_name_resolved,
-                    };
                     {
                         let mut data = shared.core.lock().await;
                         let session =
@@ -442,160 +492,56 @@ pub(in crate::services::discord) async fn handle_text_message(
         provider
     };
 
-    // Prepend pending file uploads
-    let mut context_chunks = Vec::new();
-    if !pending_uploads.is_empty() {
-        context_chunks.push(pending_uploads.join("\n"));
-    }
-    // Load SAK early — Claude gets it in the system prompt (for caching),
-    // non-Claude providers get it as a first-turn user message (no cache benefit).
-    let is_review_lite = matches!(
-        dispatch_type_str.as_deref(),
-        Some("review") | Some("review-decision")
-    );
-    let shared_knowledge_content = if !is_review_lite {
-        load_shared_knowledge()
-    } else {
-        None
-    };
-    // Non-Claude SAK injection is deferred until after session recovery
-    // (see below, after fetch_provider_session_id) to avoid duplicate injection
-    // when dcserver restarts and restores an existing session from DB.
-    if let Some(ref reply_ctx) = reply_context {
-        context_chunks.push(reply_ctx.clone());
-    }
-    // Re-inject compact formatting reminder for interactive follow-up turns.
-    // System prompt is only sent at session creation; after context compaction
-    // these rules can be lost.
-    if session_id.is_some() {
-        context_chunks.push(
-            "<system-reminder>\n\
-             Discord formatting: minimize code blocks, keep messages concise.\n\
-             </system-reminder>"
-                .to_string(),
-        );
-    }
-    context_chunks.push(sanitized_input);
-    let mut context_prompt = context_chunks.join("\n\n");
-
-    // Build disabled tools notice
-    let default_tools: std::collections::HashSet<&str> =
-        DEFAULT_ALLOWED_TOOLS.iter().copied().collect();
-    let allowed_set: std::collections::HashSet<&str> =
-        allowed_tools.iter().map(|s| s.as_str()).collect();
-    let disabled: Vec<&&str> = default_tools
-        .iter()
-        .filter(|t| !allowed_set.contains(**t))
-        .collect();
-    let disabled_notice = if disabled.is_empty() {
-        String::new()
-    } else {
-        let names: Vec<&str> = disabled.iter().map(|t| **t).collect();
-        format!(
-            "\n\nDISABLED TOOLS: The following tools have been disabled by the user: {}.\n\
-             You MUST NOT attempt to use these tools. \
-             If a user's request requires a disabled tool, do NOT proceed with the task. \
-             Instead, clearly inform the user which tool is needed and that it is currently disabled. \
-             Suggest they re-enable it with: /allowed +ToolName",
-            names.join(", ")
-        )
-    };
-
-    // Build skills notice for system prompt
-    let skills_notice = {
-        let skills = shared.skills_cache.read().await;
-        if skills.is_empty() {
-            String::new()
-        } else {
-            let list: Vec<String> = skills
-                .iter()
-                .map(|(name, desc)| format!("  - /{}: {}", name, desc))
-                .collect();
-            match &provider {
-                ProviderKind::Claude => format!(
-                    "\n\nAvailable skills (invoke via the Skill tool):\n{}",
-                    list.join("\n")
-                ),
-                ProviderKind::Codex => format!(
-                    "\n\nAvailable local Codex skills (use them by name when relevant):\n{}",
-                    list.join("\n")
-                ),
-                ProviderKind::Gemini => format!(
-                    "\n\nAvailable local Gemini skills (use them by name when relevant):\n{}",
-                    list.join("\n")
-                ),
-                ProviderKind::Qwen => format!(
-                    "\n\nAvailable local Qwen skills (use them by name when relevant):\n{}",
-                    list.join("\n")
-                ),
-                ProviderKind::Unsupported(_) => String::new(),
-            }
-        }
-    };
-
-    // Build Discord context info
-    let discord_context = {
-        let data = shared.core.lock().await;
-        let session = data.sessions.get(&channel_id);
-        let ch_name = session.and_then(|s| s.channel_name.as_deref());
-        let cat_name = session.and_then(|s| s.category_name.as_deref());
-        match ch_name {
-            Some(name) => {
-                let cat_part = cat_name
-                    .map(|c| format!(" (category: {})", c))
-                    .unwrap_or_default();
-                format!(
-                    "Discord context: channel #{} (ID: {}){}, user: {} (ID: {})",
-                    name,
-                    channel_id.get(),
-                    cat_part,
-                    request_owner_name,
-                    request_owner.get()
-                )
-            }
-            None => format!(
-                "Discord context: DM, user: {} (ID: {})",
-                request_owner_name,
-                request_owner.get()
-            ),
-        }
-    };
-
-    // Derive dispatch prompt profile: review/rework dispatches get a lighter prompt.
+    // Derive dispatch prompt profile before memory recall so ReviewLite can
+    // skip heavy memory work consistently across local/mem0 backends.
     let dispatch_profile = DispatchProfile::from_dispatch_type(
         dispatch_id_for_thread
             .as_ref()
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
-    // Claude: pass SAK to build_system_prompt for stable cache prefix placement.
-    // Non-Claude: SAK was already pushed to context_chunks above.
-    let sak_for_system = if matches!(provider, ProviderKind::Claude) {
-        shared_knowledge_content.as_deref()
-    } else {
-        None
-    };
+    super::super::commands::reset_provider_session_if_pending(
+        &ctx.http, shared, &provider, channel_id,
+    )
+    .await;
+    let prompt_prep_started = std::time::Instant::now();
 
-    let system_prompt_owned = build_system_prompt(
-        &discord_context,
-        &current_path,
-        channel_id,
-        token,
-        &disabled_notice,
-        &skills_notice,
-        role_binding.as_ref(),
-        reply_to_user_message,
-        dispatch_profile,
-        dispatch_type_str.as_deref(),
-        sak_for_system,
-    );
-    if sak_for_system.is_some() {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
-            sak_for_system.unwrap().len(),
-            channel_id.get()
-        );
+    // Resolve channel/tmux session name from current session state. We need the
+    // persisted provider session_id before recall so Mem0 can scope search by run_id.
+    let (channel_name, tmux_session_name) = {
+        let data = shared.core.lock().await;
+        let channel_name = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|s| s.channel_name.clone());
+        let tmux_session_name = channel_name
+            .as_ref()
+            .map(|name| provider.build_tmux_session_name(name));
+        (channel_name, tmux_session_name)
+    };
+    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
+    let mut session_id = session_id;
+    if session_id.is_none() {
+        if let Some(ref key) = adk_session_key {
+            let restored = super::super::adk_session::fetch_provider_session_id(
+                key,
+                &provider,
+                shared.api_port,
+            )
+            .await;
+            if restored.is_some() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
+                    key
+                );
+                let mut data = shared.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.session_id = restored.clone();
+                }
+            }
+            session_id = restored;
+        }
     }
 
     // Create cancel token — with second check to close the TOCTOU race window.
@@ -646,6 +592,170 @@ pub(in crate::services::discord) async fn handle_text_message(
     shared
         .turn_start_times
         .insert(channel_id, std::time::Instant::now());
+
+    let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
+    let memory_backend = build_memory_backend(&memory_settings);
+    let memory_recall = memory_backend
+        .recall(RecallRequest {
+            provider: provider.clone(),
+            role_id: resolve_memory_role_id(role_binding.as_ref()),
+            channel_id: channel_id.get(),
+            session_id: resolve_memory_session_id(session_id.as_deref(), channel_id.get()),
+            dispatch_profile,
+            user_text: user_text.to_string(),
+        })
+        .await;
+    for warning in &memory_recall.warnings {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!(
+            "  [{ts}] [memory] recall warning for channel {}: {}",
+            channel_id.get(),
+            warning
+        );
+    }
+
+    // Prepend pending file uploads
+    let mut context_chunks = Vec::new();
+    let memory_injection_plan = build_memory_injection_plan(
+        &provider,
+        session_id.is_some(),
+        dispatch_profile,
+        &memory_recall,
+    );
+    if !pending_uploads.is_empty() {
+        context_chunks.push(pending_uploads.join("\n"));
+    }
+    if let Some(ref reply_ctx) = reply_context {
+        context_chunks.push(reply_ctx.clone());
+    }
+    // Re-inject formatting + compaction reminder for interactive follow-up
+    // turns. System prompt is only sent at session creation; after context
+    // compaction these rules can be lost.
+    if session_id.is_some() {
+        context_chunks.push(super::super::prompt_builder::build_followup_turn_system_reminder());
+    }
+    if let Some(knowledge) = memory_injection_plan.shared_knowledge_for_context {
+        context_chunks.push(knowledge.to_string());
+    }
+    if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
+        context_chunks.push(external_recall.to_string());
+    }
+    context_chunks.push(sanitized_input);
+    let context_prompt = context_chunks.join("\n\n");
+
+    // Build disabled tools notice
+    let default_tools: std::collections::HashSet<&str> =
+        DEFAULT_ALLOWED_TOOLS.iter().copied().collect();
+    let allowed_set: std::collections::HashSet<&str> =
+        allowed_tools.iter().map(|s| s.as_str()).collect();
+    let disabled: Vec<&&str> = default_tools
+        .iter()
+        .filter(|t| !allowed_set.contains(**t))
+        .collect();
+    let disabled_notice = if disabled.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = disabled.iter().map(|t| **t).collect();
+        format!(
+            "\n\nDISABLED TOOLS: The following tools have been disabled by the user: {}.\n\
+             You MUST NOT attempt to use these tools. \
+             If a user's request requires a disabled tool, do NOT proceed with the task. \
+             Instead, clearly inform the user which tool is needed and that it is currently disabled. \
+             Suggest they re-enable it with: /allowed +ToolName",
+            names.join(", ")
+        )
+    };
+
+    // Build skills notice for system prompt
+    let skills_notice = {
+        let skills = shared.skills_cache.read().await;
+        format_skills_notice(&provider, &skills)
+    };
+
+    // Build Discord context info
+    let discord_context = {
+        let data = shared.core.lock().await;
+        let session = data.sessions.get(&channel_id);
+        let ch_name = session.and_then(|s| s.channel_name.as_deref());
+        let cat_name = session.and_then(|s| s.category_name.as_deref());
+        match ch_name {
+            Some(name) => {
+                let cat_part = cat_name
+                    .map(|c| format!(" (category: {})", c))
+                    .unwrap_or_default();
+                format!(
+                    "Discord context: channel #{} (ID: {}){}, user: {} (ID: {})",
+                    name,
+                    channel_id.get(),
+                    cat_part,
+                    request_owner_name,
+                    request_owner.get()
+                )
+            }
+            None => format!(
+                "Discord context: DM, user: {} (ID: {})",
+                request_owner_name,
+                request_owner.get()
+            ),
+        }
+    };
+
+    // Claude keeps SAK in the system prompt for prefix-cache stability.
+    // Non-Claude providers receive SAK in the user context instead.
+    let sak_for_system = memory_injection_plan.shared_knowledge_for_system_prompt;
+    let longterm_catalog_for_prompt = memory_injection_plan.longterm_catalog_for_system_prompt;
+    let narrate_progress = settings::load_narrate_progress(shared.db.as_ref());
+
+    let system_prompt_owned = build_system_prompt(
+        &discord_context,
+        &current_path,
+        channel_id,
+        token,
+        &disabled_notice,
+        &skills_notice,
+        narrate_progress,
+        role_binding.as_ref(),
+        reply_to_user_message,
+        dispatch_profile,
+        dispatch_type_str.as_deref(),
+        sak_for_system,
+        longterm_catalog_for_prompt,
+    );
+    if sak_for_system.is_some() {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
+            sak_for_system.unwrap().len(),
+            channel_id.get()
+        );
+    }
+    let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
+    let memory_backend_label = match memory_settings.backend {
+        settings::MemoryBackendKind::Local => "local",
+        settings::MemoryBackendKind::Mem0 => "mem0",
+    };
+    let provider_label = match &provider {
+        ProviderKind::Claude => "claude",
+        ProviderKind::Codex => "codex",
+        ProviderKind::Gemini => "gemini",
+        ProviderKind::Qwen => "qwen",
+        ProviderKind::Unsupported(_) => "unsupported",
+    };
+    let dispatch_profile_label = match dispatch_profile {
+        DispatchProfile::Full => "full",
+        DispatchProfile::ReviewLite => "review_lite",
+    };
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!(
+        "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} memory_profile={} reused_session={} duration_ms={}",
+        channel_id.get(),
+        provider_label,
+        dispatch_profile_label,
+        memory_backend_label,
+        memory_settings.mem0.profile,
+        session_id.is_some(),
+        prompt_prep_duration_ms
+    );
 
     // Spawn turn watchdog — cancels the turn if it exceeds the deadline.
     // The deadline is stored in cancel_token.watchdog_deadline_ms and can be
@@ -819,67 +929,21 @@ pub(in crate::services::discord) async fn handle_text_message(
             })
     };
 
-    reset_provider_session_if_pending(shared, channel_id, &provider).await;
-
-    // Resolve channel/tmux session name from current session state
-    let (channel_name, tmux_session_name) = {
-        let data = shared.core.lock().await;
-        let channel_name = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|s| s.channel_name.clone());
-        let tmux_session_name = channel_name
-            .as_ref()
-            .map(|name| provider.build_tmux_session_name(name));
-        (channel_name, tmux_session_name)
-    };
-    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
-
-    // If in-memory session_id is None (e.g. after dcserver restart),
-    // try to restore it from the DB's persisted provider session_id.
-    let session_id = if session_id.is_none() {
-        if let Some(ref key) = adk_session_key {
-            let restored = super::super::adk_session::fetch_provider_session_id(
-                key,
-                &provider,
-                shared.api_port,
-            )
-            .await;
-            if restored.is_some() {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
-                    key
-                );
-                // Also update in-memory session so subsequent turns don't re-fetch
-                let mut data = shared.core.lock().await;
-                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.session_id = restored.clone();
-                }
-            }
-            restored
-        } else {
-            None
-        }
-    } else {
-        session_id
-    };
-
-    // Non-Claude first turn: inject SAK as user context (no Anthropic cache benefit).
-    // Deferred to here (after session recovery from DB) so that a dcserver restart
-    // doesn't duplicate SAK into a resumed session.
-    if !matches!(provider, ProviderKind::Claude) && session_id.is_none() {
-        if let Some(ref knowledge) = shared_knowledge_content {
-            context_prompt = format!("{}\n\n{}", knowledge, context_prompt);
-        }
-    }
-
     let adk_session_name = channel_name.clone();
     let adk_session_info = derive_adk_session_info(
         Some(user_text),
         channel_name.as_deref(),
         Some(&current_path),
     );
+    let adk_thread_channel_id = adk_session_name
+        .as_deref()
+        .and_then(super::super::adk_session::parse_thread_channel_id_from_name)
+        .or_else(|| {
+            shared
+                .dispatch_thread_parents
+                .contains_key(&channel_id)
+                .then_some(channel_id.get())
+        });
     // #222: DB-based dispatch lookup takes priority over text parsing.
     // In unified threads, user_text may contain a stale DISPATCH: prefix
     // from a previous dispatch in the same thread. DB lookup uses the
@@ -900,6 +964,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         None,
         Some(&current_path),
         dispatch_id.as_deref(),
+        adk_thread_channel_id,
         shared.api_port,
     )
     .await;
@@ -937,7 +1002,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     };
 
-    let inflight_state = InflightTurnState::new(
+    let mut inflight_state = InflightTurnState::new(
         provider.clone(),
         channel_id.get(),
         channel_name.clone(),
@@ -951,6 +1016,9 @@ pub(in crate::services::discord) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    // Persist identifiers for long-turn diagnostics (#130)
+    inflight_state.session_key = adk_session_key.clone();
+    inflight_state.dispatch_id = dispatch_id.clone();
     if let Err(e) = save_inflight_state(&inflight_state) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}]   ⚠ inflight state save failed: {e}");
@@ -1343,6 +1411,23 @@ pub(super) async fn handle_shell_command_raw(
     Ok(())
 }
 
+pub(super) enum TextStopLookup {
+    NoActiveTurn,
+    AlreadyStopping,
+    Stop(Arc<CancelToken>),
+}
+
+pub(super) fn lookup_text_stop_token(
+    cancel_tokens: &std::collections::HashMap<serenity::ChannelId, Arc<CancelToken>>,
+    channel_id: serenity::ChannelId,
+) -> TextStopLookup {
+    match cancel_tokens.get(&channel_id).cloned() {
+        Some(token) if cancel_requested(Some(token.as_ref())) => TextStopLookup::AlreadyStopping,
+        Some(token) => TextStopLookup::Stop(token),
+        None => TextStopLookup::NoActiveTurn,
+    }
+}
+
 /// Handle text-based commands (!start, !meeting, !stop, !clear, etc.).
 /// Returns true if the command was handled, false otherwise.
 pub(super) async fn handle_text_command(
@@ -1572,61 +1657,34 @@ pub(super) async fn handle_text_command(
         }
 
         "!stop" => {
-            let mut d = data.shared.core.lock().await;
-            if let Some(token) = d.cancel_tokens.remove(&channel_id) {
-                token.cancel_with_tmux_cleanup();
-                drop(d);
-                let _ = msg.reply(&ctx.http, "Turn cancelled.").await;
-            } else {
-                drop(d);
-                let _ = msg.reply(&ctx.http, "No active turn to stop.").await;
+            let stop_lookup = {
+                let d = data.shared.core.lock().await;
+                lookup_text_stop_token(&d.cancel_tokens, channel_id)
+            };
+            match stop_lookup {
+                TextStopLookup::Stop(token) => {
+                    super::super::turn_bridge::cancel_active_token(&token, true, "!stop");
+                    let _ = msg.reply(&ctx.http, "Turn cancelled.").await;
+                }
+                TextStopLookup::AlreadyStopping => {
+                    let _ = msg.reply(&ctx.http, "Already stopping...").await;
+                }
+                TextStopLookup::NoActiveTurn => {
+                    let _ = msg.reply(&ctx.http, "No active turn to stop.").await;
+                }
             }
             return Ok(true);
         }
 
         "!clear" => {
-            let mut d = data.shared.core.lock().await;
-            if let Some(token) = d.cancel_tokens.remove(&channel_id) {
-                token.cancel_with_tmux_cleanup();
-            }
-            // Build tmux session name from channel name
-            let tmux_name = d
-                .sessions
-                .get(&channel_id)
-                .and_then(|s| s.channel_name.as_ref())
-                .map(|ch_name| data.provider.build_tmux_session_name(ch_name));
-            if let Some(session) = d.sessions.get_mut(&channel_id) {
-                session.history.clear();
-                session.pending_uploads.clear();
-                session.cleared = true;
-                session.session_id = None;
-            }
-            d.intervention_queue.remove(&channel_id);
-            drop(d);
-            // Clear stored provider session_id from DB
-            if let Some(key) = super::super::adk_session::build_adk_session_key(
+            super::super::commands::clear_channel_session_state(
+                &ctx.http,
                 &data.shared,
-                channel_id,
                 &data.provider,
+                channel_id,
+                "!clear",
             )
-            .await
-            {
-                super::super::adk_session::clear_provider_session_id(&key, data.shared.api_port)
-                    .await;
-            }
-            // Send /clear to the actual Claude Code session via tmux
-            #[cfg(unix)]
-            if data.provider == crate::services::provider::ProviderKind::Claude {
-                if let Some(ref name) = tmux_name {
-                    let exact_target = tmux_exact_target(name);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        std::process::Command::new("tmux")
-                            .args(["send-keys", "-t", &exact_target, "/clear", "Enter"])
-                            .output()
-                    })
-                    .await;
-                }
-            }
+            .await;
             let _ = msg.reply(&ctx.http, "Session cleared.").await;
             return Ok(true);
         }
@@ -2205,14 +2263,23 @@ Any other message is sent to {p}.
                     return Ok(true);
                 }
                 "stop" => {
-                    let mut d = data.shared.core.lock().await;
-                    if let Some(token) = d.cancel_tokens.remove(&channel_id) {
-                        token.cancel_with_tmux_cleanup();
-                        drop(d);
-                        let _ = msg.reply(&ctx.http, "Stopping...").await;
-                    } else {
-                        drop(d);
-                        let _ = msg.reply(&ctx.http, "No active request to stop.").await;
+                    let stop_lookup = {
+                        let d = data.shared.core.lock().await;
+                        lookup_text_stop_token(&d.cancel_tokens, channel_id)
+                    };
+                    match stop_lookup {
+                        TextStopLookup::Stop(token) => {
+                            super::super::turn_bridge::cancel_active_token(
+                                &token, true, "!cc stop",
+                            );
+                            let _ = msg.reply(&ctx.http, "Stopping...").await;
+                        }
+                        TextStopLookup::AlreadyStopping => {
+                            let _ = msg.reply(&ctx.http, "Already stopping...").await;
+                        }
+                        TextStopLookup::NoActiveTurn => {
+                            let _ = msg.reply(&ctx.http, "No active request to stop.").await;
+                        }
                     }
                     return Ok(true);
                 }
@@ -2290,63 +2357,14 @@ Any other message is sent to {p}.
             }
 
             // Build the prompt
-            let skill_prompt = match &data.provider {
-                ProviderKind::Claude => {
-                    if args_str.is_empty() {
-                        format!(
-                            "Execute the skill `/{skill}` now. \
-                             Use the Skill tool with skill=\"{skill}\"."
-                        )
-                    } else {
-                        format!(
-                            "Execute the skill `/{skill}` with arguments: {args_str}\n\
-                             Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\"."
-                        )
-                    }
-                }
-                ProviderKind::Codex => {
-                    if args_str.is_empty() {
-                        format!(
-                            "Use the local Codex skill `/{skill}` now. \
-                             Follow its SKILL.md instructions exactly and complete the task."
-                        )
-                    } else {
-                        format!(
-                            "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
-                             Follow its SKILL.md instructions exactly and adapt them to the request."
-                        )
-                    }
-                }
-                ProviderKind::Gemini => {
-                    if args_str.is_empty() {
-                        format!(
-                            "Use the local Gemini skill `/{skill}` now. \
-                             Follow its SKILL.md instructions exactly and complete the task."
-                        )
-                    } else {
-                        format!(
-                            "Use the local Gemini skill `/{skill}` now with this user request: {args_str}\n\
-                             Follow its SKILL.md instructions exactly and adapt them to the request."
-                        )
-                    }
-                }
-                ProviderKind::Qwen => {
-                    if args_str.is_empty() {
-                        format!(
-                            "Use the local Qwen skill `/{skill}` now. \
-                             Follow its SKILL.md instructions exactly and complete the task."
-                        )
-                    } else {
-                        format!(
-                            "Use the local Qwen skill `/{skill}` now with this user request: {args_str}\n\
-                             Follow its SKILL.md instructions exactly and adapt them to the request."
-                        )
-                    }
-                }
-                ProviderKind::Unsupported(name) => {
-                    let _ = msg
-                        .reply(&ctx.http, format!("Provider '{}' is not installed.", name))
-                        .await;
+            let skill_prompt = match super::super::commands::build_provider_skill_prompt(
+                &data.provider,
+                &skill,
+                args_str,
+            ) {
+                Ok(prompt) => prompt,
+                Err(message) => {
+                    let _ = msg.reply(&ctx.http, message).await;
                     return Ok(true);
                 }
             };
@@ -2384,39 +2402,145 @@ Any other message is sent to {p}.
     Ok(false)
 }
 
-/// Private helper: reset provider session if a model change is pending.
-async fn reset_provider_session_if_pending(
-    shared: &Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    provider: &ProviderKind,
-) {
-    if shared
-        .model_session_reset_pending
-        .remove(&channel_id)
-        .is_none()
-    {
-        return;
-    }
+#[cfg(test)]
+mod tests {
+    use super::super::super::DiscordSession;
+    use super::*;
+    use crate::services::memory::RecallResponse;
 
-    let channel_name = {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            session.session_id = None;
-            session.channel_name.clone()
-        } else {
-            None
-        }
-    };
-
-    if provider.uses_managed_tmux_backend() {
-        if let Some(name) = channel_name.as_deref() {
-            crate::services::claude::terminate_local_session(
-                &provider.build_tmux_session_name(name),
-            );
+    fn sample_recall() -> RecallResponse {
+        RecallResponse {
+            shared_knowledge: Some("[Shared Knowledge]".to_string()),
+            longterm_catalog: Some("- notes.md".to_string()),
+            external_recall: Some("[External Recall]".to_string()),
+            warnings: Vec::new(),
         }
     }
 
-    if let Some(session_key) = build_adk_session_key(shared, channel_id, provider).await {
-        super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
+    fn make_session(
+        current_path: Option<String>,
+        remote_profile_name: Option<String>,
+    ) -> DiscordSession {
+        DiscordSession {
+            session_id: None,
+            current_path,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name,
+            channel_id: None,
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+        }
+    }
+
+    #[test]
+    fn session_path_is_usable_for_existing_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = make_session(Some(dir.path().to_str().unwrap().to_string()), None);
+        assert!(session.validated_path("test-channel").is_some());
+    }
+
+    #[test]
+    fn session_path_is_not_usable_for_missing_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().to_str().unwrap().to_string();
+        drop(dir);
+        let mut session = make_session(Some(missing_path), None);
+        assert!(session.validated_path("test-channel").is_none());
+        // Verify current_path and worktree were cleared
+        assert!(session.current_path.is_none());
+        assert!(session.worktree.is_none());
+    }
+
+    #[test]
+    fn session_path_is_stale_for_remote_session_with_missing_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_path = dir.path().to_str().unwrap().to_string();
+        drop(dir);
+        let mut session = make_session(Some(missing_path), Some("mac-mini".to_string()));
+        // Remote sessions keep their CWD even when it is non-local to this machine.
+        assert!(session.validated_path("test-channel").is_some());
+        assert!(session.current_path.is_some());
+    }
+
+    #[test]
+    fn memory_injection_plan_routes_shared_knowledge_by_provider() {
+        let recall = sample_recall();
+
+        let claude = build_memory_injection_plan(
+            &ProviderKind::Claude,
+            false,
+            DispatchProfile::Full,
+            &recall,
+        );
+        assert_eq!(claude.shared_knowledge_for_context, None);
+        assert_eq!(
+            claude.shared_knowledge_for_system_prompt,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(
+            claude.external_recall_for_context,
+            Some("[External Recall]")
+        );
+        assert_eq!(
+            claude.longterm_catalog_for_system_prompt,
+            Some("- notes.md")
+        );
+
+        let codex = build_memory_injection_plan(
+            &ProviderKind::Codex,
+            false,
+            DispatchProfile::Full,
+            &recall,
+        );
+        assert_eq!(
+            codex.shared_knowledge_for_context,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(codex.shared_knowledge_for_system_prompt, None);
+        assert_eq!(codex.external_recall_for_context, Some("[External Recall]"));
+        assert_eq!(codex.longterm_catalog_for_system_prompt, Some("- notes.md"));
+
+        let qwen =
+            build_memory_injection_plan(&ProviderKind::Qwen, false, DispatchProfile::Full, &recall);
+        assert_eq!(
+            qwen.shared_knowledge_for_context,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(qwen.shared_knowledge_for_system_prompt, None);
+        assert_eq!(qwen.external_recall_for_context, Some("[External Recall]"));
+        assert_eq!(qwen.longterm_catalog_for_system_prompt, Some("- notes.md"));
+    }
+
+    #[test]
+    fn memory_injection_plan_keeps_review_lite_minimal() {
+        let recall = sample_recall();
+        let plan = build_memory_injection_plan(
+            &ProviderKind::Codex,
+            false,
+            DispatchProfile::ReviewLite,
+            &recall,
+        );
+
+        assert_eq!(plan.shared_knowledge_for_context, None);
+        assert_eq!(plan.shared_knowledge_for_system_prompt, None);
+        assert_eq!(plan.external_recall_for_context, None);
+        assert_eq!(plan.longterm_catalog_for_system_prompt, None);
+    }
+
+    #[test]
+    fn memory_injection_plan_skips_shared_knowledge_when_session_exists() {
+        let recall = sample_recall();
+        let plan =
+            build_memory_injection_plan(&ProviderKind::Codex, true, DispatchProfile::Full, &recall);
+
+        assert_eq!(plan.shared_knowledge_for_context, None);
+        assert_eq!(plan.shared_knowledge_for_system_prompt, None);
+        assert_eq!(plan.external_recall_for_context, Some("[External Recall]"));
+        assert_eq!(plan.longterm_catalog_for_system_prompt, Some("- notes.md"));
     }
 }

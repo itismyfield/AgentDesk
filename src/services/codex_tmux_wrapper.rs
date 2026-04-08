@@ -242,23 +242,8 @@ fn run_turn(
         prompt.to_string(),
     ]);
 
-    // Ensure node is discoverable: codex is a `#!/usr/bin/env node` script.
-    // Prepend the codex binary's parent dir and /opt/homebrew/bin to PATH
-    // so `env` can find `node` even when launched from launchd (minimal PATH).
     let mut cmd = Command::new(codex_bin);
-    {
-        let mut path = std::env::var("PATH").unwrap_or_default();
-        if let Some(parent) = std::path::Path::new(codex_bin).parent() {
-            let dir = parent.to_string_lossy();
-            if !path.split(':').any(|p| p == dir.as_ref()) {
-                path = format!("{}:{}", dir, path);
-            }
-        }
-        if !path.split(':').any(|p| p == "/opt/homebrew/bin") {
-            path = format!("/opt/homebrew/bin:{}", path);
-        }
-        cmd.env("PATH", &path);
-    }
+    crate::services::platform::augment_exec_path(&mut cmd, codex_bin);
     let mut child = cmd
         .args(&args)
         .current_dir(working_dir)

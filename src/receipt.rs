@@ -93,6 +93,13 @@ struct Pricing {
     cache_create_factor: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CodexTokenUsage {
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+}
+
 // ── Pricing table ──────────────────────────────────────────────
 
 fn pricing_for(model: &str) -> Pricing {
@@ -141,6 +148,50 @@ fn actual_cost(acc: &ModelAccum, p: &Pricing) -> f64 {
 fn no_cache_cost(acc: &ModelAccum, p: &Pricing) -> f64 {
     let all_input = acc.input_tokens + acc.cache_read_tokens + acc.cache_creation_tokens;
     all_input as f64 * p.input_per_m / 1e6 + acc.output_tokens as f64 * p.output_per_m / 1e6
+}
+
+fn parse_codex_usage(v: &Value) -> Option<CodexTokenUsage> {
+    Some(CodexTokenUsage {
+        input_tokens: v.get("input_tokens")?.as_u64()?,
+        cached_input_tokens: v
+            .get("cached_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        output_tokens: v.get("output_tokens")?.as_u64()?,
+    })
+}
+
+fn parse_codex_total_usage(info: &Value) -> Option<CodexTokenUsage> {
+    info.get("total_token_usage").and_then(parse_codex_usage)
+}
+
+fn codex_usage_delta(
+    current: CodexTokenUsage,
+    previous: Option<CodexTokenUsage>,
+) -> CodexTokenUsage {
+    let Some(previous) = previous else {
+        return current;
+    };
+
+    CodexTokenUsage {
+        input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
+        cached_input_tokens: current
+            .cached_input_tokens
+            .saturating_sub(previous.cached_input_tokens),
+        output_tokens: current.output_tokens.saturating_sub(previous.output_tokens),
+    }
+}
+
+fn codex_usage_record(model: String, agent: String, usage: CodexTokenUsage) -> UsageRecord {
+    UsageRecord {
+        model,
+        input_tokens: usage.input_tokens.saturating_sub(usage.cached_input_tokens),
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cached_input_tokens,
+        cache_creation_tokens: 0,
+        provider: "Codex".into(),
+        agent,
+    }
 }
 
 fn shorten_model(model: &str) -> String {
@@ -457,10 +508,11 @@ fn parse_codex(
     let mut records = Vec::new();
     let mut sid: Option<String> = None;
     let mut current_model = String::from("codex");
-    // Deduplicate: Codex emits many token_count snapshots per turn.
-    // Only the last snapshot before the next turn_context (or EOF) carries
-    // the final cumulative usage for that turn.
-    let mut pending_snapshot: Option<UsageRecord> = None;
+    // Codex token_count snapshots are cumulative within the session.
+    // Keep the final in-range total per turn and subtract the previous turn's
+    // final total to recover that turn's actual usage.
+    let mut previous_total: Option<CodexTokenUsage> = None;
+    let mut pending_total: Option<CodexTokenUsage> = None;
 
     let Ok(file) = fs::File::open(path) else {
         return (records, 0, None);
@@ -497,9 +549,19 @@ fn parse_codex(
             continue;
         }
         if rtype == "turn_context" {
-            // Flush previous turn's last snapshot
-            if let Some(snap) = pending_snapshot.take() {
-                records.push(snap);
+            if let Some(total) = pending_total.take() {
+                let delta = codex_usage_delta(total, previous_total);
+                previous_total = Some(total);
+                if delta.input_tokens > 0
+                    || delta.cached_input_tokens > 0
+                    || delta.output_tokens > 0
+                {
+                    records.push(codex_usage_record(
+                        current_model.clone(),
+                        agent_name.clone().unwrap_or_else(|| "codex".into()),
+                        delta,
+                    ));
+                }
             }
             if let Some(m) = v
                 .get("payload")
@@ -525,9 +587,6 @@ fn parse_codex(
             continue;
         };
         let Some(ts) = parse_ts(ts_str) else { continue };
-        if ts < start || ts > end {
-            continue;
-        }
 
         let Some(info) = payload.get("info") else {
             continue;
@@ -535,37 +594,28 @@ fn parse_codex(
         if info.is_null() {
             continue;
         }
-        let Some(last) = info.get("last_token_usage") else {
+        let Some(total_usage) = parse_codex_total_usage(info) else {
             continue;
         };
+        if ts < start || ts > end {
+            if pending_total.is_none() {
+                previous_total = Some(total_usage);
+            }
+            continue;
+        }
 
-        let input = last
-            .get("input_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let cached = last
-            .get("cached_input_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let output = last
-            .get("output_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-
-        // Overwrite pending snapshot — only the last one per turn matters.
-        pending_snapshot = Some(UsageRecord {
-            model: current_model.clone(),
-            input_tokens: input.saturating_sub(cached),
-            output_tokens: output,
-            cache_read_tokens: cached,
-            cache_creation_tokens: 0,
-            provider: "Codex".into(),
-            agent: agent_name.clone().unwrap_or_else(|| "codex".into()),
-        });
+        // Overwrite the turn's pending total — only the final in-range snapshot matters.
+        pending_total = Some(total_usage);
     }
-    // Flush final turn
-    if let Some(snap) = pending_snapshot.take() {
-        records.push(snap);
+    if let Some(total) = pending_total.take() {
+        let delta = codex_usage_delta(total, previous_total);
+        if delta.input_tokens > 0 || delta.cached_input_tokens > 0 || delta.output_tokens > 0 {
+            records.push(codex_usage_record(
+                current_model,
+                agent_name.unwrap_or_else(|| "codex".into()),
+                delta,
+            ));
+        }
     }
     let msgs = records.len() as u64;
     (records, msgs, sid)
@@ -1130,4 +1180,77 @@ fn esc(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use std::io::Write;
+
+    fn write_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("create temp jsonl");
+        for line in lines {
+            writeln!(file, "{line}").expect("write jsonl line");
+        }
+        file
+    }
+
+    #[test]
+    fn parse_codex_uses_total_token_usage_deltas_per_turn() {
+        let file = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"sess-1","cwd":"/tmp/codex-agent"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            r#"{"timestamp":"2026-04-03T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10000,"cached_input_tokens":8000,"output_tokens":100},"last_token_usage":{"input_tokens":10000,"cached_input_tokens":8000,"output_tokens":100}}}}"#,
+            r#"{"timestamp":"2026-04-03T10:00:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":26000,"cached_input_tokens":22000,"output_tokens":250},"last_token_usage":{"input_tokens":16000,"cached_input_tokens":14000,"output_tokens":150}}}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            r#"{"timestamp":"2026-04-03T10:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":38000,"cached_input_tokens":33000,"output_tokens":400},"last_token_usage":{"input_tokens":12000,"cached_input_tokens":11000,"output_tokens":150}}}}"#,
+        ]);
+
+        let start = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).single().unwrap();
+        let end = Utc
+            .with_ymd_and_hms(2026, 4, 6, 23, 59, 59)
+            .single()
+            .unwrap();
+        let (records, msgs, sid) = parse_codex(file.path(), start, end, &HashMap::new());
+
+        assert_eq!(sid.as_deref(), Some("sess-1"));
+        assert_eq!(msgs, 2);
+        assert_eq!(records.len(), 2);
+
+        assert_eq!(records[0].model, "gpt-5.4");
+        assert_eq!(records[0].input_tokens, 4000);
+        assert_eq!(records[0].cache_read_tokens, 22000);
+        assert_eq!(records[0].output_tokens, 250);
+
+        assert_eq!(records[1].model, "gpt-5.4");
+        assert_eq!(records[1].input_tokens, 1000);
+        assert_eq!(records[1].cache_read_tokens, 11000);
+        assert_eq!(records[1].output_tokens, 150);
+    }
+
+    #[test]
+    fn parse_codex_subtracts_pre_window_cumulative_baseline() {
+        let file = write_jsonl(&[
+            r#"{"type":"session_meta","payload":{"id":"sess-2","cwd":"/tmp/codex-agent"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            r#"{"timestamp":"2026-03-31T23:59:50Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20000,"cached_input_tokens":16000,"output_tokens":100},"last_token_usage":{"input_tokens":20000,"cached_input_tokens":16000,"output_tokens":100}}}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            r#"{"timestamp":"2026-04-01T00:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":32000,"cached_input_tokens":25000,"output_tokens":180},"last_token_usage":{"input_tokens":12000,"cached_input_tokens":9000,"output_tokens":80}}}}"#,
+        ]);
+
+        let start = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).single().unwrap();
+        let end = Utc
+            .with_ymd_and_hms(2026, 4, 6, 23, 59, 59)
+            .single()
+            .unwrap();
+        let (records, msgs, sid) = parse_codex(file.path(), start, end, &HashMap::new());
+
+        assert_eq!(sid.as_deref(), Some("sess-2"));
+        assert_eq!(msgs, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].input_tokens, 3000);
+        assert_eq!(records[0].cache_read_tokens, 9000);
+        assert_eq!(records[0].output_tokens, 80);
+    }
 }

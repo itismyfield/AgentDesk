@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS agents (
     provider            TEXT DEFAULT 'claude',
     discord_channel_id  TEXT,
     discord_channel_alt TEXT,
+    discord_channel_cc  TEXT,
+    discord_channel_cdx TEXT,
     avatar_emoji        TEXT,
     status              TEXT DEFAULT 'idle',
     xp                  INTEGER DEFAULT 0,
@@ -43,7 +45,8 @@ CREATE TABLE IF NOT EXISTS task_dispatches (
     parent_dispatch_id  TEXT,
     chain_depth         INTEGER DEFAULT 0,
     created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at        DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS sessions (

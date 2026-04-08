@@ -1,8 +1,12 @@
 use super::super::model_picker_interaction::build_model_picker_close_response;
 use super::intake_gate::{is_model_picker_component_custom_id, should_process_turn_message};
+use super::message_handler::{TextStopLookup, lookup_text_stop_token};
+use crate::services::provider::CancelToken;
 use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 use serenity::model::channel::MessageType;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 // Re-import the private helper for testing
 fn should_skip_human_slash_message(
@@ -58,6 +62,46 @@ fn unregistered_human_slash_messages_fall_through() {
         Some(&known)
     ));
     assert!(!should_skip_human_slash_message("/unknown", None));
+}
+
+#[test]
+fn text_stop_lookup_keeps_active_turn_registered() {
+    let channel_id = ChannelId::new(42);
+    let token = Arc::new(CancelToken::new());
+    let mut cancel_tokens = std::collections::HashMap::new();
+    cancel_tokens.insert(channel_id, token.clone());
+
+    match lookup_text_stop_token(&cancel_tokens, channel_id) {
+        TextStopLookup::Stop(found) => {
+            assert!(Arc::ptr_eq(&found, &token));
+        }
+        TextStopLookup::NoActiveTurn => panic!("expected active turn to be stoppable"),
+        TextStopLookup::AlreadyStopping => panic!("fresh token should not look cancelled"),
+    }
+
+    assert_eq!(
+        cancel_tokens.len(),
+        1,
+        "text stop lookup must not remove the active-turn marker"
+    );
+    assert!(
+        cancel_tokens.contains_key(&channel_id),
+        "active turn should stay registered until turn finalization cleans it up"
+    );
+}
+
+#[test]
+fn text_stop_lookup_detects_inflight_cancellation() {
+    let channel_id = ChannelId::new(42);
+    let token = Arc::new(CancelToken::new());
+    token.cancelled.store(true, Ordering::Relaxed);
+    let mut cancel_tokens = std::collections::HashMap::new();
+    cancel_tokens.insert(channel_id, token);
+
+    assert!(matches!(
+        lookup_text_stop_token(&cancel_tokens, channel_id),
+        TextStopLookup::AlreadyStopping
+    ));
 }
 
 /// mid:* cleanup should use the longer MSG_DEDUP_TTL (60s),

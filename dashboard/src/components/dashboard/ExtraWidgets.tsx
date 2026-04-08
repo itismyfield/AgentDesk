@@ -44,7 +44,7 @@ export function CookingHeartRoleBoardWidget({ agents, t, isKo }: CookingHeartWid
         <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
           🍳 CookingHeart
         </h3>
-        <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "rgba(239,68,68,0.15)", color: "#f87171" }}>
+        <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: "rgba(239,68,68,0.15)", color: "#f87171" }}>
           {workingCount}/{chAgents.length} {t({ ko: "가동", en: "active", ja: "稼働", zh: "活跃" })}
         </span>
       </div>
@@ -61,10 +61,10 @@ export function CookingHeartRoleBoardWidget({ agents, t, isKo }: CookingHeartWid
             >
               <span className={`w-2 h-2 rounded-full shrink-0 ${isWorking ? "bg-emerald-400" : "bg-gray-400"}`} />
               <div className="min-w-0 flex-1">
-                <div className="text-[10px] font-medium truncate" style={{ color: "var(--th-text)" }}>
+                <div className="text-xs font-medium truncate" style={{ color: "var(--th-text)" }}>
                   {agent.avatar_emoji} {roleLabel || agent.alias || agent.name}
                 </div>
-                <div className="text-[9px]" style={{ color: "var(--th-text-muted)" }}>
+                <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                   {agent.stats_xp.toLocaleString()} XP
                 </div>
               </div>
@@ -101,7 +101,7 @@ export function GitHubIssuesWidget({ t, repo }: GitHubIssuesWidgetProps) {
         <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
           {t({ ko: "GitHub 이슈", en: "GitHub Issues", ja: "GitHub Issues", zh: "GitHub Issues" })}
         </h3>
-        <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
           {data.repo}
         </span>
       </div>
@@ -112,25 +112,25 @@ export function GitHubIssuesWidget({ t, repo }: GitHubIssuesWidgetProps) {
             className="flex items-start gap-2 px-2 py-1.5 rounded-lg"
             style={{ background: "var(--th-bg-surface)" }}
           >
-            <span className="text-[10px] shrink-0 mt-0.5" style={{ color: "#34d399" }}>
+            <span className="text-xs shrink-0 mt-0.5" style={{ color: "#34d399" }}>
               #{issue.number}
             </span>
             <div className="min-w-0 flex-1">
-              <div className="text-[11px] font-medium truncate" style={{ color: "var(--th-text)" }}>
+              <div className="text-xs font-medium truncate" style={{ color: "var(--th-text)" }}>
                 {issue.title}
               </div>
               <div className="flex gap-1 flex-wrap mt-0.5">
                 {issue.labels.slice(0, 3).map((label) => (
                   <span
                     key={label.name}
-                    className="text-[8px] px-1 rounded"
+                    className="text-xs px-1 rounded"
                     style={{ background: `#${label.color}33`, color: `#${label.color}` }}
                   >
                     {label.name}
                   </span>
                 ))}
                 {issue.assignees.length > 0 && (
-                  <span className="text-[8px]" style={{ color: "var(--th-text-muted)" }}>
+                  <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                     → {issue.assignees.map((a) => a.login).join(", ")}
                   </span>
                 )}
@@ -206,11 +206,11 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
           <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
             {t({ ko: "칸반 운영 상태", en: "Kanban Ops", ja: "カンバン運用", zh: "看板运营" })}
           </h3>
-          <p className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+          <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {t({ ko: "병목과 대기 중인 카드", en: "Bottlenecks and waiting cards", ja: "ボトルネックと待機カード", zh: "瓶颈与等待卡片" })}
           </p>
         </div>
-        <span className="text-xs px-2 py-1 rounded-full bg-white/8" style={{ color: "var(--th-text-secondary)" }}>
+        <span className="text-xs px-2 py-1 rounded-full bg-surface-medium" style={{ color: "var(--th-text-secondary)" }}>
           {kanban.open_total}
         </span>
       </div>
@@ -228,7 +228,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
               cursor: item.value > 0 ? "pointer" : "default",
             }}
           >
-            <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>{item.label}</div>
+            <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{item.label}</div>
             <div className="text-xl font-black" style={{ color: item.color }}>{item.value}</div>
           </button>
         ))}
@@ -251,7 +251,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
 
       {kanban.top_repos.length > 0 && (
         <div className="mt-4 space-y-1.5">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em]" style={{ color: "var(--th-text-muted)" }}>
+          <div className="text-xs font-semibold uppercase tracking-[0.14em]" style={{ color: "var(--th-text-muted)" }}>
             {t({ ko: "압력 높은 Repo", en: "High-pressure repos", ja: "高圧 Repo", zh: "高压 Repo" })}
           </div>
           {kanban.top_repos.map((repo) => (
@@ -264,7 +264,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
                 <div className="truncate text-sm font-medium" style={{ color: "var(--th-text)" }}>
                   {repo.github_repo}
                 </div>
-                <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                   {t({ ko: "열린 카드", en: "Open cards", ja: "オープンカード", zh: "开放卡片" })}: {repo.open_count}
                 </div>
               </div>
@@ -298,13 +298,13 @@ function OpsCardRow({ card, t, onAction }: {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 flex-wrap">
             <span
-              className="text-[9px] px-1.5 py-0.5 rounded font-semibold uppercase shrink-0"
+              className="text-xs px-1.5 py-0.5 rounded font-semibold uppercase shrink-0"
               style={{ color: statusColor, background: `color-mix(in srgb, ${statusColor} 15%, transparent)` }}
             >
               {card.status}
             </span>
             {repo && (
-              <span className="text-[9px] px-1.5 py-0.5 rounded shrink-0" style={{ color: "var(--th-text-muted)", background: "rgba(255,255,255,0.06)" }}>
+              <span className="text-xs px-1.5 py-0.5 rounded shrink-0" style={{ color: "var(--th-text-muted)", background: "rgba(255,255,255,0.06)" }}>
                 {repo}
               </span>
             )}
@@ -313,12 +313,12 @@ function OpsCardRow({ card, t, onAction }: {
             {card.title}
           </div>
           {card.blocked_reason && (
-            <div className="text-[10px] mt-0.5" style={{ color: "#fca5a5" }}>
+            <div className="text-xs mt-0.5" style={{ color: "#fca5a5" }}>
               {card.blocked_reason}
             </div>
           )}
           {card.latest_dispatch_result_summary && card.status === "blocked" && (
-            <div className="text-[10px] mt-0.5" style={{ color: "#fca5a5" }}>
+            <div className="text-xs mt-0.5" style={{ color: "#fca5a5" }}>
               {card.latest_dispatch_result_summary}
             </div>
           )}
@@ -328,7 +328,7 @@ function OpsCardRow({ card, t, onAction }: {
             href={card.github_issue_url}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-[10px] shrink-0 hover:underline"
+            className="text-xs shrink-0 hover:underline"
             style={{ color: "#93c5fd" }}
           >
             #{card.github_issue_number}
@@ -341,7 +341,7 @@ function OpsCardRow({ card, t, onAction }: {
             <button
               type="button"
               onClick={() => onAction(card.id, "retry")}
-              className="text-[10px] px-2 py-0.5 rounded-md font-medium transition-colors hover:brightness-110"
+              className="text-xs px-2 py-0.5 rounded-md font-medium transition-colors hover:brightness-110"
               style={{ color: "#67e8f9", background: "rgba(103,232,249,0.12)", border: "1px solid rgba(103,232,249,0.2)" }}
             >
               {t({ ko: "재시도", en: "Retry", ja: "再試行", zh: "重试" })}
@@ -349,7 +349,7 @@ function OpsCardRow({ card, t, onAction }: {
             <button
               type="button"
               onClick={() => onAction(card.id, "ready")}
-              className="text-[10px] px-2 py-0.5 rounded-md font-medium transition-colors hover:brightness-110"
+              className="text-xs px-2 py-0.5 rounded-md font-medium transition-colors hover:brightness-110"
               style={{ color: "#a5b4fc", background: "rgba(165,180,252,0.12)", border: "1px solid rgba(165,180,252,0.2)" }}
             >
               {t({ ko: "Ready로", en: "To Ready", ja: "Readyへ", zh: "重置Ready" })}
@@ -359,7 +359,7 @@ function OpsCardRow({ card, t, onAction }: {
         <button
           type="button"
           onClick={() => onAction(card.id, "done")}
-          className="text-[10px] px-2 py-0.5 rounded-md font-medium transition-colors hover:brightness-110"
+          className="text-xs px-2 py-0.5 rounded-md font-medium transition-colors hover:brightness-110"
           style={{ color: "#86efac", background: "rgba(134,239,172,0.12)", border: "1px solid rgba(134,239,172,0.2)" }}
         >
           {t({ ko: "Done", en: "Done", ja: "Done", zh: "完成" })}
@@ -410,7 +410,7 @@ export function MachineStatusWidget({ t }: MachineStatusWidgetProps) {
                 <span
                   className={`w-2 h-2 rounded-full ${m.online ? "bg-emerald-400" : "bg-red-400 animate-pulse"}`}
                 />
-                <span className="text-[10px]" style={{ color: m.online ? "#34d399" : "#f87171" }}>
+                <span className="text-xs" style={{ color: m.online ? "#34d399" : "#f87171" }}>
                   {m.online
                     ? t({ ko: "온라인", en: "Online", ja: "オンライン", zh: "在线" })
                     : t({ ko: "오프라인", en: "Offline", ja: "オフライン", zh: "离线" })}
@@ -475,11 +475,11 @@ export function HeatmapWidget({ agents, t }: HeatmapWidgetProps) {
         })}
       </div>
       <div className="flex justify-between mt-1">
-        <span className="text-[9px]" style={{ color: "var(--th-text-muted)" }}>0h</span>
-        <span className="text-[9px]" style={{ color: "var(--th-text-muted)" }}>6h</span>
-        <span className="text-[9px]" style={{ color: "var(--th-text-muted)" }}>12h</span>
-        <span className="text-[9px]" style={{ color: "var(--th-text-muted)" }}>18h</span>
-        <span className="text-[9px]" style={{ color: "var(--th-text-muted)" }}>24h</span>
+        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>0h</span>
+        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>6h</span>
+        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>12h</span>
+        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>18h</span>
+        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>24h</span>
       </div>
     </div>
   );
@@ -513,7 +513,7 @@ export function CronTimelineWidget({ t }: CronTimelineWidgetProps) {
         <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
           {t({ ko: "크론잡 타임라인", en: "Cron Timeline", ja: "クロンタイムライン", zh: "定时任务时间线" })}
         </h3>
-        <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+        <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
           {enabledJobs.length} {t({ ko: "활성", en: "active", ja: "アクティブ", zh: "活跃" })}
         </span>
       </div>
@@ -540,10 +540,10 @@ export function CronTimelineWidget({ t }: CronTimelineWidgetProps) {
                   className={`w-2 h-2 rounded-full shrink-0 ${isOk ? "bg-emerald-400" : "bg-amber-400"}`}
                 />
                 <div className="flex-1 min-w-0">
-                  <div className="text-[11px] font-medium truncate" style={{ color: "var(--th-text)" }}>
+                  <div className="text-xs font-medium truncate" style={{ color: "var(--th-text)" }}>
                     {job.description_ko || job.name}
                   </div>
-                  <div className="text-[10px] flex gap-2" style={{ color: "var(--th-text-muted)" }}>
+                  <div className="text-xs flex gap-2" style={{ color: "var(--th-text-muted)" }}>
                     <span>{job.agentId}</span>
                     {lastRun && (
                       <span>
@@ -554,7 +554,7 @@ export function CronTimelineWidget({ t }: CronTimelineWidgetProps) {
                 </div>
                 {nextRun && (
                   <span
-                    className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                    className="text-xs px-1.5 py-0.5 rounded shrink-0"
                     style={{
                       background: isOverdue ? "rgba(239,68,68,0.15)" : "rgba(99,102,241,0.15)",
                       color: isOverdue ? "#f87171" : "#a5b4fc",
@@ -602,15 +602,15 @@ export function StreakWidget({ agents, t }: StreakWidgetProps) {
       <div className="text-2xl font-bold" style={{ color: "var(--th-text)" }}>
         {workingCount}
       </div>
-      <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+      <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
         {t({ ko: "현재 가동 중", en: "Currently Active", ja: "現在稼働中", zh: "当前活跃" })}
       </div>
       {topStreak && topStreak.streak > 1 && (
-        <div className="text-[10px] mt-2" style={{ color: "#f97316" }}>
+        <div className="text-xs mt-2" style={{ color: "#f97316" }}>
           🏅 {topStreak.avatar_emoji} {topStreak.name} — {topStreak.streak}{t({ ko: "일 연속", en: "d streak", ja: "日連続", zh: "天连续" })}
         </div>
       )}
-      <div className="text-[10px] mt-1" style={{ color: "var(--th-text-muted)" }}>
+      <div className="text-xs mt-1" style={{ color: "var(--th-text-muted)" }}>
         {t({ ko: "총 XP", en: "Total XP", ja: "合計XP", zh: "总XP" })}: {totalXp.toLocaleString()}
       </div>
     </div>
@@ -655,10 +655,10 @@ export function AchievementWidget({ t }: AchievementWidgetProps) {
           >
             <span className="text-base">{badgeIcon[ach.type] || "🎯"}</span>
             <div className="flex-1 min-w-0">
-              <div className="text-[11px] font-medium truncate" style={{ color: "var(--th-text)" }}>
+              <div className="text-xs font-medium truncate" style={{ color: "var(--th-text)" }}>
                 {ach.avatar_emoji} {ach.agent_name_ko || ach.agent_name}
               </div>
-              <div className="text-[9px]" style={{ color: "var(--th-text-muted)" }}>
+              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                 {ach.name} — {ach.description}
               </div>
             </div>
@@ -695,10 +695,10 @@ export function MvpWidget({ agents, t, isKo }: MvpWidgetProps) {
       <div className="text-lg font-bold" style={{ color: "var(--th-text)" }}>
         {mvp.avatar_emoji} {mvp.alias || mvp.name_ko || mvp.name}
       </div>
-      <div className="text-[11px] mt-1" style={{ color: "#eab308" }}>
+      <div className="text-xs mt-1" style={{ color: "#eab308" }}>
         Lv.{lvInfo.level} {title}
       </div>
-      <div className="text-[10px] mt-0.5" style={{ color: "var(--th-text-muted)" }}>
+      <div className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
         {mvp.stats_xp.toLocaleString()} XP — {t({ ko: "최다 XP", en: "Top XP", ja: "最多XP", zh: "最多XP" })}
       </div>
     </div>
@@ -800,13 +800,13 @@ export function ActivityFeedWidget({ agents, t }: ActivityFeedWidgetProps) {
             >
               <span className="text-sm">{evt.agent_emoji}</span>
               <div className="flex-1 min-w-0">
-                <div className="text-[11px] truncate" style={{ color: "var(--th-text)" }}>
+                <div className="text-xs truncate" style={{ color: "var(--th-text)" }}>
                   <span className="font-medium">{evt.agent_name}</span>
                   <span className="mx-1" style={{ color: "var(--th-text-muted)" }}>·</span>
                   {evt.description}
                 </div>
               </div>
-              <span className="text-[9px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
+              <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
                 {new Date(evt.time).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
               </span>
             </div>
@@ -864,10 +864,10 @@ export function SkillTrendWidget({ t }: SkillTrendWidgetProps) {
       <div className="flex justify-between mt-1">
         {days.length > 0 && (
           <>
-            <span className="text-[9px]" style={{ color: "var(--th-text-muted)" }}>
+            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
               {days[0].slice(5)}
             </span>
-            <span className="text-[9px]" style={{ color: "var(--th-text-muted)" }}>
+            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
               {days[days.length - 1].slice(5)}
             </span>
           </>

@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::org_schema_path;
-use super::settings::{PeerAgentInfo, RoleBinding};
+use super::settings::{MemoryConfigOverride, PeerAgentInfo, RoleBinding, resolve_memory_settings};
 use crate::services::provider::ProviderKind;
 
 // ─── YAML Schema Types ──────────────────────────────────────────────────────
@@ -23,6 +23,7 @@ pub(super) struct OrgSchema {
     /// `{prompts_root}/agents/{role_id}/IDENTITY.md` if not explicitly specified.
     pub prompts_root: Option<String>,
     /// Root directory for skill files (e.g. "$AGENTDESK_ROOT_DIR/skills").
+    #[allow(dead_code)]
     pub skills_root: Option<String>,
     pub agents: HashMap<String, AgentDef>,
     pub channels: Option<ChannelsConfig>,
@@ -39,6 +40,8 @@ pub(super) struct AgentDef {
     pub model: Option<String>,
     pub workspace: Option<String>,
     pub peer_agents: Option<bool>,
+    #[serde(default)]
+    pub memory: Option<MemoryConfigOverride>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +57,8 @@ pub(super) struct ChannelBinding {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub peer_agents: Option<bool>,
+    #[serde(default)]
+    pub memory: Option<MemoryConfigOverride>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,6 +182,7 @@ pub(super) fn resolve_role_binding(
         .peer_agents
         .or(agent_def.peer_agents)
         .unwrap_or(true);
+    let memory = resolve_memory_settings(agent_def.memory.as_ref(), ch_binding.memory.as_ref());
 
     // Explicit prompt_file > auto-derived from prompts_root > empty
     let prompt_file = agent_def
@@ -198,6 +204,7 @@ pub(super) fn resolve_role_binding(
         model,
         reasoning_effort: None,
         peer_agents_enabled,
+        memory,
     })
 }
 
@@ -236,6 +243,7 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
 }
 
 /// Return the configured skills_root path (expanded).
+#[allow(dead_code)]
 pub(super) fn load_skills_root() -> Option<String> {
     let schema = load_org_schema()?;
     schema.skills_root.as_deref().map(expand_tilde)
@@ -352,7 +360,7 @@ mod tests {
     where
         F: FnOnce(&TempDir),
     {
-        let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let _guard = super::super::runtime_store::lock_test_env();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join(".adk");
         fs::create_dir_all(&root).unwrap();
@@ -480,6 +488,54 @@ channels:
 
             let binding = resolve_role_binding(ChannelId::new(1488022491992424448), None).unwrap();
             assert!(!binding.peer_agents_enabled);
+        });
+    }
+
+    #[test]
+    fn test_channel_binding_memory_overrides_agent_memory_defaults() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_org_yaml(
+                temp_home.path(),
+                r#"
+version: 1
+agents:
+  spark:
+    display_name: "Spark"
+    prompt_file: "~/prompts/spark.md"
+    memory:
+      backend: mem0
+      recall_timeout_ms: 900
+      capture_timeout_ms: 7000
+      mem0:
+        profile: default
+        ingestion:
+          infer: false
+channels:
+  by_id:
+    "1488022491992424448":
+      agent: spark
+      memory:
+        recall_timeout_ms: 50
+        mem0:
+          profile: strict
+          ingestion:
+            custom_instructions: "Prefer high-confidence facts"
+"#,
+            );
+
+            let binding = resolve_role_binding(ChannelId::new(1488022491992424448), None).unwrap();
+            assert_eq!(
+                binding.memory.backend,
+                super::super::settings::MemoryBackendKind::Mem0
+            );
+            assert_eq!(binding.memory.recall_timeout_ms, 100);
+            assert_eq!(binding.memory.capture_timeout_ms, 7000);
+            assert_eq!(binding.memory.mem0.profile, "strict");
+            assert_eq!(binding.memory.mem0.ingestion.infer, Some(false));
+            assert_eq!(
+                binding.memory.mem0.ingestion.custom_instructions.as_deref(),
+                Some("Prefer high-confidence facts")
+            );
         });
     }
 

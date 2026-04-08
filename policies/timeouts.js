@@ -16,7 +16,10 @@
  * [J] Failed 디스패치 자동 재시도 (30초 쿨다운, ~60초 cadence, 최대 10회 + 즉시 Discord 알림)
  * [I] 턴 데드락 감지 + 자동 복구 (15분 주기, 최대 3회 연장 후 강제 중단 + 재디스패치)
  * [K] 고아 디스패치 복구 (5분) — in_progress 카드 + pending 디스패치 + 활성 세션 없음 → review 전이
+ * [L] Inflight 장시간 턴 감지 (#130) — heartbeat와 독립, started_at 기반 15/30/60/120분 단계별 알림
  * [M] Workspace branch 보호 (5분) — 메인 repo가 wt/* 브랜치로 이탈하면 자동 복구 (#181)
+ * [N] Orphan review 자동 복구 (1분) — review 상태인데 활성 review 계열 dispatch가 없으면 pending_decision
+ * [O] Idle session TTL cleanup (5분) — idle 60분 tmux-backed 세션 force-kill + notify
  */
 
 // Send notification via notify bot (system alerts, not agent communication)
@@ -55,6 +58,10 @@ function getTimeoutInterval(key, fallbackMinutes) {
   var val = parseInt(agentdesk.config.get(key), 10);
   if (!val || val <= 0) val = fallbackMinutes;
   return "-" + val + " minutes";
+}
+
+function latestCardActivityExpr(cardAlias, dispatchAlias) {
+  return "MAX(COALESCE(" + dispatchAlias + ".created_at, ''), COALESCE(" + cardAlias + ".updated_at, ''), COALESCE(" + cardAlias + ".started_at, ''))";
 }
 
 // #231: PM Decision notification dedup — durable kv_meta buffer.
@@ -294,7 +301,7 @@ var timeouts = {
           [rc.id]
         );
         agentdesk.log.warn("[timeout] Card " + rc.id + " " + aInitial + " timeout → " + aPending + " (" + MAX_DISPATCH_RETRIES + " retries exhausted)");
-        // #231: Queue deduped PM notification
+        // #231: Queue deduped PM notification — PM must decide next action
         var cardInfo = agentdesk.db.query(
           "SELECT title FROM kanban_cards WHERE id = ?",
           [rc.id]
@@ -314,7 +321,9 @@ var timeouts = {
     var bBlocked = bForce.length > 1 ? bForce[1] : bForce[0];
     var inProgressInterval = getTimeoutInterval("in_progress_stale_min", 120);
     var staleInProgress = agentdesk.db.query(
-      "SELECT id FROM kanban_cards WHERE status = ? AND started_at IS NOT NULL AND started_at < datetime('now', '" + inProgressInterval + "')",
+      "SELECT kc.id FROM kanban_cards kc " +
+      "LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id " +
+      "WHERE kc.status = ? AND " + latestCardActivityExpr("kc", "td") + " < datetime('now', '" + inProgressInterval + "')",
       [bInProgress]
     );
     for (var j = 0; j < staleInProgress.length; j++) {
@@ -325,7 +334,7 @@ var timeouts = {
         [staleInProgress[j].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " " + bInProgress + " stale → " + bBlocked);
-      // #231: Queue deduped PM notification
+      // #231: Queue deduped PM notification — PM must unblock
       var stalledInfo = agentdesk.db.query(
         "SELECT title FROM kanban_cards WHERE id = ?",
         [staleInProgress[j].id]
@@ -360,7 +369,7 @@ var timeouts = {
       // #117: sync canonical review state
       agentdesk.reviewState.sync(staleReviews[k].card_id, "idle");
       agentdesk.log.warn("[timeout] Stale review → pending_decision: card " + staleReviews[k].card_id);
-      // #231: Queue deduped PM notification
+      // #231: Queue deduped PM notification — PM must decide
       var staleRevInfo = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [staleReviews[k].card_id]);
       var staleRevTitle = (staleRevInfo.length > 0) ? staleRevInfo[0].title : staleReviews[k].card_id;
       _queuePMDecision(staleReviews[k].card_id, staleRevTitle, "stale review — dispatch 완료 30분+ verdict 없음 → pending_decision");
@@ -743,77 +752,38 @@ var timeouts = {
         agentdesk.log.warn("[deadlock] Session " + sess.session_key +
           " — max extensions (" + MAX_EXTENSIONS + ") reached. Force cancelling + re-dispatch.");
 
-        // 1) agentdesk.session.kill로 tmux 세션 강제 종료
-        var killResult = JSON.parse(agentdesk.session.kill(sess.session_key));
-        if (killResult.ok) {
-          agentdesk.log.info("[deadlock] Killed tmux session: " + sess.session_key);
-        } else {
-          // kill 실패 — tmux 세션이 이미 죽어있는지 확인
-          var tmuxName = sess.session_key.split(":").pop() || sess.session_key;
-          var tmuxExists = false;
-          try {
-            var checkResult = agentdesk.exec("tmux", JSON.stringify(["has-session", "-t", tmuxName]));
-            tmuxExists = (checkResult && checkResult.indexOf("error") === -1);
-          } catch(e) {
-            tmuxExists = false;
-          }
-          if (tmuxExists) {
-            // tmux 세션이 살아있으면 worker가 아직 동작 중 — 건너뜀
-            agentdesk.log.warn("[deadlock] tmux kill failed but session alive, skipping re-dispatch: " + killResult.error);
+        // 1) authoritative force-kill API로 tmux 종료 + inflight cleanup + dispatch fail/retry 일원화
+        var forceKillResp = null;
+        try {
+          var apiPort = agentdesk.config.get("server_port");
+          if (!apiPort) {
+            agentdesk.log.error("[deadlock] server_port missing — cannot call force-kill API");
             continue;
           }
-          // tmux 세션이 없으면 고아 상태 — disconnected 전환 + 재디스패치 진행
-          agentdesk.log.warn("[deadlock] tmux session gone (orphan), proceeding with cleanup: " + tmuxName);
+          var forceKillUrl = "http://127.0.0.1:" + apiPort +
+            "/api/sessions/" + encodeURIComponent(sess.session_key) + "/force-kill";
+          forceKillResp = agentdesk.http.post(forceKillUrl, { retry: true });
+        } catch (e) {
+          agentdesk.log.error("[deadlock] force-kill API exception for " + sess.session_key + ": " + e);
+          continue;
         }
 
-        // 2) 세션 상태 disconnected (last_heartbeat는 원본 유지 — 인위적 덮어쓰기 방지)
-        agentdesk.db.execute(
-          "UPDATE sessions SET status = 'disconnected' WHERE session_key = ?",
-          [sess.session_key]
-        );
+        if (!forceKillResp || !forceKillResp.ok) {
+          agentdesk.log.error("[deadlock] force-kill API failed for " + sess.session_key + ": " + JSON.stringify(forceKillResp));
+          continue;
+        }
 
-        // 3) 현재 디스패치 실패 + 재디스패치
-        var redispatched = false;
-        if (sess.active_dispatch_id) {
-          // 먼저 현재 상태 확인 — 이미 completed/failed면 재디스패치 불필요
-          var dispInfo = agentdesk.db.query(
-            "SELECT kanban_card_id, to_agent_id, dispatch_type, title, status " +
-            "FROM task_dispatches WHERE id = ?",
-            [sess.active_dispatch_id]
-          );
+        if (forceKillResp.tmux_killed) {
+          agentdesk.log.info("[deadlock] Killed tmux session via API: " + sess.session_key);
+        } else {
+          agentdesk.log.warn("[deadlock] tmux already gone or kill no-op for " + sess.session_key);
+        }
 
-          if (dispInfo.length > 0 && (dispInfo[0].status === "pending" || dispInfo[0].status === "dispatched")) {
-            var di = dispInfo[0];
-            var dlResult = agentdesk.dispatch.markFailed(sess.active_dispatch_id, "Deadlock auto-recovery: " + totalMin + "min timeout");
-            if (dlResult.rows_affected === 0) {
-              agentdesk.log.info("[deadlock] Dispatch " + sess.active_dispatch_id + " already terminal, skipping");
-              continue;
-            }
-
-            try {
-              agentdesk.dispatch.create(
-                di.kanban_card_id,
-                di.to_agent_id,
-                di.dispatch_type || "implementation",
-                "[Retry] " + (di.title || "deadlock recovery")
-              );
-              redispatched = true;
-              agentdesk.log.info("[deadlock] Re-dispatched card " +
-                di.kanban_card_id + " → " + di.to_agent_id);
-            } catch (e) {
-              // 재디스패치 실패 시 PMD 판단으로 이관
-              agentdesk.kanban.setStatus(di.kanban_card_id, iPending);
-              agentdesk.db.execute(
-                "UPDATE kanban_cards SET blocked_reason = ? WHERE id = ?",
-                ["Deadlock recovery re-dispatch failed: " + e, di.kanban_card_id]
-              );
-              agentdesk.log.error("[deadlock] Re-dispatch failed for " +
-                di.kanban_card_id + ": " + e + " → pending_decision");
-            }
-          } else if (dispInfo.length > 0) {
-            agentdesk.log.info("[deadlock] Dispatch " + sess.active_dispatch_id +
-              " already " + dispInfo[0].status + " — skip re-dispatch");
-          }
+        var redispatched = !!forceKillResp.retry_dispatch_id;
+        if (redispatched) {
+          agentdesk.log.info("[deadlock] Retry dispatch created: " + forceKillResp.retry_dispatch_id);
+        } else if (forceKillResp.queue_activation_requested) {
+          agentdesk.log.info("[deadlock] No retry dispatch created — requested auto-queue activation for agent " + sess.agent_id);
         }
 
         // 4) Deadlock-manager 알림 (announce 봇)
@@ -828,7 +798,9 @@ var timeouts = {
         // 5) Termination audit
         try {
           var probeInfo = "agent=" + sess.agent_id + " extensions=" + extensions + "/" + MAX_EXTENSIONS +
-            " last_heartbeat=" + sess.last_heartbeat + " kill_ok=" + (killResult.ok || false);
+            " last_heartbeat=" + sess.last_heartbeat +
+            " kill_ok=" + (!!forceKillResp.tmux_killed) +
+            " inflight_cleared=" + (!!forceKillResp.inflight_cleared);
           agentdesk.db.execute(
             "INSERT INTO session_termination_events (session_key, dispatch_id, killer_component, reason_code, reason_text, probe_snapshot, tmux_alive) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [sess.session_key, sess.active_dispatch_id || null, "deadlock_policy", "deadlock_timeout",
@@ -844,6 +816,7 @@ var timeouts = {
              session_key: sess.session_key,
              agent_id: sess.agent_id,
              dispatch_id: sess.active_dispatch_id,
+             retry_dispatch_id: forceKillResp.retry_dispatch_id || null,
              extensions: extensions,
              action: redispatched ? "force_cancel_and_redispatch" : "force_cancel_only",
              ts: new Date().toISOString()
@@ -926,8 +899,43 @@ var timeouts = {
     );
     for (var op = 0; op < orphanedDispatches.length; op++) {
       var od = orphanedDispatches[op];
+      var beforeCard = agentdesk.db.query(
+        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = ?",
+        [od.kanban_card_id]
+      );
+      if (beforeCard.length === 0 ||
+          beforeCard[0].status !== kInProgress ||
+          beforeCard[0].latest_dispatch_id !== od.dispatch_id) {
+        agentdesk.log.warn("[orphan-recovery] Skip stale orphan candidate " + od.dispatch_id +
+          " — card moved to status=" + ((beforeCard.length > 0 && beforeCard[0].status) || "?") +
+          " latest_dispatch_id=" + ((beforeCard.length > 0 && beforeCard[0].latest_dispatch_id) || "null"));
+        continue;
+      }
+
       // 1) Dispatch를 completed로 마크
-      agentdesk.dispatch.markCompleted(od.dispatch_id, '{"auto_completed":true,"completion_source":"orphan_recovery"}');
+      var markCompletedResult = agentdesk.dispatch.markCompleted(
+        od.dispatch_id,
+        '{"auto_completed":true,"completion_source":"orphan_recovery"}'
+      );
+      if (!markCompletedResult || markCompletedResult.rows_affected === 0) {
+        agentdesk.log.warn("[orphan-recovery] Skip " + od.dispatch_id +
+          " — dispatch already terminal or cleanup won the race");
+        continue;
+      }
+
+      var currentCard = agentdesk.db.query(
+        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = ?",
+        [od.kanban_card_id]
+      );
+      if (currentCard.length === 0 ||
+          currentCard[0].status !== kInProgress ||
+          currentCard[0].latest_dispatch_id !== od.dispatch_id) {
+        agentdesk.log.warn("[orphan-recovery] Skip post-complete transition for " + od.dispatch_id +
+          " — card moved to status=" + ((currentCard.length > 0 && currentCard[0].status) || "?") +
+          " latest_dispatch_id=" + ((currentCard.length > 0 && currentCard[0].latest_dispatch_id) || "null"));
+        continue;
+      }
+
       // 2) Card를 review로 전이 → OnReviewEnter 훅이 review dispatch를 생성
       agentdesk.kanban.setStatus(od.kanban_card_id, kReview);
       agentdesk.log.warn("[orphan-recovery] Completed orphaned dispatch " + od.dispatch_id +
@@ -950,6 +958,8 @@ var timeouts = {
   },
 
   _section_L: function() {
+    // ─── [L] Inflight 장시간 턴 감지 (#130) ──────────────────
+    // heartbeat와 독립 — inflight 파일의 started_at 기반 단계별 알림.
     // Prevents alarm fatigue while still notifying at key thresholds.
     var ALERT_THRESHOLDS = [15, 30, 60, 120]; // minutes
     try {
@@ -973,8 +983,28 @@ var timeouts = {
         var lastTier = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [tierKey]);
         var lastAlertedTier = lastTier.length > 0 ? parseInt(lastTier[0].value, 10) : -1;
         if (currentTier <= lastAlertedTier) continue; // already alerted at this tier or higher
+        // Resolve agent_id: prefer dispatch target, fallback to channel owner (#130)
+        var agentId = "?";
+        if (inf.dispatch_id) {
+          var dispRow = agentdesk.db.query(
+            "SELECT to_agent_id FROM task_dispatches WHERE id = ? LIMIT 1",
+            [inf.dispatch_id]
+          );
+          if (dispRow.length > 0 && dispRow[0].to_agent_id) {
+            agentId = dispRow[0].to_agent_id;
+          }
+        }
+        if (agentId === "?") {
+          // #304: search all channel columns for reverse lookup
+          var agentRows = agentdesk.db.query(
+            "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? OR discord_channel_cc = ? OR discord_channel_cdx = ? LIMIT 1",
+            [inf.channel_id, inf.channel_id, inf.channel_id, inf.channel_id]
+          );
+          if (agentRows.length > 0) agentId = agentRows[0].id;
+        }
         sendDeadlockAlert(
           "⚠️ [장시간 턴] " + (inf.channel_name || inf.channel_id) + "\n" +
+          "agent_id: " + agentId + "\n" +
           "session_key: " + (inf.session_key || "?") + "\n" +
           "dispatch_id: " + (inf.dispatch_id || "?") + "\n" +
           "tmux: " + (inf.tmux_session_name || "?") + "\n" +
@@ -1076,7 +1106,8 @@ var timeouts = {
   },
 
   // ─── [N] Orphan review — review 상태인데 dispatch가 없는 카드 자동 복구 ──
-  // 패턴: card.status=review, review_entered_at > 5분 전, pending/dispatched review dispatch 0건
+  // 패턴: card.status=review, review_entered_at > 5분 전, pending/dispatched
+  // review/review-decision/e2e-test dispatch 0건
   // 원인: force-transition 후 dispatch 누락, dispatch 생성 중 에러, race condition 등
   // 복구: in_progress → review 재진입으로 OnReviewEnter 훅이 dispatch를 생성하도록 유도
   _section_N: function() {
@@ -1095,11 +1126,30 @@ var timeouts = {
       "AND NOT EXISTS (" +
       "  SELECT 1 FROM task_dispatches td " +
       "  WHERE td.kanban_card_id = kc.id " +
-      "  AND td.dispatch_type IN ('review', 'review-decision') " +
+      "  AND td.dispatch_type IN ('review', 'review-decision', 'e2e-test') " +
       "  AND td.status IN ('pending', 'dispatched')" +
       ")",
       [nReview]
     );
+
+    var protectedE2EReviews = agentdesk.db.query(
+      "SELECT kc.id, kc.title, kc.github_issue_number, td.id AS dispatch_id, td.status AS dispatch_status " +
+      "FROM kanban_cards kc " +
+      "JOIN task_dispatches td ON td.kanban_card_id = kc.id " +
+      "WHERE kc.status = ? " +
+      "AND kc.review_entered_at IS NOT NULL " +
+      "AND kc.review_entered_at < datetime('now', '-5 minutes') " +
+      "AND td.dispatch_type = 'e2e-test' " +
+      "AND td.status IN ('pending', 'dispatched')",
+      [nReview]
+    );
+
+    for (var p = 0; p < protectedE2EReviews.length; p++) {
+      var pc = protectedE2EReviews[p];
+      agentdesk.log.info("[timeout] Orphan review guard: card " + pc.id +
+        " (#" + (pc.github_issue_number || "?") + ") keeps review state because e2e-test dispatch " +
+        pc.dispatch_id + " is still " + pc.dispatch_status);
+    }
 
     // Orphan review = review state with no active dispatch after 5 min.
     // Instead of reimplementing OnReviewEnter safeguards, escalate to
@@ -1117,21 +1167,25 @@ var timeouts = {
       agentdesk.kanban.setReviewStatus(oc.id, null, {suggestion_pending_at: null});
       agentdesk.reviewState.sync(oc.id, "idle");
 
-      // #231: Queue deduped PM notification
+      // #231: Queue deduped PM notification — PM must decide
       _queuePMDecision(oc.id, (oc.title || oc.id), "orphan review — dispatch 없음 → pending_decision");
     }
   },
 
-  // ─── [I] 컨텍스트 윈도우 자동 관리 ─────────────────────
-  // onTick에서 세션 토큰 사용량을 모니터링하고 compact/clear 자동 호출
-  onContextCheck: function() {
-    var CONTEXT_WINDOW = 1000000; // 1M tokens
-    var compactPercent = parseInt(agentdesk.config.get("context_compact_percent") || "60", 10);
-    var clearPercent = parseInt(agentdesk.config.get("context_clear_percent") || "40", 10);
-    var clearIdleMin = parseInt(agentdesk.config.get("context_clear_idle_minutes") || "60", 10);
+  // ─── [O] Idle session TTL cleanup — idle 60분 tmux-backed 세션 force-kill ──
+  _section_O: function() {
+    var apiPort = agentdesk.config.get("server_port");
+    if (!apiPort) {
+      agentdesk.log.error("[idle-kill] server_port missing — cannot call force-kill API");
+      return;
+    }
 
     var sessions = agentdesk.db.query(
-      "SELECT session_key, agent_id, tokens, status, last_heartbeat, provider FROM sessions WHERE status IN ('idle', 'working')"
+      "SELECT session_key, agent_id, provider, COALESCE(last_heartbeat, created_at) AS last_seen_at " +
+      "FROM sessions " +
+      "WHERE status = 'idle' " +
+      "AND provider IN ('claude', 'codex', 'qwen') " +
+      "AND COALESCE(last_heartbeat, created_at) < datetime('now', '-60 minutes')"
     );
 
     var now = Date.now();
@@ -1140,70 +1194,42 @@ var timeouts = {
       var s = sessions[i];
       if (!s.session_key) continue;
 
-      // Skip non-Claude sessions
-      var provider = s.provider || "claude";
-      if (provider !== "claude") continue;
+      var lastSeenMs = s.last_seen_at ? new Date(s.last_seen_at).getTime() : NaN;
+      var idleMin = isNaN(lastSeenMs) ? 60 : Math.max(60, Math.round((now - lastSeenMs) / 60000));
 
-      // Skip working sessions — turn-end handler in tmux watcher handles compact
-      if (s.status === "working") continue;
-
-      // Check cooldown (5 min) to avoid spamming commands
-      var cooldownKey = "context_action_" + s.session_key;
-      var lastAction = agentdesk.db.query(
-        "SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]
-      );
-      if (lastAction.length > 0) {
-        var lastMs = parseInt(lastAction[0].value, 10);
-        if (now - lastMs < 300000) continue; // 5 min cooldown
+      var forceKillResp = null;
+      try {
+        var forceKillUrl = "http://127.0.0.1:" + apiPort +
+          "/api/sessions/" + encodeURIComponent(s.session_key) + "/force-kill";
+        forceKillResp = agentdesk.http.post(forceKillUrl, { retry: false });
+      } catch (e) {
+        agentdesk.log.error("[idle-kill] force-kill API exception for " + s.session_key + ": " + e);
+        continue;
       }
 
-      // Use DB tokens directly — updated from result events by tmux watcher/turn_bridge
-      var pct = (s.tokens / CONTEXT_WINDOW) * 100;
-
-      // Compact: >= compactPercent
-      if (pct >= compactPercent) {
-        var result = JSON.parse(agentdesk.session.sendCommand(s.session_key, "/compact"));
-        if (result.ok) {
-          agentdesk.log.info("[context] Auto-compact: " + s.session_key + " (" + Math.round(pct) + "%)");
-          agentdesk.db.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-            [cooldownKey, "" + now]
-          );
-          // Discord notification
-          var agent = agentdesk.db.query("SELECT discord_channel_id FROM agents WHERE id = ?", [s.agent_id]);
-          if (agent.length > 0 && agent[0].discord_channel_id) {
-            sendNotifyAlert(
-              "channel:" + agent[0].discord_channel_id,
-              "⚡ 컨텍스트 자동 compact 실행 (" + Math.round(pct) + "% → " + s.session_key + ")"
-            );
-          }
-        }
-        continue; // Don't also clear in same tick
+      if (!forceKillResp || !forceKillResp.ok) {
+        agentdesk.log.error("[idle-kill] force-kill API failed for " + s.session_key + ": " + JSON.stringify(forceKillResp));
+        continue;
       }
 
-      // Clear: >= clearPercent AND idle for clearIdleMin
-      if (pct >= clearPercent && s.last_heartbeat) {
-        var lastHb = new Date(s.last_heartbeat).getTime();
-        var idleMs = now - lastHb;
-        var idleMin = idleMs / 60000;
+      if (!forceKillResp.tmux_killed) {
+        agentdesk.log.warn("[idle-kill] force-kill API succeeded but tmux was already gone for " + s.session_key);
+        continue;
+      }
 
-        if (idleMin >= clearIdleMin) {
-          var result2 = JSON.parse(agentdesk.session.sendCommand(s.session_key, "/clear"));
-          if (result2.ok) {
-            agentdesk.log.info("[context] Auto-clear: " + s.session_key + " (" + Math.round(pct) + "%, idle " + Math.round(idleMin) + "min)");
-            agentdesk.db.execute(
-              "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-              [cooldownKey, "" + now]
-            );
-            var agent2 = agentdesk.db.query("SELECT discord_channel_id FROM agents WHERE id = ?", [s.agent_id]);
-            if (agent2.length > 0 && agent2[0].discord_channel_id) {
-              sendNotifyAlert(
-                "channel:" + agent2[0].discord_channel_id,
-                "🧹 컨텍스트 자동 clear 실행 (" + Math.round(pct) + "%, idle " + Math.round(idleMin) + "분 → " + s.session_key + ")"
-              );
-            }
-          }
-        }
+      agentdesk.log.info("[idle-kill] Killed idle session after " + idleMin + "min: " + s.session_key);
+
+      var primaryChannel = s.agent_id ? agentdesk.agents.resolvePrimaryChannel(s.agent_id) : null;
+      var notifyTarget = primaryChannel ? ("channel:" + primaryChannel) : getPMDChannel();
+      if (notifyTarget) {
+        sendNotifyAlert(
+          notifyTarget,
+          "💤 [Idle 세션 자동 종료] " + (s.agent_id || "unknown-agent") + "\n" +
+          "provider: `" + (s.provider || "unknown") + "`\n" +
+          "session_key: `" + s.session_key + "`\n" +
+          "idle: `" + idleMin + "분`\n" +
+          "원인: idle 60분 경과 → tmux kill"
+        );
       }
     }
   }
@@ -1249,7 +1275,7 @@ timeouts.onTick1min = function(ev) {
   agentdesk.log.debug("[tick1min] total " + (Date.now() - start) + "ms");
 };
 
-// 5min tier: [R] [B] [F] [G] [H] [ctx] + TTL cleanup (non-critical reconciliation)
+// 5min tier: [R] [B] [F] [G] [H] [M] [O] + TTL cleanup (non-critical reconciliation)
 // [I] moved to 30s tier for critical-path isolation (#127)
 timeouts.onTick5min = function(ev) {
   var start = Date.now();
@@ -1272,11 +1298,8 @@ timeouts.onTick5min = function(ev) {
   agentdesk.log.debug("[tick5min][H] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_M(); } catch(e) { agentdesk.log.warn("[tick5min] M error: " + e); }
   agentdesk.log.debug("[tick5min][M] " + (Date.now() - t) + "ms");
-  // DISABLED — token counting unreliable (double-count, stale after /clear). Re-enable after fix.
-  // if (timeouts.onContextCheck) {
-  //   t = Date.now(); try { timeouts.onContextCheck(); } catch(e) { agentdesk.log.warn("[tick5min] ctx error: " + e); }
-  //   agentdesk.log.debug("[tick5min][ctx] " + (Date.now() - t) + "ms");
-  // }
+  t = Date.now(); try { timeouts._section_O(); } catch(e) { agentdesk.log.warn("[tick5min] O error: " + e); }
+  agentdesk.log.debug("[tick5min][O] " + (Date.now() - t) + "ms");
   agentdesk.log.debug("[tick5min] total " + (Date.now() - start) + "ms");
 };
 

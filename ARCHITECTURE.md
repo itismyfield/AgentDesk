@@ -10,6 +10,9 @@ src/
 ├── config.rs                      # Parses agentdesk.yaml
 ├── credential.rs                  # Credential storage
 ├── kanban.rs                      # Kanban state machine helpers
+├── reconcile.rs                   # Boot-time state reconciler
+├── pipeline.rs                    # Pipeline routing and orchestration
+├── receipt.rs                     # Receipt/log handling
 ├── error.rs                       # Error types
 │
 ├── cli/                           # CLI subcommands
@@ -23,22 +26,38 @@ src/
 ├── db/                            # SQLite database
 │   ├── mod.rs                     # DB init (WAL mode, foreign keys)
 │   ├── schema.rs                  # Migrations (versioned)
-│   └── agents.rs                  # Agent SQL queries
+│   ├── agents.rs                  # Agent SQL queries
+│   └── session_transcripts.rs     # Session transcript storage
 │
 ├── server/                        # Axum HTTP server
 │   ├── mod.rs                     # Server boot, router assembly, 3-tier tick loop
 │   ├── ws.rs                      # WebSocket broadcast
 │   └── routes/                    # 30+ route modules (see API section)
+│       ├── dispatches/            # Task dispatch API (split from dispatches.rs)
+│       │   ├── crud.rs            # Dispatch CRUD operations
+│       │   ├── discord_delivery.rs # Discord channel delivery routing
+│       │   ├── outbox.rs          # Dispatch notification outbox
+│       │   ├── thread_reuse.rs    # Thread reuse logic
+│       │   └── tests.rs          
+│       └── review_verdict/        # Review verdict API (split from review_verdict.rs)
+│           ├── decision_route.rs  # Review-decision accept/dispute
+│           ├── verdict_route.rs   # Review pass/reject
+│           ├── tuning_aggregate.rs # Tuning outcome aggregation
+│           └── tests.rs          
 │
 ├── engine/                        # QuickJS policy engine
 │   ├── mod.rs                     # JS runtime init, hook execution
 │   ├── ops.rs                     # Rust↔JS bridge (~30 functions)
 │   ├── hooks.rs                   # 10 lifecycle hook definitions (7 event + 3 tiered tick)
+│   ├── transition.rs              # State transition logic
+│   ├── intent.rs                  # Intent parsing
 │   └── loader.rs                  # File watcher + hot-reload
 │
 ├── services/                      # Core service layer
 │   ├── claude.rs                  # Claude provider (streaming, tool exec)
 │   ├── codex.rs                   # Codex provider
+│   ├── gemini.rs                  # Gemini provider
+│   ├── qwen.rs                    # Qwen provider
 │   ├── provider.rs                # ProviderKind enum, session name construction
 │   ├── provider_exec.rs           # Provider execution dispatcher
 │   ├── session_backend.rs         # ProcessBackend — session spawn via child process
@@ -46,6 +65,7 @@ src/
 │   ├── tmux_diagnostics.rs        # Exit reason tracking, death diagnostics
 │   ├── tmux_wrapper.rs            # Claude process wrapper (--tmux-wrapper)
 │   ├── codex_tmux_wrapper.rs      # Codex process wrapper
+│   ├── qwen_tmux_wrapper.rs       # Qwen process wrapper
 │   ├── process.rs                 # Process list/kill (for /ps command)
 │   ├── remote_stub.rs             # Remote provider stub
 │   │
@@ -57,12 +77,24 @@ src/
 │   │
 │   └── discord/                   # Discord bot (see dedicated section below)
 │       ├── mod.rs                 # SharedData, bot boot, event handler
-│       ├── router.rs              # Message routing, intake dedup, mention filter
-│       ├── turn_bridge.rs         # Agent turn lifecycle, heartbeat, watchdog
+│       ├── router/                # Message routing (split from router.rs)
+│       │   ├── message_handler.rs # Core message processing
+│       │   ├── intake_gate.rs     # Intake dedup, dispatch guard, drain mode
+│       │   ├── thread_binding.rs  # Thread binding resolution
+│       │   └── tests.rs          
+│       ├── turn_bridge/           # Agent turn lifecycle (split from turn_bridge.rs)
+│       │   ├── mod.rs             # Turn dispatch, dequeue, lifecycle
+│       │   ├── completion_guard.rs # Turn completion guard
+│       │   ├── context_window.rs  # Context window management
+│       │   ├── retry_state.rs     # Retry state tracking
+│       │   ├── stale_resume.rs    # Stale session resume
+│       │   ├── tmux_runtime.rs    # Tmux runtime helpers
+│       │   └── tests.rs          
 │       ├── tmux.rs                # Session output watcher, orphan cleanup
 │       ├── recovery.rs            # Inflight turn recovery after restart
 │       ├── health.rs              # Health registry, agent heartbeat HTTP server
 │       ├── meeting.rs             # Round-table meetings
+│       ├── model_catalog.rs       # Provider model catalog
 │       ├── handoff.rs             # Agent handoff logic
 │       ├── inflight.rs            # Inflight message tracking
 │       ├── metrics.rs             # Performance metrics
@@ -96,6 +128,9 @@ policies/                          # JS policy files (hot-reloadable)
 ├── auto-queue.js                  # Auto-queuing + dispatch
 ├── review-automation.js           # Review automation
 ├── timeouts.js                    # Timeout detection
+├── deploy-pipeline.js             # Deployment pipeline
+├── merge-automation.js            # Merge automation rules
+├── ci-recovery.js                 # CI pipeline recovery
 ├── pipeline.js                    # Pipeline routing
 └── triage-rules.js                # Issue triage
 
@@ -125,7 +160,7 @@ Message received → discord/router.rs (intake_message)
         → tmux_wrapper.rs — actual Claude CLI execution
 ```
 
-**Key files:** `discord/router.rs` → `discord/turn_bridge.rs` → `claude.rs`
+**Key files:** `discord/router/message_handler.rs` → `discord/turn_bridge/mod.rs` → `claude.rs` / `codex.rs` / `gemini.rs` / `qwen.rs`
 
 ### "Session died / no response"
 
@@ -179,19 +214,33 @@ dcserver mode:  cli/dcserver.rs → standalone Discord bot
 
 ## Discord Bot Internals
 
-`src/services/discord/` — full bot logic.
+`src/services/discord/` — full bot logic. Total ~28,000 lines.
+
+### Core Files
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `mod.rs` | ~2500 | SharedData struct, bot boot, event handler |
-| `router.rs` | ~2300 | Message routing — intake, dedup, mention filtering |
-| `turn_bridge.rs` | ~900 | Agent turn management — spawn, cancel, stream output |
-| `tmux.rs` | ~1000 | Session lifecycle — output watcher, orphan cleanup, kill |
-| `recovery.rs` | ~650 | Post-restart recovery — inflight turn restoration |
-| `health.rs` | ~700 | Health registry, agent heartbeat HTTP server |
-| `meeting.rs` | ~400 | Round-table meeting orchestration |
-| `prompt_builder.rs` | ~300 | Prompt construction with org context |
-| `handoff.rs` | ~200 | Agent-to-agent handoff |
+| `mod.rs` | ~3,500 | SharedData struct, bot boot, event handler |
+| `tmux.rs` | ~2,270 | Session lifecycle — output watcher, orphan cleanup, kill |
+| `meeting.rs` | ~1,700 | Round-table meeting orchestration |
+| `recovery.rs` | ~1,570 | Post-restart recovery — inflight turn restoration |
+| `settings.rs` | ~1,530 | Per-channel settings |
+| `formatting.rs` | ~1,180 | Discord message formatting |
+| `model_catalog.rs` | ~1,080 | Provider model catalog |
+| `health.rs` | ~720 | Health registry, agent heartbeat HTTP server |
+| `org_schema.rs` | ~710 | Organization schema management |
+| `adk_session.rs` | ~700 | ADK session handling |
+| `prompt_builder.rs` | ~480 | Prompt construction with org context |
+| `restart_report.rs` | ~480 | Crash report formatting |
+| `handoff.rs` | ~260 | Agent-to-agent handoff |
+
+### Split Modules (from #159 epic)
+
+| Module | Files | Total Lines | Purpose |
+|--------|-------|-------------|---------|
+| `router/` | 5 | ~3,530 | Message routing — intake, dedup, dispatch guard, drain |
+| `turn_bridge/` | 8 | ~3,300 | Agent turn lifecycle — spawn, cancel, completion, watchdog |
+| `commands/` | 11 | ~3,570 | Slash commands (see table below) |
 
 ### Slash Commands
 
@@ -296,7 +345,10 @@ Lower number runs first:
 |----------|--------|------|
 | 10 | kanban-rules.js | Card transition rules, PM gate |
 | 50 | review-automation.js | Review automation |
+| 60 | merge-automation.js | Merge automation rules |
 | 100 | timeouts.js | Timeout detection |
+| 150 | ci-recovery.js | CI pipeline recovery |
+| 200 | deploy-pipeline.js | Deployment pipeline |
 | 200 | pipeline.js | Pipeline stages |
 | 300 | triage-rules.js | Auto-triage |
 | 500 | auto-queue.js | Auto-queuing |

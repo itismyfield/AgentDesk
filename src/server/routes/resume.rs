@@ -280,7 +280,7 @@ fn resume_from_requested(
     card_id: &str,
     agent_id: &str,
     card_title: &str,
-    latest_dispatch_id: &Option<String>,
+    _latest_dispatch_id: &Option<String>,
 ) -> Result<serde_json::Value, String> {
     cancel_and_clear(state, card_id)?;
     let dispatch = create_and_notify(
@@ -526,7 +526,7 @@ fn resume_from_pending_decision(
     }
 
     // Look at the most recent completed dispatch to determine what to resume with
-    let (last_dispatch_type, last_dispatch_id): (Option<String>, Option<String>) = {
+    let (last_dispatch_type, _last_dispatch_id): (Option<String>, Option<String>) = {
         let conn = state.db.lock().map_err(|e| format!("{e}"))?;
         conn.query_row(
             "SELECT dispatch_type, id FROM task_dispatches \
@@ -707,7 +707,7 @@ fn resume_from_blocked(
     agent_id: &str,
     card_title: &str,
     force: bool,
-    latest_dispatch_id: &Option<String>,
+    _latest_dispatch_id: &Option<String>,
 ) -> Result<serde_json::Value, String> {
     if !force {
         return Err("blocked requires force=true to resume".to_string());

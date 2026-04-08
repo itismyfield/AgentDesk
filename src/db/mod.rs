@@ -1,5 +1,6 @@
 pub mod agents;
 pub(crate) mod schema;
+pub mod session_transcripts;
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -61,6 +62,7 @@ pub fn test_db() -> Db {
 /// Wrap a raw Connection into a Db (for tests and migration).
 /// Uses a named shared in-memory URI so that `separate_conn()` and `read_conn()`
 /// can open additional connections to the same in-memory database.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn wrap_conn(conn: Connection) -> Db {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);

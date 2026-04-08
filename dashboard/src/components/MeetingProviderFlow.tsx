@@ -114,19 +114,19 @@ export default function MeetingProviderFlow({
       border: "1px solid rgba(148,163,184,0.14)",
     }}>
       {!compact && (
-        <span className="text-[10px] font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+        <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
           Provider Flow
         </span>
       )}
       <ProviderChip label={primary.label} bg={primary.bg} color={primary.color} border={primary.border} />
-      <span className="text-[10px] font-semibold" style={{ color: "var(--th-text-muted)" }}>
+      <span className="text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
         {t({ ko: "초안/최종", en: "draft/final" })}
       </span>
-      <span className="text-[10px] font-semibold px-1" style={{ color: "var(--th-text-muted)" }}>
+      <span className="text-xs font-semibold px-1" style={{ color: "var(--th-text-muted)" }}>
         →
       </span>
       <ProviderChip label={reviewer.label} bg={reviewer.bg} color={reviewer.color} border={reviewer.border} />
-      <span className="text-[10px] font-semibold" style={{ color: "var(--th-text-muted)" }}>
+      <span className="text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
         {t({ ko: "비판 검토", en: "critique" })}
       </span>
     </div>
@@ -146,7 +146,7 @@ function ProviderChip({
 }) {
   return (
     <span
-      className="text-[10px] px-2 py-0.5 rounded-full font-semibold"
+      className="text-xs px-2 py-0.5 rounded-full font-semibold"
       style={{ background: bg, color, border: `1px solid ${border}` }}
     >
       {label}

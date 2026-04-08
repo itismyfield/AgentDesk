@@ -1,7 +1,8 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use serde::Deserialize;
 use serenity::ChannelId;
 use sha2::{Digest, Sha256};
 
@@ -64,16 +65,255 @@ fn find_bot_settings_entry<'a>(
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct RoleBinding {
+pub(crate) struct RoleBinding {
     pub role_id: String,
     pub prompt_file: String,
     pub provider: Option<ProviderKind>,
     /// Optional model override (e.g. "opus", "sonnet", "haiku", "o3")
     pub model: Option<String>,
     /// Optional reasoning effort for Codex (e.g. "low", "normal", "high", "xhigh")
+    #[allow(dead_code)]
     pub reasoning_effort: Option<String>,
     /// Whether this role may see peer-agent handoff guidance in the system prompt.
     pub peer_agents_enabled: bool,
+    pub memory: ResolvedMemorySettings,
+}
+
+const DEFAULT_MEMORY_RECALL_TIMEOUT_MS: u64 = 500;
+const DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 5_000;
+const MIN_MEMORY_RECALL_TIMEOUT_MS: u64 = 100;
+const MAX_MEMORY_RECALL_TIMEOUT_MS: u64 = 2_000;
+const MIN_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 500;
+const MAX_MEMORY_CAPTURE_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_MEM0_PROFILE: &str = "default";
+const KNOWN_MEM0_PROFILES: &[&str] = &["default", "strict"];
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct MemoryConfigOverride {
+    pub backend: Option<String>,
+    pub recall_timeout_ms: Option<u64>,
+    pub capture_timeout_ms: Option<u64>,
+    pub mem0: Option<Mem0ConfigOverride>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct Mem0ConfigOverride {
+    pub profile: Option<String>,
+    pub ingestion: Option<Mem0IngestionConfigOverride>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub(crate) struct Mem0IngestionConfigOverride {
+    pub infer: Option<bool>,
+    pub custom_instructions: Option<String>,
+    pub confidence_threshold: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MemoryBackendKind {
+    #[default]
+    Local,
+    Mem0,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Mem0IngestionSettings {
+    pub infer: Option<bool>,
+    pub custom_instructions: Option<String>,
+    pub confidence_threshold: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Mem0ResolvedSettings {
+    pub profile: String,
+    pub ingestion: Mem0IngestionSettings,
+}
+
+impl Default for Mem0ResolvedSettings {
+    fn default() -> Self {
+        Self {
+            profile: DEFAULT_MEM0_PROFILE.to_string(),
+            ingestion: Mem0IngestionSettings::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ResolvedMemorySettings {
+    pub backend: MemoryBackendKind,
+    pub recall_timeout_ms: u64,
+    pub capture_timeout_ms: u64,
+    pub mem0: Mem0ResolvedSettings,
+}
+
+impl Default for ResolvedMemorySettings {
+    fn default() -> Self {
+        Self {
+            backend: MemoryBackendKind::Local,
+            recall_timeout_ms: DEFAULT_MEMORY_RECALL_TIMEOUT_MS,
+            capture_timeout_ms: DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS,
+            mem0: Mem0ResolvedSettings::default(),
+        }
+    }
+}
+
+fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u64 {
+    let clamped = value.clamp(min, max);
+    if value != clamped {
+        eprintln!(
+            "  [memory] Warning: {name}={} is out of range; clamping to {clamped}",
+            value
+        );
+    }
+    if clamped == 0 { default } else { clamped }
+}
+
+fn resolve_memory_backend(raw: Option<&str>) -> MemoryBackendKind {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => MemoryBackendKind::Local,
+        Some(value) if value.eq_ignore_ascii_case("local") => MemoryBackendKind::Local,
+        Some(value) if value.eq_ignore_ascii_case("mem0") => MemoryBackendKind::Mem0,
+        Some(value) => {
+            eprintln!(
+                "  [memory] Warning: unknown memory.backend '{value}', falling back to local"
+            );
+            MemoryBackendKind::Local
+        }
+    }
+}
+
+fn resolve_mem0_profile(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => DEFAULT_MEM0_PROFILE.to_string(),
+        Some(value)
+            if KNOWN_MEM0_PROFILES
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(value)) =>
+        {
+            value.to_ascii_lowercase()
+        }
+        Some(value) => {
+            eprintln!(
+                "  [memory] Warning: unknown memory.mem0.profile '{value}', falling back to {DEFAULT_MEM0_PROFILE}"
+            );
+            DEFAULT_MEM0_PROFILE.to_string()
+        }
+    }
+}
+
+fn resolve_confidence_threshold(raw: Option<f64>) -> Option<f64> {
+    match raw {
+        Some(value) if (0.0..=1.0).contains(&value) => Some(value),
+        Some(value) => {
+            eprintln!(
+                "  [memory] Warning: memory.mem0.ingestion.confidence_threshold={} is invalid; dropping override",
+                value
+            );
+            None
+        }
+        None => None,
+    }
+}
+
+fn merge_mem0_config(
+    base: Option<&Mem0ConfigOverride>,
+    override_cfg: Option<&Mem0ConfigOverride>,
+) -> Mem0ConfigOverride {
+    let base_ingestion = base.and_then(|cfg| cfg.ingestion.as_ref());
+    let override_ingestion = override_cfg.and_then(|cfg| cfg.ingestion.as_ref());
+    Mem0ConfigOverride {
+        profile: override_cfg
+            .and_then(|cfg| cfg.profile.clone())
+            .or_else(|| base.and_then(|cfg| cfg.profile.clone())),
+        ingestion: Some(Mem0IngestionConfigOverride {
+            infer: override_ingestion
+                .and_then(|cfg| cfg.infer)
+                .or_else(|| base_ingestion.and_then(|cfg| cfg.infer)),
+            custom_instructions: override_ingestion
+                .and_then(|cfg| cfg.custom_instructions.clone())
+                .or_else(|| base_ingestion.and_then(|cfg| cfg.custom_instructions.clone())),
+            confidence_threshold: override_ingestion
+                .and_then(|cfg| cfg.confidence_threshold)
+                .or_else(|| base_ingestion.and_then(|cfg| cfg.confidence_threshold)),
+        }),
+    }
+}
+
+fn merge_memory_config(
+    base: Option<&MemoryConfigOverride>,
+    override_cfg: Option<&MemoryConfigOverride>,
+) -> MemoryConfigOverride {
+    MemoryConfigOverride {
+        backend: override_cfg
+            .and_then(|cfg| cfg.backend.clone())
+            .or_else(|| base.and_then(|cfg| cfg.backend.clone())),
+        recall_timeout_ms: override_cfg
+            .and_then(|cfg| cfg.recall_timeout_ms)
+            .or_else(|| base.and_then(|cfg| cfg.recall_timeout_ms)),
+        capture_timeout_ms: override_cfg
+            .and_then(|cfg| cfg.capture_timeout_ms)
+            .or_else(|| base.and_then(|cfg| cfg.capture_timeout_ms)),
+        mem0: Some(merge_mem0_config(
+            base.and_then(|cfg| cfg.mem0.as_ref()),
+            override_cfg.and_then(|cfg| cfg.mem0.as_ref()),
+        )),
+    }
+}
+
+pub(crate) fn resolve_memory_settings(
+    base: Option<&MemoryConfigOverride>,
+    override_cfg: Option<&MemoryConfigOverride>,
+) -> ResolvedMemorySettings {
+    let merged = merge_memory_config(base, override_cfg);
+    let mem0_override = merged.mem0.as_ref();
+    ResolvedMemorySettings {
+        backend: resolve_memory_backend(merged.backend.as_deref()),
+        recall_timeout_ms: clamp_timeout(
+            "memory.recall_timeout_ms",
+            merged
+                .recall_timeout_ms
+                .unwrap_or(DEFAULT_MEMORY_RECALL_TIMEOUT_MS),
+            MIN_MEMORY_RECALL_TIMEOUT_MS,
+            MAX_MEMORY_RECALL_TIMEOUT_MS,
+            DEFAULT_MEMORY_RECALL_TIMEOUT_MS,
+        ),
+        capture_timeout_ms: clamp_timeout(
+            "memory.capture_timeout_ms",
+            merged
+                .capture_timeout_ms
+                .unwrap_or(DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS),
+            MIN_MEMORY_CAPTURE_TIMEOUT_MS,
+            MAX_MEMORY_CAPTURE_TIMEOUT_MS,
+            DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS,
+        ),
+        mem0: Mem0ResolvedSettings {
+            profile: resolve_mem0_profile(mem0_override.and_then(|cfg| cfg.profile.as_deref())),
+            ingestion: Mem0IngestionSettings {
+                infer: mem0_override
+                    .and_then(|cfg| cfg.ingestion.as_ref())
+                    .and_then(|cfg| cfg.infer),
+                custom_instructions: mem0_override
+                    .and_then(|cfg| cfg.ingestion.as_ref())
+                    .and_then(|cfg| cfg.custom_instructions.clone()),
+                confidence_threshold: resolve_confidence_threshold(
+                    mem0_override
+                        .and_then(|cfg| cfg.ingestion.as_ref())
+                        .and_then(|cfg| cfg.confidence_threshold),
+                ),
+            },
+        },
+    }
+}
+
+pub(crate) fn memory_settings_for_binding(
+    role_binding: Option<&RoleBinding>,
+) -> ResolvedMemorySettings {
+    role_binding
+        .map(|binding| binding.memory.clone())
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,7 +482,14 @@ pub(super) fn resolve_workspace(
 }
 
 pub(super) fn load_role_prompt(binding: &RoleBinding) -> Option<String> {
-    let raw = fs::read_to_string(Path::new(&binding.prompt_file)).ok()?;
+    let prompt_path = Path::new(&binding.prompt_file);
+    let raw = fs::read_to_string(prompt_path)
+        .or_else(|_| {
+            legacy_prompt_fallback_path(prompt_path)
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+                .and_then(fs::read_to_string)
+        })
+        .ok()?;
     const MAX_CHARS: usize = 12_000;
     if raw.chars().count() <= MAX_CHARS {
         return Some(raw);
@@ -251,21 +498,45 @@ pub(super) fn load_role_prompt(binding: &RoleBinding) -> Option<String> {
     Some(truncated)
 }
 
-/// Build a catalog of long-term memory files for a given role.
-/// Scans $AGENTDESK_ROOT_DIR/role-context/{role_id}.memory/ for .md files and extracts
-/// name + description from YAML frontmatter (or first heading as fallback).
-/// Returns None if directory doesn't exist or has no .md files.
-pub(super) fn load_longterm_memory_catalog(role_id: &str) -> Option<String> {
-    let root = super::runtime_store::agentdesk_root()?;
-    let memory_dir = root
-        .join("role-context")
-        .join(format!("{}.memory", role_id));
-    if !memory_dir.is_dir() {
-        return None;
+fn legacy_prompt_fallback_path(path: &Path) -> Option<PathBuf> {
+    let mut rewritten = PathBuf::new();
+    let mut replaced = false;
+
+    for component in path.components() {
+        match component {
+            Component::Normal(name) if name == "role-context" => {
+                rewritten.push("agents");
+                replaced = true;
+            }
+            other => rewritten.push(other.as_os_str()),
+        }
     }
 
+    replaced.then_some(rewritten)
+}
+
+/// Build a catalog of long-term memory files for a given role.
+/// Scans config/memories/long-term/{role_id}/ for .md files and extracts
+/// name + description from YAML frontmatter (or first heading as fallback).
+/// Returns None if directory doesn't exist or has no .md files.
+pub(crate) fn load_longterm_memory_catalog(role_id: &str) -> Option<String> {
+    let memory_dir = super::runtime_store::long_term_memory_root()?.join(role_id);
+    if !memory_dir.is_dir() {
+        let root = super::runtime_store::agentdesk_root()?;
+        let legacy_dir = root
+            .join("role-context")
+            .join(format!("{}.memory", role_id));
+        if !legacy_dir.is_dir() {
+            return None;
+        }
+        return load_longterm_memory_catalog_from_dir(&legacy_dir);
+    }
+    load_longterm_memory_catalog_from_dir(&memory_dir)
+}
+
+fn load_longterm_memory_catalog_from_dir(memory_dir: &std::path::Path) -> Option<String> {
     let mut entries: Vec<(String, String)> = Vec::new();
-    let Ok(read_dir) = std::fs::read_dir(&memory_dir) else {
+    let Ok(read_dir) = std::fs::read_dir(memory_dir) else {
         return None;
     };
 
@@ -329,6 +600,34 @@ fn extract_first_heading(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn parse_boolish_config_value(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+pub(super) fn load_narrate_progress(db: Option<&crate::db::Db>) -> bool {
+    let Some(db) = db else {
+        return true;
+    };
+    let Ok(conn) = db.read_conn() else {
+        return true;
+    };
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = 'narrate_progress'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    value
+        .as_deref()
+        .and_then(parse_boolish_config_value)
+        .unwrap_or(true)
 }
 
 /// Load the shared agent prompt (e.g. AGENTS.md) configured in org.yaml or role_map.json.
@@ -729,15 +1028,16 @@ mod tests {
     use super::{
         BotChannelRoutingGuardFailure, bot_settings_allow_agent, bot_settings_allow_channel,
         channel_supports_provider, discord_token_hash, load_bot_settings,
-        load_discord_bot_launch_configs, load_peer_agents, render_peer_agent_guidance,
-        resolve_role_binding, save_bot_settings, validate_bot_channel_routing,
+        load_discord_bot_launch_configs, load_narrate_progress, load_peer_agents,
+        render_peer_agent_guidance, resolve_memory_settings, resolve_role_binding,
+        save_bot_settings, validate_bot_channel_routing,
     };
 
     fn with_temp_home<F>(f: F)
     where
         F: FnOnce(&TempDir),
     {
-        let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let _guard = super::super::runtime_store::lock_test_env();
         let temp_home = TempDir::new().unwrap();
         let root = temp_home.path().join(".adk");
         fs::create_dir_all(&root).unwrap();
@@ -782,6 +1082,60 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_memory_settings_defaults_to_local_and_code_defaults() {
+        let resolved = resolve_memory_settings(None, None);
+        assert_eq!(resolved.backend, super::MemoryBackendKind::Local);
+        assert_eq!(resolved.recall_timeout_ms, 500);
+        assert_eq!(resolved.capture_timeout_ms, 5_000);
+        assert_eq!(resolved.mem0.profile, "default");
+        assert!(resolved.mem0.ingestion.infer.is_none());
+        assert!(resolved.mem0.ingestion.custom_instructions.is_none());
+        assert!(resolved.mem0.ingestion.confidence_threshold.is_none());
+    }
+
+    #[test]
+    fn test_resolve_memory_settings_applies_override_and_clamps_values() {
+        let agent = super::MemoryConfigOverride {
+            backend: Some("mem0".to_string()),
+            recall_timeout_ms: Some(50),
+            capture_timeout_ms: Some(60_000),
+            mem0: Some(super::Mem0ConfigOverride {
+                profile: Some("strict".to_string()),
+                ingestion: Some(super::Mem0IngestionConfigOverride {
+                    infer: Some(true),
+                    custom_instructions: Some("Prefer durable facts".to_string()),
+                    confidence_threshold: Some(0.75),
+                }),
+            }),
+        };
+        let channel = super::MemoryConfigOverride {
+            backend: Some("mem0".to_string()),
+            recall_timeout_ms: Some(5_000),
+            capture_timeout_ms: Some(100),
+            mem0: Some(super::Mem0ConfigOverride {
+                profile: Some("unknown-profile".to_string()),
+                ingestion: Some(super::Mem0IngestionConfigOverride {
+                    infer: None,
+                    custom_instructions: Some("Channel override".to_string()),
+                    confidence_threshold: Some(2.0),
+                }),
+            }),
+        };
+
+        let resolved = resolve_memory_settings(Some(&agent), Some(&channel));
+        assert_eq!(resolved.backend, super::MemoryBackendKind::Mem0);
+        assert_eq!(resolved.recall_timeout_ms, 2_000);
+        assert_eq!(resolved.capture_timeout_ms, 500);
+        assert_eq!(resolved.mem0.profile, "default");
+        assert_eq!(
+            resolved.mem0.ingestion.custom_instructions.as_deref(),
+            Some("Channel override")
+        );
+        assert_eq!(resolved.mem0.ingestion.infer, Some(true));
+        assert_eq!(resolved.mem0.ingestion.confidence_threshold, None);
+    }
+
+    #[test]
     fn test_load_bot_settings_normalizes_and_dedupes_tool_names() {
         with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".adk").join("config");
@@ -806,6 +1160,26 @@ mod tests {
                 vec!["WebFetch".to_string(), "Bash".to_string()]
             );
         });
+    }
+
+    #[test]
+    fn test_load_narrate_progress_defaults_true_without_db() {
+        assert!(load_narrate_progress(None));
+    }
+
+    #[test]
+    fn test_load_narrate_progress_reads_false_from_db() {
+        let db = crate::db::test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('narrate_progress', 'false')",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert!(!load_narrate_progress(Some(&db)));
     }
 
     #[test]
@@ -1349,6 +1723,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
+            memory: Default::default(),
         };
         let spark_binding = super::RoleBinding {
             role_id: "spark".to_string(),
@@ -1357,6 +1732,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
+            memory: Default::default(),
         };
 
         assert!(bot_settings_allow_agent(
@@ -1403,6 +1779,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            memory: Default::default(),
         };
 
         // With a role binding specifying Claude, only Claude should match

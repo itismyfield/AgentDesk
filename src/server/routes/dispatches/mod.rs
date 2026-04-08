@@ -6,10 +6,7 @@ mod tests;
 mod thread_reuse;
 
 // ── Re-exports: CRUD routes ──────────────────────────────────
-pub use crud::{
-    CreateDispatchBody, ListDispatchesQuery, UpdateDispatchBody, cancel_dispatch, create_dispatch,
-    get_dispatch, list_dispatches, update_dispatch,
-};
+pub use crud::{cancel_dispatch, create_dispatch, get_dispatch, list_dispatches, update_dispatch};
 
 // ── Re-exports: Discord delivery ─────────────────────────────
 pub(crate) use discord_delivery::send_dispatch_to_discord;
@@ -17,16 +14,14 @@ pub(crate) use discord_delivery::send_dispatch_to_discord;
 // ── Re-exports: Outbox ───────────────────────────────────────
 pub use outbox::resolve_channel_alias_pub;
 pub(crate) use outbox::use_counter_model_channel;
-pub(crate) use outbox::{
-    OutboxNotifier, RealOutboxNotifier, dispatch_outbox_loop, handle_completed_dispatch_followups,
-    process_outbox_batch, queue_dispatch_followup,
-};
+#[cfg(test)]
+pub(crate) use outbox::{OutboxNotifier, process_outbox_batch};
+pub(crate) use outbox::{dispatch_outbox_loop, queue_dispatch_followup};
 
 // ── Re-exports: Thread reuse ─────────────────────────────────
 pub(super) use thread_reuse::clear_all_threads;
-pub use thread_reuse::{
-    LinkDispatchThreadBody, get_card_thread, get_pending_dispatch_for_thread, link_dispatch_thread,
-};
+pub(crate) use thread_reuse::validate_channel_thread_maps_on_startup;
+pub use thread_reuse::{get_card_thread, get_pending_dispatch_for_thread, link_dispatch_thread};
 
 // ── Shared utilities (used by both discord_delivery and thread_reuse) ──
 

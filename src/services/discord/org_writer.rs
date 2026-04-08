@@ -100,6 +100,7 @@ fn default_org_version() -> u32 {
     1
 }
 
+#[allow(dead_code)]
 pub(crate) fn merge_org_agents(
     runtime_root: &Path,
     updates: &[OrgAgentUpdate],

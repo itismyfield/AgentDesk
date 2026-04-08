@@ -26,6 +26,7 @@ pub struct CreateDispatchBody {
     pub dispatch_type: Option<String>,
     pub title: String,
     pub context: Option<serde_json::Value>,
+    pub skip_outbox: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,8 +240,11 @@ pub async fn create_dispatch(
         .dispatch_type
         .unwrap_or_else(|| "implementation".to_string());
     let context = body.context.unwrap_or(json!({}));
+    let options = dispatch::DispatchCreateOptions {
+        skip_outbox: body.skip_outbox.unwrap_or(false),
+    };
 
-    match dispatch::create_dispatch(
+    match dispatch::create_dispatch_with_options(
         &state.db,
         &state.engine,
         &body.kanban_card_id,
@@ -248,6 +252,7 @@ pub async fn create_dispatch(
         &dispatch_type,
         &body.title,
         &context,
+        options,
     ) {
         Ok(d) => {
             let was_reused = d.get("__reused").and_then(|v| v.as_bool()).unwrap_or(false);

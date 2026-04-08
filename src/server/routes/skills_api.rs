@@ -43,6 +43,10 @@ fn codex_skill_file(path: &Path) -> Option<PathBuf> {
 
 fn sync_skills_from_disk(conn: &rusqlite::Connection) {
     let mut roots = Vec::new();
+    if let Some(runtime_root) = crate::config::runtime_root() {
+        let _ = crate::runtime_layout::sync_managed_skills(&runtime_root);
+        roots.push(crate::runtime_layout::managed_skills_root(&runtime_root));
+    }
     if let Some(home) = dirs::home_dir() {
         roots.push(home.join(".codex").join("skills"));
         roots.push(home.join(".claude").join("commands"));

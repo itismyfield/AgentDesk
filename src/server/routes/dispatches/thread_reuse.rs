@@ -6,6 +6,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::db::agents::{
+    resolve_agent_counter_model_channel_on_conn, resolve_agent_primary_channel_on_conn,
+};
 use crate::server::routes::AppState;
 
 use super::parse_channel_id;
@@ -138,6 +141,220 @@ pub(in crate::server::routes) fn clear_all_threads(conn: &rusqlite::Connection, 
         [card_id],
     )
     .ok();
+}
+
+pub(crate) async fn validate_channel_thread_maps_on_startup(
+    db: &crate::db::Db,
+    token: &str,
+) -> (usize, usize) {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!("[dispatch] failed to build startup thread-map validator client: {e}");
+            return (0, 0);
+        }
+    };
+
+    validate_channel_thread_maps_on_startup_with_base_url(
+        db,
+        &client,
+        token,
+        "https://discord.com/api/v10",
+    )
+    .await
+}
+
+async fn validate_channel_thread_maps_on_startup_with_base_url(
+    db: &crate::db::Db,
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+) -> (usize, usize) {
+    let rows: Vec<(String, String, Option<String>)> = match db.lock() {
+        Ok(conn) => conn
+            .prepare(
+                "SELECT id, channel_thread_map, active_thread_id
+                 FROM kanban_cards
+                 WHERE channel_thread_map IS NOT NULL
+                   AND TRIM(channel_thread_map) != ''
+                   AND TRIM(channel_thread_map) != '{}'",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            })
+            .unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!("[dispatch] startup thread-map validation skipped (db lock): {e}");
+            return (0, 0);
+        }
+    };
+
+    let mut checked = 0usize;
+    let mut cleared = 0usize;
+
+    for (card_id, map_json, active_thread_id) in rows {
+        let Ok(mut map) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&map_json)
+        else {
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "UPDATE kanban_cards SET channel_thread_map = NULL WHERE id = ?1",
+                    [&card_id],
+                )
+                .ok();
+            }
+            cleared += 1;
+            continue;
+        };
+
+        let mut changed = false;
+        let mut removed_active = false;
+        let snapshot: Vec<(String, Option<String>)> = map
+            .iter()
+            .map(|(channel_id, thread_id)| {
+                (
+                    channel_id.clone(),
+                    thread_id.as_str().map(std::string::ToString::to_string),
+                )
+            })
+            .collect();
+
+        for (channel_id_raw, thread_id) in snapshot {
+            checked += 1;
+            let Some(thread_id) = thread_id else {
+                map.remove(&channel_id_raw);
+                changed = true;
+                cleared += 1;
+                continue;
+            };
+            let Ok(expected_parent) = channel_id_raw.parse::<u64>() else {
+                map.remove(&channel_id_raw);
+                changed = true;
+                cleared += 1;
+                if active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                    removed_active = true;
+                }
+                continue;
+            };
+
+            let thread_info_url =
+                format!("{}/channels/{}", base_url.trim_end_matches('/'), thread_id);
+            let response = match client
+                .get(&thread_info_url)
+                .header("Authorization", format!("Bot {}", token))
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    tracing::info!(
+                        "[dispatch] startup thread-map validation clearing {} -> {} after request error: {}",
+                        card_id,
+                        thread_id,
+                        e
+                    );
+                    map.remove(&channel_id_raw);
+                    changed = true;
+                    cleared += 1;
+                    if active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                        removed_active = true;
+                    }
+                    continue;
+                }
+            };
+
+            if !response.status().is_success() {
+                tracing::info!(
+                    "[dispatch] startup thread-map validation clearing {} -> {} after {}",
+                    card_id,
+                    thread_id,
+                    response.status()
+                );
+                map.remove(&channel_id_raw);
+                changed = true;
+                cleared += 1;
+                if active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                    removed_active = true;
+                }
+                continue;
+            }
+
+            let body: serde_json::Value = match response.json().await {
+                Ok(body) => body,
+                Err(e) => {
+                    tracing::info!(
+                        "[dispatch] startup thread-map validation clearing {} -> {} after json error: {}",
+                        card_id,
+                        thread_id,
+                        e
+                    );
+                    map.remove(&channel_id_raw);
+                    changed = true;
+                    cleared += 1;
+                    if active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                        removed_active = true;
+                    }
+                    continue;
+                }
+            };
+
+            let parent_id = body
+                .get("parent_id")
+                .and_then(|value| value.as_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_default();
+
+            if parent_id != expected_parent {
+                tracing::info!(
+                    "[dispatch] startup thread-map validation clearing {} -> {} (parent {} != {})",
+                    card_id,
+                    thread_id,
+                    parent_id,
+                    expected_parent
+                );
+                map.remove(&channel_id_raw);
+                changed = true;
+                cleared += 1;
+                if active_thread_id.as_deref() == Some(thread_id.as_str()) {
+                    removed_active = true;
+                }
+            }
+        }
+
+        if !changed {
+            continue;
+        }
+
+        let new_map = if map.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))
+        };
+        let new_active_thread_id = if removed_active {
+            map.values()
+                .find_map(|value| value.as_str())
+                .map(std::string::ToString::to_string)
+        } else {
+            active_thread_id.clone()
+        };
+
+        if let Ok(conn) = db.lock() {
+            conn.execute(
+                "UPDATE kanban_cards
+                 SET channel_thread_map = ?1,
+                     active_thread_id = ?2
+                 WHERE id = ?3",
+                rusqlite::params![new_map, new_active_thread_id, card_id],
+            )
+            .ok();
+        }
+    }
+
+    (checked, cleared)
 }
 
 /// Try to reuse an existing Discord thread for a dispatch.
@@ -328,6 +545,101 @@ pub(super) async fn try_reuse_thread(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get,
+    };
+    use serde_json::json;
+
+    fn test_db() -> crate::db::Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        crate::db::wrap_conn(conn)
+    }
+
+    async fn spawn_thread_info_server() -> (String, tokio::task::JoinHandle<()>) {
+        async fn channel(Path(thread_id): Path<String>) -> impl IntoResponse {
+            match thread_id.as_str() {
+                "thread-valid" => (
+                    StatusCode::OK,
+                    Json(json!({"id":"thread-valid","parent_id":"111"})),
+                )
+                    .into_response(),
+                "thread-wrong-parent" => (
+                    StatusCode::OK,
+                    Json(json!({"id":"thread-wrong-parent","parent_id":"999"})),
+                )
+                    .into_response(),
+                _ => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+
+        let app = Router::new().route("/channels/{thread_id}", get(channel));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn startup_validation_clears_missing_and_mismatched_thread_bindings() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, priority, channel_thread_map, active_thread_id,
+                    created_at, updated_at
+                ) VALUES (
+                    'card-thread-map-startup', 'Issue #335', 'review', 'medium',
+                    '{\"111\":\"thread-valid\",\"222\":\"thread-missing\",\"333\":\"thread-wrong-parent\"}',
+                    'thread-missing',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let client = reqwest::Client::builder().build().unwrap();
+        let (base_url, server_handle) = spawn_thread_info_server().await;
+        let (checked, cleared) = validate_channel_thread_maps_on_startup_with_base_url(
+            &db,
+            &client,
+            "test-token",
+            &base_url,
+        )
+        .await;
+        server_handle.abort();
+
+        assert_eq!(checked, 3);
+        assert_eq!(cleared, 2);
+
+        let conn = db.lock().unwrap();
+        let (map_json, active_thread_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT channel_thread_map, active_thread_id
+                 FROM kanban_cards
+                 WHERE id = 'card-thread-map-startup'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        let map: serde_json::Value =
+            serde_json::from_str(map_json.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(map["111"], "thread-valid");
+        assert!(map.get("222").is_none());
+        assert!(map.get("333").is_none());
+        assert_eq!(active_thread_id.as_deref(), Some("thread-valid"));
+    }
+}
+
 // ── Route handlers ────────────────────────────────────────────
 
 /// POST /api/internal/link-dispatch-thread
@@ -421,14 +733,12 @@ pub async fn get_card_thread(
         String,
         Option<String>,
         Option<String>,
-        Option<String>,
-        Option<String>,
+        String,
         Option<String>,
     )> = conn
         .query_row(
             "SELECT kc.id, kc.active_thread_id, td.dispatch_type, \
-                    (SELECT a.discord_channel_alt FROM agents a WHERE a.id = td.to_agent_id), \
-                    (SELECT a.discord_channel_id FROM agents a WHERE a.id = td.to_agent_id), \
+                    td.to_agent_id, \
                     td.context \
              FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
@@ -441,25 +751,24 @@ pub async fn get_card_thread(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
-                    row.get(5)?,
                 ))
             },
         )
         .ok();
 
     match result {
-        Some((
-            card_id,
-            _legacy_thread_id,
-            dispatch_type,
-            alt_channel,
-            primary_channel,
-            dispatch_context,
-        )) => {
+        Some((card_id, _legacy_thread_id, dispatch_type, to_agent_id, dispatch_context)) => {
+            let primary_channel = resolve_agent_primary_channel_on_conn(&conn, &to_agent_id)
+                .ok()
+                .flatten();
+            let counter_model_channel =
+                resolve_agent_counter_model_channel_on_conn(&conn, &to_agent_id)
+                    .ok()
+                    .flatten();
             // Determine target channel for this dispatch type
-            let use_alt = matches!(dispatch_type.as_deref(), Some("review"));
+            let use_alt = super::use_counter_model_channel(dispatch_type.as_deref());
             let target_channel = if use_alt {
-                alt_channel.as_deref()
+                counter_model_channel.as_deref()
             } else {
                 primary_channel.as_deref()
             };
@@ -474,7 +783,9 @@ pub async fn get_card_thread(
                     "card_id": card_id,
                     "active_thread_id": thread_id,
                     "dispatch_type": dispatch_type,
-                    "discord_channel_alt": alt_channel,
+                    "discord_channel_id": primary_channel,
+                    "discord_channel_alt": counter_model_channel,
+                    "discord_channel_target": target_channel,
                     "dispatch_context": dispatch_context,
                 })),
             )
@@ -488,9 +799,10 @@ pub async fn get_card_thread(
 
 /// GET /api/internal/pending-dispatch-for-thread?thread_id=xxx
 ///
-/// #222: Look up a pending implementation/rework dispatch whose kanban card
-/// is linked to the given thread channel. Used by turn_bridge as fallback
-/// when parse_dispatch_id(user_text) fails in unified threads.
+/// #222: Look up the latest pending/dispatched dispatch whose kanban card is
+/// linked to the given thread channel. Used by turn_bridge as fallback when
+/// parse_dispatch_id(user_text) fails in unified/reused threads, including
+/// review and review-decision flows.
 pub async fn get_pending_dispatch_for_thread(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -515,23 +827,34 @@ pub async fn get_pending_dispatch_for_thread(
         }
     };
 
-    // Find a pending dispatch whose card is linked to this thread via
-    // channel_thread_map (JSON contains the thread_id) or active_thread_id.
+    // Find the latest pending/dispatched dispatch whose card is linked to this
+    // thread via thread_id (direct match), active_thread_id, or
+    // channel_thread_map JSON values. This must cover review/review-decision
+    // as well as work dispatches because reused threads often omit a fresh
+    // DISPATCH: prefix.
+    //
+    // #355: Use td.thread_id as primary match, and json_each for
+    // channel_thread_map to avoid matching JSON keys (parent channel IDs).
+    // INSTR was matching parent channel IDs, causing thread dispatch
+    // reminders to leak into parent channel turns.
     let dispatch_id: Option<String> = conn
         .query_row(
             "SELECT td.id FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.status IN ('pending', 'dispatched') \
-             AND td.dispatch_type IN ('implementation', 'rework') \
-             AND (kc.active_thread_id = ?1 \
-                  OR INSTR(COALESCE(kc.channel_thread_map, ''), ?1) > 0) \
+             AND (td.thread_id = ?1 \
+                  OR kc.active_thread_id = ?1 \
+                  OR EXISTS(SELECT 1 FROM json_each(kc.channel_thread_map) \
+                            WHERE json_each.value = ?1)) \
              ORDER BY td.created_at DESC LIMIT 1",
             [thread_id],
             |row| row.get(0),
         )
         .ok();
 
-    // Fallback: check unified_thread_id / unified_thread_channel_id in auto_queue_runs
+    // Fallback: check unified_thread_id / unified_thread_channel_id in
+    // auto_queue_runs. These runs only own work dispatches, so keep the
+    // explicit implementation/rework filter here.
     let dispatch_id = dispatch_id.or_else(|| {
         conn.query_row(
             "SELECT td.id FROM task_dispatches td \
@@ -540,8 +863,10 @@ pub async fn get_pending_dispatch_for_thread(
              WHERE td.status IN ('pending', 'dispatched') \
              AND td.dispatch_type IN ('implementation', 'rework') \
              AND r.unified_thread = 1 AND r.status = 'active' \
-             AND (r.unified_thread_channel_id = ?1 \
-                  OR INSTR(COALESCE(r.unified_thread_id, ''), ?1) > 0) \
+             AND (td.thread_id = ?1 \
+                  OR r.unified_thread_channel_id = ?1 \
+                  OR EXISTS(SELECT 1 FROM json_each(r.unified_thread_id) \
+                            WHERE json_each.value = ?1)) \
              ORDER BY td.created_at DESC LIMIT 1",
             [thread_id],
             |row| row.get(0),

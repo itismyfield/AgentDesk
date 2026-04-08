@@ -80,17 +80,9 @@ const ACTIVITY_SOURCE_COLORS: Record<string, string> = {
   idle: "#64748b",
 };
 
-const GENERIC_BINDING_NAMES = new Set(["RoleMap", "Primary", "Alt", "Codex"]);
-
-
 function inferBindingSource(binding: DiscordBinding): string {
   if (binding.channelId.startsWith("dm:")) return "dm";
   if (binding.source) return binding.source;
-  const normalized = (binding.channelName || "").trim().toLowerCase();
-  if (normalized === "rolemap") return "role-map";
-  if (normalized === "primary") return "primary";
-  if (normalized === "alt") return "alt";
-  if (normalized === "codex") return "codex";
   return "channel";
 }
 
@@ -373,6 +365,9 @@ export default function AgentInfoCard({
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${localeName(locale, agent)} — ${tr("직원 상세", "Agent Details")}`}
         className="w-full max-w-lg max-h-[90vh] overflow-y-auto overscroll-contain rounded-2xl shadow-2xl animate-in fade-in zoom-in-95 duration-200"
         style={{
           background: "var(--th-card-bg)",
@@ -415,7 +410,7 @@ export default function AgentInfoCard({
                   onBlur={saveAlias}
                   disabled={savingAlias}
                   placeholder={tr("별명 입력", "Enter alias")}
-                  className="text-[11px] px-1.5 py-0.5 rounded border outline-none"
+                  className="text-xs px-1.5 py-0.5 rounded border outline-none"
                   style={{
                     background: "var(--th-bg-surface)",
                     borderColor: "var(--th-input-border)",
@@ -426,7 +421,7 @@ export default function AgentInfoCard({
               ) : (
                 <button
                   onClick={() => { setAliasValue(agent.alias ?? ""); setEditingAlias(true); }}
-                  className="text-[10px] px-1.5 py-0.5 rounded hover:bg-[var(--th-bg-surface-hover)] transition-colors"
+                  className="text-xs px-1.5 py-0.5 rounded hover:bg-[var(--th-bg-surface-hover)] transition-colors"
                   style={{ color: agent.alias ? "var(--th-text-secondary)" : "var(--th-text-muted)" }}
                   title={tr("별명 편집", "Edit alias")}
                 >
@@ -436,7 +431,7 @@ export default function AgentInfoCard({
             </div>
             <div className="flex items-center gap-2 mt-1.5">
               <span
-                className="text-[10px] px-2 py-0.5 rounded-full font-medium"
+                className="text-xs px-2 py-0.5 rounded-full font-medium"
                 style={{
                   background: agent.status === "working" ? "rgba(16,185,129,0.15)" :
                     agent.status === "break" ? "rgba(245,158,11,0.15)" :
@@ -452,7 +447,7 @@ export default function AgentInfoCard({
               </span>
               {agent.status === "working" && sourceLabel && (
                 <span
-                  className="text-[10px] px-2 py-0.5 rounded-full"
+                  className="text-xs px-2 py-0.5 rounded-full"
                   style={{ background: "rgba(99,102,241,0.18)", color: "#a5b4fc" }}
                 >
                   {sourceLabel}
@@ -460,7 +455,7 @@ export default function AgentInfoCard({
               )}
               {dept && (
                 <span
-                  className="text-[10px] px-2 py-0.5 rounded-full"
+                  className="text-xs px-2 py-0.5 rounded-full"
                   style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
                 >
                   {dept.icon} {localeName(locale, dept)}
@@ -468,7 +463,7 @@ export default function AgentInfoCard({
               )}
               {!dept && (
                 <span
-                  className="text-[10px] px-2 py-0.5 rounded-full"
+                  className="text-xs px-2 py-0.5 rounded-full"
                   style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
                 >
                   {tr("미배정", "Unassigned")}
@@ -478,8 +473,9 @@ export default function AgentInfoCard({
           </div>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors self-start"
+            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors self-start"
             style={{ color: "var(--th-text-muted)" }}
+            aria-label="Close"
           >
             ✕
           </button>
@@ -487,7 +483,7 @@ export default function AgentInfoCard({
 
         <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+            className="text-xs font-semibold uppercase tracking-widest mb-2"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("소속 부서", "Department")}
@@ -511,7 +507,7 @@ export default function AgentInfoCard({
                 </option>
               ))}
             </select>
-            <span className="text-[10px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
+            <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
               {savingDept ? tr("저장 중...", "Saving...") : null}
             </span>
           </div>
@@ -519,7 +515,7 @@ export default function AgentInfoCard({
 
         <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+            className="text-xs font-semibold uppercase tracking-widest mb-2"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("메인 Provider", "Main Provider")}
@@ -541,7 +537,7 @@ export default function AgentInfoCard({
               <option value="gemini">Gemini</option>
               <option value="qwen">Qwen</option>
             </select>
-            <span className="text-[10px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
+            <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
               {savingProvider ? tr("저장 중...", "Saving...") : null}
             </span>
           </div>
@@ -549,7 +545,7 @@ export default function AgentInfoCard({
 
         <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+            className="text-xs font-semibold uppercase tracking-widest mb-2"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("소속 오피스", "Offices")}
@@ -592,14 +588,14 @@ export default function AgentInfoCard({
 
         <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+            className="text-xs font-semibold uppercase tracking-widest mb-2"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("상태 요약", "Status Summary")}
           </div>
           <div className="space-y-2">
             <div className="rounded-xl px-3 py-2" style={{ background: "var(--th-bg-surface)" }}>
-              <div className="text-[10px] mb-1" style={{ color: "var(--th-text-muted)" }}>
+              <div className="text-xs mb-1" style={{ color: "var(--th-text-muted)" }}>
                 {tr("현재 작업", "Current Work")}
               </div>
               <div className="text-xs leading-relaxed" style={{ color: "var(--th-text-primary)" }}>
@@ -609,20 +605,20 @@ export default function AgentInfoCard({
             <div className="flex flex-wrap gap-2">
               {currentWorkElapsedMs != null && (
                 <span
-                  className="text-[10px] px-2 py-1 rounded-lg"
+                  className="text-xs px-2 py-1 rounded-lg"
                   style={{ background: "rgba(59,130,246,0.14)", color: "#93c5fd" }}
                 >
                   {tr("경과", "Elapsed")}: {formatElapsedCompact(currentWorkElapsedMs, isKo)}
                 </span>
               )}
               <span
-                className="text-[10px] px-2 py-1 rounded-lg"
+                className="text-xs px-2 py-1 rounded-lg"
                 style={{ background: "rgba(56,189,248,0.14)", color: "#67e8f9" }}
               >
                 AgentDesk {workingLinkedSessions.length}/{claudeSessions.length}
               </span>
               <span
-                className="text-[10px] px-2 py-1 rounded-lg"
+                className="text-xs px-2 py-1 rounded-lg"
                 style={{ background: "rgba(168,85,247,0.14)", color: "#d8b4fe" }}
               >
                 {tr("DB 경로", "DB routes")}: {dbBindings.length}
@@ -631,7 +627,7 @@ export default function AgentInfoCard({
             {currentWorkDetails.length > 0 && (
               <div className="space-y-1">
                 {currentWorkDetails.map((line, idx) => (
-                  <div key={`${line}:${idx}`} className="text-[11px]" style={{ color: "var(--th-text-secondary)" }}>
+                  <div key={`${line}:${idx}`} className="text-xs" style={{ color: "var(--th-text-secondary)" }}>
                     • {line}
                   </div>
                 ))}
@@ -643,7 +639,7 @@ export default function AgentInfoCard({
         {warnings.length > 0 && (
           <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
             <div
-              className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+              className="text-xs font-semibold uppercase tracking-widest mb-2"
               style={{ color: "var(--th-text-muted)" }}
             >
               {tr("이상 징후", "Warnings")}
@@ -652,7 +648,7 @@ export default function AgentInfoCard({
               {warnings.map((warning) => (
                 <span
                   key={warning.code}
-                  className="text-[10px] px-2 py-1 rounded-lg"
+                  className="text-xs px-2 py-1 rounded-lg"
                   style={{
                     background:
                       warning.severity === "error"
@@ -677,7 +673,7 @@ export default function AgentInfoCard({
 
         <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+            className="text-xs font-semibold uppercase tracking-widest mb-2"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("정본 연결", "Source of Truth")}
@@ -685,7 +681,7 @@ export default function AgentInfoCard({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {sourceOfTruthRows.map((row) => (
               <div key={row.label} className="rounded-xl px-3 py-2" style={{ background: "var(--th-bg-surface)" }}>
-                <div className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                   {row.label}
                 </div>
                 <div className="mt-1 text-xs font-medium break-all" style={{ color: row.tone }}>
@@ -695,7 +691,7 @@ export default function AgentInfoCard({
             ))}
           </div>
           {roleMapBindings.length > 0 && (
-            <div className="mt-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+            <div className="mt-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
               {tr("RoleMap 경로가 있으면 Discord source-of-truth는 role_map 우선으로 봅니다.", "When RoleMap exists, role_map is treated as the Discord source-of-truth.")}
             </div>
           )}
@@ -705,7 +701,7 @@ export default function AgentInfoCard({
         {agent.personality && (
           <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
             <div
-              className="text-[10px] font-semibold uppercase tracking-widest mb-1.5"
+              className="text-xs font-semibold uppercase tracking-widest mb-1.5"
               style={{ color: "var(--th-text-muted)" }}
             >
               {tr("성격", "Personality")}
@@ -723,7 +719,7 @@ export default function AgentInfoCard({
         {agent.session_info && (
           <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
             <div
-              className="text-[10px] font-semibold uppercase tracking-widest mb-1.5"
+              className="text-xs font-semibold uppercase tracking-widest mb-1.5"
               style={{ color: "var(--th-text-muted)" }}
             >
               {tr("현재 작업", "Current Session")}
@@ -741,23 +737,22 @@ export default function AgentInfoCard({
         {discordBindings.length > 0 && (
           <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
             <div
-              className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+              className="text-xs font-semibold uppercase tracking-widest mb-2"
               style={{ color: "var(--th-text-muted)" }}
             >
               {tr("Discord 라우팅", "Discord Routing")} ({discordBindings.length})
             </div>
-            <div className="text-[11px] mb-2" style={{ color: "var(--th-text-muted)" }}>
+            <div className="text-xs mb-2" style={{ color: "var(--th-text-muted)" }}>
               {tr("RoleMap/Primary/Alt/Codex는 이 agent에 연결된 Discord 경로의 source다.", "RoleMap/Primary/Alt/Codex indicate how this agent is wired to Discord.")}
             </div>
             <div className="space-y-1">
               {discordBindings.map((b) => {
                 const source = inferBindingSource(b);
                 const sourceLabel = bindingSourceLabel(source);
-                const title =
-                  b.channelName && !GENERIC_BINDING_NAMES.has(b.channelName)
-                    ? b.channelName
-                    : b.channelId;
-                const subtitle = title === b.channelId ? null : b.channelId;
+                const title = b.channelId;
+                const subtitle = b.counterModelChannelId && b.counterModelChannelId !== b.channelId
+                  ? `counter: ${b.counterModelChannelId}`
+                  : null;
 
                 return (
                   <div
@@ -771,12 +766,12 @@ export default function AgentInfoCard({
                         {title}
                       </div>
                       {subtitle && (
-                        <div className="text-[10px] truncate mt-0.5" style={{ color: "var(--th-text-muted)" }}>
+                        <div className="text-xs truncate mt-0.5" style={{ color: "var(--th-text-muted)" }}>
                           {subtitle}
                         </div>
                       )}
                     </div>
-                    <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ background: "rgba(88,101,242,0.15)", color: "#7289da" }}>
+                    <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: "rgba(88,101,242,0.15)", color: "#7289da" }}>
                       {sourceLabel}
                     </span>
                   </div>
@@ -789,7 +784,7 @@ export default function AgentInfoCard({
         {/* Linked AgentDesk Sessions */}
         <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+            className="text-xs font-semibold uppercase tracking-widest mb-2"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("연결된 AgentDesk 세션", "Linked AgentDesk Sessions")}
@@ -815,13 +810,13 @@ export default function AgentInfoCard({
                     <div className="text-xs font-medium truncate" style={{ color: "var(--th-text-primary)" }}>
                       {s.name || s.session_key}
                     </div>
-                    <div className="text-[10px] truncate mt-0.5" style={{ color: "var(--th-text-muted)" }}>
+                    <div className="text-xs truncate mt-0.5" style={{ color: "var(--th-text-muted)" }}>
                       {s.session_info || s.model || "AgentDesk session"}
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
                     <span
-                      className="text-[10px] px-1.5 py-0.5 rounded"
+                      className="text-xs px-1.5 py-0.5 rounded"
                       style={{
                         background:
                           s.provider === "codex"
@@ -844,7 +839,7 @@ export default function AgentInfoCard({
                       {s.provider === "codex" ? "Codex" : s.provider === "gemini" ? "Gemini" : s.provider === "qwen" ? "Qwen" : "Claude"}
                     </span>
                     <span
-                      className="text-[10px] px-1.5 py-0.5 rounded"
+                      className="text-xs px-1.5 py-0.5 rounded"
                       style={{
                         background: s.status === "working" ? "rgba(16,185,129,0.15)" : "rgba(100,116,139,0.15)",
                         color: s.status === "working" ? "#34d399" : "#94a3b8",
@@ -862,7 +857,7 @@ export default function AgentInfoCard({
         {/* Cron Jobs */}
         <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+            className="text-xs font-semibold uppercase tracking-widest mb-2"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("크론 작업", "Cron Jobs")} {!loadingCron && `(${cronJobs.length})`}
@@ -898,14 +893,14 @@ export default function AgentInfoCard({
                     </div>
                     <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       <span
-                        className="text-[10px] font-mono"
+                        className="text-xs font-mono"
                         style={{ color: "var(--th-text-muted)" }}
                       >
                         {formatSchedule(job.schedule, isKo)}
                       </span>
                       {job.state?.lastRunAtMs && (
                         <span
-                          className="text-[10px]"
+                          className="text-xs"
                           style={{ color: "var(--th-text-muted)" }}
                         >
                           {tr("최근:", "Last:")} {timeAgo(job.state.lastRunAtMs, isKo)}
@@ -916,7 +911,7 @@ export default function AgentInfoCard({
                   </div>
                   {!job.enabled && (
                     <span
-                      className="text-[9px] px-1.5 py-0.5 rounded shrink-0"
+                      className="text-xs px-1.5 py-0.5 rounded shrink-0"
                       style={{ background: "rgba(100,116,139,0.2)", color: "#94a3b8" }}
                     >
                       {tr("비활성", "Off")}
@@ -930,7 +925,7 @@ export default function AgentInfoCard({
 
         <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--th-card-border)" }}>
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+            className="text-xs font-semibold uppercase tracking-widest mb-2"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("최근 변경", "Recent Changes")}
@@ -954,7 +949,7 @@ export default function AgentInfoCard({
                   <div className="text-xs" style={{ color: "var(--th-text-primary)" }}>
                     {log.summary}
                   </div>
-                  <div className="mt-1 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                  <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
                     {log.action} • {timeAgo(log.created_at, isKo)}
                   </div>
                 </div>
@@ -966,7 +961,7 @@ export default function AgentInfoCard({
         {/* Skills */}
         <div className="px-5 py-3">
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-2"
+            className="text-xs font-semibold uppercase tracking-widest mb-2"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("스킬", "Skills")}
@@ -984,7 +979,7 @@ export default function AgentInfoCard({
               {agentSkills.length > 0 && (
                 <div>
                   <div
-                    className="text-[10px] mb-1 font-medium"
+                    className="text-xs mb-1 font-medium"
                     style={{ color: "var(--th-text-secondary)" }}
                   >
                     {tr("전용 스킬", "Agent-specific")}
@@ -993,7 +988,7 @@ export default function AgentInfoCard({
                     {agentSkills.map((skill) => (
                       <span
                         key={skill.name}
-                        className="text-[10px] px-2 py-0.5 rounded-full"
+                        className="text-xs px-2 py-0.5 rounded-full"
                         style={{
                           background: "rgba(99,102,241,0.15)",
                           color: "#a5b4fc",
@@ -1010,18 +1005,18 @@ export default function AgentInfoCard({
                 <div>
                   <button
                     onClick={() => setShowSharedSkills(!showSharedSkills)}
-                    className="text-[10px] font-medium flex items-center gap-1 hover:underline"
+                    className="text-xs font-medium flex items-center gap-1 hover:underline"
                     style={{ color: "var(--th-text-muted)" }}
                   >
                     {tr("공유 스킬", "Shared")} ({sharedSkills.length})
-                    <span className="text-[8px]">{showSharedSkills ? "▲" : "▼"}</span>
+                    <span className="text-xs">{showSharedSkills ? "▲" : "▼"}</span>
                   </button>
                   {showSharedSkills && (
                     <div className="flex flex-wrap gap-1 mt-1">
                       {sharedSkills.map((skill) => (
                         <span
                           key={skill.name}
-                          className="text-[10px] px-2 py-0.5 rounded-full"
+                          className="text-xs px-2 py-0.5 rounded-full"
                           style={{
                             background: "var(--th-bg-surface)",
                             color: "var(--th-text-muted)",
@@ -1051,7 +1046,7 @@ export default function AgentInfoCard({
             return (
               <div className="flex items-center gap-2">
                 <span
-                  className="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0"
+                  className="text-xs font-bold px-2 py-0.5 rounded-full shrink-0"
                   style={{ background: "rgba(99,102,241,0.18)", color: "#a5b4fc" }}
                 >
                   Lv.{lv.level} {title}
@@ -1062,7 +1057,7 @@ export default function AgentInfoCard({
                     style={{ width: `${Math.round(lv.progress * 100)}%`, background: "linear-gradient(90deg, #6366f1, #a78bfa)" }}
                   />
                 </div>
-                <span className="text-[10px] shrink-0" style={{ color: "var(--th-text-muted)" }}>
+                <span className="text-xs shrink-0" style={{ color: "var(--th-text-muted)" }}>
                   {agent.stats_xp} / {lv.nextThreshold === Infinity ? "MAX" : lv.nextThreshold} XP
                 </span>
               </div>
@@ -1093,9 +1088,9 @@ export default function AgentInfoCard({
                       : `${Math.round(evt.duration_ms / 60_000)}m`
                     : null;
                   return (
-                    <div key={`${evt.source}-${evt.id}`} className="flex items-start gap-2 text-[11px]">
+                    <div key={`${evt.source}-${evt.id}`} className="flex items-start gap-2 text-xs">
                       <span
-                        className="shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold mt-0.5"
+                        className="shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-xs font-bold mt-0.5"
                         style={{ backgroundColor: `${sourceColor}22`, color: sourceColor }}
                       >
                         {sourceLabel}
@@ -1122,13 +1117,13 @@ export default function AgentInfoCard({
             <div className="flex items-center gap-2">
               {agent.role_id && (
                 <span
-                  className="text-[10px] font-mono px-1.5 py-0.5 rounded"
+                  className="text-xs font-mono px-1.5 py-0.5 rounded"
                   style={{ background: "var(--th-bg-surface)", color: "var(--th-text-muted)" }}
                 >
                   {agent.role_id}
                 </span>
               )}
-              <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+              <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                 {tr("완료", "Done")} {agent.stats_tasks_done}
               </span>
             </div>

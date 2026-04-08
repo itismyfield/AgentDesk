@@ -196,10 +196,10 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
           onClick={() => setExpanded((prev) => !prev)}
           className="flex items-center gap-1.5 hover:opacity-80 transition-opacity"
         >
-          <span className="text-[10px] sm:text-xs font-bold uppercase tracking-wider" style={{ color: "#f59e0b" }}>
+          <span className="text-xs sm:text-xs font-bold uppercase tracking-wider" style={{ color: "#f59e0b" }}>
             {t({ ko: "토큰 영수증", en: "TOKEN RECEIPT", ja: "トークンレシート", zh: "代币收据" })}
           </span>
-          <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+          <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {expanded ? "▲" : "▼"}
           </span>
           {loading && (
@@ -302,7 +302,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
 
       {expanded && (
         <div
-          className="mt-3 rounded-lg p-3 sm:p-4 font-mono text-[11px] sm:text-xs"
+          className="mt-3 rounded-lg p-3 sm:p-4 font-mono text-xs sm:text-xs"
           style={{
             background: "#fefdf8",
             color: "#1a1a1a",
@@ -400,7 +400,7 @@ export default function ReceiptWidget({ t }: ReceiptWidgetProps) {
           ))}
 
           <hr style={{ border: "none", borderTop: "1px dashed #bbb", margin: "8px 0", opacity: 0.6 }} />
-          <div className="text-center text-[9px]" style={{ color: "#888" }}>Thank you for using AgentDesk!</div>
+          <div className="text-center text-xs" style={{ color: "#888" }}>Thank you for using AgentDesk!</div>
           <div className="text-center text-[12px] mt-1" style={{ color: "#1a1a1a", opacity: 0.2, letterSpacing: 1 }}>
             ||||| || ||| || |||| || ||| | |||| ||| ||
           </div>

@@ -1,14 +1,41 @@
 use super::settings::{
-    discord_token_hash, load_longterm_memory_catalog, load_review_tuning_guidance,
-    load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
+    discord_token_hash, load_review_tuning_guidance, load_role_prompt, load_shared_prompt,
+    render_peer_agent_guidance,
 };
 use super::*;
 
+const CONTEXT_COMPRESSION_SECTION_ORDER: &str = "`Goal`, `Progress`, `Decisions`, `Files`, `Next`";
+const STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE: &str =
+    "[이전 결과 — 3줄 요약: cargo test failed in src/foo.rs because ...]";
+
+fn context_compression_guidance() -> String {
+    format!(
+        "[Context Compression]\n\
+         When conversation compaction happens (`/compact`, automatic compaction, or equivalent summarization), \
+         rewrite prior context using these sections in order: {CONTEXT_COMPRESSION_SECTION_ORDER}.\n\
+         - Keep each section short, factual, and focused on the latest state.\n\
+         - Preserve unresolved blockers, assumptions, failures, and the latest user intent.\n\
+         - In `Files`, list only files that still matter and why they matter.\n\
+         - Replace stale tool chatter, raw logs, and old command output with placeholders like {STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE}.\n\
+         - Prefer outcomes and follow-up implications over verbatim output, and drop already-resolved repetition once summarized."
+    )
+}
+
+pub(crate) fn build_followup_turn_system_reminder() -> String {
+    format!(
+        "<system-reminder>\n\
+         Discord formatting: minimize code blocks, keep messages concise.\n\
+         If the session was compacted, treat the compacted summary as authoritative.\n\
+         Keep prior context organized as {CONTEXT_COMPRESSION_SECTION_ORDER}.\n\
+         Replace stale tool chatter, raw logs, and old command output with placeholders like {STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE} instead of replaying them verbatim.\n\
+         </system-reminder>"
+    )
+}
 /// Dispatch prompt profile — controls which system prompt sections are injected.
 /// `Full` includes everything (used for implementation dispatches and normal turns).
 /// `ReviewLite` strips peer agents, long-term memory, and skills to reduce token cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DispatchProfile {
+pub(crate) enum DispatchProfile {
     /// Full system prompt — all sections included (implementation, normal turns)
     Full,
     /// Minimal prompt for review/review-decision dispatches.
@@ -34,12 +61,20 @@ pub(super) fn build_system_prompt(
     token: &str,
     disabled_notice: &str,
     skills_notice: &str,
+    narrate_progress: bool,
     role_binding: Option<&RoleBinding>,
     queued_turn: bool,
     profile: DispatchProfile,
     dispatch_type: Option<&str>,
     shared_knowledge: Option<&str>,
+    longterm_catalog: Option<&str>,
 ) -> String {
+    let narration_guidance = if narrate_progress {
+        "\n\nAlways keep the user informed about what you are doing. Briefly explain each step as you work \
+         (e.g. \"Reading the file...\", \"Creating the script...\", \"Running tests...\")."
+    } else {
+        ""
+    };
     let mut system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
          {}\n\
@@ -48,10 +83,7 @@ pub(super) fn build_system_prompt(
          send it by running this bash command:\n\n\
          agentdesk discord-sendfile <filepath> --channel {} --key {}\n\n\
          This delivers the file directly to the user's Discord channel.\n\
-         Do NOT tell the user to use /down — use the command above instead.\n\n\
-         Always keep the user informed about what you are doing. Briefly explain each step as you work \
-         (e.g. \"Reading the file...\", \"Creating the script...\", \"Running tests...\"). \
-         The user cannot see your tool calls, so narrate your progress so they know what is happening.\n\
+         Do NOT tell the user to use /down — use the command above instead.{}\n\n\
          IMPORTANT: When reading, editing, or searching files, ALWAYS mention the specific file path and what you're looking for \
          (e.g. \"mod.rs:2700 부근의 시스템 프롬프트를 확인합니다\" not just \"코드를 확인합니다\"). \
          The user sees only your text output, not the tool calls themselves.\n\n\
@@ -66,6 +98,7 @@ pub(super) fn build_system_prompt(
         current_path,
         channel_id.get(),
         discord_token_hash(token),
+        narration_guidance,
         disabled_notice,
         // ReviewLite: omit skills to save tokens — reviewer only submits verdict
         if profile == DispatchProfile::ReviewLite {
@@ -74,6 +107,10 @@ pub(super) fn build_system_prompt(
             skills_notice
         }
     );
+    if profile == DispatchProfile::Full {
+        system_prompt_owned.push_str("\n\n");
+        system_prompt_owned.push_str(&context_compression_guidance());
+    }
 
     if let Some(binding) = role_binding {
         // ReviewLite: inject minimal review rules instead of full shared prompt.
@@ -151,7 +188,7 @@ pub(super) fn build_system_prompt(
 
         // ReviewLite: skip long-term memory and peer agents to save tokens
         if profile == DispatchProfile::Full {
-            if let Some(catalog) = load_longterm_memory_catalog(&binding.role_id) {
+            if let Some(catalog) = longterm_catalog {
                 system_prompt_owned.push_str(
                     "\n\n[Long-term Memory]\n\
                      Available memory files for this agent. Use the Read tool to load full content when needed:\n",
@@ -214,11 +251,13 @@ mod tests {
             token,
             disabled_notice,
             skills_notice,
+            true,  // narrate_progress
             None,  // role_binding
             false, // queued_turn
             DispatchProfile::Full,
             None, // dispatch_type
             None, // shared_knowledge
+            None, // longterm_catalog
         )
     }
 
@@ -270,6 +309,55 @@ mod tests {
     }
 
     #[test]
+    fn test_build_system_prompt_includes_context_compression_guidance() {
+        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        assert!(output.contains("[Context Compression]"));
+        assert!(output.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
+        assert!(output.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
+    }
+
+    #[test]
+    fn test_build_system_prompt_includes_narration_when_enabled() {
+        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        assert!(output.contains("Always keep the user informed about what you are doing."));
+        assert!(!output.contains("The user cannot see your tool calls"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_omits_narration_when_disabled() {
+        let output = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            false,
+            None,
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+        );
+
+        assert!(!output.contains("Always keep the user informed about what you are doing."));
+        assert!(!output.contains("The user cannot see your tool calls"));
+        assert!(output.contains("ALWAYS mention the specific file path"));
+    }
+
+    #[test]
+    fn test_followup_turn_reminder_reinjects_compaction_rules() {
+        let reminder = build_followup_turn_system_reminder();
+
+        assert!(reminder.contains("<system-reminder>"));
+        assert!(reminder.contains("Discord formatting: minimize code blocks"));
+        assert!(reminder.contains("treat the compacted summary as authoritative"));
+        assert!(reminder.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
+        assert!(reminder.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
+    }
+
+    #[test]
     fn test_dispatch_profile_from_dispatch_type() {
         assert_eq!(
             DispatchProfile::from_dispatch_type(None),
@@ -288,6 +376,14 @@ mod tests {
             DispatchProfile::ReviewLite
         );
         assert_eq!(
+            DispatchProfile::from_dispatch_type(Some("e2e-test")),
+            DispatchProfile::Full
+        );
+        assert_eq!(
+            DispatchProfile::from_dispatch_type(Some("consultation")),
+            DispatchProfile::Full
+        );
+        assert_eq!(
             DispatchProfile::from_dispatch_type(Some("rework")),
             DispatchProfile::Full
         );
@@ -295,16 +391,23 @@ mod tests {
 
     #[test]
     fn test_review_lite_omits_skills() {
+        let skills_notice = "\n\nAvailable skills:\n\
+            The entries below are descriptions only, not the full skill body.\n\
+            If a skill is relevant or explicitly requested, load that skill's `SKILL.md` before acting.\n\
+            Read files under `references/` only when the `SKILL.md` points to them or you need extra detail.\n\
+              - /commit: Commit changes";
         let with_skills = build_system_prompt(
             "ctx",
             "/tmp",
             ChannelId::new(1),
             "tok",
             "",
-            "\n\nAvailable skills:\n  - /commit: Commit changes",
+            skills_notice,
+            true,
             None,
             false,
             DispatchProfile::Full,
+            None,
             None,
             None,
         );
@@ -314,17 +417,45 @@ mod tests {
             ChannelId::new(1),
             "tok",
             "",
-            "\n\nAvailable skills:\n  - /commit: Commit changes",
+            skills_notice,
+            true,
             None,
             false,
             DispatchProfile::ReviewLite,
             Some("review"),
             None,
+            None,
         );
         assert!(with_skills.contains("Available skills"));
+        assert!(with_skills.contains("descriptions only"));
+        assert!(with_skills.contains("`SKILL.md`"));
         assert!(!without_skills.contains("Available skills"));
+        assert!(!without_skills.contains("[Context Compression]"));
         // ReviewLite prompt should be shorter
         assert!(without_skills.len() < with_skills.len());
+    }
+
+    #[test]
+    fn test_review_lite_omits_context_compression_guidance() {
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            true,
+            None,
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review"),
+            None,
+            None,
+        );
+
+        assert!(!prompt.contains("[Context Compression]"));
+        assert!(!prompt.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
+        assert!(!prompt.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
     }
 
     #[test]
@@ -337,6 +468,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            memory: Default::default(),
         };
         let review_prompt = build_system_prompt(
             "ctx",
@@ -345,10 +477,12 @@ mod tests {
             "tok",
             "",
             "",
+            true,
             Some(&binding),
             false,
             DispatchProfile::ReviewLite,
             Some("review"),
+            None,
             None,
         );
         let decision_prompt = build_system_prompt(
@@ -358,10 +492,12 @@ mod tests {
             "tok",
             "",
             "",
+            true,
             Some(&binding),
             false,
             DispatchProfile::ReviewLite,
             Some("review-decision"),
+            None,
             None,
         );
         // review should NOT contain decision API
@@ -384,6 +520,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: false,
+            memory: Default::default(),
         };
 
         let prompt = build_system_prompt(
@@ -393,13 +530,49 @@ mod tests {
             "tok",
             "",
             "",
+            true,
             Some(&binding),
             false,
             DispatchProfile::Full,
             None,
             None,
+            None,
         );
 
         assert!(!prompt.contains("[Peer Agent Directory]"));
+    }
+
+    #[test]
+    fn test_full_prompt_renders_supplied_longterm_catalog() {
+        use super::super::settings::RoleBinding;
+
+        let binding = RoleBinding {
+            role_id: "spark".to_string(),
+            prompt_file: "/nonexistent".to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+            memory: Default::default(),
+        };
+
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            true,
+            Some(&binding),
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            Some("- facts.md: deployment notes"),
+        );
+
+        assert!(prompt.contains("[Long-term Memory]"));
+        assert!(prompt.contains("facts.md"));
     }
 }

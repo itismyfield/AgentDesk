@@ -128,7 +128,7 @@ export const DEPT_COLORS = [
 export function XpBar({ xp, maxXp, color }: { xp: number; maxXp: number; color: string }) {
   const pct = maxXp > 0 ? Math.min(100, Math.round((xp / maxXp) * 100)) : 0;
   return (
-    <div className="relative h-2.5 w-full overflow-hidden rounded-full border border-white/[0.08] bg-white/[0.04]">
+    <div className="relative h-2.5 w-full overflow-hidden rounded-full border border-surface-medium bg-surface-subtle">
       <div
         className="xp-bar-fill h-full rounded-full transition-all duration-1000 ease-out"
         style={{
@@ -144,8 +144,8 @@ export function XpBar({ xp, maxXp, color }: { xp: number; maxXp: number; color: 
 export function RankBadge({ xp, size = "md" }: { xp: number; size?: "sm" | "md" | "lg" }) {
   const tier = getRankTier(xp);
   const sizeClasses = {
-    sm: "px-1.5 py-0.5 text-[8px] gap-0.5",
-    md: "px-2 py-0.5 text-[10px] gap-1",
+    sm: "px-1.5 py-0.5 text-xs gap-0.5",
+    md: "px-2 py-0.5 text-xs gap-1",
     lg: "px-3 py-1 text-xs gap-1",
   };
   return (

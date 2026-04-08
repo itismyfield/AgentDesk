@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::db::schema::seed_builtin_pipeline_stages;
 
 // ── Body types ─────────────────────────────────────────────────
 
@@ -16,6 +17,7 @@ pub struct CreateRepoBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct UpdateRepoBody {
     pub default_agent_id: Option<String>,
     pub pipeline_config: Option<serde_json::Value>,
@@ -124,6 +126,13 @@ pub async fn create_repo(
                 Json(json!({"error": format!("{e}")})),
             );
         }
+    }
+
+    if let Err(e) = seed_builtin_pipeline_stages(&conn) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("seed_builtin_pipeline_stages: {e}")})),
+        );
     }
 
     match conn.query_row(

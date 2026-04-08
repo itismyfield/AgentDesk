@@ -63,7 +63,7 @@ export default function DepartmentsTab({
           </button>
           <button
             onClick={onCancelOrder}
-            className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all hover:bg-white/5"
+            className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all hover:bg-surface-subtle"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("취소", "Cancel")}
@@ -100,7 +100,7 @@ export default function DepartmentsTab({
                 <button
                   onClick={() => onMoveDept(index, -1)}
                   disabled={index === 0}
-                  className="w-6 h-5 flex items-center justify-center rounded text-xs transition-all hover:bg-white/10 disabled:opacity-20"
+                  className="w-6 h-5 flex items-center justify-center rounded text-xs transition-all hover:bg-surface-hover disabled:opacity-20"
                   style={{ color: "var(--th-text-muted)" }}
                 >
                   ▲
@@ -108,7 +108,7 @@ export default function DepartmentsTab({
                 <button
                   onClick={() => onMoveDept(index, 1)}
                   disabled={index === deptOrder.length - 1}
-                  className="w-6 h-5 flex items-center justify-center rounded text-xs transition-all hover:bg-white/10 disabled:opacity-20"
+                  className="w-6 h-5 flex items-center justify-center rounded text-xs transition-all hover:bg-surface-hover disabled:opacity-20"
                   style={{ color: "var(--th-text-muted)" }}
                 >
                   ▼
@@ -144,13 +144,13 @@ export default function DepartmentsTab({
                 )}
               </div>
 
-              <code className="text-[10px] px-2 py-0.5 rounded opacity-50" style={{ background: "var(--th-input-bg)" }}>
+              <code className="text-xs px-2 py-0.5 rounded opacity-50" style={{ background: "var(--th-input-bg)" }}>
                 {dept.id}
               </code>
 
               <button
                 onClick={() => onEditDept(dept)}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all opacity-0 group-hover:opacity-100 hover:bg-white/10"
+                className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all opacity-0 group-hover:opacity-100 hover:bg-surface-hover"
                 style={{ color: "var(--th-text-muted)" }}
               >
                 {tr("편집", "Edit")}

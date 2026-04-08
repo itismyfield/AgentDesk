@@ -1,5 +1,7 @@
 //! DoD (Definition of Done) checklist mirroring from/to GitHub issues.
 
+#![allow(dead_code)]
+
 /// A single checklist item parsed from markdown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DodItem {

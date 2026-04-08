@@ -28,7 +28,7 @@ export default function VirtualPadOverlay({
         <button
           type="button"
           aria-label="Interact"
-          className="pointer-events-auto flex h-10 min-w-12 items-center justify-center rounded-xl border border-amber-300/80 bg-amber-500/85 px-2 text-[11px] font-bold tracking-wide text-slate-950 shadow-none active:scale-95 active:bg-amber-400"
+          className="pointer-events-auto flex h-10 min-w-12 items-center justify-center rounded-xl border border-amber-300/80 bg-amber-500/85 px-2 text-xs font-bold tracking-wide text-slate-950 shadow-none active:scale-95 active:bg-amber-400"
           style={{ touchAction: "none" }}
           onPointerDown={(event) => event.preventDefault()}
           onClick={onInteract}

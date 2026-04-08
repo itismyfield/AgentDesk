@@ -1,5 +1,8 @@
 mod completion_guard;
+mod context_window;
 mod recovery_text;
+mod retry_state;
+mod stale_resume;
 mod tmux_runtime;
 
 #[cfg(test)]
@@ -8,6 +11,9 @@ mod tests;
 use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
+use crate::services::memory::{
+    CaptureRequest, build_memory_backend, resolve_memory_role_id, resolve_memory_session_id,
+};
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
@@ -16,7 +22,7 @@ use crate::utils::format::tail_with_ellipsis;
 // Re-exports for pub(super) items used by sibling modules in the discord package
 pub(super) use completion_guard::guard_review_dispatch_completion;
 pub(super) use completion_guard::runtime_db_fallback_complete;
-pub(super) use recovery_text::result_event_has_stale_resume_error;
+pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::stale_inflight_message;
 
@@ -25,16 +31,35 @@ pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
 use completion_guard::{complete_work_dispatch_on_turn_end, fail_dispatch_with_retry};
-use recovery_text::{
-    auto_retry_with_history, clear_local_session_state, handle_gemini_retry_boundary,
-    output_file_has_stale_resume_error_after_offset, reset_session_for_auto_retry,
-    resolve_done_response, stream_error_has_stale_resume_error,
+use context_window::{persisted_context_tokens, resolve_done_response};
+use recovery_text::auto_retry_with_history;
+use retry_state::{
+    clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
+};
+use stale_resume::{
+    output_file_has_stale_resume_error_after_offset, stream_error_has_stale_resume_error,
     stream_error_requires_terminal_session_reset,
 };
-use tmux_runtime::{
-    is_dcserver_restart_command, persisted_context_tokens, should_resume_watcher_after_turn,
-    total_context_tokens,
-};
+use tmux_runtime::{is_dcserver_restart_command, should_resume_watcher_after_turn};
+
+pub(super) fn spawn_memory_capture_task(
+    channel_id: ChannelId,
+    capture_memory_settings: settings::ResolvedMemorySettings,
+    capture_request: CaptureRequest,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let backend = build_memory_backend(&capture_memory_settings);
+        let result = backend.capture(capture_request).await;
+        for warning in result.warnings {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!(
+                "  [{ts}] [memory] capture warning for channel {}: {}",
+                channel_id.get(),
+                warning
+            );
+        }
+    })
+}
 
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
@@ -59,6 +84,61 @@ pub(super) struct TurnBridgeContext {
     pub(super) defer_watcher_resume: bool,
     pub(super) completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(super) inflight_state: InflightTurnState,
+}
+
+fn extract_skill_id_from_tool_use(name: &str, input: &str) -> Option<String> {
+    if name != "Skill" {
+        return None;
+    }
+
+    serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("skill")
+                .and_then(|skill| skill.as_str())
+                .map(str::trim)
+                .filter(|skill| !skill.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+fn resolve_skill_usage_agent_id(
+    conn: &rusqlite::Connection,
+    session_key: Option<&str>,
+    role_binding: Option<&RoleBinding>,
+) -> Option<String> {
+    session_key
+        .and_then(|key| {
+            conn.query_row(
+                "SELECT agent_id FROM sessions WHERE session_key = ?1",
+                [key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+        })
+        .or_else(|| {
+            role_binding
+                .map(|binding| binding.role_id.trim().to_string())
+                .filter(|role_id| !role_id.is_empty())
+        })
+}
+
+fn record_skill_usage(
+    db: &crate::db::Db,
+    skill_id: &str,
+    session_key: Option<&str>,
+    role_binding: Option<&RoleBinding>,
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| format!("db lock failed: {e}"))?;
+    let agent_id = resolve_skill_usage_agent_id(&conn, session_key, role_binding);
+    conn.execute(
+        "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
+        rusqlite::params![skill_id, agent_id, session_key],
+    )
+    .map_err(|e| format!("insert skill_usage failed: {e}"))?;
+    Ok(())
 }
 
 pub(super) fn spawn_turn_bridge(
@@ -218,6 +298,22 @@ pub(super) fn spawn_turn_bridge(
                             has_post_tool_text = false;
                             inflight_state.any_tool_used = true;
                             inflight_state.has_post_tool_text = false;
+                            if let Some(skill_id) = extract_skill_id_from_tool_use(&name, &input) {
+                                if let Some(db) = shared_owned.db.as_ref() {
+                                    if let Err(e) = record_skill_usage(
+                                        db,
+                                        &skill_id,
+                                        adk_session_key.as_deref(),
+                                        role_binding.as_ref(),
+                                    ) {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        eprintln!(
+                                            "  [{ts}] ⚠ Failed to record skill usage for {}: {}",
+                                            skill_id, e
+                                        );
+                                    }
+                                }
+                            }
                             let summary = format_tool_input(&name, &input);
                             let display_summary = if summary.trim().is_empty() {
                                 "…".to_string()
@@ -564,6 +660,9 @@ pub(super) fn spawn_turn_bridge(
                     None,
                     adk_cwd.as_deref(),
                     dispatch_id.as_deref(),
+                    adk_session_name.as_deref().and_then(
+                        crate::services::discord::adk_session::parse_thread_channel_id_from_name,
+                    ),
                     shared_owned.api_port,
                 )
                 .await;
@@ -594,6 +693,7 @@ pub(super) fn spawn_turn_bridge(
                 &shared_owned,
                 dispatch_id.as_deref(),
                 adk_cwd.as_deref(),
+                Some(&full_response),
             )
             .await;
         } else if transport_error && !cancelled {
@@ -616,90 +716,12 @@ pub(super) fn spawn_turn_bridge(
             persisted_context_tokens(accumulated_input_tokens, accumulated_output_tokens),
             adk_cwd.as_deref(),
             dispatch_id.as_deref(),
+            adk_session_name
+                .as_deref()
+                .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name),
             shared_owned.api_port,
         )
         .await;
-
-        // ─── Auto-compact: DISABLED — token counting still unreliable (224% after restart).
-        // #227 re-enabled but measurement is still wrong. Keep disabled until root cause fixed.
-        #[cfg(unix)]
-        if false && dispatch_id.is_none() && !is_prompt_too_long {
-            let total_tokens =
-                total_context_tokens(accumulated_input_tokens, accumulated_output_tokens);
-            let ctx_cfg = super::adk_session::fetch_context_thresholds(shared_owned.api_port).await;
-            let pct = (total_tokens * 100) / ctx_cfg.context_window.max(1);
-            // Cooldown: skip if compact was sent recently (5 min)
-            let compact_cooldown_ok = shared_owned.db.as_ref().map_or(true, |db| {
-                db.lock().ok().map_or(true, |conn| {
-                    let cooldown_key = format!("auto_compact_cooldown:{}", channel_id.get());
-                    let last: Option<String> = conn
-                        .query_row(
-                            "SELECT value FROM kv_meta WHERE key = ?1",
-                            [&cooldown_key],
-                            |row| row.get(0),
-                        )
-                        .ok();
-                    last.and_then(|v| v.parse::<i64>().ok()).map_or(true, |ts| {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
-                        now - ts > 300 // 5 min cooldown
-                    })
-                })
-            });
-            if pct >= ctx_cfg.compact_pct && compact_cooldown_ok {
-                if let Some(ref tmux_name) = inflight_state.tmux_session_name {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ⚡ Auto-compact: {tmux_name} at {pct}% ({total_tokens} tokens)"
-                    );
-                    let name = tmux_name.to_string();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        crate::services::platform::tmux::send_keys(&name, &["/compact", "Enter"])
-                    })
-                    .await;
-                    // Notify agent channel via notify bot
-                    {
-                        let api_port = shared_owned.api_port;
-                        let ch = channel_id.get();
-                        let msg = format!(
-                            "⚡ 컨텍스트 자동 compact 실행 ({}% — {} tokens)",
-                            pct, total_tokens
-                        );
-                        tokio::spawn(async move {
-                            let url = crate::config::local_api_url(api_port, "/api/send");
-                            let _ = reqwest::Client::new()
-                                .post(&url)
-                                .json(&serde_json::json!({
-                                    "target": format!("channel:{ch}"),
-                                    "content": msg,
-                                    "bot": "notify",
-                                    "source": "system",
-                                }))
-                                .send()
-                                .await;
-                        });
-                    }
-                    // Set cooldown timestamp
-                    if let Some(ref db) = shared_owned.db {
-                        if let Ok(conn) = db.lock() {
-                            let cooldown_key =
-                                format!("auto_compact_cooldown:{}", channel_id.get());
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            conn.execute(
-                                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                                rusqlite::params![cooldown_key, now.to_string()],
-                            )
-                            .ok();
-                        }
-                    }
-                }
-            }
-        }
 
         let can_chain_locally =
             serenity_ctx.is_some() && request_owner.is_some() && token.is_some();
@@ -1213,7 +1235,15 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
+        let should_record_final_turn = !is_prompt_too_long
+            && !resume_failure_detected
+            && !recovery_retry
+            && !restart_recovery_handoff
+            && !(rx_disconnected && tmux_handed_off && full_response.is_empty())
+            && !full_response.trim().is_empty();
+
         // Update in-memory session under lock.
+        let mut should_persist_transcript = false;
         let session_id_to_persist = {
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -1223,14 +1253,17 @@ pub(super) fn spawn_turn_bridge(
                     } else if let Some(sid) = new_session_id {
                         session.session_id = Some(sid);
                     }
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::User,
-                        content: user_text_owned.clone(),
-                    });
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::Assistant,
-                        content: full_response.clone(),
-                    });
+                    if should_record_final_turn {
+                        session.history.push(HistoryItem {
+                            item_type: HistoryType::User,
+                            content: user_text_owned.clone(),
+                        });
+                        session.history.push(HistoryItem {
+                            item_type: HistoryType::Assistant,
+                            content: full_response.clone(),
+                        });
+                        should_persist_transcript = true;
+                    }
                     session.session_id.clone()
                 } else {
                     None
@@ -1242,8 +1275,8 @@ pub(super) fn spawn_turn_bridge(
 
         // Persist provider session_id to DB so it survives dcserver restarts.
         if !resume_failure_detected && !terminal_session_reset_required {
-            if let (Some(ref session_key), Some(ref persisted_sid)) =
-                (adk_session_key, session_id_to_persist)
+            if let (Some(session_key), Some(persisted_sid)) =
+                (adk_session_key.as_deref(), session_id_to_persist.as_deref())
             {
                 super::adk_session::save_provider_session_id(
                     session_key,
@@ -1258,6 +1291,48 @@ pub(super) fn spawn_turn_bridge(
                 super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
                     .await;
             }
+        }
+
+        if should_persist_transcript {
+            if let Some(db) = shared_owned.db.as_ref() {
+                let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
+                let channel_id_text = channel_id.get().to_string();
+                if let Err(e) = crate::db::session_transcripts::persist_turn(
+                    db,
+                    crate::db::session_transcripts::PersistSessionTranscript {
+                        turn_id: &turn_id,
+                        session_key: adk_session_key.as_deref(),
+                        channel_id: Some(channel_id_text.as_str()),
+                        agent_id: None,
+                        provider: Some(provider.as_str()),
+                        dispatch_id: dispatch_id.as_deref(),
+                        user_message: &user_text_owned,
+                        assistant_message: &full_response,
+                    },
+                ) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!("  [{ts}] ⚠ failed to persist session transcript: {e}");
+                }
+            }
+        }
+
+        if should_persist_transcript {
+            let capture_memory_settings =
+                settings::memory_settings_for_binding(role_binding.as_ref());
+            let capture_request = CaptureRequest {
+                provider: provider.clone(),
+                role_id: resolve_memory_role_id(role_binding.as_ref()),
+                channel_id: channel_id.get(),
+                session_id: resolve_memory_session_id(
+                    session_id_to_persist.as_deref(),
+                    channel_id.get(),
+                ),
+                dispatch_id: dispatch_id.clone(),
+                user_text: user_text_owned.clone(),
+                assistant_text: full_response.clone(),
+            };
+            let _capture_task =
+                spawn_memory_capture_task(channel_id, capture_memory_settings, capture_request);
         }
 
         // Clear restart report BEFORE clearing inflight state (which removes
@@ -1327,7 +1402,6 @@ pub(super) fn spawn_turn_bridge(
                                     "  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}"
                                 );
                             }
-                            _ => {}
                         }
                     }
 
@@ -1450,31 +1524,12 @@ pub(super) fn spawn_turn_bridge(
                         watcher.paused.store(false, Ordering::Relaxed);
                     }
                 }
-                // Deferred drain: wait briefly then kickoff idle queues using cached context
-                let shared_for_drain = shared_owned.clone();
-                let provider_for_drain = provider.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if let (Some(ctx), Some(tok)) = (
-                        shared_for_drain.cached_serenity_ctx.get(),
-                        shared_for_drain.cached_bot_token.get(),
-                    ) {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] 🚀 Deferred drain: kicking off idle queues");
-                        super::kickoff_idle_queues(
-                            ctx,
-                            &shared_for_drain,
-                            tok,
-                            &provider_for_drain,
-                        )
-                        .await;
-                    } else {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
-                            "  [{ts}] ⚠ Deferred drain: still no cached context, queued messages remain pending"
-                        );
-                    }
-                });
+                super::schedule_deferred_idle_queue_kickoff(
+                    shared_owned.clone(),
+                    provider.clone(),
+                    channel_id,
+                    "turn bridge queued backlog",
+                );
             }
         }
 

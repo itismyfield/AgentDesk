@@ -2,7 +2,6 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::settings::{resolve_role_binding, validate_bot_channel_routing};
 use super::turn_bridge::stale_inflight_message;
 use super::*;
-use crate::services::tmux_common::tmux_exact_target;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{build_tmux_death_diagnostic, tmux_session_has_live_pane};
 use crate::utils::format::tail_with_ellipsis;
@@ -243,8 +242,6 @@ pub(super) async fn restore_inflight_turns(
 
     let settings_snapshot = shared.settings.read().await.clone();
 
-    let current_gen = shared.current_generation;
-
     for state in states {
         let channel_id = ChannelId::new(state.channel_id);
         let is_dm = matches!(
@@ -310,10 +307,10 @@ pub(super) async fn restore_inflight_turns(
                 let user_msg_id = MessageId::new(state.user_msg_id);
                 super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
                 super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
-                // Complete the dispatch if this was a dispatch turn — the normal
-                // completion path was lost when dcserver restarted.
-                // #142: Check dispatch type — implementation/rework need explicit completion,
-                // review can use idle auto-complete.
+                // Complete the dispatch if this was a work dispatch turn — the
+                // normal completion path was lost when dcserver restarted.
+                // #142: implementation/rework need explicit completion. Review
+                // and review-decision stay pending until their API handlers run.
                 // #222: DB lookup first, text parsing as fallback for unified threads.
                 let recovered_dispatch_id =
                     lookup_pending_dispatch_for_thread(shared.api_port, state.channel_id)
@@ -827,9 +824,9 @@ pub(super) async fn restore_inflight_turns(
                         }
                     }
                     Some(_) => {
-                        // Non-work dispatches (review, review-decision) need their
-                        // own completion flow — clear inflight but leave dispatch
-                        // status for the appropriate handler (see follow-up #xxx).
+                        // Non-work dispatches (review, review-decision) need
+                        // their own explicit API completion flow. Clear inflight
+                        // but leave dispatch status untouched.
                         dispatch_completed = true;
                     }
                     None => {
@@ -1149,6 +1146,9 @@ pub(super) async fn restore_inflight_turns(
             channel_name.as_deref(),
             last_path.as_deref(),
         );
+        let adk_thread_channel_id = adk_session_name
+            .as_deref()
+            .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name);
         post_adk_session_status(
             adk_session_key.as_deref(),
             adk_session_name.as_deref(),
@@ -1163,6 +1163,7 @@ pub(super) async fn restore_inflight_turns(
                 .await
                 .or_else(|| parse_dispatch_id(&state.user_text))
                 .as_deref(),
+            adk_thread_channel_id,
             shared.api_port,
         )
         .await;
@@ -1480,7 +1481,7 @@ mod tests {
 
     #[test]
     fn missing_session_recovery_saves_handoff_for_followup_turn() {
-        let _lock = super::super::runtime_store::test_env_lock().lock().unwrap();
+        let _lock = super::super::runtime_store::lock_test_env();
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("agentdesk-root");
         std::fs::create_dir_all(root.join("runtime")).unwrap();

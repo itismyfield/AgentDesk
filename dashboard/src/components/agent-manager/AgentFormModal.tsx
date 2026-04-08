@@ -73,6 +73,9 @@ export default function AgentFormModal({
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={isEdit ? tr("직원 정보 수정", "Edit Agent") : tr("신규 직원 채용", "Hire New Agent")}
         className="w-full max-w-2xl max-h-[90vh] overflow-y-auto overscroll-contain rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200"
         style={{
           background: "var(--th-card-bg)",
@@ -87,8 +90,9 @@ export default function AgentFormModal({
           </h3>
           <button
             onClick={onClose}
-            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors"
+            className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-[var(--th-bg-surface-hover)] transition-colors"
             style={{ color: "var(--th-text-muted)" }}
+            aria-label="Close"
           >
             ✕
           </button>
@@ -99,7 +103,7 @@ export default function AgentFormModal({
           {/* ── Left column: 기본 정보 ── */}
           <div className="space-y-4">
             <div
-              className="text-[10px] font-semibold uppercase tracking-widest"
+              className="text-xs font-semibold uppercase tracking-widest"
               style={{ color: "var(--th-text-muted)" }}
             >
               {tr("기본 정보", "Basic Info")}
@@ -120,7 +124,7 @@ export default function AgentFormModal({
                   ▲
                 </button>
                 <div
-                  className="w-14 h-14 rounded-xl overflow-hidden bg-gray-700 flex items-center justify-center flex-shrink-0"
+                  className="w-14 h-14 rounded-xl overflow-hidden bg-th-bg-surface flex items-center justify-center flex-shrink-0"
                   style={{ border: "2px solid var(--th-input-border)" }}
                 >
                   {spriteNum > 0 ? (
@@ -249,7 +253,7 @@ export default function AgentFormModal({
           {/* ── Right column ── */}
           <div className="space-y-4">
             <div
-              className="text-[10px] font-semibold uppercase tracking-widest"
+              className="text-xs font-semibold uppercase tracking-widest"
               style={{ color: "var(--th-text-muted)" }}
             >
               {tr("추가 정보", "Details")}
@@ -274,7 +278,7 @@ export default function AgentFormModal({
         {/* ── Sprite Upload ── */}
         <div className="mt-5 pt-4" style={{ borderTop: "1px solid var(--th-card-border)" }}>
           <div
-            className="text-[10px] font-semibold uppercase tracking-widest mb-3"
+            className="text-xs font-semibold uppercase tracking-widest mb-3"
             style={{ color: "var(--th-text-muted)" }}
           >
             {tr("캐릭터 스프라이트", "Character Sprite")}
@@ -339,7 +343,7 @@ export default function AgentFormModal({
               <div className="grid grid-cols-3 gap-3">
                 {(["D", "L", "R"] as const).map((dir) => (
                   <div key={dir} className="text-center">
-                    <div className="text-[10px] font-medium mb-1" style={{ color: "var(--th-text-muted)" }}>
+                    <div className="text-xs font-medium mb-1" style={{ color: "var(--th-text-muted)" }}>
                       {dir === "D" ? tr("정면", "Front") : dir === "L" ? tr("좌측", "Left") : tr("우측", "Right")}
                     </div>
                     <div

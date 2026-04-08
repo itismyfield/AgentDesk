@@ -14,6 +14,7 @@ import type {
 } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
 import * as api from "./api/client";
+import { onApiError } from "./api/client";
 import { KanbanProvider, useKanban } from "./contexts/KanbanContext";
 import { OfficeProvider, useOffice } from "./contexts/OfficeContext";
 import { SettingsProvider, useSettings } from "./contexts/SettingsContext";
@@ -117,7 +118,21 @@ interface BootstrapData {
 
 export default function App() {
   const [data, setData] = useState<BootstrapData | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const { notifications, pushNotification, dismissNotification } = useNotifications();
+
+  // Wire up API error → toast notifications (throttled: max 1 per 3s per endpoint)
+  useEffect(() => {
+    const lastFired = new Map<string, number>();
+    onApiError((url, error) => {
+      const now = Date.now();
+      const last = lastFired.get(url) ?? 0;
+      if (now - last < 3000) return;
+      lastFired.set(url, now);
+      pushNotification(`API error: ${error.message}`, "error");
+    });
+    return () => onApiError(null);
+  }, [pushNotification]);
 
   useEffect(() => {
     api.onApiError((url, error) => {
@@ -129,6 +144,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      const partial: string[] = [];
       try {
         await api.getSession();
         const offices = await api.getOffices();
@@ -184,7 +200,7 @@ export default function App() {
         });
       }
     })();
-  }, []);
+  }, [pushNotification]);
 
   const handleWsEvent = useCallback(
     (event: WSEvent) => {
@@ -258,7 +274,12 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
   const [showCmdPalette, setShowCmdPalette] = useState(false);
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
 
-  const { settings, setSettings, stats, refreshStats, isKo, locale, tr } = useSettings();
+  // Reset mobile-more overlay when viewport switches to desktop
+  useEffect(() => {
+    if (!isMobile) setShowMobileMore(false);
+  }, [isMobile]);
+
+  const { settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr } = useSettings();
   const {
     offices,
     selectedOfficeId,
@@ -280,6 +301,8 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
     refreshDepartments,
     refreshAllDepartments,
     refreshAuditLogs,
+    refreshing,
+    datasetStates,
   } = useOffice();
   const { kanbanCards, taskDispatches, upsertKanbanCard, setKanbanCards } = useKanban();
 
@@ -709,7 +732,7 @@ function NavBtn({
       }`}
     >
       {icon}
-      <span className="text-[10px] leading-tight">{label}</span>
+      <span className="text-xs leading-tight">{label}</span>
       {badge !== undefined && badge > 0 && (
         <span className={`absolute -right-0.5 -top-1 flex h-4 w-4 items-center justify-center rounded-full text-[10px] text-white ${badgeColor || "bg-emerald-500"}`}>
           {badge > 9 ? "9+" : badge}

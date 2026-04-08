@@ -82,6 +82,7 @@ pub fn kill_session_output(session_name: &str) -> std::io::Result<Output> {
 }
 
 /// Kill a tmux session, returning an error on failure (for anyhow contexts).
+#[allow(dead_code)]
 pub fn kill_session_checked(session_name: &str) -> Result<(), String> {
     let status = Command::new("tmux")
         .args(["kill-session", "-t", &exact_target(session_name)])

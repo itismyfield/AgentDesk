@@ -1,10 +1,28 @@
 @import "tailwindcss";
 
+/* ── Tailwind v4 semantic color tokens ── */
+@theme {
+  --color-surface-subtle: var(--th-overlay-subtle);
+  --color-surface-light: var(--th-overlay-light);
+  --color-surface-medium: var(--th-overlay-medium);
+  --color-surface-hover: var(--th-overlay-strong);
+  --color-th-bg-primary: var(--th-bg-primary);
+  --color-th-bg-surface: var(--th-bg-surface);
+  --color-th-card-bg: var(--th-card-bg);
+  --color-th-input-bg: var(--th-input-bg);
+  --color-th-text-primary: var(--th-text-primary);
+  --color-th-text-secondary: var(--th-text-secondary);
+  --color-th-text-muted: var(--th-text-muted);
+  --color-th-text-heading: var(--th-text-heading);
+  --color-th-border: var(--th-border);
+  --color-th-border-subtle: var(--th-border-subtle);
+  --color-th-card-border: var(--th-card-border);
+  --color-th-input-border: var(--th-input-border);
+  --color-th-nav-bg: var(--th-nav-bg);
+}
+
 :root {
   --color-primary: #6366f1;
-  --color-bg: #0f172a;
-  --color-surface: #1e293b;
-  --color-border: #334155;
 }
 
 /* ── CE Theme Variables (dark) ── */
@@ -16,6 +34,7 @@
   --th-card-bg: #111827;
   --th-card-border: #1f2937;
   --th-border: #1f2937;
+  --th-border-subtle: rgba(148, 163, 184, 0.18);
   --th-input-bg: #0f172a;
   --th-input-border: #374151;
   --th-text: var(--th-text-primary);
@@ -24,6 +43,24 @@
   --th-text-muted: #64748b;
   --th-text-heading: #f1f5f9;
   --th-modal-overlay: rgba(0, 0, 0, 0.7);
+  --th-nav-bg: #030712;
+  --th-text: #e2e8f0;
+  --th-surface: #141925;
+  --th-bg-card: #111827;
+  --th-overlay-subtle: rgba(255, 255, 255, 0.05);
+  --th-overlay-light: rgba(255, 255, 255, 0.06);
+  --th-overlay-medium: rgba(255, 255, 255, 0.08);
+  --th-overlay-strong: rgba(255, 255, 255, 0.10);
+  --th-badge-sky-bg: rgba(14, 165, 233, 0.18);
+  --th-badge-sky-text: #7dd3fc;
+  --th-badge-blue-bg: rgba(59, 130, 246, 0.18);
+  --th-badge-blue-text: #93c5fd;
+  --th-badge-emerald-bg: rgba(16, 185, 129, 0.18);
+  --th-badge-emerald-text: #6ee7b7;
+  --th-badge-violet-bg: rgba(139, 92, 246, 0.18);
+  --th-badge-violet-text: #c4b5fd;
+  --th-badge-amber-bg: rgba(245, 158, 11, 0.18);
+  --th-badge-amber-text: #fcd34d;
 }
 
 [data-theme="light"] {
@@ -34,6 +71,7 @@
   --th-card-bg: #ffffff;
   --th-card-border: #e2e8f0;
   --th-border: #e2e8f0;
+  --th-border-subtle: rgba(100, 116, 139, 0.18);
   --th-input-bg: #ffffff;
   --th-input-border: #cbd5e1;
   --th-text: var(--th-text-primary);
@@ -42,18 +80,41 @@
   --th-text-muted: #94a3b8;
   --th-text-heading: #0f172a;
   --th-modal-overlay: rgba(0, 0, 0, 0.4);
+  --th-nav-bg: #e2e8f0;
+  --th-text: #1e293b;
+  --th-surface: #f1f5f9;
+  --th-bg-card: #ffffff;
+  --th-overlay-subtle: rgba(0, 0, 0, 0.04);
+  --th-overlay-light: rgba(0, 0, 0, 0.05);
+  --th-overlay-medium: rgba(0, 0, 0, 0.06);
+  --th-overlay-strong: rgba(0, 0, 0, 0.08);
+  --th-badge-sky-bg: rgba(14, 165, 233, 0.12);
+  --th-badge-sky-text: #0369a1;
+  --th-badge-blue-bg: rgba(59, 130, 246, 0.12);
+  --th-badge-blue-text: #1d4ed8;
+  --th-badge-emerald-bg: rgba(16, 185, 129, 0.12);
+  --th-badge-emerald-text: #047857;
+  --th-badge-violet-bg: rgba(139, 92, 246, 0.12);
+  --th-badge-violet-text: #6d28d9;
+  --th-badge-amber-bg: rgba(245, 158, 11, 0.12);
+  --th-badge-amber-text: #b45309;
 }
 
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: var(--color-bg);
-  color: #e2e8f0;
+  background: var(--th-bg-primary);
+  color: var(--th-text-primary);
   overflow: hidden;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+@media (max-width: 639px) {
+  body { overflow: auto; }
 }
 
 #root {
-  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -61,13 +122,24 @@ body {
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: var(--th-text-muted); border-radius: 3px; }
 
 /* ── CE Dashboard Classes ── */
 .game-panel {
   background: var(--th-card-bg);
   border: 1px solid var(--th-card-border);
   border-radius: 1rem;
+}
+
+@keyframes loading-bar {
+  0% { width: 0%; margin-left: 0; }
+  50% { width: 40%; margin-left: 30%; }
+  100% { width: 0%; margin-left: 100%; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .dashboard-title-gradient {

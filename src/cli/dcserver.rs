@@ -160,6 +160,7 @@ pub fn is_windows_service_running() -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
 pub fn is_windows_service_running() -> bool {
     false
 }
@@ -425,6 +426,7 @@ pub fn kill_existing_dcserver_processes() {
     }
 }
 
+#[allow(dead_code)]
 pub fn parse_restart_dcserver_report_context(
     args: &[String],
     start_index: usize,
@@ -633,32 +635,32 @@ pub fn handle_restart_dcserver(
             }
             // Check if dcserver process is still running
             let pid_file = root.join("runtime").join("dcserver.pid");
-            if let Ok(pid_str) = fs::read_to_string(&pid_file) {
-                if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                    // Check if process still exists
-                    let process_alive = {
-                        #[cfg(unix)]
-                        {
-                            let status = std::process::Command::new("kill")
-                                .args(["-0", &pid.to_string()])
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .status();
-                            matches!(status, Ok(s) if s.success())
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            let status = std::process::Command::new("tasklist")
-                                .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-                                .output();
-                            matches!(status, Ok(o) if String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-                        }
-                    };
-                    if !process_alive {
-                        println!("   ✓ dcserver process exited gracefully");
-                        let _ = fs::remove_file(&marker);
-                        break;
+            if let Ok(pid_str) = fs::read_to_string(&pid_file)
+                && let Ok(pid) = pid_str.trim().parse::<u32>()
+            {
+                // Check if process still exists
+                let process_alive = {
+                    #[cfg(unix)]
+                    {
+                        let status = std::process::Command::new("kill")
+                            .args(["-0", &pid.to_string()])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                        matches!(status, Ok(s) if s.success())
                     }
+                    #[cfg(not(unix))]
+                    {
+                        let status = std::process::Command::new("tasklist")
+                            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                            .output();
+                        matches!(status, Ok(o) if String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+                    }
+                };
+                if !process_alive {
+                    println!("   ✓ dcserver process exited gracefully");
+                    let _ = fs::remove_file(&marker);
+                    break;
                 }
             }
             if start.elapsed() >= DEFERRED_TIMEOUT {
@@ -1015,6 +1017,27 @@ pub fn handle_dcserver(token: Option<String>) {
     // Also kill any stale processes (e.g. orphaned without lock)
     kill_existing_dcserver_processes();
 
+    if let Some(root) = agentdesk_runtime_root() {
+        match crate::runtime_layout::ensure_runtime_layout(&root) {
+            Ok(report) => {
+                if report.migrated {
+                    if let Some(backup) = report.backup_path {
+                        println!(
+                            "  ▸ Config migration : v2 complete (backup: {})",
+                            backup.display()
+                        );
+                    } else {
+                        println!("  ▸ Config migration : v2 complete");
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("  ✖ Failed to prepare runtime layout: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Write PID/version files
     if let Some(root) = agentdesk_runtime_root() {
         let runtime_dir = root.join("runtime");
@@ -1068,26 +1091,23 @@ pub fn handle_dcserver(token: Option<String>) {
             if let Some(rm_path) = agentdesk_runtime_root()
                 .map(|r| r.join("config").join("role_map.json"))
                 .filter(|p| p.exists())
+                && let Ok(content) = std::fs::read_to_string(&rm_path)
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
             {
-                if let Ok(content) = std::fs::read_to_string(&rm_path) {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        for section in ["byChannelId", "byChannelName"] {
-                            if let Some(map) = json.get(section).and_then(|v| v.as_object()) {
-                                for (_key, entry) in map {
-                                    if let Some(ws) = entry.get("workspace").and_then(|v| v.as_str())
-                                    {
-                                        let expanded = if ws.starts_with("~/") {
-                                            if let Some(home) = dirs::home_dir() {
-                                                format!("{}{}", home.display(), &ws[1..])
-                                            } else {
-                                                ws.to_string()
-                                            }
-                                        } else {
-                                            ws.to_string()
-                                        };
-                                        workspaces.insert(expanded);
+                for section in ["byChannelId", "byChannelName"] {
+                    if let Some(map) = json.get(section).and_then(|v| v.as_object()) {
+                        for (_key, entry) in map {
+                            if let Some(ws) = entry.get("workspace").and_then(|v| v.as_str()) {
+                                let expanded = if ws.starts_with("~/") {
+                                    if let Some(home) = dirs::home_dir() {
+                                        format!("{}{}", home.display(), &ws[1..])
+                                    } else {
+                                        ws.to_string()
                                     }
-                                }
+                                } else {
+                                    ws.to_string()
+                                };
+                                workspaces.insert(expanded);
                             }
                         }
                     }
@@ -1226,13 +1246,15 @@ pub fn handle_dcserver(token: Option<String>) {
                 services::discord::run_bot(
                     &token,
                     provider,
-                    global_active,
-                    global_finalizing,
-                    shutdown_remaining,
-                    health_registry,
-                    api_port,
-                    discord_db,
-                    discord_engine,
+                    services::discord::RunBotContext {
+                        global_active,
+                        global_finalizing,
+                        shutdown_remaining,
+                        health_registry,
+                        api_port,
+                        db: discord_db,
+                        engine: discord_engine,
+                    },
                 )
                 .await;
             }
@@ -1255,11 +1277,11 @@ pub fn handle_dcserver(token: Option<String>) {
                     let mut http_ok = false;
                     for _ in 0..15 {
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                        if let Ok(resp) = reqwest::get(&health_url).await {
-                            if resp.status().is_success() {
-                                http_ok = true;
-                                break;
-                            }
+                        if let Ok(resp) = reqwest::get(&health_url).await
+                            && resp.status().is_success()
+                        {
+                            http_ok = true;
+                            break;
                         }
                     }
                     if http_ok {
@@ -1303,13 +1325,15 @@ pub fn handle_dcserver(token: Option<String>) {
                         services::discord::run_bot(
                             &config.token,
                             config.provider,
-                            ga,
-                            gf,
-                            sr,
-                            hr,
-                            port,
-                            db_clone,
-                            engine_clone,
+                            services::discord::RunBotContext {
+                                global_active: ga,
+                                global_finalizing: gf,
+                                shutdown_remaining: sr,
+                                health_registry: hr,
+                                api_port: port,
+                                db: db_clone,
+                                engine: engine_clone,
+                            },
                         )
                         .await;
                     }));

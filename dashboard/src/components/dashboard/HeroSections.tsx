@@ -46,7 +46,7 @@ export function DashboardHeroHeader({
         <div className="space-y-1.5">
           <div className="flex items-center gap-3">
             <h1 className="dashboard-title-gradient text-2xl font-black tracking-tight sm:text-3xl">{companyName}</h1>
-            <span className="flex items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-emerald-300">
+            <span className="flex items-center gap-1.5 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2.5 py-0.5 text-xs font-bold uppercase tracking-widest text-emerald-300">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
               {t({ ko: "실시간", en: "LIVE", ja: "ライブ", zh: "实时" })}
             </span>
@@ -60,16 +60,16 @@ export function DashboardHeroHeader({
                 zh: "代理正在实时执行任务",
               })}
             </p>
-            <span className="font-mono text-[11px] tracking-tight" style={{ color: "var(--th-text-muted)" }}>{time}</span>
+            <span className="font-mono text-xs tracking-tight" style={{ color: "var(--th-text-muted)" }}>{time}</span>
           </div>
         </div>
 
         <div className="hidden sm:flex items-center gap-3">
           <div className="flex flex-col gap-1">
-            <span className="rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-0.5 text-[10px] text-slate-400">
+            <span className="rounded-md border border-surface-light bg-surface-subtle px-2 py-0.5 text-xs text-slate-400">
               {date}
             </span>
-            <span className="rounded-md border border-cyan-400/20 bg-cyan-500/[0.06] px-2 py-0.5 text-[10px] text-cyan-300">
+            <span className="rounded-md border border-cyan-400/20 bg-cyan-500/[0.06] px-2 py-0.5 text-xs text-cyan-300">
               {briefing}
             </span>
           </div>
@@ -100,7 +100,7 @@ export function DashboardHudStats({ hudStats, numberFormatter }: DashboardHudSta
           />
           <div className="relative flex items-center justify-between">
             <div className="min-w-0">
-              <p className="text-[8px] sm:text-[9px] font-bold uppercase tracking-[0.1em] sm:tracking-[0.15em] truncate" style={{ color: "var(--th-text-muted)" }}>
+              <p className="text-xs sm:text-xs font-bold uppercase tracking-[0.1em] sm:tracking-[0.15em] truncate" style={{ color: "var(--th-text-muted)" }}>
                 {stat.label}
               </p>
               <p
@@ -109,7 +109,7 @@ export function DashboardHudStats({ hudStats, numberFormatter }: DashboardHudSta
               >
                 {typeof stat.value === "number" ? numberFormatter.format(stat.value) : stat.value}
               </p>
-              <p className="hidden sm:block mt-0.5 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+              <p className="hidden sm:block mt-0.5 text-xs" style={{ color: "var(--th-text-muted)" }}>
                 {stat.sub}
               </p>
             </div>
@@ -163,7 +163,7 @@ export function DashboardRankingBoard({
             <h2 className="dashboard-ranking-gradient text-lg font-black uppercase tracking-wider">
               {t({ ko: "랭킹 보드", en: "RANKING BOARD", ja: "ランキングボード", zh: "排行榜" })}
             </h2>
-            <p className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+            <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
               {t({
                 ko: "XP 기준 에이전트 순위",
                 en: "Agent ranking by XP",
@@ -173,7 +173,7 @@ export function DashboardRankingBoard({
             </p>
           </div>
         </div>
-        <span className="rounded-md border border-white/[0.06] bg-white/[0.03] px-2.5 py-1 text-[10px] font-bold text-slate-400">
+        <span className="rounded-md border border-surface-light bg-surface-subtle px-2.5 py-1 text-xs font-bold text-slate-400">
           TOP {topAgents.length}
         </span>
       </div>
@@ -192,7 +192,7 @@ export function DashboardRankingBoard({
               zh: "暂无已注册代理",
             })}
           </p>
-          <p className="text-[10px]">
+          <p className="text-xs">
             {t({
               ko: "에이전트를 추가하고 미션을 시작하세요",
               en: "Add agents and start missions",
@@ -315,7 +315,7 @@ export function DashboardRankingBoard({
           )}
 
           {topAgents.length > 3 && (
-            <div className="space-y-2 border-t border-white/[0.06] pt-4">
+            <div className="space-y-2 border-t border-surface-light pt-4">
               {topAgents.slice(3).map((agent, idx) => {
                 const rank = idx + 4;
                 const tier = getRankTier(agent.xp);
@@ -323,7 +323,7 @@ export function DashboardRankingBoard({
                 return (
                   <div
                     key={agent.id}
-                    className="group flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:bg-white/[0.05] hover:translate-x-1"
+                    className="group flex items-center gap-3 rounded-xl border border-surface-light bg-surface-subtle p-3 transition-all duration-200 hover:bg-surface-subtle hover:translate-x-1"
                     style={{ borderLeftWidth: "3px", borderLeftColor: `${tier.color}60` }}
                   >
                     <span className="w-8 text-center font-mono text-sm font-black" style={{ color: `${tier.color}80` }}>
@@ -345,7 +345,7 @@ export function DashboardRankingBoard({
                           <p className="truncate text-sm font-bold" style={{ color: "var(--th-text-primary)" }}>
                             {agent.name}
                           </p>
-                          <p className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                          <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                             {agent.department || t({ ko: "미지정", en: "Unassigned", ja: "未指定", zh: "未指定" })}
                           </p>
                         </div>
@@ -362,7 +362,7 @@ export function DashboardRankingBoard({
                           <p className="truncate text-sm font-bold" style={{ color: "var(--th-text-primary)" }}>
                             {agent.name}
                           </p>
-                          <p className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                          <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                             {agent.department || t({ ko: "미지정", en: "Unassigned", ja: "未指定", zh: "未指定" })}
                           </p>
                         </div>

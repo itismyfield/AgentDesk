@@ -191,7 +191,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
       className="rounded-2xl border p-3 sm:p-4 space-y-3"
       style={{
         borderColor: savedStages.length > 0 ? "rgba(14,165,233,0.35)" : "rgba(148,163,184,0.22)",
-        backgroundColor: "rgba(15,23,42,0.65)",
+        backgroundColor: "var(--th-bg-surface)",
       }}
     >
       <div className="flex items-center justify-between gap-2">
@@ -203,7 +203,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
             {tr("파이프라인", "Pipeline")}
           </h3>
           {savedStages.length > 0 && (
-            <span className="text-[11px] px-2 py-0.5 rounded-full"
+            <span className="text-xs px-2 py-0.5 rounded-full"
               style={{ backgroundColor: "rgba(14,165,233,0.2)", color: "#38bdf8" }}>
               {savedStages.length} {tr("스테이지", "stages")}
             </span>
@@ -222,9 +222,9 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
 
           {stages.map((stage, idx) => (
             <div key={idx} className="rounded-xl border p-3 space-y-2"
-              style={{ borderColor: "rgba(148,163,184,0.18)", backgroundColor: "rgba(2,6,23,0.5)" }}>
+              style={{ borderColor: "rgba(148,163,184,0.18)", backgroundColor: "var(--th-overlay-medium)" }}>
               <div className="flex items-center gap-2">
-                <span className="text-[10px] font-mono w-5 text-center shrink-0"
+                <span className="text-xs font-mono w-5 text-center shrink-0"
                   style={{ color: "var(--th-text-muted)" }}>{idx + 1}</span>
                 <input
                   className="flex-1 bg-transparent border-b text-xs px-1 py-0.5 outline-none"
@@ -235,23 +235,23 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                 />
                 <div className="flex items-center gap-1">
                   {idx > 0 && (
-                    <button onClick={() => moveStage(idx, -1)} className="text-[10px] px-1"
+                    <button onClick={() => moveStage(idx, -1)} className="text-xs px-1"
                       style={{ color: "var(--th-text-muted)" }}>↑</button>
                   )}
                   {idx < stages.length - 1 && (
-                    <button onClick={() => moveStage(idx, 1)} className="text-[10px] px-1"
+                    <button onClick={() => moveStage(idx, 1)} className="text-xs px-1"
                       style={{ color: "var(--th-text-muted)" }}>↓</button>
                   )}
-                  <button onClick={() => removeStage(idx)} className="text-[10px] px-1"
+                  <button onClick={() => removeStage(idx)} className="text-xs px-1"
                     style={{ color: "#f87171" }}>✕</button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2 text-[11px]">
+              <div className="grid grid-cols-2 gap-2 text-xs">
                 <div>
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("스킬", "Skill")}</label>
                   <input
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     placeholder="e.g. claude-code-plan"
                     value={stage.entry_skill}
@@ -261,7 +261,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                 <div>
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("프로바이더", "Provider")}</label>
                   <input
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     placeholder="claude / codex"
                     value={stage.provider}
@@ -271,7 +271,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                 <div>
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("담당 에이전트", "Agent override")}</label>
                   <select
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     value={stage.agent_override_id}
                     onChange={(e) => updateStage(idx, { agent_override_id: e.target.value })}
@@ -285,7 +285,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                 <div>
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("적용 에이전트", "Applies to agent")}</label>
                   <select
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     value={stage.applies_to_agent_id}
                     onChange={(e) => updateStage(idx, { applies_to_agent_id: e.target.value })}
@@ -299,7 +299,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                 <div>
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("트리거", "Trigger")}</label>
                   <select
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     value={stage.trigger_after}
                     onChange={(e) => updateStage(idx, { trigger_after: e.target.value as "ready" | "review_pass" })}
@@ -312,7 +312,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("타임아웃(분)", "Timeout (min)")}</label>
                   <input
                     type="number"
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     value={stage.timeout_minutes}
                     min={1}
@@ -322,7 +322,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                 <div>
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("실패 시", "On failure")}</label>
                   <select
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     value={stage.on_failure}
                     onChange={(e) => updateStage(idx, { on_failure: e.target.value as StageEditor["on_failure"] })}
@@ -336,7 +336,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                   <div>
                     <label style={{ color: "var(--th-text-muted)" }}>{tr("이동 대상", "Goto target")}</label>
                     <select
-                      className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                      className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                       style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                       value={stage.on_failure_target}
                       onChange={(e) => updateStage(idx, { on_failure_target: e.target.value })}
@@ -352,7 +352,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("최대 재시도", "Max retries")}</label>
                   <input
                     type="number"
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     value={stage.max_retries}
                     min={0}
@@ -363,7 +363,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                 <div>
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("스킵 조건", "Skip condition")}</label>
                   <input
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     placeholder="label:hotfix"
                     value={stage.skip_condition}
@@ -373,7 +373,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
                 <div>
                   <label style={{ color: "var(--th-text-muted)" }}>{tr("병렬 스테이지", "Parallel with")}</label>
                   <select
-                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-[11px]"
+                    className="w-full bg-transparent border rounded px-1.5 py-0.5 outline-none text-xs"
                     style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
                     value={stage.parallel_with}
                     onChange={(e) => updateStage(idx, { parallel_with: e.target.value })}
@@ -391,7 +391,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
           <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={addStage}
-              className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
+              className="text-xs px-2.5 py-1 rounded-lg border font-medium"
               style={{ borderColor: "rgba(14,165,233,0.4)", color: "#38bdf8", backgroundColor: "rgba(14,165,233,0.1)" }}
             >
               + {tr("스테이지 추가", "Add stage")}
@@ -400,7 +400,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
               <button
                 onClick={() => void handleSave()}
                 disabled={saving}
-                className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
+                className="text-xs px-2.5 py-1 rounded-lg border font-medium"
                 style={{ borderColor: "rgba(34,197,94,0.4)", color: "#4ade80", backgroundColor: "rgba(34,197,94,0.1)" }}
               >
                 {saving ? "…" : tr("저장", "Save")}
@@ -410,7 +410,7 @@ export default function PipelineEditor({ tr, locale, repo, agents, selectedAgent
               <button
                 onClick={() => void handleDelete()}
                 disabled={saving}
-                className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
+                className="text-xs px-2.5 py-1 rounded-lg border font-medium"
                 style={{ borderColor: "rgba(239,68,68,0.3)", color: "#f87171", backgroundColor: "rgba(239,68,68,0.08)" }}
               >
                 {tr("파이프라인 삭제", "Delete pipeline")}

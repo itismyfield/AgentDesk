@@ -9,11 +9,11 @@ pub mod shell;
 pub mod tmux;
 
 pub use binary_resolver::{
-    apply_runtime_path, async_resolve_binary_with_login_shell, merged_runtime_path, resolve_binary,
-    resolve_binary_with_login_shell, resolve_login_shell_path,
+    BinaryResolution, apply_binary_resolution, async_resolve_binary_with_login_shell,
+    augment_exec_path, merged_runtime_path, probe_resolved_binary_version, resolve_provider_binary,
 };
 pub use dump_tool::capture_process_dump;
 pub use shell::{
-    async_shell_command, find_latest_commit_for_issue, find_worktree_for_issue, git_head_commit,
-    hostname_short, resolve_repo_dir, shell_command,
+    find_latest_commit_for_issue, find_worktree_for_issue, git_head_commit, hostname_short,
+    resolve_repo_dir,
 };

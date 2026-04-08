@@ -907,6 +907,7 @@ async fn execute_agent_turn(
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            memory: Default::default(),
         })
         .unwrap_or_default()
     } else {
@@ -1117,6 +1118,7 @@ async fn conclude_meeting(
             model: None,
             reasoning_effort: None,
             peer_agents_enabled: true,
+            memory: Default::default(),
         })
         .unwrap_or_default()
     } else {

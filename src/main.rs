@@ -10,7 +10,9 @@ mod github;
 pub(crate) mod kanban;
 pub(crate) mod pipeline;
 pub(crate) mod receipt;
+pub(crate) mod reconcile;
 pub(crate) mod runtime;
+pub(crate) mod runtime_layout;
 mod server;
 mod services;
 mod ui;
@@ -51,7 +53,7 @@ enum Commands {
         /// Discord channel ID for restart completion report
         #[arg(long)]
         report_channel_id: Option<u64>,
-        /// Provider for restart report (claude, codex, or gemini)
+        /// Provider for restart report (claude, codex, gemini, or qwen)
         #[arg(long, value_enum)]
         report_provider: Option<ReportProvider>,
         /// Existing message ID to edit for restart report
@@ -308,6 +310,8 @@ enum ConfigAction {
 enum ReportProvider {
     Claude,
     Codex,
+    Gemini,
+    Qwen,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -631,6 +635,8 @@ fn build_restart_report_context(
             let provider = match provider_arg {
                 ReportProvider::Claude => ProviderKind::Claude,
                 ReportProvider::Codex => ProviderKind::Codex,
+                ReportProvider::Gemini => ProviderKind::Gemini,
+                ReportProvider::Qwen => ProviderKind::Qwen,
             };
             Ok(Some(RestartReportContext {
                 provider,

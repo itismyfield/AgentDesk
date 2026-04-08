@@ -1,1 +1,1 @@
-/Users/itismyfield/ObsidianVault/RemoteVault/99_Skills/agentdesk-restart/SKILL.md
+../../../../../../.agentdesk/skills/agentdesk-restart/SKILL.md
