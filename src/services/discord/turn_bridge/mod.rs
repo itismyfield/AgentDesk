@@ -12,8 +12,8 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::services::memory::{
-    CaptureRequest, ReflectRequest, SessionEndReason, build_memory_backend, resolve_memory_role_id,
-    resolve_memory_session_id,
+    CaptureRequest, ReflectRequest, SessionEndReason, TokenUsage, build_memory_backend,
+    resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
@@ -47,11 +47,11 @@ pub(super) fn spawn_memory_capture_task(
     channel_id: ChannelId,
     capture_memory_settings: settings::ResolvedMemorySettings,
     capture_request: CaptureRequest,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
     tokio::spawn(async move {
         let backend = build_memory_backend(&capture_memory_settings);
         let result = backend.capture(capture_request).await;
-        for warning in result.warnings {
+        for warning in &result.warnings {
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
                 "  [{ts}] [memory] capture warning for channel {}: {}",
@@ -59,6 +59,7 @@ pub(super) fn spawn_memory_capture_task(
                 warning
             );
         }
+        result
     })
 }
 
@@ -66,12 +67,12 @@ pub(super) fn spawn_memory_reflect_task(
     channel_id: ChannelId,
     reflect_memory_settings: settings::ResolvedMemorySettings,
     reflect_request: ReflectRequest,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
     tokio::spawn(async move {
         let backend = build_memory_backend(&reflect_memory_settings);
         let reason = reflect_request.reason.as_str().to_string();
         let result = backend.reflect(reflect_request).await;
-        for warning in result.warnings {
+        for warning in &result.warnings {
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
                 "  [{ts}] [memory] reflect warning for channel {} ({}): {}",
@@ -80,6 +81,7 @@ pub(super) fn spawn_memory_reflect_task(
                 warning
             );
         }
+        result
     })
 }
 
@@ -159,6 +161,7 @@ pub(super) struct TurnBridgeContext {
     pub(super) adk_session_info: Option<String>,
     pub(super) adk_cwd: Option<String>,
     pub(super) dispatch_id: Option<String>,
+    pub(super) memory_recall_usage: TokenUsage,
     pub(super) current_msg_id: MessageId,
     pub(super) response_sent_offset: usize,
     pub(super) full_response: String,
@@ -167,6 +170,24 @@ pub(super) struct TurnBridgeContext {
     pub(super) defer_watcher_resume: bool,
     pub(super) completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(super) inflight_state: InflightTurnState,
+}
+
+pub(super) fn optional_metric_token_fields(usage: TokenUsage) -> (Option<u64>, Option<u64>) {
+    if usage.is_zero() {
+        return (None, None);
+    }
+    (
+        if usage.input_tokens > 0 {
+            Some(usage.input_tokens)
+        } else {
+            None
+        },
+        if usage.output_tokens > 0 {
+            Some(usage.output_tokens)
+        } else {
+            None
+        },
+    )
 }
 
 fn extract_skill_id_from_tool_use(name: &str, input: &str) -> Option<String> {
@@ -258,6 +279,8 @@ pub(super) fn spawn_turn_bridge(
         let mut last_tool_summary: Option<String> = None;
         let mut accumulated_input_tokens: u64 = 0;
         let mut accumulated_output_tokens: u64 = 0;
+        let mut accumulated_memory_input_tokens: u64 = bridge.memory_recall_usage.input_tokens;
+        let mut accumulated_memory_output_tokens: u64 = bridge.memory_recall_usage.output_tokens;
         let mut spin_idx: usize = 0;
         let mut restart_followup_pending = false;
         let mut any_tool_used = bridge.inflight_state.any_tool_used;
@@ -1268,36 +1291,6 @@ pub(super) fn spawn_turn_bridge(
                     .send()
                     .await;
             }
-
-            // Record turn metrics
-            {
-                let duration = shared_owned
-                    .turn_start_times
-                    .remove(&channel_id)
-                    .map(|(_, start)| start.elapsed().as_secs_f64())
-                    .unwrap_or(0.0);
-                let provider_name = {
-                    let settings = shared_owned.settings.read().await;
-                    settings.provider.as_str().to_string()
-                };
-                super::metrics::record_turn(&super::metrics::TurnMetric {
-                    channel_id: channel_id.get(),
-                    provider: provider_name,
-                    timestamp: chrono::Local::now().to_rfc3339(),
-                    duration_secs: duration,
-                    model: None, // model info from StatusUpdate not yet accumulated in turn_bridge
-                    input_tokens: if accumulated_input_tokens > 0 {
-                        Some(accumulated_input_tokens)
-                    } else {
-                        None
-                    },
-                    output_tokens: if accumulated_output_tokens > 0 {
-                        Some(accumulated_output_tokens)
-                    } else {
-                        None
-                    },
-                });
-            }
         }
 
         if should_resume_watcher_after_turn(
@@ -1411,14 +1404,14 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
+        let mut background_memory_task = None;
         if let Some(reflect_request) = reflect_request {
-            let _reflect_task = spawn_memory_reflect_task(
+            background_memory_task = Some(spawn_memory_reflect_task(
                 channel_id,
                 capture_memory_settings.clone(),
                 reflect_request,
-            );
+            ));
         }
-
         if should_persist_transcript {
             if capture_memory_settings.backend != settings::MemoryBackendKind::Memento {
                 let capture_request = CaptureRequest {
@@ -1433,9 +1426,68 @@ pub(super) fn spawn_turn_bridge(
                     user_text: user_text_owned.clone(),
                     assistant_text: full_response.clone(),
                 };
-                let _capture_task =
-                    spawn_memory_capture_task(channel_id, capture_memory_settings, capture_request);
+                background_memory_task = Some(spawn_memory_capture_task(
+                    channel_id,
+                    capture_memory_settings,
+                    capture_request,
+                ));
             }
+        }
+
+        if let Some(memory_task) = background_memory_task {
+            match memory_task.await {
+                Ok(result) => {
+                    accumulated_memory_input_tokens = accumulated_memory_input_tokens
+                        .saturating_add(result.token_usage.input_tokens);
+                    accumulated_memory_output_tokens = accumulated_memory_output_tokens
+                        .saturating_add(result.token_usage.output_tokens);
+                }
+                Err(err) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] [memory] background task join failed for channel {}: {}",
+                        channel_id.get(),
+                        err
+                    );
+                }
+            }
+        }
+
+        {
+            let duration = shared_owned
+                .turn_start_times
+                .remove(&channel_id)
+                .map(|(_, start)| start.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
+            let memory_usage = TokenUsage {
+                input_tokens: accumulated_memory_input_tokens,
+                output_tokens: accumulated_memory_output_tokens,
+            };
+            let (memory_input_tokens, memory_output_tokens) =
+                optional_metric_token_fields(memory_usage);
+            let provider_name = {
+                let settings = shared_owned.settings.read().await;
+                settings.provider.as_str().to_string()
+            };
+            super::metrics::record_turn(&super::metrics::TurnMetric {
+                channel_id: channel_id.get(),
+                provider: provider_name,
+                timestamp: chrono::Local::now().to_rfc3339(),
+                duration_secs: duration,
+                model: None, // model info from StatusUpdate not yet accumulated in turn_bridge
+                input_tokens: if accumulated_input_tokens > 0 {
+                    Some(accumulated_input_tokens)
+                } else {
+                    None
+                },
+                output_tokens: if accumulated_output_tokens > 0 {
+                    Some(accumulated_output_tokens)
+                } else {
+                    None
+                },
+                memory_input_tokens,
+                memory_output_tokens,
+            });
         }
 
         // Clear restart report BEFORE clearing inflight state (which removes

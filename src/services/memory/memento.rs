@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 
 use super::{
     CaptureRequest, CaptureResult, LocalMemoryBackend, MemoryBackend, MemoryFuture, RecallRequest,
-    RecallResponse, ReflectRequest, UNBOUND_MEMORY_ROLE_ID,
+    RecallResponse, ReflectRequest, TokenUsage, UNBOUND_MEMORY_ROLE_ID, extract_token_usage,
 };
 use crate::runtime_layout;
 use crate::services::discord::DispatchProfile;
@@ -30,6 +30,16 @@ struct MementoRuntimeConfig {
     endpoint: String,
     access_key: String,
     workspace_override: Option<String>,
+}
+
+struct ToolCallResult {
+    payload: Value,
+    token_usage: TokenUsage,
+}
+
+struct ContextFetchResult {
+    external_recall: Option<String>,
+    token_usage: TokenUsage,
 }
 
 #[derive(Clone)]
@@ -227,7 +237,7 @@ impl MementoBackend {
         config: &MementoRuntimeConfig,
         tool_name: &str,
         arguments: Value,
-    ) -> Result<Value, String> {
+    ) -> Result<ToolCallResult, String> {
         let mut session_id = self.ensure_session(config).await?;
 
         for attempt in 0..2 {
@@ -291,7 +301,7 @@ impl MementoBackend {
         request: &RecallRequest,
         config: &MementoRuntimeConfig,
         workspace: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<ContextFetchResult, String> {
         let agent_id = self.resolve_agent_id(&request.role_id, request.channel_id);
         let mut args = Map::new();
         args.insert("agentId".to_string(), json!(agent_id));
@@ -300,10 +310,13 @@ impl MementoBackend {
         if !workspace.trim().is_empty() {
             args.insert("workspace".to_string(), json!(workspace));
         }
-        let payload = self
+        let result = self
             .call_tool(config, "context", Value::Object(args))
             .await?;
-        Ok(format_context_payload_for_external_recall(&payload))
+        Ok(ContextFetchResult {
+            external_recall: format_context_payload_for_external_recall(&result.payload),
+            token_usage: result.token_usage,
+        })
     }
 
     async fn reflect_transcript(
@@ -311,7 +324,7 @@ impl MementoBackend {
         request: &ReflectRequest,
         config: &MementoRuntimeConfig,
         workspace: &str,
-    ) -> Result<(), String> {
+    ) -> Result<TokenUsage, String> {
         let agent_id = self.resolve_agent_id(&request.role_id, request.channel_id);
         let mut args = Map::new();
         args.insert("agentId".to_string(), json!(agent_id));
@@ -325,7 +338,7 @@ impl MementoBackend {
         }
         self.call_tool(config, "reflect", Value::Object(args))
             .await
-            .map(|_| ())
+            .map(|result| result.token_usage)
     }
 }
 
@@ -372,7 +385,7 @@ fn is_session_error(message: &str) -> bool {
         || message.contains("session expired")
 }
 
-fn extract_tool_result(payload: &Value, tool_name: &str) -> Result<Value, String> {
+fn extract_tool_result(payload: &Value, tool_name: &str) -> Result<ToolCallResult, String> {
     if payload
         .get("result")
         .and_then(|result| result.get("isError"))
@@ -409,7 +422,12 @@ fn extract_tool_result(payload: &Value, tool_name: &str) -> Result<Value, String
             .unwrap_or("unknown tool error");
         return Err(format!("memento {tool_name} tool failed: {error}"));
     }
-    Ok(parsed)
+    Ok(ToolCallResult {
+        token_usage: extract_token_usage(payload)
+            .or_else(|| extract_token_usage(&parsed))
+            .unwrap_or_default(),
+        payload: parsed,
+    })
 }
 
 fn sanitize_workspace_segment(value: &str) -> String {
@@ -893,11 +911,11 @@ impl MemoryBackend for MementoBackend {
             )
             .await
             {
-                Ok(Ok(Some(external_recall))) => RecallResponse {
-                    external_recall: Some(external_recall),
+                Ok(Ok(result)) => RecallResponse {
+                    external_recall: result.external_recall,
+                    token_usage: result.token_usage,
                     ..RecallResponse::default()
                 },
-                Ok(Ok(None)) => RecallResponse::default(),
                 Ok(Err(err)) => {
                     let mut fallback = self.local.recall(request.clone()).await;
                     fallback.warnings.push(err);
@@ -933,6 +951,7 @@ impl MemoryBackend for MementoBackend {
                         "memento reflect skipped because session transcript is empty".to_string(),
                     ],
                     skipped: true,
+                    ..CaptureResult::default()
                 };
             }
 
@@ -942,6 +961,7 @@ impl MemoryBackend for MementoBackend {
                     return CaptureResult {
                         warnings: vec![err],
                         skipped: true,
+                        ..CaptureResult::default()
                     };
                 }
             };
@@ -953,10 +973,14 @@ impl MemoryBackend for MementoBackend {
             )
             .await
             {
-                Ok(Ok(())) => CaptureResult::default(),
+                Ok(Ok(token_usage)) => CaptureResult {
+                    token_usage,
+                    ..CaptureResult::default()
+                },
                 Ok(Err(err)) => CaptureResult {
                     warnings: vec![err],
                     skipped: true,
+                    ..CaptureResult::default()
                 },
                 Err(_) => CaptureResult {
                     warnings: vec![format!(
@@ -964,6 +988,7 @@ impl MemoryBackend for MementoBackend {
                         self.settings.capture_timeout_ms
                     )],
                     skipped: true,
+                    ..CaptureResult::default()
                 },
             }
         })
@@ -1168,6 +1193,10 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 2,
             "result": {
+                "usage": {
+                    "input_tokens": 123,
+                    "output_tokens": 9
+                },
                 "content": [
                     {
                         "type": "text",
@@ -1232,6 +1261,13 @@ mod tests {
         assert!(recall.shared_knowledge.is_none());
         assert!(recall.longterm_catalog.is_none());
         assert!(recall.warnings.is_empty());
+        assert_eq!(
+            recall.token_usage,
+            crate::services::memory::TokenUsage {
+                input_tokens: 123,
+                output_tokens: 9,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1287,6 +1323,10 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 2,
             "result": {
+                "usage": {
+                    "promptTokenCount": 33,
+                    "completionTokenCount": 4
+                },
                 "content": [
                     {
                         "type": "text",
@@ -1339,7 +1379,17 @@ mod tests {
         assert!(requests[1].contains("\"agentId\":\"project-agentdesk\""));
         assert!(requests[1].contains("\"sessionId\":\"session-1\""));
         assert!(requests[1].contains("User: hi | Assistant: hello"));
-        assert_eq!(result, CaptureResult::default());
+        assert_eq!(
+            result,
+            CaptureResult {
+                warnings: Vec::new(),
+                skipped: false,
+                token_usage: crate::services::memory::TokenUsage {
+                    input_tokens: 33,
+                    output_tokens: 4,
+                },
+            }
+        );
     }
 
     #[tokio::test]

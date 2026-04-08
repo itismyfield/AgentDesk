@@ -5,7 +5,7 @@ use serde_json::{Map, Value, json};
 
 use super::{
     CaptureRequest, CaptureResult, LocalMemoryBackend, MemoryBackend, MemoryFuture, RecallRequest,
-    RecallResponse,
+    RecallResponse, TokenUsage, extract_token_usage,
 };
 use crate::services::discord::DispatchProfile;
 use crate::services::discord::settings::ResolvedMemorySettings;
@@ -30,6 +30,11 @@ struct Mem0ProfilePolicy {
     threshold: f64,
     top_k: u64,
     unique_limit: usize,
+}
+
+struct ExternalRecallResult {
+    content: Option<String>,
+    token_usage: TokenUsage,
 }
 
 #[derive(Clone)]
@@ -175,7 +180,7 @@ impl Mem0Backend {
     async fn search_external_recall(
         &self,
         request: &RecallRequest,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<ExternalRecallResult, String> {
         let config = self.runtime_config()?;
         let url = format!("{}{}", config.base_url, MEM0_SEARCH_PATH);
         let body = self.build_search_body(request, &config);
@@ -198,13 +203,16 @@ impl Mem0Backend {
             .map_err(|err| format!("mem0 search response read failed: {err}"))?;
         let payload: Value = serde_json::from_str(&text)
             .map_err(|err| format!("mem0 search response decode failed: {err}; body={text}"))?;
-        Ok(format_search_payload_for_external_recall(
-            &payload,
-            self.profile_policy().unique_limit,
-        ))
+        Ok(ExternalRecallResult {
+            content: format_search_payload_for_external_recall(
+                &payload,
+                self.profile_policy().unique_limit,
+            ),
+            token_usage: extract_token_usage(&payload).unwrap_or_default(),
+        })
     }
 
-    async fn add_capture(&self, request: &CaptureRequest) -> Result<(), String> {
+    async fn add_capture(&self, request: &CaptureRequest) -> Result<CaptureResult, String> {
         let config = self.runtime_config()?;
         let url = format!("{}{}", config.base_url, MEM0_ADD_PATH);
         let body = self.build_capture_body(request, &config);
@@ -221,7 +229,20 @@ impl Mem0Backend {
             return Err(format!("mem0 add failed with {status}: {body}"));
         }
 
-        Ok(())
+        let body = response.text().await.unwrap_or_default();
+        let token_usage = if body.trim().is_empty() {
+            TokenUsage::default()
+        } else {
+            serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|payload| extract_token_usage(&payload))
+                .unwrap_or_default()
+        };
+
+        Ok(CaptureResult {
+            token_usage,
+            ..CaptureResult::default()
+        })
     }
 }
 
@@ -419,10 +440,12 @@ impl MemoryBackend for Mem0Backend {
             )
             .await
             {
-                Ok(Ok(Some(external_recall))) => {
-                    response.external_recall = Some(external_recall);
+                Ok(Ok(external)) => {
+                    response.external_recall = external.content;
+                    response
+                        .token_usage
+                        .saturating_add_assign(external.token_usage);
                 }
-                Ok(Ok(None)) => {}
                 Ok(Err(err)) => response.warnings.push(err),
                 Err(_) => response.warnings.push(format!(
                     "mem0 recall timed out after {}ms; falling back to local memory",
@@ -442,6 +465,7 @@ impl MemoryBackend for Mem0Backend {
                         "mem0 capture skipped because turn content is empty".to_string(),
                     ],
                     skipped: true,
+                    ..CaptureResult::default()
                 };
             }
 
@@ -451,10 +475,11 @@ impl MemoryBackend for Mem0Backend {
             )
             .await
             {
-                Ok(Ok(())) => CaptureResult::default(),
+                Ok(Ok(result)) => result,
                 Ok(Err(err)) => CaptureResult {
                     warnings: vec![err],
                     skipped: true,
+                    ..CaptureResult::default()
                 },
                 Err(_) => CaptureResult {
                     warnings: vec![format!(
@@ -462,6 +487,7 @@ impl MemoryBackend for Mem0Backend {
                         self.settings.capture_timeout_ms
                     )],
                     skipped: true,
+                    ..CaptureResult::default()
                 },
             }
         })
@@ -864,7 +890,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_mem0_capture_accepts_202_success() {
-        let (base_url, server_handle) = spawn_fixed_response_server("202 Accepted", "{}").await;
+        let (base_url, server_handle) = spawn_fixed_response_server(
+            "202 Accepted",
+            r#"{"usage":{"inputTokens":8,"outputTokens":2}}"#,
+        )
+        .await;
         let (_guard, prev_api_key, prev_base_url) = set_mem0_env(&base_url);
         let backend = Mem0Backend::new(mem0_settings());
 
@@ -885,6 +915,13 @@ mod tests {
 
         assert!(!result.skipped);
         assert!(result.warnings.is_empty());
+        assert_eq!(
+            result.token_usage,
+            TokenUsage {
+                input_tokens: 8,
+                output_tokens: 2,
+            }
+        );
     }
 
     #[tokio::test]
@@ -936,7 +973,11 @@ mod tests {
                     "relationship": "uses",
                     "destination": "neo4j"
                 }
-            ]
+            ],
+            "usage": {
+                "request_tokens": 17,
+                "response_tokens": 6
+            }
         }"#;
         let (base_url, server_handle) = spawn_fixed_response_server("200 OK", body).await;
         let (_guard, prev_api_key, prev_base_url) = set_mem0_env(&base_url);
@@ -963,5 +1004,12 @@ mod tests {
         assert!(external.contains("Relevant graph relations from Mem0 for this session:"));
         assert!(external.contains("agentdesk -- uses -- neo4j"));
         assert_eq!(external.matches("AgentDesk uses Neo4j").count(), 1);
+        assert_eq!(
+            response.token_usage,
+            TokenUsage {
+                input_tokens: 17,
+                output_tokens: 6,
+            }
+        );
     }
 }

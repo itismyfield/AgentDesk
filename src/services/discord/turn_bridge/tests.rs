@@ -14,12 +14,14 @@ use super::stale_resume::{
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
-use super::{spawn_memory_capture_task, take_memento_reflect_request};
+use super::{
+    optional_metric_token_fields, spawn_memory_capture_task, take_memento_reflect_request,
+};
 use crate::services::discord::ChannelId;
 use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
-use crate::services::memory::{CaptureRequest, SessionEndReason};
+use crate::services::memory::{CaptureRequest, SessionEndReason, TokenUsage};
 use crate::services::provider::ProviderKind;
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use std::io::Write;
@@ -97,6 +99,32 @@ fn persisted_context_tokens_uses_input_only() {
 #[test]
 fn total_context_tokens_saturates_on_overflow() {
     assert_eq!(total_context_tokens(u64::MAX, 1), u64::MAX);
+}
+
+#[test]
+fn optional_metric_token_fields_omit_all_zero_usage() {
+    assert_eq!(
+        optional_metric_token_fields(TokenUsage::default()),
+        (None, None)
+    );
+}
+
+#[test]
+fn optional_metric_token_fields_preserve_partial_usage() {
+    assert_eq!(
+        optional_metric_token_fields(TokenUsage {
+            input_tokens: 13,
+            output_tokens: 0,
+        }),
+        (Some(13), None)
+    );
+    assert_eq!(
+        optional_metric_token_fields(TokenUsage {
+            input_tokens: 0,
+            output_tokens: 5,
+        }),
+        (None, Some(5))
+    );
 }
 
 fn sample_session() -> DiscordSession {

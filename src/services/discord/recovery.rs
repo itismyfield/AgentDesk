@@ -1273,6 +1273,7 @@ pub(super) async fn restore_inflight_turns(
                 adk_session_info: Some(adk_session_info),
                 adk_cwd: last_path.clone(),
                 dispatch_id: recovery_dispatch_id,
+                memory_recall_usage: crate::services::memory::TokenUsage::default(),
                 current_msg_id,
                 response_sent_offset: state.response_sent_offset,
                 full_response: state.full_response.clone(),

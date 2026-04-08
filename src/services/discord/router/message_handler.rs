@@ -1241,6 +1241,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             adk_session_info: Some(adk_session_info),
             adk_cwd: Some(current_path.clone()),
             dispatch_id,
+            memory_recall_usage: memory_recall.token_usage,
             current_msg_id: placeholder_msg_id,
             response_sent_offset: 0,
             full_response: String::new(),
@@ -2579,6 +2580,7 @@ mod tests {
             longterm_catalog: Some("- notes.md".to_string()),
             external_recall: Some("[External Recall]".to_string()),
             warnings: Vec::new(),
+            token_usage: crate::services::memory::TokenUsage::default(),
         }
     }
 
