@@ -130,6 +130,70 @@ fn git_commit(repo_dir: &std::path::Path, message: &str) -> String {
 }
 
 #[tokio::test]
+async fn health_api_http_reports_observability_metrics_and_degraded_outbox_backlog() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    harness.set_recovery_duration_ms(1_250);
+    let app = axum::Router::new().nest(
+        "/api",
+        test_api_router(db.clone(), engine, Some(harness.registry())),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let url = format!("http://{addr}/api/health");
+
+    let healthy_response = reqwest::get(&url).await.unwrap();
+    assert_eq!(healthy_response.status(), reqwest::StatusCode::OK);
+    let healthy_json: serde_json::Value = healthy_response.json().await.unwrap();
+    assert_eq!(healthy_json["status"], "healthy");
+    assert_eq!(healthy_json["deferred_hooks"], 0);
+    assert_eq!(healthy_json["queue_depth"], 0);
+    assert_eq!(healthy_json["watcher_count"], 0);
+    assert_eq!(healthy_json["outbox_age"], 0);
+    assert!(
+        (healthy_json["recovery_duration"].as_f64().unwrap() - 1.25).abs() < f64::EPSILON,
+        "expected recovery_duration=1.25, got {}",
+        healthy_json["recovery_duration"]
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dispatch_outbox (dispatch_id, action, status, created_at) \
+             VALUES (?1, 'notify', 'pending', datetime('now', '-5 minutes'))",
+            ["dispatch-1"],
+        )
+        .unwrap();
+    }
+
+    let degraded_response = reqwest::get(&url).await.unwrap();
+    assert_eq!(degraded_response.status(), reqwest::StatusCode::OK);
+    let degraded_json: serde_json::Value = degraded_response.json().await.unwrap();
+    assert_eq!(degraded_json["status"], "degraded");
+    assert!(
+        degraded_json["outbox_age"].as_i64().unwrap() >= 299,
+        "expected an outbox age close to 300s, got {}",
+        degraded_json["outbox_age"]
+    );
+    assert!(
+        degraded_json["degraded_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|reason| reason.starts_with("dispatch_outbox_oldest_pending_age:")),
+        "expected dispatch_outbox_oldest_pending_age reason, got {:?}",
+        degraded_json["degraded_reasons"]
+    );
+}
+
+#[tokio::test]
 async fn offices_reorder_accepts_bare_array_and_updates_listing_order() {
     let db = test_db();
     let engine = test_engine(&db);

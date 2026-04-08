@@ -444,6 +444,13 @@ pub(super) struct SharedData {
     /// Set to true after startup reconciliation + recovery is complete (#122).
     /// Until true, the router queues all incoming messages.
     pub(super) reconcile_done: Arc<std::sync::atomic::AtomicBool>,
+    /// Number of queued deferred idle-queue kickoffs waiting to run.
+    pub(super) deferred_hook_backlog: std::sync::atomic::AtomicUsize,
+    /// When this provider started reconcile/recovery for the current boot.
+    pub(super) recovery_started_at: std::time::Instant,
+    /// Captured reconcile/recovery duration for the current boot in milliseconds.
+    /// Remains 0 until reconcile completes, at which point it is frozen.
+    pub(super) recovery_duration_ms: std::sync::atomic::AtomicU64,
     /// Process-global active turn counter shared across all providers.
     /// Deferred restart checks this instead of provider-local cancel_tokens.len().
     pub(super) global_active: Arc<std::sync::atomic::AtomicUsize>,
@@ -512,6 +519,20 @@ pub(super) struct Data {
     pub(super) shared: Arc<SharedData>,
     pub(super) token: String,
     pub(super) provider: ProviderKind,
+}
+
+pub(super) fn mark_reconcile_complete(shared: &SharedData) {
+    let duration_ms = shared.recovery_started_at.elapsed().as_millis();
+    let duration_ms = duration_ms.min(u64::MAX as u128) as u64;
+    let _ = shared.recovery_duration_ms.compare_exchange(
+        0,
+        duration_ms,
+        std::sync::atomic::Ordering::AcqRel,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    shared
+        .reconcile_done
+        .store(true, std::sync::atomic::Ordering::Release);
 }
 
 pub(super) type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -1906,6 +1927,9 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
         current_generation: runtime_store::load_generation(),
         restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+        recovery_started_at: std::time::Instant::now(),
+        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
         global_active,
         global_finalizing,
         shutdown_remaining,
@@ -2257,9 +2281,7 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                     .await;
 
                     // #122: Reconcile phase complete — open intake
-                    shared_for_restart_reports
-                        .reconcile_done
-                        .store(true, std::sync::atomic::Ordering::Release);
+                    mark_reconcile_complete(&shared_for_restart_reports);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ✓ Reconcile complete — intake open");
 

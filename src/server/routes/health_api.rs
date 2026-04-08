@@ -10,6 +10,15 @@ use crate::services::discord::health;
 
 use super::AppState;
 
+const OUTBOX_AGE_DEGRADED_SECS: i64 = 60;
+
+struct DispatchOutboxStats {
+    pending: i64,
+    retrying: i64,
+    permanent_failures: i64,
+    oldest_pending_age: i64,
+}
+
 /// GET /api/health — combined DB + Discord provider health.
 /// When HealthRegistry is present, returns Discord provider status.
 /// Always includes DB status and dashboard availability.
@@ -28,54 +37,58 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         dashboard_dir.join("index.html").exists()
     };
 
-    // #209: Collect dispatch_outbox stats for observability
-    let outbox_stats = state.db.lock().ok().map(|conn| {
-        let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let retrying: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let failed: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'failed'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
+    let outbox_stats = load_dispatch_outbox_stats(&state.db);
+    let outbox_json = outbox_stats.as_ref().map(|stats| {
         serde_json::json!({
-            "pending": pending,
-            "retrying": retrying,
-            "permanent_failures": failed
+            "pending": stats.pending,
+            "retrying": stats.retrying,
+            "permanent_failures": stats.permanent_failures,
+            "oldest_pending_age": stats.oldest_pending_age,
         })
     });
+    let outbox_age = outbox_stats
+        .as_ref()
+        .map(|stats| stats.oldest_pending_age)
+        .unwrap_or(0);
 
     if let Some(ref registry) = state.health_registry {
-        let healthy = health::is_healthy(registry).await;
-        let discord_json = health::build_health_json(registry).await;
-        // Parse the discord JSON and merge with DB status
-        let mut json: serde_json::Value =
-            serde_json::from_str(&discord_json).unwrap_or(serde_json::json!({}));
+        let discord_snapshot = health::build_health_snapshot(registry).await;
+        let mut status = discord_snapshot.status();
+        let mut json =
+            serde_json::to_value(discord_snapshot).unwrap_or_else(|_| serde_json::json!({}));
+        let mut degraded_reasons = json["degraded_reasons"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        if !db_ok {
+            status = status.worsen(health::HealthStatus::Unhealthy);
+            degraded_reasons.push(serde_json::json!("db_unavailable"));
+        }
+        if outbox_age >= OUTBOX_AGE_DEGRADED_SECS {
+            status = status.worsen(health::HealthStatus::Degraded);
+            degraded_reasons.push(serde_json::json!(format!(
+                "dispatch_outbox_oldest_pending_age:{}",
+                outbox_age
+            )));
+        }
+
+        json["status"] =
+            serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!("unhealthy"));
+        json["degraded_reasons"] = serde_json::Value::Array(degraded_reasons);
         json["db"] = serde_json::json!(db_ok);
         json["dashboard"] = serde_json::json!(dashboard_ok);
-        if let Some(stats) = outbox_stats {
+        json["outbox_age"] = serde_json::json!(outbox_age);
+        if let Some(stats) = outbox_json {
             json["dispatch_outbox"] = stats;
         }
 
-        let status = if healthy && db_ok {
+        let http_status = if status.is_http_ready() {
             StatusCode::OK
         } else {
             StatusCode::SERVICE_UNAVAILABLE
         };
-        (status, Json(json)).into_response()
+        (http_status, Json(json)).into_response()
     } else {
         // Standalone mode — no Discord providers
         let status = if db_ok {
@@ -87,9 +100,14 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
             "ok": db_ok,
             "version": env!("CARGO_PKG_VERSION"),
             "db": db_ok,
-            "dashboard": dashboard_ok
+            "dashboard": dashboard_ok,
+            "deferred_hooks": 0,
+            "outbox_age": outbox_age,
+            "queue_depth": 0,
+            "watcher_count": 0,
+            "recovery_duration": 0.0
         });
-        if let Some(stats) = outbox_stats {
+        if let Some(stats) = outbox_json {
             json["dispatch_outbox"] = stats;
         }
         (status, Json(json)).into_response()
@@ -160,4 +178,45 @@ fn parse_status_code(s: &str) -> StatusCode {
         "503 Service Unavailable" => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+fn load_dispatch_outbox_stats(db: &crate::db::Db) -> Option<DispatchOutboxStats> {
+    db.lock().ok().map(|conn| {
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let retrying: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let failed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_outbox WHERE status = 'failed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let oldest_pending_age: i64 = conn
+            .query_row(
+                "SELECT COALESCE(CAST(MAX((julianday('now') - julianday(created_at)) * 86400.0) AS INTEGER), 0) \
+                 FROM dispatch_outbox WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        DispatchOutboxStats {
+            pending,
+            retrying,
+            permanent_failures: failed,
+            oldest_pending_age,
+        }
+    })
 }

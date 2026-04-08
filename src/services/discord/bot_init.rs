@@ -679,6 +679,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         current_generation: runtime_store::load_generation(),
         restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+        recovery_started_at: std::time::Instant::now(),
+        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
         global_active,
         global_finalizing,
         shutdown_remaining,
@@ -1057,9 +1060,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     .await;
 
                     // #122: Reconcile phase complete — open intake
-                    shared_for_restart_reports
-                        .reconcile_done
-                        .store(true, std::sync::atomic::Ordering::Release);
+                    super::mark_reconcile_complete(&shared_for_restart_reports);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ✓ Reconcile complete — intake open");
 

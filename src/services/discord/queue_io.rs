@@ -623,6 +623,9 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
     channel_id: ChannelId,
     reason: &'static str,
 ) {
+    shared
+        .deferred_hook_backlog
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         if let (Some(ctx), Some(tok)) = (
@@ -642,6 +645,9 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
                 channel_id
             );
         }
+        shared
+            .deferred_hook_backlog
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     });
 }
 

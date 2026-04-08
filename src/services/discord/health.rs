@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use poise::serenity_prelude as serenity;
+use serde::Serialize;
 use serenity::ChannelId;
 
 use super::SharedData;
@@ -13,6 +14,72 @@ use crate::services::provider::ProviderKind;
 struct ProviderEntry {
     name: String,
     shared: Arc<SharedData>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+impl HealthStatus {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Healthy => 0,
+            Self::Degraded => 1,
+            Self::Unhealthy => 2,
+        }
+    }
+
+    pub fn worsen(self, other: Self) -> Self {
+        if self.rank() >= other.rank() {
+            self
+        } else {
+            other
+        }
+    }
+
+    pub fn is_http_ready(self) -> bool {
+        matches!(self, Self::Healthy | Self::Degraded)
+    }
+
+    pub fn is_healthy(self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderHealthSnapshot {
+    name: String,
+    connected: bool,
+    active_turns: usize,
+    queue_depth: usize,
+    sessions: usize,
+    restart_pending: bool,
+    last_turn_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiscordHealthSnapshot {
+    status: HealthStatus,
+    version: &'static str,
+    uptime_secs: u64,
+    global_active: usize,
+    global_finalizing: usize,
+    deferred_hooks: usize,
+    queue_depth: usize,
+    watcher_count: usize,
+    recovery_duration: f64,
+    degraded_reasons: Vec<String>,
+    providers: Vec<ProviderHealthSnapshot>,
+}
+
+impl DiscordHealthSnapshot {
+    pub fn status(&self) -> HealthStatus {
+        self.status
+    }
 }
 
 /// Registry that providers register with so the unified axum API can query all of them.
@@ -150,19 +217,31 @@ pub async fn clear_provider_channel_runtime(
     true
 }
 
-/// Build the health check JSON response.
-pub async fn build_health_json(registry: &HealthRegistry) -> String {
+/// Build the health check snapshot for the API response.
+pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSnapshot {
     let uptime_secs = registry.started_at.elapsed().as_secs();
     let version = env!("CARGO_PKG_VERSION");
 
     let providers = registry.providers.lock().await;
     let mut provider_entries = Vec::new();
+    let mut degraded_reasons = Vec::new();
+    let mut status = HealthStatus::Healthy;
+    let mut deferred_hooks = 0usize;
+    let mut queue_depth = 0usize;
+    let mut watcher_count = 0usize;
+    let mut recovery_duration = 0.0f64;
+
+    if providers.is_empty() {
+        degraded_reasons.push("no_providers_registered".to_string());
+        status = HealthStatus::Unhealthy;
+    }
 
     for entry in providers.iter() {
         // Use try_lock to avoid blocking the health endpoint when core is
         // held by a long-running turn. Fall back to atomic counters so the
         // unified API route always responds promptly.
-        let (active_turns, queue_depth, session_count) = match entry.shared.core.try_lock() {
+        let (active_turns, provider_queue_depth, session_count) = match entry.shared.core.try_lock()
+        {
             Ok(data) => {
                 let at = data.cancel_tokens.len();
                 let qd: usize = data.intervention_queue.values().map(|q| q.len()).sum();
@@ -187,19 +266,72 @@ pub async fn build_health_json(registry: &HealthRegistry) -> String {
             .shared
             .bot_connected
             .load(std::sync::atomic::Ordering::Relaxed);
+        let reconcile_done = entry
+            .shared
+            .reconcile_done
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let provider_deferred_hooks = entry
+            .shared
+            .deferred_hook_backlog
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let provider_watchers = entry.shared.tmux_watchers.len();
+        let recovering_channels = entry.shared.recovering_channels.len();
+        let provider_recovery_duration = recovery_duration_secs(&entry.shared);
         let last_turn_at = entry
             .shared
             .last_turn_at
             .lock()
             .ok()
-            .and_then(|g| g.clone())
-            .map(|t| format!(r#""{}""#, t))
-            .unwrap_or_else(|| "null".to_string());
+            .and_then(|g| g.clone());
 
-        provider_entries.push(format!(
-            r#"{{"name":"{}","connected":{},"active_turns":{},"queue_depth":{},"sessions":{},"restart_pending":{},"last_turn_at":{}}}"#,
-            entry.name, connected, active_turns, queue_depth, session_count, restart_pending, last_turn_at
-        ));
+        deferred_hooks += provider_deferred_hooks;
+        queue_depth += provider_queue_depth;
+        watcher_count += provider_watchers;
+        recovery_duration = recovery_duration.max(provider_recovery_duration);
+
+        if !connected {
+            status = status.worsen(HealthStatus::Unhealthy);
+            degraded_reasons.push(format!("provider:{}:disconnected", entry.name));
+        }
+        if restart_pending {
+            status = status.worsen(HealthStatus::Unhealthy);
+            degraded_reasons.push(format!("provider:{}:restart_pending", entry.name));
+        }
+        if !reconcile_done {
+            status = status.worsen(HealthStatus::Degraded);
+            degraded_reasons.push(format!("provider:{}:reconcile_in_progress", entry.name));
+        }
+        if provider_deferred_hooks > 0 {
+            status = status.worsen(HealthStatus::Degraded);
+            degraded_reasons.push(format!(
+                "provider:{}:deferred_hooks_backlog:{}",
+                entry.name, provider_deferred_hooks
+            ));
+        }
+        if provider_queue_depth > 0 {
+            status = status.worsen(HealthStatus::Degraded);
+            degraded_reasons.push(format!(
+                "provider:{}:pending_queue_depth:{}",
+                entry.name, provider_queue_depth
+            ));
+        }
+        if recovering_channels > 0 {
+            status = status.worsen(HealthStatus::Degraded);
+            degraded_reasons.push(format!(
+                "provider:{}:recovering_channels:{}",
+                entry.name, recovering_channels
+            ));
+        }
+
+        provider_entries.push(ProviderHealthSnapshot {
+            name: entry.name.clone(),
+            connected,
+            active_turns,
+            queue_depth: provider_queue_depth,
+            sessions: session_count,
+            restart_pending,
+            last_turn_at,
+        });
     }
 
     let global_active = if let Some(p) = providers.first() {
@@ -217,49 +349,143 @@ pub async fn build_health_json(registry: &HealthRegistry) -> String {
         0
     };
 
-    format!(
-        r#"{{"status":"{}","version":"{}","uptime_secs":{},"global_active":{},"global_finalizing":{},"providers":[{}]}}"#,
-        if is_healthy_inner(&providers) {
-            "healthy"
-        } else {
-            "unhealthy"
-        },
+    DiscordHealthSnapshot {
+        status,
         version,
         uptime_secs,
-        global_active,
-        global_finalizing,
-        provider_entries.join(",")
-    )
+        global_active: global_active as usize,
+        global_finalizing: global_finalizing as usize,
+        deferred_hooks,
+        queue_depth,
+        watcher_count,
+        recovery_duration,
+        degraded_reasons,
+        providers: provider_entries,
+    }
+}
+
+pub async fn build_health_json(registry: &HealthRegistry) -> String {
+    serde_json::to_string(&build_health_snapshot(registry).await)
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
+pub async fn health_status(registry: &HealthRegistry) -> HealthStatus {
+    build_health_snapshot(registry).await.status
 }
 
 pub async fn is_healthy(registry: &HealthRegistry) -> bool {
-    let providers = registry.providers.lock().await;
-    is_healthy_inner(&providers)
+    health_status(registry).await.is_healthy()
 }
 
-fn is_healthy_inner(providers: &[ProviderEntry]) -> bool {
-    // Unhealthy if no providers registered (startup not complete)
-    if providers.is_empty() {
-        return false;
+fn recovery_duration_secs(shared: &SharedData) -> f64 {
+    let recorded_ms = shared
+        .recovery_duration_ms
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let duration_ms = if recorded_ms > 0 {
+        recorded_ms
+    } else {
+        let elapsed_ms = shared.recovery_started_at.elapsed().as_millis();
+        elapsed_ms.min(u64::MAX as u128) as u64
+    };
+    duration_ms as f64 / 1000.0
+}
+
+#[cfg(test)]
+pub(crate) struct TestHealthHarness {
+    registry: Arc<HealthRegistry>,
+    shared: Arc<SharedData>,
+}
+
+#[cfg(test)]
+impl TestHealthHarness {
+    pub(crate) async fn new() -> Self {
+        let registry = Arc::new(HealthRegistry::new());
+        let global_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let global_finalizing = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let shutdown_remaining = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let shared = Arc::new(SharedData {
+            core: tokio::sync::Mutex::new(super::CoreState {
+                sessions: std::collections::HashMap::new(),
+                cancel_tokens: std::collections::HashMap::new(),
+                active_request_owner: std::collections::HashMap::new(),
+                intervention_queue: std::collections::HashMap::new(),
+                active_meetings: std::collections::HashMap::new(),
+            }),
+            settings: tokio::sync::RwLock::new(super::DiscordBotSettings::default()),
+            api_timestamps: dashmap::DashMap::new(),
+            skills_cache: tokio::sync::RwLock::new(Vec::new()),
+            tmux_watchers: dashmap::DashMap::new(),
+            recovering_channels: dashmap::DashMap::new(),
+            shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            current_generation: 0,
+            restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+            recovery_started_at: Instant::now(),
+            recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+            global_active,
+            global_finalizing,
+            shutdown_remaining,
+            shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+            intake_dedup: dashmap::DashMap::new(),
+            dispatch_thread_parents: dashmap::DashMap::new(),
+            bot_connected: std::sync::atomic::AtomicBool::new(true),
+            last_turn_at: std::sync::Mutex::new(None),
+            model_overrides: dashmap::DashMap::new(),
+            model_session_reset_pending: dashmap::DashSet::new(),
+            model_picker_pending: dashmap::DashMap::new(),
+            dispatch_role_overrides: dashmap::DashMap::new(),
+            last_message_ids: dashmap::DashMap::new(),
+            turn_start_times: dashmap::DashMap::new(),
+            cached_serenity_ctx: tokio::sync::OnceCell::new(),
+            cached_bot_token: tokio::sync::OnceCell::new(),
+            token_hash: super::settings::discord_token_hash("test-token"),
+            api_port: 8791,
+            db: None,
+            engine: None,
+            known_slash_commands: tokio::sync::OnceCell::new(),
+        });
+        super::mark_reconcile_complete(&shared);
+        registry
+            .register("claude".to_string(), shared.clone())
+            .await;
+        Self { registry, shared }
     }
-    for p in providers {
-        // Unhealthy if any provider hasn't connected to Discord gateway yet
-        if !p
-            .shared
-            .bot_connected
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return false;
-        }
-        // Unhealthy if restart is pending (draining)
-        if p.shared
-            .restart_pending
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return false;
-        }
+
+    pub(crate) fn registry(&self) -> Arc<HealthRegistry> {
+        self.registry.clone()
     }
-    true
+
+    pub(crate) fn set_deferred_hooks(&self, count: usize) {
+        self.shared
+            .deferred_hook_backlog
+            .store(count, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_recovery_duration_ms(&self, duration_ms: u64) {
+        self.shared
+            .recovery_duration_ms
+            .store(duration_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) async fn set_queue_depth(&self, depth: usize) {
+        let mut data = self.shared.core.lock().await;
+        data.intervention_queue.clear();
+        if depth == 0 {
+            return;
+        }
+        let queue = (0..depth)
+            .map(|idx| super::Intervention {
+                author_id: serenity::UserId::new(idx as u64 + 1),
+                message_id: serenity::MessageId::new(idx as u64 + 1),
+                text: format!("queued-{idx}"),
+                mode: super::InterventionMode::Soft,
+                created_at: Instant::now(),
+            })
+            .collect::<Vec<_>>();
+        data.intervention_queue.insert(ChannelId::new(1), queue);
+    }
 }
 
 /// Resolve the bot HTTP client by name.
@@ -909,6 +1135,37 @@ mod tests {
         assert_eq!(
             err,
             SendTargetResolutionError::NotFound("unknown agent target: missing".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_reports_observability_metrics_and_degraded_queue_state() {
+        let harness = TestHealthHarness::new().await;
+        harness.set_deferred_hooks(2);
+        harness.set_recovery_duration_ms(4_250);
+        harness.set_queue_depth(3).await;
+
+        let snapshot = build_health_snapshot(&harness.registry()).await;
+        let json = serde_json::to_value(&snapshot).unwrap();
+
+        assert_eq!(snapshot.status(), HealthStatus::Degraded);
+        assert_eq!(json["deferred_hooks"], 2);
+        assert_eq!(json["queue_depth"], 3);
+        assert_eq!(json["watcher_count"], 0);
+        assert_eq!(json["recovery_duration"], 4.25);
+        assert!(
+            json["degraded_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "provider:claude:deferred_hooks_backlog:2")
+        );
+        assert!(
+            json["degraded_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "provider:claude:pending_queue_depth:3")
         );
     }
 }
