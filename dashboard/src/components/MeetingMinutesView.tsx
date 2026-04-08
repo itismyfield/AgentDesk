@@ -487,7 +487,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors"
         >
           <Plus size={14} />
-          {t({ ko: "새 회의", en: "New Meeting" })}
+          {t({ ko: "회의", en: "Meeting" })}
         </button>
       </div>
 
@@ -503,7 +503,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
           {/* Channel selector */}
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "채널", en: "Channel" })}
             </label>
             <div className="flex-1 space-y-2">
@@ -595,23 +595,22 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
           {/* Agenda input */}
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "안건", en: "Agenda" })}
             </label>
-            <input
-              type="text"
+            <textarea
               value={agenda}
               onChange={(e) => setAgenda(e.target.value)}
               placeholder={t({ ko: "회의 안건을 입력하세요", en: "Enter meeting agenda" })}
-              className="flex-1 px-3 py-1.5 rounded-lg text-sm"
+              rows={3}
+              className="flex-1 px-3 py-2 rounded-lg text-sm resize-y min-h-[84px] leading-5"
               style={inputStyle}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) handleStartMeeting(); }}
             />
           </div>
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "진행 모델", en: "Primary" })}
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24" style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "진행 에이전트", en: "Primary Agent" })}
             </label>
             <select
               value={primaryProvider}
@@ -626,19 +625,11 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 <option key={p} value={p}>{PROVIDER_LABELS[p] ?? p.toUpperCase()}</option>
               ))}
             </select>
-            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-              {selectedChannel
-                ? t({
-                    ko: `채널 담당 봇은 ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider} 입니다`,
-                    en: `Channel owner bot is ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
-                  })
-                : t({ ko: "등록된 채널을 먼저 선택하세요", en: "Select a registered channel first" })}
-            </span>
           </div>
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "리뷰 모델", en: "Reviewer" })}
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24" style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "리뷰 에이전트", en: "Reviewer Agent" })}
             </label>
             <select
               value={reviewerProvider}
@@ -649,7 +640,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
             >
               {reviewerOptions.length === 0 ? (
                 <option value="">
-                  {t({ ko: "선택 가능한 리뷰 모델 없음", en: "No reviewer available" })}
+                  {t({ ko: "선택 가능한 리뷰 에이전트 없음", en: "No reviewer agent available" })}
                 </option>
               ) : (
                 reviewerOptions.map((provider) => (
@@ -662,10 +653,10 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
             <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
               {selectedChannel
                 ? t({
-                    ko: "리뷰 모델은 채널 담당 provider, 진행 모델과 달라야 합니다",
-                    en: "Reviewer must differ from channel owner provider and primary provider",
+                    ko: "리뷰 에이전트는 채널 담당 에이전트, 진행 에이전트와 달라야 합니다",
+                    en: "Reviewer agent must differ from the channel owner and primary agent",
                   })
-                : t({ ko: "채널 선택 후 리뷰 모델을 정하세요", en: "Pick reviewer after selecting a channel" })}
+                : t({ ko: "채널 선택 후 리뷰 에이전트를 정하세요", en: "Pick a reviewer agent after selecting a channel" })}
             </span>
           </div>
 
@@ -699,7 +690,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
         <div className="text-center py-16" style={{ color: "var(--th-text-muted)" }}>
           <FileText size={48} className="mx-auto mb-4 opacity-30" />
           <p>{t({ ko: "회의 기록이 없습니다", en: "No meeting records" })}</p>
-          <p className="text-sm mt-1">{t({ ko: "\"새 회의\" 버튼으로 라운드 테이블을 시작하세요", en: "Start a round table with the \"New Meeting\" button" })}</p>
+          <p className="text-sm mt-1">{t({ ko: "\"회의\" 버튼으로 라운드 테이블을 시작하세요", en: "Start a round table with the \"Meeting\" button" })}</p>
         </div>
       )}
 
