@@ -15,6 +15,7 @@ impl MemoryBackend for LocalMemoryBackend {
                 longterm_catalog: load_longterm_memory_catalog(&request.role_id),
                 external_recall: None,
                 warnings: Vec::new(),
+                token_usage: Default::default(),
             }
         })
     }

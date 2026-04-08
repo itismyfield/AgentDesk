@@ -13,6 +13,8 @@ pub(super) struct TurnMetric {
     pub model: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub memory_input_tokens: Option<u64>,
+    pub memory_output_tokens: Option<u64>,
 }
 
 fn metrics_dir() -> Option<PathBuf> {
@@ -77,6 +79,8 @@ pub(super) fn build_metrics_report(metrics: &[TurnMetric], label: &str) -> Strin
     let avg_duration = total_duration / total_turns as f64;
     let total_input: u64 = metrics.iter().filter_map(|m| m.input_tokens).sum();
     let total_output: u64 = metrics.iter().filter_map(|m| m.output_tokens).sum();
+    let total_memory_input: u64 = metrics.iter().filter_map(|m| m.memory_input_tokens).sum();
+    let total_memory_output: u64 = metrics.iter().filter_map(|m| m.memory_output_tokens).sum();
 
     // Per-channel breakdown
     let mut by_channel: std::collections::HashMap<u64, Vec<&TurnMetric>> =
@@ -91,7 +95,10 @@ pub(super) fn build_metrics_report(metrics: &[TurnMetric], label: &str) -> Strin
             "  Turns: {} | Avg: {:.0}s | Total: {:.0}s",
             total_turns, avg_duration, total_duration
         ),
-        format!("  Tokens: {}↓ {}↑", total_input, total_output),
+        format!(
+            "  Tokens: model {}↓ {}↑ | memory {}↓ {}↑",
+            total_input, total_output, total_memory_input, total_memory_output
+        ),
     ];
 
     let mut channels: Vec<_> = by_channel.iter().collect();
@@ -102,11 +109,40 @@ pub(super) fn build_metrics_report(metrics: &[TurnMetric], label: &str) -> Strin
         let ch_avg: f64 = turns.iter().map(|m| m.duration_secs).sum::<f64>() / ch_turns as f64;
         let ch_input: u64 = turns.iter().filter_map(|m| m.input_tokens).sum();
         let ch_output: u64 = turns.iter().filter_map(|m| m.output_tokens).sum();
+        let ch_memory_input: u64 = turns.iter().filter_map(|m| m.memory_input_tokens).sum();
+        let ch_memory_output: u64 = turns.iter().filter_map(|m| m.memory_output_tokens).sum();
         lines.push(format!(
-            "  **#{}** — {} turns, avg {:.0}s, {}↓ {}↑",
-            ch_id, ch_turns, ch_avg, ch_input, ch_output
+            "  **#{}** — {} turns, avg {:.0}s, model {}↓ {}↑, memory {}↓ {}↑",
+            ch_id, ch_turns, ch_avg, ch_input, ch_output, ch_memory_input, ch_memory_output
         ));
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_metrics_report_separates_model_and_memory_tokens() {
+        let report = build_metrics_report(
+            &[TurnMetric {
+                channel_id: 42,
+                provider: "codex".to_string(),
+                timestamp: "2026-04-08T12:00:00+09:00".to_string(),
+                duration_secs: 12.0,
+                model: None,
+                input_tokens: Some(100),
+                output_tokens: Some(40),
+                memory_input_tokens: Some(15),
+                memory_output_tokens: Some(5),
+            }],
+            "today",
+        );
+
+        assert!(report.contains("Tokens: model 100↓ 40↑ | memory 15↓ 5↑"));
+        assert!(report.contains("#42"));
+        assert!(report.contains("model 100↓ 40↑, memory 15↓ 5↑"));
+    }
 }
