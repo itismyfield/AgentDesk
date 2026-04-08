@@ -539,6 +539,55 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     }
 
+    // Create cancel token — with second check to close the TOCTOU race window.
+    // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
+    // because the async gap between check and insert allows interleaving.
+    // If another message won the race, queue ourselves and clean up.
+    let cancel_token = Arc::new(CancelToken::new());
+    {
+        let mut data = shared.core.lock().await;
+        if data.cancel_tokens.contains_key(&channel_id) {
+            // Race lost — another message already started a turn.
+            // Queue this message as an intervention instead.
+            let queue = data.intervention_queue.entry(channel_id).or_default();
+            super::super::enqueue_intervention(
+                queue,
+                super::super::Intervention {
+                    author_id: request_owner,
+                    message_id: user_msg_id,
+                    text: user_text.to_string(),
+                    mode: super::super::InterventionMode::Soft,
+                    created_at: std::time::Instant::now(),
+                },
+            );
+            // Write-through: persist this channel's queue to disk
+            if let Some(q) = data.intervention_queue.get(&channel_id) {
+                super::super::save_channel_queue(&provider, channel_id, q);
+            }
+            drop(data);
+            // Clean up: remove placeholder and reaction created before this check
+            let _ = channel_id
+                .delete_message(&ctx.http, placeholder_msg_id)
+                .await;
+            super::super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳')
+                .await;
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
+                channel_id
+            );
+            return Ok(());
+        }
+        shared
+            .global_active
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        data.cancel_tokens.insert(channel_id, cancel_token.clone());
+        data.active_request_owner.insert(channel_id, request_owner);
+    }
+    shared
+        .turn_start_times
+        .insert(channel_id, std::time::Instant::now());
+
     let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
     let memory_backend = build_memory_backend(&memory_settings);
     let memory_recall = memory_backend
@@ -702,55 +751,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         session_id.is_some(),
         prompt_prep_duration_ms
     );
-
-    // Create cancel token — with second check to close the TOCTOU race window.
-    // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
-    // because the async gap between check and insert allows interleaving.
-    // If another message won the race, queue ourselves and clean up.
-    let cancel_token = Arc::new(CancelToken::new());
-    {
-        let mut data = shared.core.lock().await;
-        if data.cancel_tokens.contains_key(&channel_id) {
-            // Race lost — another message already started a turn.
-            // Queue this message as an intervention instead.
-            let queue = data.intervention_queue.entry(channel_id).or_default();
-            super::super::enqueue_intervention(
-                queue,
-                super::super::Intervention {
-                    author_id: request_owner,
-                    message_id: user_msg_id,
-                    text: user_text.to_string(),
-                    mode: super::super::InterventionMode::Soft,
-                    created_at: std::time::Instant::now(),
-                },
-            );
-            // Write-through: persist this channel's queue to disk
-            if let Some(q) = data.intervention_queue.get(&channel_id) {
-                super::super::save_channel_queue(&provider, channel_id, q);
-            }
-            drop(data);
-            // Clean up: remove placeholder and reaction created before this check
-            let _ = channel_id
-                .delete_message(&ctx.http, placeholder_msg_id)
-                .await;
-            super::super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳')
-                .await;
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
-                channel_id
-            );
-            return Ok(());
-        }
-        shared
-            .global_active
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        data.cancel_tokens.insert(channel_id, cancel_token.clone());
-        data.active_request_owner.insert(channel_id, request_owner);
-    }
-    shared
-        .turn_start_times
-        .insert(channel_id, std::time::Instant::now());
 
     // Spawn turn watchdog — cancels the turn if it exceeds the deadline.
     // The deadline is stored in cancel_token.watchdog_deadline_ms and can be

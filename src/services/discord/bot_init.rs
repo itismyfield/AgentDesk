@@ -15,6 +15,10 @@ async fn execute_handoff_turns(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
+    let skip_handoff = |provider: &ProviderKind, channel_id: u64| {
+        let _ = update_handoff_state(provider, channel_id, "skipped");
+        clear_handoff(provider, channel_id);
+    };
     let handoffs = load_handoffs(provider);
     if handoffs.is_empty() {
         return;
@@ -73,6 +77,7 @@ async fn execute_handoff_turns(
                 "  [{ts}] ⏭ Skipping handoff for channel {} — {reason}",
                 record.channel_id
             );
+            skip_handoff(provider, record.channel_id);
             continue;
         }
 
@@ -89,8 +94,7 @@ async fn execute_handoff_turns(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (pending queue has messages)",
                 record.channel_id
             );
-            let _ = update_handoff_state(provider, record.channel_id, "skipped");
-            clear_handoff(provider, record.channel_id);
+            skip_handoff(provider, record.channel_id);
             continue;
         }
 
@@ -104,8 +108,7 @@ async fn execute_handoff_turns(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (active turn running)",
                 record.channel_id
             );
-            let _ = update_handoff_state(provider, record.channel_id, "skipped");
-            clear_handoff(provider, record.channel_id);
+            skip_handoff(provider, record.channel_id);
             continue;
         }
 
@@ -122,8 +125,7 @@ async fn execute_handoff_turns(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (no active session)",
                 record.channel_id
             );
-            let _ = update_handoff_state(provider, record.channel_id, "skipped");
-            clear_handoff(provider, record.channel_id);
+            skip_handoff(provider, record.channel_id);
             continue;
         }
 
