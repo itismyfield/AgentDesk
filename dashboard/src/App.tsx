@@ -125,21 +125,14 @@ export default function App() {
   useEffect(() => {
     const lastFired = new Map<string, number>();
     onApiError((url, error) => {
+      const apiPath = url.replace(/^\/api\//, "");
       const now = Date.now();
       const last = lastFired.get(url) ?? 0;
       if (now - last < 3000) return;
       lastFired.set(url, now);
-      pushNotification(`API error: ${error.message}`, "error");
-    });
-    return () => onApiError(null);
-  }, [pushNotification]);
-
-  useEffect(() => {
-    api.onApiError((url, error) => {
-      const apiPath = url.replace(/^\/api\//, "");
       pushNotification(`API error: ${apiPath} - ${error.message}`, "error");
     });
-    return () => api.onApiError(null);
+    return () => onApiError(null);
   }, [pushNotification]);
 
   useEffect(() => {
@@ -163,9 +156,7 @@ export default function App() {
             api.getKanbanCards().catch(() => [] as KanbanCard[]),
             api.getTaskDispatches({ limit: 200 }).catch(() => [] as TaskDispatch[]),
           ]);
-        const resolvedSettings = settings.companyName
-          ? ({ ...DEFAULT_SETTINGS, ...settings } as CompanySettings)
-          : DEFAULT_SETTINGS;
+        const resolvedSettings = { ...DEFAULT_SETTINGS, ...settings } as CompanySettings;
         setData({
           offices,
           agents,
@@ -578,8 +569,9 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                 onRefreshMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
                 settings={settings}
                 onSaveSettings={async (patch) => {
-                  await api.saveSettings(patch);
-                  setSettings((prev) => ({ ...prev, ...patch } as CompanySettings));
+                  const mergedSettings = { ...settings, ...patch } as CompanySettings;
+                  await api.saveSettings(mergedSettings);
+                  setSettings(mergedSettings);
                   refreshAuditLogs();
                 }}
                 notifications={notifications}
