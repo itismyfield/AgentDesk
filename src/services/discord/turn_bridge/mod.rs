@@ -12,7 +12,7 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::services::memory::{
-    CaptureRequest, ReflectRequest, SessionEndReason, TokenUsage, build_memory_backend,
+    CaptureRequest, ReflectRequest, SessionEndReason, TokenUsage, build_resolved_memory_backend,
     resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
@@ -49,7 +49,7 @@ pub(super) fn spawn_memory_capture_task(
     capture_request: CaptureRequest,
 ) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
     tokio::spawn(async move {
-        let backend = build_memory_backend(&capture_memory_settings);
+        let backend = build_resolved_memory_backend(&capture_memory_settings);
         let result = backend.capture(capture_request).await;
         for warning in &result.warnings {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -69,7 +69,7 @@ pub(super) fn spawn_memory_reflect_task(
     reflect_request: ReflectRequest,
 ) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
     tokio::spawn(async move {
-        let backend = build_memory_backend(&reflect_memory_settings);
+        let backend = build_resolved_memory_backend(&reflect_memory_settings);
         let reason = reflect_request.reason.as_str().to_string();
         let result = backend.reflect(reflect_request).await;
         for warning in &result.warnings {
@@ -143,6 +143,42 @@ pub(super) fn take_memento_reflect_request(
         session_id,
         reason,
         transcript,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TurnEndMemoryPlan {
+    pub(super) reflect_reason: Option<SessionEndReason>,
+    pub(super) clear_provider_session: bool,
+    pub(super) persist_transcript: bool,
+    pub(super) spawn_capture: bool,
+}
+
+pub(super) fn plan_turn_end_memory(
+    session: &DiscordSession,
+    backend: settings::MemoryBackendKind,
+    is_prompt_too_long: bool,
+    resume_failure_detected: bool,
+    terminal_session_reset_required: bool,
+    should_record_final_turn: bool,
+) -> Option<TurnEndMemoryPlan> {
+    if session.cleared || is_prompt_too_long {
+        return None;
+    }
+
+    let persist_transcript = should_record_final_turn;
+    let reflect_reason = if terminal_session_reset_required {
+        Some(SessionEndReason::LocalSessionReset)
+    } else {
+        None
+    };
+    let clear_provider_session = resume_failure_detected || terminal_session_reset_required;
+
+    Some(TurnEndMemoryPlan {
+        reflect_reason,
+        clear_provider_session,
+        persist_transcript,
+        spawn_capture: persist_transcript && backend != settings::MemoryBackendKind::Memento,
     })
 }
 
@@ -1323,28 +1359,36 @@ pub(super) fn spawn_turn_bridge(
 
         // Update in-memory session under lock.
         let mut should_persist_transcript = false;
+        let mut should_spawn_memory_capture = false;
         let mut reflect_request = None;
         let capture_memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
         let session_id_to_persist = {
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
-                if !session.cleared && !is_prompt_too_long {
-                    if terminal_session_reset_required {
+                if let Some(memory_plan) = plan_turn_end_memory(
+                    session,
+                    capture_memory_settings.backend,
+                    is_prompt_too_long,
+                    resume_failure_detected,
+                    terminal_session_reset_required,
+                    should_record_final_turn,
+                ) {
+                    if let Some(reason) = memory_plan.reflect_reason {
                         reflect_request = take_memento_reflect_request(
                             session,
                             &capture_memory_settings,
                             &provider,
                             role_binding.as_ref(),
                             channel_id.get(),
-                            SessionEndReason::LocalSessionReset,
+                            reason,
                         );
                     }
-                    if resume_failure_detected || terminal_session_reset_required {
+                    if memory_plan.clear_provider_session {
                         session.clear_provider_session();
-                    } else if let Some(sid) = new_session_id {
-                        session.restore_provider_session(Some(sid));
+                    } else if let Some(sid) = new_session_id.as_ref() {
+                        session.restore_provider_session(Some(sid.clone()));
                     }
-                    if should_record_final_turn {
+                    if memory_plan.persist_transcript {
                         session.history.push(HistoryItem {
                             item_type: HistoryType::User,
                             content: user_text_owned.clone(),
@@ -1355,6 +1399,7 @@ pub(super) fn spawn_turn_bridge(
                         });
                         should_persist_transcript = true;
                     }
+                    should_spawn_memory_capture = memory_plan.spawn_capture;
                     session.session_id.clone()
                 } else {
                     None
@@ -1415,26 +1460,24 @@ pub(super) fn spawn_turn_bridge(
                 reflect_request,
             ));
         }
-        if should_persist_transcript {
-            if capture_memory_settings.backend != settings::MemoryBackendKind::Memento {
-                let capture_request = CaptureRequest {
-                    provider: provider.clone(),
-                    role_id: resolve_memory_role_id(role_binding.as_ref()),
-                    channel_id: channel_id.get(),
-                    session_id: resolve_memory_session_id(
-                        session_id_to_persist.as_deref(),
-                        channel_id.get(),
-                    ),
-                    dispatch_id: dispatch_id.clone(),
-                    user_text: user_text_owned.clone(),
-                    assistant_text: full_response.clone(),
-                };
-                background_memory_task = Some(spawn_memory_capture_task(
-                    channel_id,
-                    capture_memory_settings,
-                    capture_request,
-                ));
-            }
+        if should_spawn_memory_capture {
+            let capture_request = CaptureRequest {
+                provider: provider.clone(),
+                role_id: resolve_memory_role_id(role_binding.as_ref()),
+                channel_id: channel_id.get(),
+                session_id: resolve_memory_session_id(
+                    session_id_to_persist.as_deref(),
+                    channel_id.get(),
+                ),
+                dispatch_id: dispatch_id.clone(),
+                user_text: user_text_owned.clone(),
+                assistant_text: full_response.clone(),
+            };
+            background_memory_task = Some(spawn_memory_capture_task(
+                channel_id,
+                capture_memory_settings,
+                capture_request,
+            ));
         }
 
         if let Some(memory_task) = background_memory_task {

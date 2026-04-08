@@ -15,7 +15,8 @@ use super::stale_resume::{
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
 use super::{
-    optional_metric_token_fields, spawn_memory_capture_task, take_memento_reflect_request,
+    TurnEndMemoryPlan, optional_metric_token_fields, plan_turn_end_memory,
+    spawn_memory_capture_task, take_memento_reflect_request,
 };
 use crate::services::discord::ChannelId;
 use crate::services::discord::DiscordSession;
@@ -151,6 +152,99 @@ fn sample_session() -> DiscordSession {
         worktree: None,
         born_generation: 0,
     }
+}
+
+#[test]
+fn turn_end_memory_plan_skips_cleared_and_prompt_too_long_surfaces() {
+    let mut cleared = sample_session();
+    cleared.cleared = true;
+    assert_eq!(
+        plan_turn_end_memory(&cleared, MemoryBackendKind::File, false, false, false, true),
+        None
+    );
+
+    let prompt_too_long = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(
+            &prompt_too_long,
+            MemoryBackendKind::Mem0,
+            true,
+            false,
+            false,
+            true,
+        ),
+        None
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_uses_background_capture_for_non_memento_turns() {
+    let session = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(&session, MemoryBackendKind::File, false, false, false, true),
+        Some(TurnEndMemoryPlan {
+            reflect_reason: None,
+            clear_provider_session: false,
+            persist_transcript: true,
+            spawn_capture: true,
+        })
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_uses_reflect_for_memento_local_session_reset() {
+    let session = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(
+            &session,
+            MemoryBackendKind::Memento,
+            false,
+            false,
+            true,
+            true
+        ),
+        Some(TurnEndMemoryPlan {
+            reflect_reason: Some(SessionEndReason::LocalSessionReset),
+            clear_provider_session: true,
+            persist_transcript: true,
+            spawn_capture: false,
+        })
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_clears_provider_session_on_resume_failure_without_capture() {
+    let session = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(&session, MemoryBackendKind::Mem0, false, true, false, false),
+        Some(TurnEndMemoryPlan {
+            reflect_reason: None,
+            clear_provider_session: true,
+            persist_transcript: false,
+            spawn_capture: false,
+        })
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_skips_background_capture_for_normal_memento_turns() {
+    let session = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(
+            &session,
+            MemoryBackendKind::Memento,
+            false,
+            false,
+            false,
+            true
+        ),
+        Some(TurnEndMemoryPlan {
+            reflect_reason: None,
+            clear_provider_session: false,
+            persist_transcript: true,
+            spawn_capture: false,
+        })
+    );
 }
 
 #[tokio::test]

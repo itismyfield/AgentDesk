@@ -723,8 +723,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         .turn_start_times
         .insert(channel_id, std::time::Instant::now());
 
-    let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
-    let memory_backend = build_memory_backend(&memory_settings);
+    let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
     let memory_recall = if should_skip_memento_recall(&memory_settings, memento_context_loaded) {
         RecallResponse::default()
     } else {
