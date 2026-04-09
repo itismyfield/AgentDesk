@@ -618,11 +618,11 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
   return (
     <div
-      className="p-4 sm:p-6 max-w-4xl mx-auto overflow-y-auto overflow-x-hidden h-full pb-40"
-      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+      className="h-full max-w-4xl mx-auto overflow-y-auto overflow-x-hidden p-3 sm:p-6"
+      style={{ paddingBottom: "max(7rem, calc(7rem + env(safe-area-inset-bottom)))" }}
     >
       {/* Header */}
-      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="mb-4 flex flex-col gap-3 sm:mb-6 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-center gap-3">
           <FileText className="text-amber-400" size={24} />
           <div className="min-w-0">
@@ -649,7 +649,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
       {/* Start meeting form */}
       {showStartForm && (
         <div
-          className="rounded-2xl border p-4 sm:p-5 mb-6 space-y-3"
+          className="mb-5 space-y-2.5 rounded-2xl border p-3 sm:mb-6 sm:space-y-3 sm:p-5"
           style={{ background: "var(--th-surface)", borderColor: "var(--th-border)" }}
         >
           <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
@@ -691,7 +691,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 </button>
               </div>
               <div
-                className="max-h-44 overflow-y-auto rounded-xl border p-2 space-y-1"
+                className="max-h-32 overflow-y-auto rounded-xl border p-2 space-y-1 sm:max-h-44"
                 style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)" }}
               >
                 {loadingChannels ? (
@@ -709,7 +709,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                       <button
                         key={channel.channel_id}
                         onClick={() => setChannelId(channel.channel_id)}
-                        className="w-full rounded-lg border px-3 py-2 text-left transition-colors"
+                        className="w-full rounded-lg border px-2.5 py-2 text-left transition-colors sm:px-3"
                         style={{
                           background: isSelected ? "rgba(245,158,11,0.12)" : "transparent",
                           borderColor: isSelected ? "rgba(245,158,11,0.35)" : "var(--th-border)",
@@ -769,7 +769,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 style={inputStyle}
               />
               <div
-                className="max-h-36 overflow-y-auto rounded-xl border p-2 space-y-1"
+                className="max-h-28 overflow-y-auto rounded-xl border p-2 space-y-1 sm:max-h-36"
                 style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)" }}
               >
                 {filteredPrimaryProviders.length === 0 ? (
@@ -783,7 +783,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                       <button
                         key={provider}
                         onClick={() => setPrimaryProvider(provider)}
-                        className="w-full rounded-lg border px-3 py-2 text-left transition-colors"
+                        className="w-full rounded-lg border px-2.5 py-2 text-left transition-colors sm:px-3"
                         style={{
                           background: isSelected ? "rgba(245,158,11,0.12)" : "transparent",
                           borderColor: isSelected ? "rgba(245,158,11,0.35)" : "var(--th-border)",
@@ -821,7 +821,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 disabled={reviewerOptions.length === 0}
               />
               <div
-                className="max-h-36 overflow-y-auto rounded-xl border p-2 space-y-1"
+                className="max-h-28 overflow-y-auto rounded-xl border p-2 space-y-1 sm:max-h-36"
                 style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)" }}
               >
                 {reviewerOptions.length === 0 ? (
@@ -839,7 +839,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                       <button
                         key={provider}
                         onClick={() => setReviewerProvider(provider)}
-                        className="w-full rounded-lg border px-3 py-2 text-left transition-colors"
+                        className="w-full rounded-lg border px-2.5 py-2 text-left transition-colors sm:px-3"
                         style={{
                           background: isSelected ? "rgba(245,158,11,0.12)" : "transparent",
                           borderColor: isSelected ? "rgba(245,158,11,0.35)" : "var(--th-border)",
@@ -884,7 +884,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                 disabled={!selectedChannel || availableExperts.length === 0}
               />
               <div
-                className="max-h-44 overflow-y-auto rounded-xl border p-2 space-y-1"
+                className="max-h-36 overflow-y-auto rounded-xl border p-2 space-y-1 sm:max-h-44"
                 style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)" }}
               >
                 {!selectedChannel ? (
@@ -907,7 +907,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                       <button
                         key={expert.role_id}
                         onClick={() => toggleFixedParticipant(expert.role_id)}
-                        className="w-full rounded-lg border px-3 py-2 text-left transition-colors"
+                        className="w-full rounded-lg border px-2.5 py-2 text-left transition-colors sm:px-3"
                         style={{
                           background: isSelected ? "rgba(99,102,241,0.12)" : "transparent",
                           borderColor: isSelected ? "rgba(99,102,241,0.35)" : "var(--th-border)",

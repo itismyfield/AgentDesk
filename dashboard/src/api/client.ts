@@ -314,6 +314,41 @@ export interface RuntimeConfigResponse {
   defaults: Record<string, number>;
 }
 
+export interface HealthProviderStatus {
+  active_turns: number;
+  connected: boolean;
+  last_turn_at: number | null;
+  name: string;
+  queue_depth: number;
+  restart_pending: boolean;
+  sessions: number;
+}
+
+export interface HealthDispatchOutbox {
+  oldest_pending_age: number;
+  pending: number;
+  permanent_failures: number;
+  retrying: number;
+}
+
+export interface HealthResponse {
+  dashboard?: boolean;
+  db?: boolean;
+  deferred_hooks?: number;
+  degraded_reasons?: string[];
+  dispatch_outbox?: HealthDispatchOutbox;
+  global_active?: number;
+  global_finalizing?: number;
+  outbox_age?: number;
+  providers?: HealthProviderStatus[];
+  queue_depth?: number;
+  recovery_duration?: number;
+  status: string;
+  uptime_secs?: number;
+  version?: string;
+  watcher_count?: number;
+}
+
 export async function getRuntimeConfig(): Promise<RuntimeConfigResponse> {
   return request("/api/settings/runtime-config");
 }
@@ -346,6 +381,10 @@ export async function createDispatch(body: {
 export async function getStats(officeId?: string): Promise<DashboardStats> {
   const q = officeId ? `?officeId=${officeId}` : "";
   return request(`/api/stats${q}`);
+}
+
+export async function getHealth(): Promise<HealthResponse> {
+  return request("/api/health");
 }
 
 // ── Kanban & Dispatches ──
