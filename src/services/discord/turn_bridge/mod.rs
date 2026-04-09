@@ -1,7 +1,9 @@
 mod completion_guard;
 mod context_window;
+mod memory_lifecycle;
 mod recovery_text;
 mod retry_state;
+mod skill_usage;
 mod stale_resume;
 mod tmux_runtime;
 
@@ -12,8 +14,7 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::services::memory::{
-    CaptureRequest, ReflectRequest, SessionEndReason, TokenUsage, build_resolved_memory_backend,
-    resolve_memory_role_id, resolve_memory_session_id,
+    CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
@@ -35,153 +36,19 @@ pub(crate) use tmux_runtime::tmux_runtime_paths;
 // Items used by spawn_turn_bridge from submodules
 use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{persisted_context_tokens, resolve_done_response};
+use memory_lifecycle::{
+    optional_metric_token_fields, plan_turn_end_memory, spawn_memory_capture_task,
+    spawn_memory_reflect_task, take_memento_reflect_request,
+};
 use retry_state::{
     clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
 };
+use skill_usage::record_skill_usage_from_tool_use;
 use stale_resume::{
     output_file_has_stale_resume_error_after_offset, stream_error_has_stale_resume_error,
     stream_error_requires_terminal_session_reset,
 };
 use tmux_runtime::{is_dcserver_restart_command, should_resume_watcher_after_turn};
-
-pub(super) fn spawn_memory_capture_task(
-    channel_id: ChannelId,
-    capture_memory_settings: settings::ResolvedMemorySettings,
-    capture_request: CaptureRequest,
-) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
-    tokio::spawn(async move {
-        let backend = build_resolved_memory_backend(&capture_memory_settings);
-        let result = backend.capture(capture_request).await;
-        for warning in &result.warnings {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] [memory] capture warning for channel {}: {}",
-                channel_id.get(),
-                warning
-            );
-        }
-        result
-    })
-}
-
-pub(super) fn spawn_memory_reflect_task(
-    channel_id: ChannelId,
-    reflect_memory_settings: settings::ResolvedMemorySettings,
-    reflect_request: ReflectRequest,
-) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
-    tokio::spawn(async move {
-        let backend = build_resolved_memory_backend(&reflect_memory_settings);
-        let reason = reflect_request.reason.as_str().to_string();
-        let result = backend.reflect(reflect_request).await;
-        for warning in &result.warnings {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] [memory] reflect warning for channel {} ({}): {}",
-                channel_id.get(),
-                reason,
-                warning
-            );
-        }
-        result
-    })
-}
-
-fn build_memento_transcript(history: &[HistoryItem]) -> String {
-    history
-        .iter()
-        .filter_map(|item| {
-            let content = item.content.trim();
-            if content.is_empty() {
-                return None;
-            }
-
-            let label = match item.item_type {
-                HistoryType::User => "User",
-                HistoryType::Assistant => "Assistant",
-                HistoryType::Error => "Error",
-                HistoryType::System => "System",
-                HistoryType::ToolUse => "ToolUse",
-                HistoryType::ToolResult => "ToolResult",
-            };
-
-            Some(format!("[{label}]: {content}"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub(super) fn take_memento_reflect_request(
-    session: &mut DiscordSession,
-    memory_settings: &settings::ResolvedMemorySettings,
-    provider: &ProviderKind,
-    role_binding: Option<&RoleBinding>,
-    channel_id: u64,
-    reason: SessionEndReason,
-) -> Option<ReflectRequest> {
-    if memory_settings.backend != settings::MemoryBackendKind::Memento
-        || !session.memento_context_loaded
-        || session.memento_reflected
-    {
-        return None;
-    }
-
-    let session_id = session
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?
-        .to_string();
-    let transcript = build_memento_transcript(&session.history);
-    if transcript.trim().is_empty() {
-        return None;
-    }
-
-    session.memento_reflected = true;
-    Some(ReflectRequest {
-        provider: provider.clone(),
-        role_id: resolve_memory_role_id(role_binding),
-        channel_id,
-        session_id,
-        reason,
-        transcript,
-    })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct TurnEndMemoryPlan {
-    pub(super) reflect_reason: Option<SessionEndReason>,
-    pub(super) clear_provider_session: bool,
-    pub(super) persist_transcript: bool,
-    pub(super) spawn_capture: bool,
-}
-
-pub(super) fn plan_turn_end_memory(
-    session: &DiscordSession,
-    backend: settings::MemoryBackendKind,
-    is_prompt_too_long: bool,
-    resume_failure_detected: bool,
-    terminal_session_reset_required: bool,
-    should_record_final_turn: bool,
-) -> Option<TurnEndMemoryPlan> {
-    if session.cleared || is_prompt_too_long {
-        return None;
-    }
-
-    let persist_transcript = should_record_final_turn;
-    let reflect_reason = if terminal_session_reset_required {
-        Some(SessionEndReason::LocalSessionReset)
-    } else {
-        None
-    };
-    let clear_provider_session = resume_failure_detected || terminal_session_reset_required;
-
-    Some(TurnEndMemoryPlan {
-        reflect_reason,
-        clear_provider_session,
-        persist_transcript,
-        spawn_capture: persist_transcript && backend != settings::MemoryBackendKind::Memento,
-    })
-}
 
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
@@ -207,79 +74,6 @@ pub(super) struct TurnBridgeContext {
     pub(super) defer_watcher_resume: bool,
     pub(super) completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(super) inflight_state: InflightTurnState,
-}
-
-pub(super) fn optional_metric_token_fields(usage: TokenUsage) -> (Option<u64>, Option<u64>) {
-    if usage.is_zero() {
-        return (None, None);
-    }
-    (
-        if usage.input_tokens > 0 {
-            Some(usage.input_tokens)
-        } else {
-            None
-        },
-        if usage.output_tokens > 0 {
-            Some(usage.output_tokens)
-        } else {
-            None
-        },
-    )
-}
-
-fn extract_skill_id_from_tool_use(name: &str, input: &str) -> Option<String> {
-    if name != "Skill" {
-        return None;
-    }
-
-    serde_json::from_str::<serde_json::Value>(input)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("skill")
-                .and_then(|skill| skill.as_str())
-                .map(str::trim)
-                .filter(|skill| !skill.is_empty())
-                .map(ToString::to_string)
-        })
-}
-
-fn resolve_skill_usage_agent_id(
-    conn: &rusqlite::Connection,
-    session_key: Option<&str>,
-    role_binding: Option<&RoleBinding>,
-) -> Option<String> {
-    session_key
-        .and_then(|key| {
-            conn.query_row(
-                "SELECT agent_id FROM sessions WHERE session_key = ?1",
-                [key],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-        })
-        .or_else(|| {
-            role_binding
-                .map(|binding| binding.role_id.trim().to_string())
-                .filter(|role_id| !role_id.is_empty())
-        })
-}
-
-fn record_skill_usage(
-    db: &crate::db::Db,
-    skill_id: &str,
-    session_key: Option<&str>,
-    role_binding: Option<&RoleBinding>,
-) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| format!("db lock failed: {e}"))?;
-    let agent_id = resolve_skill_usage_agent_id(&conn, session_key, role_binding);
-    conn.execute(
-        "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
-        rusqlite::params![skill_id, agent_id, session_key],
-    )
-    .map_err(|e| format!("insert skill_usage failed: {e}"))?;
-    Ok(())
 }
 
 pub(super) fn spawn_turn_bridge(
@@ -454,18 +248,21 @@ pub(super) fn spawn_turn_bridge(
                             has_post_tool_text = false;
                             inflight_state.any_tool_used = true;
                             inflight_state.has_post_tool_text = false;
-                            if let Some(skill_id) = extract_skill_id_from_tool_use(&name, &input) {
-                                if let Some(db) = shared_owned.db.as_ref() {
-                                    if let Err(e) = record_skill_usage(
-                                        db,
-                                        &skill_id,
-                                        adk_session_key.as_deref(),
-                                        role_binding.as_ref(),
-                                    ) {
+                            if let Some(db) = shared_owned.db.as_ref() {
+                                match record_skill_usage_from_tool_use(
+                                    db,
+                                    &name,
+                                    &input,
+                                    adk_session_key.as_deref(),
+                                    role_binding.as_ref(),
+                                ) {
+                                    Ok(Some(_)) => {}
+                                    Ok(None) => {}
+                                    Err(e) => {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         eprintln!(
-                                            "  [{ts}] ⚠ Failed to record skill usage for {}: {}",
-                                            skill_id, e
+                                            "  [{ts}] ⚠ Failed to record skill usage for tool {}: {}",
+                                            name, e
                                         );
                                     }
                                 }
@@ -1033,10 +830,8 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
         } else if cancelled {
-            if let Ok(guard) = cancel_token.child_pid.lock() {
-                if let Some(pid) = *guard {
-                    crate::services::process::kill_pid_tree(pid);
-                }
+            if let Some(pid) = cancel_token.child_pid.lock().ok().and_then(|guard| *guard) {
+                crate::services::process::kill_pid_tree(pid);
             }
 
             full_response = if full_response.trim().is_empty() {
@@ -1186,42 +981,37 @@ pub(super) fn spawn_turn_bridge(
                     let mut resume_failed = false;
                     let quick_exit = turn_start.elapsed().as_secs() < 10;
                     // Method 1: check tmux output file
-                    if let Some(ref path) = inflight_state.output_path {
-                        if output_file_has_stale_resume_error_after_offset(
+                    if let Some(ref path) = inflight_state.output_path
+                        && output_file_has_stale_resume_error_after_offset(
                             path,
                             inflight_state.last_offset,
-                        ) {
-                            resume_failed = true;
-                            resume_failure_detected = true;
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!(
-                                "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
-                                channel_id
-                            );
-                            reset_session_for_auto_retry(
-                                &shared_owned,
-                                channel_id,
-                                &cancel_token,
-                                adk_session_key.as_deref(),
-                                &mut new_session_id,
-                                &mut inflight_state,
-                                "stale session_id in output file",
-                            )
-                            .await;
-                            let http_c = http.clone();
-                            let retry_text = user_text_owned.clone();
-                            let retry_port = shared_owned.api_port;
-                            tokio::spawn(async move {
-                                auto_retry_with_history(
-                                    &http_c,
-                                    channel_id,
-                                    &retry_text,
-                                    retry_port,
-                                )
+                        )
+                    {
+                        resume_failed = true;
+                        resume_failure_detected = true;
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!(
+                            "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
+                            channel_id
+                        );
+                        reset_session_for_auto_retry(
+                            &shared_owned,
+                            channel_id,
+                            &cancel_token,
+                            adk_session_key.as_deref(),
+                            &mut new_session_id,
+                            &mut inflight_state,
+                            "stale session_id in output file",
+                        )
+                        .await;
+                        let http_c = http.clone();
+                        let retry_text = user_text_owned.clone();
+                        let retry_port = shared_owned.api_port;
+                        tokio::spawn(async move {
+                            auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port)
                                 .await;
-                            });
-                            full_response = String::new();
-                        }
+                        });
+                        full_response = String::new();
                     }
                     // Method 2: quick exit (<10s) + empty response + had a session_id to resume
                     if !resume_failed && quick_exit && rx_disconnected {
@@ -1352,25 +1142,23 @@ pub(super) fn spawn_turn_bridge(
             defer_watcher_resume,
             has_queued_turns,
             can_chain_locally,
-        ) {
-            if let Some(offset) = tmux_last_offset {
-                if let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id) {
-                    if let Ok(mut guard) = watcher.resume_offset.lock() {
-                        *guard = Some(offset);
-                    }
-                    // NOTE: turn_delivered is NOT cleared here — the watcher clears it
-                    // when it consumes resume_offset, ensuring the flag stays active
-                    // until the watcher actually starts reading from the new offset.
-                    watcher.paused.store(false, Ordering::Relaxed);
-                }
+        ) && let Some(offset) = tmux_last_offset
+            && let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id)
+        {
+            if let Ok(mut guard) = watcher.resume_offset.lock() {
+                *guard = Some(offset);
             }
+            // NOTE: turn_delivered is NOT cleared here — the watcher clears it
+            // when it consumes resume_offset, ensuring the flag stays active
+            // until the watcher actually starts reading from the new offset.
+            watcher.paused.store(false, Ordering::Relaxed);
         }
 
-        let should_record_final_turn = !is_prompt_too_long
-            && !resume_failure_detected
-            && !recovery_retry
-            && !restart_recovery_handoff
-            && !(rx_disconnected && tmux_handed_off && full_response.is_empty())
+        let should_record_final_turn = !(is_prompt_too_long
+            || resume_failure_detected
+            || recovery_retry
+            || restart_recovery_handoff
+            || (rx_disconnected && tmux_handed_off && full_response.is_empty()))
             && !full_response.trim().is_empty();
 
         // Update in-memory session under lock.
@@ -1438,33 +1226,28 @@ pub(super) fn spawn_turn_bridge(
                 )
                 .await;
             }
-        } else if terminal_session_reset_required {
-            if let Some(ref session_key) = adk_session_key {
-                super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
-                    .await;
-            }
+        } else if terminal_session_reset_required && let Some(ref session_key) = adk_session_key {
+            super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port).await;
         }
 
-        if should_persist_transcript {
-            if let Some(db) = shared_owned.db.as_ref() {
-                let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
-                let channel_id_text = channel_id.get().to_string();
-                if let Err(e) = crate::db::session_transcripts::persist_turn(
-                    db,
-                    crate::db::session_transcripts::PersistSessionTranscript {
-                        turn_id: &turn_id,
-                        session_key: adk_session_key.as_deref(),
-                        channel_id: Some(channel_id_text.as_str()),
-                        agent_id: None,
-                        provider: Some(provider.as_str()),
-                        dispatch_id: dispatch_id.as_deref(),
-                        user_message: &user_text_owned,
-                        assistant_message: &full_response,
-                    },
-                ) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!("  [{ts}] ⚠ failed to persist session transcript: {e}");
-                }
+        if should_persist_transcript && let Some(db) = shared_owned.db.as_ref() {
+            let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
+            let channel_id_text = channel_id.get().to_string();
+            if let Err(e) = crate::db::session_transcripts::persist_turn(
+                db,
+                crate::db::session_transcripts::PersistSessionTranscript {
+                    turn_id: &turn_id,
+                    session_key: adk_session_key.as_deref(),
+                    channel_id: Some(channel_id_text.as_str()),
+                    agent_id: None,
+                    provider: Some(provider.as_str()),
+                    dispatch_id: dispatch_id.as_deref(),
+                    user_message: &user_text_owned,
+                    assistant_message: &full_response,
+                },
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!("  [{ts}] ⚠ failed to persist session transcript: {e}");
             }
         }
 
@@ -1624,20 +1407,16 @@ pub(super) fn spawn_turn_bridge(
 
                     // Only delete the DB session row if tmux kill succeeded.
                     // If kill failed, leave the row so the periodic reaper can retry.
-                    if kill_ok {
-                        if let Some(session_key) = super::adk_session::build_adk_session_key(
+                    if kill_ok
+                        && let Some(session_key) = super::adk_session::build_adk_session_key(
                             &shared_owned,
                             channel_id,
                             &provider,
                         )
                         .await
-                        {
-                            super::adk_session::delete_adk_session(
-                                &session_key,
-                                shared_owned.api_port,
-                            )
+                    {
+                        super::adk_session::delete_adk_session(&session_key, shared_owned.api_port)
                             .await;
-                        }
                     }
                 }
             } else {
@@ -1736,13 +1515,13 @@ pub(super) fn spawn_turn_bridge(
                 println!(
                     "  [{ts}] 📦 preserving queued command(s): missing live Discord context — scheduling deferred drain"
                 );
-                if let Some(offset) = tmux_last_offset {
-                    if let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id) {
-                        if let Ok(mut guard) = watcher.resume_offset.lock() {
-                            *guard = Some(offset);
-                        }
-                        watcher.paused.store(false, Ordering::Relaxed);
+                if let Some(offset) = tmux_last_offset
+                    && let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id)
+                {
+                    if let Ok(mut guard) = watcher.resume_offset.lock() {
+                        *guard = Some(offset);
                     }
+                    watcher.paused.store(false, Ordering::Relaxed);
                 }
                 super::schedule_deferred_idle_queue_kickoff(
                     shared_owned.clone(),

@@ -5,19 +5,20 @@ use super::completion_guard::{
 use super::context_window::{
     persisted_context_tokens, resolve_done_response, total_context_tokens,
 };
+use super::memory_lifecycle::{
+    TurnEndMemoryPlan, optional_metric_token_fields, plan_turn_end_memory,
+    spawn_memory_capture_task, take_memento_reflect_request,
+};
 use super::retry_state::{
     clear_local_session_state, handle_gemini_retry_boundary, reset_gemini_retry_attempt_state,
     should_reset_gemini_retry_attempt_state,
 };
+use super::skill_usage::extract_skill_id_from_tool_use;
 use super::stale_resume::{
     contains_stale_resume_error_text, output_file_has_stale_resume_error_after_offset,
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
-use super::{
-    TurnEndMemoryPlan, optional_metric_token_fields, plan_turn_end_memory,
-    spawn_memory_capture_task, take_memento_reflect_request,
-};
 use crate::services::discord::ChannelId;
 use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
@@ -124,6 +125,19 @@ fn optional_metric_token_fields_preserve_partial_usage() {
         }),
         (None, Some(5))
     );
+}
+
+#[test]
+fn skill_tool_use_extracts_skill_id_only_from_skill_tool() {
+    assert_eq!(
+        extract_skill_id_from_tool_use("Skill", r#"{"skill":" /memory-write "}"#),
+        Some("/memory-write".to_string())
+    );
+    assert_eq!(
+        extract_skill_id_from_tool_use("Bash", r#"{"skill":"memory-write"}"#),
+        None
+    );
+    assert_eq!(extract_skill_id_from_tool_use("Skill", r#"{}"#), None);
 }
 
 fn sample_session() -> DiscordSession {
@@ -247,6 +261,7 @@ fn turn_end_memory_plan_skips_background_capture_for_normal_memento_turns() {
     );
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn memory_capture_task_is_backgrounded_and_timeout_isolated() {
     let (base_url, server_handle) = spawn_hanging_http_server().await;
