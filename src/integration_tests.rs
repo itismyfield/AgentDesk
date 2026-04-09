@@ -605,6 +605,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine: test_engine(&db),
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
@@ -1190,6 +1191,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine: engine.clone(),
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
@@ -2803,6 +2805,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine,
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
@@ -2926,6 +2929,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine,
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
@@ -3001,6 +3005,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine,
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,

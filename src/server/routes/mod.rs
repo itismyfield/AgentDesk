@@ -47,6 +47,7 @@ use crate::services::discord::health::HealthRegistry;
 pub struct AppState {
     pub db: Db,
     pub engine: PolicyEngine,
+    pub config: Arc<crate::config::Config>,
     pub broadcast_tx: crate::server::ws::BroadcastTx,
     pub batch_buffer: crate::server::ws::BatchBuffer,
     pub health_registry: Option<Arc<HealthRegistry>>,
@@ -55,11 +56,20 @@ pub struct AppState {
 #[cfg(test)]
 impl AppState {
     pub fn test_state(db: Db, engine: PolicyEngine) -> Self {
+        Self::test_state_with_config(db, engine, crate::config::Config::default())
+    }
+
+    pub fn test_state_with_config(
+        db: Db,
+        engine: PolicyEngine,
+        config: crate::config::Config,
+    ) -> Self {
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         Self {
             db,
             engine,
+            config: Arc::new(config),
             broadcast_tx: tx,
             batch_buffer: buf,
             health_registry: None,
@@ -70,6 +80,7 @@ impl AppState {
 pub fn api_router(
     db: Db,
     engine: PolicyEngine,
+    config: crate::config::Config,
     broadcast_tx: crate::server::ws::BroadcastTx,
     batch_buffer: crate::server::ws::BatchBuffer,
     health_registry: Option<Arc<HealthRegistry>>,
@@ -77,6 +88,7 @@ pub fn api_router(
     let state = AppState {
         db,
         engine,
+        config: Arc::new(config),
         broadcast_tx,
         batch_buffer,
         health_registry,

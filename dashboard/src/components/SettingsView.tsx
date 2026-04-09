@@ -412,8 +412,8 @@ const AUDIT_NOTES: AuditNote[] = [
     id: "merge-automation-surface",
     titleKo: "merge automation은 개별 정책 키 surface",
     titleEn: "Merge automation now lives on the policy-key surface",
-    descriptionKo: "`merge_automation_enabled`, `merge_strategy`, `merge_allowed_authors`는 `/api/settings/config` whitelist와 대시보드 정책 섹션에서 함께 관리됩니다. YAML이 아니라 개별 `kv_meta` 키가 정본입니다.",
-    descriptionEn: "`merge_automation_enabled`, `merge_strategy`, and `merge_allowed_authors` are managed together through the `/api/settings/config` whitelist and the dashboard policy section. Their canonical source is the individual `kv_meta` surface, not YAML.",
+    descriptionKo: "`merge_automation_enabled`, `merge_strategy`, `merge_allowed_authors`는 `agentdesk.yaml`의 `automation:` baseline 위에 대시보드가 `kv_meta` runtime override를 덮는 구조입니다.",
+    descriptionEn: "`merge_automation_enabled`, `merge_strategy`, and `merge_allowed_authors` now use `agentdesk.yaml` `automation:` as the startup baseline while the dashboard writes `kv_meta` runtime overrides on top.",
     keys: ["merge_automation_enabled", "merge_strategy", "merge_allowed_authors"],
     status: "backend-contract",
   },
@@ -787,7 +787,7 @@ export default function SettingsView({
           <SummaryCard
             label={tr("정책 키", "Policy Keys")}
             value={String(configEntries.length)}
-            description={tr("개별 `kv_meta` 키로 저장되는 파이프라인 정책", "Pipeline policy keys stored as individual `kv_meta` entries")}
+            description={tr("YAML baseline 위에 `kv_meta` override로 동작하는 파이프라인 정책", "Pipeline policy keys layered as YAML baselines with `kv_meta` overrides")}
             accent="#f59e0b"
           />
           <SummaryCard
@@ -821,18 +821,18 @@ export default function SettingsView({
           <SurfaceCard
             title={tr("런타임 설정", "Runtime config")}
             body={tr(
-              "폴링 주기와 cache TTL 같은 숫자 설정은 `kv_meta['runtime-config']`에 저장되고 재시작 없이 반영됩니다.",
-              "Polling intervals and cache TTL values live in `kv_meta['runtime-config']` and apply without restart.",
+              "`agentdesk.yaml`의 `runtime:` 섹션이 재시작 시 baseline이 되고, 대시보드 변경은 `kv_meta['runtime-config']` override로 즉시 반영됩니다.",
+              "The `runtime:` section in `agentdesk.yaml` becomes the restart baseline, while dashboard edits apply immediately as `kv_meta['runtime-config']` overrides.",
             )}
-            footer={tr("source: kv_meta['runtime-config']", "source: kv_meta['runtime-config']")}
+            footer={tr("source: agentdesk.yaml runtime + kv_meta['runtime-config']", "source: agentdesk.yaml runtime + kv_meta['runtime-config']")}
           />
           <SurfaceCard
             title={tr("정책/파이프라인 키", "Policy and pipeline keys")}
             body={tr(
-              "리뷰, 타임아웃, context compact, merge automation 값은 개별 `kv_meta` 키로 저장되고 `/api/settings/config` whitelist를 통해서만 노출됩니다.",
-              "Review, timeout, context-compaction, and merge automation values are stored as individual `kv_meta` keys and only exposed through the `/api/settings/config` whitelist.",
+              "리뷰, 타임아웃, context compact, merge automation 값은 `agentdesk.yaml` baseline에서 시작하고, 운영 중 수정은 개별 `kv_meta` 키 override로 유지됩니다.",
+              "Review, timeout, context-compaction, and merge automation values start from the `agentdesk.yaml` baseline and keep live edits as individual `kv_meta` overrides.",
             )}
-            footer={tr("source: individual kv_meta keys", "source: individual kv_meta keys")}
+            footer={tr("source: agentdesk.yaml + individual kv_meta overrides", "source: agentdesk.yaml + individual kv_meta overrides")}
           />
           <SurfaceCard
             title={tr("온보딩/시크릿", "Onboarding and secrets")}
@@ -939,10 +939,10 @@ export default function SettingsView({
           eyebrow={tr("즉시 반영", "Live Runtime")}
           title={tr("운영 리듬과 캐시 튜닝", "Tune runtime cadence and caching")}
           description={tr(
-            "이 값들은 `runtime-config`에 저장되고 재시작 없이 반영됩니다. 장애 복구 속도, GitHub 동기화 리듬, 사용량 경고 민감도 같은 운영 감각을 조절하는 영역입니다.",
-            "These values are saved to `runtime-config` and apply without restart. They tune recovery cadence, GitHub sync rhythm, and usage-alert sensitivity.",
+            "이 값들은 `agentdesk.yaml` `runtime:` baseline 위에 저장되는 live override입니다. 저장 즉시 반영되지만, 재시작하면 YAML baseline이 다시 기준이 됩니다.",
+            "These values are live overrides layered on top of the `agentdesk.yaml` `runtime:` baseline. They apply immediately, but the YAML baseline becomes authoritative again on restart.",
           )}
-          badge={tr("no restart needed", "no restart needed")}
+          badge={tr("live override on YAML baseline", "live override on YAML baseline")}
         />
 
         {!rcLoaded ? (
@@ -1059,10 +1059,10 @@ export default function SettingsView({
           eyebrow={tr("파이프라인 정책", "Pipeline Policy")}
           title={tr("개별 `kv_meta` 키 관리", "Manage individual `kv_meta` keys")}
           description={tr(
-            "리뷰, 자동 머지, 타임아웃, context compact, Discord 채널 연결 값은 일반 설정 JSON이 아니라 개별 `kv_meta` 키입니다. 여기서는 토글/숫자/문자열 타입을 분리해서 보여주고, read-only 항목은 편집 대신 현재 상태만 노출합니다.",
-            "Review, merge automation, timeout, context-compaction, and Discord channel IDs are stored as individual `kv_meta` keys rather than the general settings JSON. This section separates toggles, numeric values, and read-only keys.",
+            "리뷰, 자동 머지, 타임아웃, context compact, Discord 채널 연결 값은 `agentdesk.yaml` baseline과 개별 `kv_meta` override의 조합입니다. 여기서는 live override만 수정하고, restart baseline은 YAML이 담당합니다.",
+            "Review, merge automation, timeout, context-compaction, and Discord channel IDs now combine an `agentdesk.yaml` baseline with individual `kv_meta` overrides. This section edits only the live override layer while YAML owns the restart baseline.",
           )}
-          badge={tr("whitelisted API only", "whitelisted API only")}
+          badge={tr("YAML baseline + live override", "YAML baseline + live override")}
         />
 
         {configEntries.length === 0 ? (
@@ -1217,8 +1217,8 @@ export default function SettingsView({
             <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
               <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
                 {tr(
-                  "이 섹션은 whitelist된 개별 `kv_meta` 키만 편집합니다. dead config였던 `max_chain_depth`와 `context_clear_*`는 surface에서 제거했고, merge automation도 이제 여기서 직접 설명/수정됩니다.",
-                  "This section edits only whitelisted individual `kv_meta` keys. Retired keys such as `max_chain_depth` and `context_clear_*` have been removed from the surface, and merge automation is now explained and editable here.",
+                  "이 섹션은 whitelist된 개별 `kv_meta` override만 편집합니다. dead config였던 `max_chain_depth`와 `context_clear_*`는 surface에서 제거했고, 재시작 baseline은 `agentdesk.yaml`이 다시 적용됩니다.",
+                  "This section edits only whitelisted `kv_meta` override keys. Retired keys such as `max_chain_depth` and `context_clear_*` have been removed from the surface, and the `agentdesk.yaml` baseline is re-applied on restart.",
                 )}
               </p>
               <button
