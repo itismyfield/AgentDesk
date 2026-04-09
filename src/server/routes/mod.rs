@@ -53,6 +53,20 @@ pub struct AppState {
     pub health_registry: Option<Arc<HealthRegistry>>,
 }
 
+impl AppState {
+    pub fn dispatch_service(&self) -> crate::services::dispatches::DispatchService {
+        crate::services::dispatches::DispatchService::new(self.db.clone(), self.engine.clone())
+    }
+
+    pub fn queue_service(&self) -> crate::services::queue::QueueService {
+        crate::services::queue::QueueService::new(self.db.clone())
+    }
+
+    pub fn settings_service(&self) -> crate::services::settings::SettingsService {
+        crate::services::settings::SettingsService::new(self.db.clone(), self.config.clone())
+    }
+}
+
 #[cfg(test)]
 impl AppState {
     pub fn test_state(db: Db, engine: PolicyEngine) -> Self {

@@ -117,56 +117,9 @@ pub async fn cancel_dispatch(
     State(state): State<AppState>,
     Path(dispatch_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    // Check current status
-    let current_status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM task_dispatches WHERE id = ?1",
-            [&dispatch_id],
-            |row| row.get(0),
-        )
-        .ok();
-
-    match current_status.as_deref() {
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "dispatch not found"})),
-        ),
-        Some("completed") | Some("cancelled") | Some("failed") => (
-            StatusCode::CONFLICT,
-            Json(
-                json!({"error": format!("dispatch already in terminal state: {}", current_status.unwrap())}),
-            ),
-        ),
-        Some(_) => {
-            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(
-                &conn,
-                &dispatch_id,
-                None,
-            )
-            .ok();
-            // Also clean up notification marker
-            conn.execute(
-                "DELETE FROM kv_meta WHERE key = ?1",
-                [&format!("dispatch_notified:{dispatch_id}")],
-            )
-            .ok();
-
-            tracing::info!("[queue-api] Cancelled dispatch {dispatch_id}");
-            (
-                StatusCode::OK,
-                Json(json!({"ok": true, "dispatch_id": dispatch_id})),
-            )
-        }
+    match state.queue_service().cancel_dispatch(&dispatch_id) {
+        Ok(body) => (StatusCode::OK, Json(body)),
+        Err(error) => error.into_json_response(),
     }
 }
 
@@ -183,58 +136,13 @@ pub async fn cancel_all_dispatches(
     State(state): State<AppState>,
     Json(body): Json<CancelAllBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    let mut conditions = vec!["status IN ('pending', 'dispatched')".to_string()];
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-    if let Some(ref card_id) = body.kanban_card_id {
-        params.push(Box::new(card_id.clone()));
-        conditions.push(format!("kanban_card_id = ?{}", params.len()));
+    match state
+        .queue_service()
+        .cancel_all_dispatches(body.kanban_card_id.as_deref(), body.agent_id.as_deref())
+    {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(error) => error.into_json_response(),
     }
-    if let Some(ref agent_id) = body.agent_id {
-        params.push(Box::new(agent_id.clone()));
-        conditions.push(format!("to_agent_id = ?{}", params.len()));
-    }
-
-    let sql = format!(
-        "SELECT id FROM task_dispatches WHERE {}",
-        conditions.join(" AND ")
-    );
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let dispatch_ids: Vec<String> = conn
-        .prepare(&sql)
-        .ok()
-        .and_then(|mut stmt| {
-            stmt.query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        })
-        .unwrap_or_default();
-    let mut count = 0;
-    for dispatch_id in &dispatch_ids {
-        count +=
-            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, dispatch_id, None)
-                .unwrap_or(0);
-    }
-
-    tracing::info!(
-        "[queue-api] Cancelled {count} dispatches (card={:?}, agent={:?})",
-        body.kanban_card_id,
-        body.agent_id
-    );
-    (
-        StatusCode::OK,
-        Json(json!({"ok": true, "cancelled": count})),
-    )
 }
 
 // ── POST /api/turns/:channel_id/cancel ──────────────────────────
@@ -245,70 +153,10 @@ pub async fn cancel_turn(
     State(state): State<AppState>,
     Path(channel_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // Find the active session for this channel
-    let session_info: Option<(String, Option<String>)> = state.db.lock().ok().and_then(|conn| {
-        conn.query_row(
-            "SELECT session_key, active_dispatch_id FROM sessions \
-                 WHERE status = 'working' \
-                 AND (session_key LIKE '%' || ?1 || '%' OR agent_id IN \
-                      (SELECT id FROM agents WHERE
-                          discord_channel_id = ?1 OR discord_channel_alt = ?1 OR
-                          discord_channel_cc = ?1 OR discord_channel_cdx = ?1)) \
-                 ORDER BY last_heartbeat DESC LIMIT 1",
-            [&channel_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        )
-        .ok()
-    });
-
-    let Some((session_key, dispatch_id)) = session_info else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "no active turn found for this channel"})),
-        );
-    };
-
-    // Extract tmux session name from session_key
-    // Format: hostname:AgentDesk-provider-channelname(-threadid)
-    let tmux_name = session_key.split(':').last().unwrap_or(&session_key);
-
-    // Kill tmux session
-    let killed = crate::services::platform::tmux::kill_session(tmux_name);
-
-    // Cancel the associated dispatch if any
-    if let Some(ref did) = dispatch_id {
-        if let Ok(conn) = state.db.lock() {
-            crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_conn(&conn, did, None).ok();
-        }
+    match state.queue_service().cancel_turn(&channel_id) {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(error) => error.into_json_response(),
     }
-
-    // Mark session as disconnected
-    if let Ok(conn) = state.db.lock() {
-        conn.execute(
-            "UPDATE sessions SET status = 'disconnected', active_dispatch_id = NULL WHERE session_key = ?1",
-            [&session_key],
-        )
-        .ok();
-    }
-
-    tracing::info!(
-        "[queue-api] Cancelled turn: session={}, tmux={}, killed={}, dispatch={:?}",
-        session_key,
-        tmux_name,
-        killed,
-        dispatch_id
-    );
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "session_key": session_key,
-            "tmux_session": tmux_name,
-            "tmux_killed": killed,
-            "dispatch_cancelled": dispatch_id,
-        })),
-    )
 }
 
 // ── POST /api/turns/:channel_id/extend-timeout ───────────────────

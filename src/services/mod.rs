@@ -4,17 +4,21 @@ pub mod codex;
 #[cfg(unix)]
 pub mod codex_tmux_wrapper;
 pub mod discord;
+pub mod dispatches;
 pub mod gemini;
 pub mod memory;
 pub mod platform;
 pub mod process;
 pub mod provider;
 pub mod provider_exec;
+pub mod queue;
 pub mod qwen;
 #[cfg(unix)]
 pub mod qwen_tmux_wrapper;
 pub mod remote_stub;
+pub mod service_error;
 pub mod session_backend;
+pub mod settings;
 pub mod termination_audit;
 pub mod tmux_common;
 pub mod tmux_diagnostics;
