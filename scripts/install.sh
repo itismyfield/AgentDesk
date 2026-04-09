@@ -212,7 +212,7 @@ if [ -z "$LATEST_TAG" ]; then
   fi
 
   # Install
-  mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,policies,dashboard}
+  mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,policies,dashboard,skills}
   cp target/release/agentdesk "$INSTALL_DIR/bin/"
   chmod +x "$INSTALL_DIR/bin/agentdesk"
 
@@ -222,6 +222,10 @@ if [ -z "$LATEST_TAG" ]; then
 
   if [ -d "policies" ]; then
     cp policies/*.js "$INSTALL_DIR/policies/"
+  fi
+
+  if [ -d "skills" ]; then
+    rsync -a --delete "skills/" "$INSTALL_DIR/skills/"
   fi
 
   cd /
@@ -243,7 +247,7 @@ else
   tar xzf "${ARTIFACT}.tar.gz"
 
   # Install
-  mkdir -p "$INSTALL_DIR"/{bin,config,data,logs}
+  mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,skills}
   cp "${ARTIFACT}/agentdesk" "$INSTALL_DIR/bin/"
   chmod +x "$INSTALL_DIR/bin/agentdesk"
 
@@ -255,6 +259,10 @@ else
   if [ -d "${ARTIFACT}/policies" ]; then
     mkdir -p "$INSTALL_DIR/policies"
     cp "${ARTIFACT}/policies/"*.js "$INSTALL_DIR/policies/"
+  fi
+
+  if [ -d "${ARTIFACT}/skills" ]; then
+    rsync -a --delete "${ARTIFACT}/skills/" "$INSTALL_DIR/skills/"
   fi
 
   cd /

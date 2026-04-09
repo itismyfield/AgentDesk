@@ -8,7 +8,7 @@
 #
 # Output:
 #   dist/agentdesk-{os}-{arch}.tar.gz  +  dist/checksums.txt
-#   Contents: agentdesk (binary), dashboard/dist/, policies/
+#   Contents: agentdesk (binary), dashboard/dist/, policies/, skills/
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -98,6 +98,12 @@ fi
 if [ -d "policies" ]; then
   mkdir -p "$STAGING/policies"
   cp policies/*.js "$STAGING/policies/"
+fi
+
+# Managed skills
+if [ -d "skills" ]; then
+  mkdir -p "$STAGING/skills"
+  rsync -a --delete "skills/" "$STAGING/skills/"
 fi
 
 # Version marker
