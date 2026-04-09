@@ -2734,6 +2734,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn memento_recall_skip_only_triggers_for_loaded_memento_sessions() {
         let memento = settings::ResolvedMemorySettings {
             backend: settings::MemoryBackendKind::Memento,

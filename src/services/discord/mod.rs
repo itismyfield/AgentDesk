@@ -214,6 +214,8 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
 #[derive(Clone)]
 pub(super) struct DiscordSession {
     pub(super) session_id: Option<String>,
+    pub(super) memento_context_loaded: bool,
+    pub(super) memento_reflected: bool,
     pub(super) current_path: Option<String>,
     pub(super) history: Vec<HistoryItem>,
     pub(super) pending_uploads: Vec<String>,
@@ -253,6 +255,23 @@ pub(super) fn select_restored_session_path(
 }
 
 impl DiscordSession {
+    pub(super) fn clear_provider_session(&mut self) {
+        self.session_id = None;
+        self.memento_context_loaded = false;
+        self.memento_reflected = false;
+    }
+
+    pub(super) fn restore_provider_session(&mut self, session_id: Option<String>) {
+        self.session_id = session_id;
+        self.memento_context_loaded = self.session_id.is_some();
+        self.memento_reflected = false;
+    }
+
+    pub(super) fn note_memento_context_loaded(&mut self) {
+        self.memento_context_loaded = true;
+        self.memento_reflected = false;
+    }
+
     /// Validate `current_path` and return it if it exists on disk.
     /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
     pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
@@ -3410,6 +3429,8 @@ pub(super) async fn auto_restore_session(
                 .entry(channel_id)
                 .or_insert_with(|| DiscordSession {
                     session_id: None,
+                    memento_context_loaded: false,
+                    memento_reflected: false,
                     current_path: None,
                     history: Vec::new(),
                     pending_uploads: Vec::new(),
@@ -3477,6 +3498,8 @@ async fn bootstrap_thread_session(
         .entry(thread_channel_id)
         .or_insert_with(|| DiscordSession {
             session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
             current_path: None,
             history: Vec::new(),
             pending_uploads: Vec::new(),
