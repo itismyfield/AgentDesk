@@ -3,6 +3,10 @@ use super::settings::{
     load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
 };
 use super::*;
+use crate::services::memory::{
+    UNBOUND_MEMORY_ROLE_ID, resolve_memento_agent_id, resolve_memento_workspace,
+    sanitize_memento_workspace_segment,
+};
 
 const CONTEXT_COMPRESSION_SECTION_ORDER: &str = "`Goal`, `Progress`, `Decisions`, `Files`, `Next`";
 const STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE: &str =
@@ -34,6 +38,9 @@ pub(crate) fn build_followup_turn_system_reminder() -> String {
 
 fn proactive_memory_guidance(
     memory_settings: Option<&ResolvedMemorySettings>,
+    current_path: &str,
+    channel_id: ChannelId,
+    role_binding: Option<&RoleBinding>,
     profile: DispatchProfile,
 ) -> Option<String> {
     if profile != DispatchProfile::Full {
@@ -42,19 +49,45 @@ fn proactive_memory_guidance(
 
     let settings = memory_settings?;
     let (backend_name, read_tool, write_tool, extra_note) = match settings.backend {
-        MemoryBackendKind::File => ("local", "`memory-read` skill", "`memory-write` skill", ""),
+        MemoryBackendKind::File => (
+            "local",
+            "`memory-read` skill",
+            "`memory-write` skill",
+            String::new(),
+        ),
         MemoryBackendKind::Mem0 => (
             "mem0",
             "`search_memory` MCP tool",
             "`add_memories` MCP tool",
-            "",
+            String::new(),
         ),
-        MemoryBackendKind::Memento => (
-            "memento",
-            "`recall` MCP tool",
-            "`remember` MCP tool",
-            "\n- 참고: 턴 시작 `context` 주입과 세션 종료 시 `reflect`는 서버가 담당한다. 턴 중 보강만 `recall`/`remember`로 수행한다.",
-        ),
+        MemoryBackendKind::Memento => {
+            let role_id = role_binding
+                .map(|binding| binding.role_id.as_str())
+                .unwrap_or(UNBOUND_MEMORY_ROLE_ID);
+            let workspace_scope = current_path
+                .trim()
+                .split('/')
+                .rev()
+                .find(|segment| !segment.trim().is_empty())
+                .map(sanitize_memento_workspace_segment)
+                .unwrap_or_else(|| "default".to_string());
+            let agent_workspace = resolve_memento_workspace(role_id, channel_id.get(), None);
+            let agent_id = resolve_memento_agent_id(role_id, channel_id.get());
+            (
+                "memento",
+                "`recall` MCP tool",
+                "`remember` MCP tool",
+                format!(
+                    "\n- 스코프 규칙: 전역 정보는 `workspace`를 생략하고 `agentId`를 `default`로 둔다.\n\
+                     - 스코프 규칙: 현재 프로젝트/도메인 사실과 기술 결정은 `workspace={workspace_scope}` + `agentId=default`로 저장한다.\n\
+                     - 스코프 규칙: 이 에이전트만의 반복 에러, 작업 습관, 도구 사용 패턴은 `workspace={agent_workspace}` + `agentId={agent_id}`로 저장한다.\n\
+                     - 현재 채널 힌트: workspace 스코프 이름은 `{workspace_scope}`, 에이전트 스코프 이름은 `{agent_workspace}`, 에이전트 ID는 `{agent_id}`다.\n\
+                     - 원칙: 전역이 아니면 `workspace`를 명시하고, 에이전트 전용이 아니면 `agentId`는 `default`를 유지한다.\n\
+                     - 참고: 턴 시작 `context` 주입과 세션 종료 시 `reflect`는 서버가 담당한다. 턴 중 보강만 `recall`/`remember`로 수행한다."
+                ),
+            )
+        }
     };
 
     Some(format!(
@@ -244,7 +277,13 @@ pub(super) fn build_system_prompt(
         system_prompt_owned.push_str(sak);
     }
 
-    if let Some(memory_guidance) = proactive_memory_guidance(memory_settings, profile) {
+    if let Some(memory_guidance) = proactive_memory_guidance(
+        memory_settings,
+        current_path,
+        channel_id,
+        role_binding,
+        profile,
+    ) {
         system_prompt_owned.push_str(&memory_guidance);
     }
 
@@ -653,15 +692,26 @@ mod tests {
 
     #[test]
     fn test_full_prompt_injects_memento_memory_guidance() {
+        use super::super::settings::RoleBinding;
+
+        let binding = RoleBinding {
+            role_id: "project-agentdesk".to_string(),
+            prompt_file: "/nonexistent".to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+            memory: Default::default(),
+        };
         let prompt = build_system_prompt(
             "ctx",
-            "/tmp",
+            "/Users/test/.adk/release/workspaces/agentdesk",
             ChannelId::new(1),
             "tok",
             "",
             "",
             true,
-            None,
+            Some(&binding),
             false,
             DispatchProfile::Full,
             None,
@@ -678,6 +728,13 @@ mod tests {
         assert!(prompt.contains("`remember` MCP tool"));
         assert!(prompt.contains("`context`"));
         assert!(prompt.contains("`reflect`"));
+        assert!(prompt.contains("`workspace`를 생략"));
+        assert!(prompt.contains("`workspace=agentdesk` + `agentId=default`"));
+        assert!(
+            prompt
+                .contains("`workspace=agentdesk-project-agentdesk` + `agentId=project-agentdesk`")
+        );
+        assert!(prompt.contains("workspace 스코프 이름은 `agentdesk`"));
     }
 
     #[test]
