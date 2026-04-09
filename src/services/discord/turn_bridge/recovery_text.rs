@@ -5,7 +5,7 @@ use serenity::all::ChannelId;
 /// storing it in kv_meta for the router to inject into the LLM prompt,
 /// and re-sending the original message via announce bot.
 /// Discord only sees a short notice — the full history is LLM-only.
-pub(super) async fn auto_retry_with_history(
+pub(in crate::services::discord) async fn auto_retry_with_history(
     http: &serenity::http::Http,
     channel_id: ChannelId,
     user_text: &str,

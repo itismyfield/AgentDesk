@@ -21,8 +21,10 @@ use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 use crate::utils::format::tail_with_ellipsis;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package
-pub(super) use completion_guard::guard_review_dispatch_completion;
-pub(super) use completion_guard::runtime_db_fallback_complete;
+pub(super) use completion_guard::{
+    fail_dispatch_with_retry, guard_review_dispatch_completion, runtime_db_fallback_complete,
+};
+pub(super) use recovery_text::auto_retry_with_history;
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::stale_inflight_message;
@@ -31,9 +33,8 @@ pub(super) use tmux_runtime::stale_inflight_message;
 pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
-use completion_guard::{complete_work_dispatch_on_turn_end, fail_dispatch_with_retry};
+use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{persisted_context_tokens, resolve_done_response};
-use recovery_text::auto_retry_with_history;
 use retry_state::{
     clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
 };
