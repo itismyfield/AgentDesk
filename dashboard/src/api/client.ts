@@ -316,6 +316,47 @@ export async function saveRuntimeConfig(
   });
 }
 
+// ── Runtime Health ──
+
+export interface HealthProviderStatus {
+  name: string;
+  connected: boolean;
+  active_turns: number;
+  queue_depth: number;
+  sessions: number;
+  restart_pending: boolean;
+  last_turn_at: string | null;
+}
+
+export interface HealthDispatchOutboxStats {
+  pending: number;
+  retrying: number;
+  permanent_failures: number;
+  oldest_pending_age: number;
+}
+
+export interface HealthResponse {
+  status: "healthy" | "degraded" | "unhealthy" | string;
+  version?: string;
+  uptime_secs?: number;
+  global_active?: number;
+  global_finalizing?: number;
+  deferred_hooks?: number;
+  queue_depth?: number;
+  watcher_count?: number;
+  recovery_duration?: number;
+  degraded_reasons?: string[];
+  providers?: HealthProviderStatus[];
+  db?: boolean;
+  dashboard?: boolean;
+  outbox_age?: number;
+  dispatch_outbox?: HealthDispatchOutboxStats;
+}
+
+export async function getHealth(): Promise<HealthResponse> {
+  return request("/api/health");
+}
+
 // ── Dispatches ──
 
 export async function createDispatch(body: {
