@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::ProviderKind;
@@ -28,6 +30,25 @@ pub async fn execute_simple(provider: ProviderKind, prompt: String) -> Result<St
         }
         ProviderKind::Unsupported(name) => Err(format!("Provider '{}' is not installed", name)),
     }
+}
+
+async fn await_with_timeout<T, F>(label: &str, timeout: Duration, future: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(format!("{} timed out after {}s", label, timeout.as_secs())),
+    }
+}
+
+pub async fn execute_simple_with_timeout(
+    provider: ProviderKind,
+    prompt: String,
+    timeout: Duration,
+    label: &str,
+) -> Result<String, String> {
+    await_with_timeout(label, timeout, execute_simple(provider, prompt)).await
 }
 
 #[derive(Clone, Debug)]
@@ -175,5 +196,34 @@ fn collect_stream_output(rx: mpsc::Receiver<StreamMessage>) -> Result<String, St
         Err("Empty response from provider runtime".to_string())
     } else {
         Ok(trimmed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::await_with_timeout;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn await_with_timeout_returns_inner_result_before_deadline() {
+        let result = await_with_timeout("selection stage", Duration::from_millis(50), async {
+            Ok::<_, String>("ok".to_string())
+        })
+        .await
+        .expect("result should succeed");
+
+        assert_eq!(result, "ok");
+    }
+
+    #[tokio::test]
+    async fn await_with_timeout_errors_after_deadline() {
+        let error = await_with_timeout("selection stage", Duration::from_millis(10), async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok::<_, String>("late".to_string())
+        })
+        .await
+        .expect_err("timeout should fail");
+
+        assert!(error.contains("selection stage timed out after 0s"));
     }
 }

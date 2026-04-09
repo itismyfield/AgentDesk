@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,7 @@ use super::{SharedData, rate_limit_wait};
 const MIN_MEETING_PARTICIPANTS: usize = 2;
 const MAX_MEETING_PARTICIPANTS: usize = 5;
 const MEETING_READONLY_ALLOWED_TOOLS: &[&str] = &["Read"];
+const MEETING_SELECTION_STAGE_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct MeetingExpertOption {
@@ -619,6 +621,11 @@ pub(crate) async fn start_meeting_with_reviewer(
 
     // Select participants via primary provider + reviewer cross-check
     let participants = match select_participants(
+        http,
+        shared,
+        channel_id,
+        msg_channel,
+        &meeting_id,
         &config,
         agenda,
         primary_provider,
@@ -629,10 +636,24 @@ pub(crate) async fn start_meeting_with_reviewer(
     {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
+            send_meeting_selection_status(
+                http,
+                shared,
+                msg_channel,
+                "❌ **참가자 선정 실패**\nreason: 참여자를 선정하지 못했어.",
+            )
+            .await;
             cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
             return Err("참여자를 선정하지 못했어.".into());
         }
         Err(e) => {
+            send_meeting_selection_status(
+                http,
+                shared,
+                msg_channel,
+                format!("❌ **참가자 선정 실패**\nreason: {}", e),
+            )
+            .await;
             cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
             return Err(format!("참여자 선정 실패: {}", e).into());
         }
@@ -1190,8 +1211,92 @@ fn build_meeting_participants(
         .collect()
 }
 
+async fn send_meeting_selection_status(
+    http: &serenity::Http,
+    shared: &Arc<SharedData>,
+    msg_channel: ChannelId,
+    content: impl Into<String>,
+) {
+    rate_limit_wait(shared, msg_channel).await;
+    let _ = msg_channel
+        .send_message(http, CreateMessage::new().content(content.into()))
+        .await;
+}
+
+async fn execute_selection_stage(
+    http: &serenity::Http,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    msg_channel: ChannelId,
+    meeting_id: &str,
+    provider: ProviderKind,
+    stage_key: &str,
+    stage_label: &str,
+    prompt: String,
+) -> Result<String, String> {
+    tracing::info!(
+        "[meeting] selection stage start meeting_id={} channel_id={} stage={} provider={}",
+        meeting_id,
+        channel_id.get(),
+        stage_key,
+        provider.as_str()
+    );
+    send_meeting_selection_status(
+        http,
+        shared,
+        msg_channel,
+        format!(
+            "⏳ **{}**\nprovider: {}",
+            stage_label,
+            provider.display_name()
+        ),
+    )
+    .await;
+
+    let started_at = Instant::now();
+    let response = provider_exec::execute_simple_with_timeout(
+        provider.clone(),
+        prompt,
+        MEETING_SELECTION_STAGE_TIMEOUT,
+        &format!("meeting selection stage `{}`", stage_key),
+    )
+    .await;
+    let elapsed_ms = started_at.elapsed().as_millis();
+
+    match response {
+        Ok(text) => {
+            tracing::info!(
+                "[meeting] selection stage completed meeting_id={} channel_id={} stage={} provider={} elapsed_ms={}",
+                meeting_id,
+                channel_id.get(),
+                stage_key,
+                provider.as_str(),
+                elapsed_ms
+            );
+            Ok(text)
+        }
+        Err(error) => {
+            tracing::error!(
+                "[meeting] selection stage failed meeting_id={} channel_id={} stage={} provider={} elapsed_ms={} error={}",
+                meeting_id,
+                channel_id.get(),
+                stage_key,
+                provider.as_str(),
+                elapsed_ms,
+                error
+            );
+            Err(format!("{} 실패: {}", stage_label, error))
+        }
+    }
+}
+
 /// Select participants using primary provider + reviewer micro cross-check.
 async fn select_participants(
+    http: &serenity::Http,
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    msg_channel: ChannelId,
+    meeting_id: &str,
     config: &MeetingConfig,
     agenda: &str,
     primary_provider: ProviderKind,
@@ -1292,8 +1397,18 @@ async fn select_participants(
         agents_desc.join("\n")
     );
 
-    let initial_response =
-        provider_exec::execute_simple(primary_provider.clone(), selection_prompt).await?;
+    let initial_response = execute_selection_stage(
+        http,
+        shared,
+        channel_id,
+        msg_channel,
+        meeting_id,
+        primary_provider.clone(),
+        "initial_selection",
+        "전문 에이전트 1차 선정",
+        selection_prompt,
+    )
+    .await?;
     let initial_selected = parse_selected_role_ids_response(&initial_response)?;
 
     let review_prompt = format!(
@@ -1324,8 +1439,18 @@ async fn select_participants(
         current = serde_json::to_string(&initial_selected).unwrap_or_else(|_| "[]".to_string()),
     );
 
-    let review_notes =
-        provider_exec::execute_simple(reviewer_provider.clone(), review_prompt).await?;
+    let review_notes = execute_selection_stage(
+        http,
+        shared,
+        channel_id,
+        msg_channel,
+        meeting_id,
+        reviewer_provider.clone(),
+        "selection_review",
+        "전문 에이전트 선정 리뷰",
+        review_prompt,
+    )
+    .await?;
 
     let finalize_prompt = format!(
         r#"다음 안건에 대한 회의 참가자 선정을 최종 확정해줘.
@@ -1377,8 +1502,18 @@ async fn select_participants(
         review = review_notes.trim(),
     );
 
-    let final_response =
-        provider_exec::execute_simple(primary_provider.clone(), finalize_prompt).await?;
+    let final_response = execute_selection_stage(
+        http,
+        shared,
+        channel_id,
+        msg_channel,
+        meeting_id,
+        primary_provider.clone(),
+        "selection_finalize",
+        "전문 에이전트 최종 확정",
+        finalize_prompt,
+    )
+    .await?;
     let selected = parse_selected_role_ids_response(&final_response)?;
     build_meeting_participants(&candidate_pool, &selected, &fixed_role_ids)
 }
