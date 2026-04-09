@@ -30,13 +30,6 @@ fn test_engine(db: &Db) -> PolicyEngine {
     PolicyEngine::new(&config, db.clone()).unwrap()
 }
 
-fn test_engine_with_policy_dir(db: &Db, dir: &std::path::Path) -> PolicyEngine {
-    let mut config = crate::config::Config::default();
-    config.policies.dir = dir.to_path_buf();
-    config.policies.hot_reload = false;
-    PolicyEngine::new(&config, db.clone()).unwrap()
-}
-
 fn test_api_router(
     db: Db,
     engine: PolicyEngine,
@@ -2697,6 +2690,17 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
+    let (decision_signal, chosen_action, audit_dispatch_id): (String, String, Option<String>) =
+        conn.query_row(
+            "SELECT signal, chosen_action, dispatch_id
+             FROM runtime_decisions
+             WHERE dispatch_id = 'dispatch-orphan-330'
+             ORDER BY id DESC
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
 
     assert_eq!(
         card_status, "review",
@@ -2713,44 +2717,18 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
             .contains("orphan_recovery"),
         "true orphan recovery must keep the orphan_recovery completion marker"
     );
+    assert_eq!(decision_signal, "OrphanCandidate");
+    assert_eq!(chosen_action, "Resume");
+    assert_eq!(audit_dispatch_id.as_deref(), Some("dispatch-orphan-330"));
 }
 
 #[test]
 fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
+    let engine = test_engine(&db);
     seed_agent(&db, "agent-orphan-race");
     seed_repo(&db, "test-repo");
-
-    let temp_dir = tempfile::tempdir().unwrap();
-    let policy_dir = temp_dir.path();
-    std::fs::copy(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/timeouts.js"),
-        policy_dir.join("timeouts.js"),
-    )
-    .unwrap();
-    std::fs::write(
-        policy_dir.join("zzz_orphan_race.js"),
-        r#"
-        (function() {
-          var raw = agentdesk.dispatch.markCompleted;
-          agentdesk.dispatch.markCompleted = function(dispatchId, resultJson) {
-            var result = raw(dispatchId, resultJson);
-            if (dispatchId === "dispatch-race-330") {
-              JSON.parse(agentdesk.db.__execute_raw(
-                "UPDATE kanban_cards SET status = 'backlog', updated_at = datetime('now') WHERE id = ?1",
-                JSON.stringify(["card-race-330"])
-              ));
-            }
-            return result;
-          };
-          agentdesk.registerPolicy({ name: "orphan-race-test" });
-        })();
-        "#,
-    )
-    .unwrap();
-
-    let engine = test_engine_with_policy_dir(&db, policy_dir);
 
     {
         let conn = db.lock().unwrap();
@@ -2773,6 +2751,14 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
                 'race impl', datetime('now', '-10 minutes'), datetime('now', '-10 minutes')
             )",
             [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, 'backlog')",
+            [format!(
+                "test:runtime_supervisor:orphan_post_complete_override:{}",
+                "dispatch-race-330"
+            )],
         )
         .unwrap();
     }
@@ -2803,6 +2789,17 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
             |row| row.get(0),
         )
         .unwrap();
+    let (chosen_action, decision_note): (String, Option<String>) = conn
+        .query_row(
+            "SELECT chosen_action, json_extract(evidence_json, '$.supervisor_note')
+             FROM runtime_decisions
+             WHERE dispatch_id = 'dispatch-race-330'
+             ORDER BY id DESC
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
 
     assert_eq!(
         card_status, "backlog",
@@ -2815,6 +2812,17 @@ fn on_tick30s_orphan_dispatch_skips_card_that_moved_to_backlog_mid_recovery() {
     assert_eq!(
         review_dispatch_count, 0,
         "skipped orphan recovery must not create a follow-up review dispatch"
+    );
+    assert_eq!(
+        chosen_action, "Resume",
+        "supervisor should still choose resume before the post-complete race guard trips"
+    );
+    assert!(
+        decision_note
+            .as_deref()
+            .unwrap_or("")
+            .contains("card moved to status=backlog"),
+        "runtime_decisions audit must explain why the resume transition was skipped"
     );
 }
 

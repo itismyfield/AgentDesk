@@ -598,6 +598,26 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_ste_created_at ON session_termination_events(created_at);",
     )?;
 
+    // #398: Runtime supervisor decision audit
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS runtime_decisions (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal        TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            chosen_action TEXT NOT NULL,
+            actor         TEXT NOT NULL,
+            session_key   TEXT,
+            dispatch_id   TEXT,
+            created_at    DATETIME DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_decisions_signal
+            ON runtime_decisions(signal);
+        CREATE INDEX IF NOT EXISTS idx_runtime_decisions_dispatch_id
+            ON runtime_decisions(dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_runtime_decisions_created_at
+            ON runtime_decisions(created_at);",
+    )?;
+
     // #189: Generic DM reply tracking — replaces family profile probe hardcode.
     // Agents register pending DM replies; router matches incoming DMs to pending entries.
     conn.execute_batch(

@@ -15,6 +15,7 @@ pub(crate) mod runtime;
 pub(crate) mod runtime_layout;
 mod server;
 mod services;
+pub(crate) mod supervisor;
 mod ui;
 mod utils;
 

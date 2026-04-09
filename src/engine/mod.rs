@@ -43,6 +43,12 @@ pub struct PolicyEngine {
     db: crate::db::Db,
 }
 
+#[derive(Clone)]
+pub struct PolicyEngineHandle {
+    inner: std::sync::Weak<Mutex<PolicyEngineInner>>,
+    db: crate::db::Db,
+}
+
 /// Summary of a loaded policy (for the /api/policies endpoint).
 #[derive(serde::Serialize)]
 pub struct PolicyInfo {
@@ -55,6 +61,7 @@ pub struct PolicyInfo {
 impl PolicyEngine {
     /// Create a new policy engine, initializing QuickJS and loading policies.
     pub fn new(config: &Config, db: Db) -> Result<Self> {
+        let supervisor_bridge = crate::supervisor::BridgeHandle::new();
         let runtime =
             Runtime::new().map_err(|e| anyhow::anyhow!("QuickJS runtime creation failed: {e}"))?;
         let context = Context::full(&runtime)
@@ -62,7 +69,7 @@ impl PolicyEngine {
 
         // Register bridge ops (agentdesk.*)
         context.with(|ctx| {
-            ops::register_globals(&ctx, db.clone())
+            ops::register_globals_with_supervisor(&ctx, db.clone(), supervisor_bridge.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to register bridge ops: {e}"))
         })?;
 
@@ -81,9 +88,10 @@ impl PolicyEngine {
 
             // Register bridge ops in the reload context too
             reload_ctx.with(|ctx| {
-                ops::register_globals(&ctx, db.clone()).map_err(|e| {
-                    anyhow::anyhow!("Failed to register bridge ops in reload ctx: {e}")
-                })
+                ops::register_globals_with_supervisor(&ctx, db.clone(), supervisor_bridge.clone())
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to register bridge ops in reload ctx: {e}")
+                    })
             })?;
 
             match loader::start_hot_reload(policies_dir.clone(), reload_ctx, store.clone()) {
@@ -105,7 +113,7 @@ impl PolicyEngine {
             policies_dir.display()
         );
 
-        Ok(Self {
+        let engine = Self {
             inner: Arc::new(Mutex::new(PolicyEngineInner {
                 _runtime: runtime,
                 context,
@@ -113,7 +121,17 @@ impl PolicyEngine {
                 _watcher: watcher,
             })),
             db: db.clone(),
-        })
+        };
+        supervisor_bridge.attach_engine(&engine);
+
+        Ok(engine)
+    }
+
+    pub fn downgrade(&self) -> PolicyEngineHandle {
+        PolicyEngineHandle {
+            inner: Arc::downgrade(&self.inner),
+            db: self.db.clone(),
+        }
     }
 
     /// Fire a hook with the given JSON payload. All policies that registered
@@ -684,6 +702,15 @@ impl PolicyEngine {
                 .eval(code_owned.as_bytes().to_vec())
                 .map_err(|e| anyhow::anyhow!("JS eval error: {e}"))?;
             Ok(result)
+        })
+    }
+}
+
+impl PolicyEngineHandle {
+    pub fn upgrade(&self) -> Option<PolicyEngine> {
+        Some(PolicyEngine {
+            inner: self.inner.upgrade()?,
+            db: self.db.clone(),
         })
     }
 }
