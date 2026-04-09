@@ -39,6 +39,25 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pr_tracking (
+            card_id        TEXT PRIMARY KEY REFERENCES kanban_cards(id) ON DELETE CASCADE,
+            repo_id        TEXT,
+            worktree_path  TEXT,
+            branch         TEXT,
+            pr_number      INTEGER,
+            head_sha       TEXT,
+            state          TEXT NOT NULL DEFAULT 'create-pr',
+            last_error     TEXT,
+            created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at     TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_pr_tracking_state ON pr_tracking(state);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pr_tracking_repo_pr
+        ON pr_tracking(repo_id, pr_number)
+        WHERE repo_id IS NOT NULL AND pr_number IS NOT NULL;",
+    )?;
+
     // Additive columns — ALTER TABLE errors are ignored if column already exists
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN deferred_dod_json TEXT;");
     let _ = conn.execute_batch("ALTER TABLE github_repos ADD COLUMN default_agent_id TEXT;");
