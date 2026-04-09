@@ -104,24 +104,11 @@ impl MementoBackend {
         channel_id: u64,
         config: &MementoRuntimeConfig,
     ) -> String {
-        if let Some(workspace) = config.workspace_override.as_deref() {
-            return workspace.to_string();
-        }
-
-        let role_id = role_id.trim();
-        if role_id.is_empty() || role_id == UNBOUND_MEMORY_ROLE_ID {
-            return format!("agentdesk-channel-{channel_id}");
-        }
-
-        format!("agentdesk-{}", sanitize_workspace_segment(role_id))
+        resolve_memento_workspace(role_id, channel_id, config.workspace_override.as_deref())
     }
 
     fn resolve_agent_id(&self, role_id: &str, channel_id: u64) -> String {
-        let role_id = role_id.trim();
-        if role_id.is_empty() || role_id == UNBOUND_MEMORY_ROLE_ID {
-            return format!("agentdesk-channel-{channel_id}");
-        }
-        role_id.to_string()
+        resolve_memento_agent_id(role_id, channel_id)
     }
 
     fn cached_session_id(&self, endpoint: &str) -> Option<String> {
@@ -430,7 +417,35 @@ fn extract_tool_result(payload: &Value, tool_name: &str) -> Result<ToolCallResul
     })
 }
 
-fn sanitize_workspace_segment(value: &str) -> String {
+pub(crate) fn resolve_memento_workspace(
+    role_id: &str,
+    channel_id: u64,
+    workspace_override: Option<&str>,
+) -> String {
+    if let Some(workspace) = workspace_override
+        .map(str::trim)
+        .filter(|workspace| !workspace.is_empty())
+    {
+        return workspace.to_string();
+    }
+
+    let role_id = role_id.trim();
+    if role_id.is_empty() || role_id == UNBOUND_MEMORY_ROLE_ID {
+        return format!("agentdesk-channel-{channel_id}");
+    }
+
+    format!("agentdesk-{}", sanitize_memento_workspace_segment(role_id))
+}
+
+pub(crate) fn resolve_memento_agent_id(role_id: &str, channel_id: u64) -> String {
+    let role_id = role_id.trim();
+    if role_id.is_empty() || role_id == UNBOUND_MEMORY_ROLE_ID {
+        return format!("agentdesk-channel-{channel_id}");
+    }
+    role_id.to_string()
+}
+
+pub(crate) fn sanitize_memento_workspace_segment(value: &str) -> String {
     let mut sanitized = String::with_capacity(value.len());
     let mut last_was_dash = false;
 
@@ -1130,11 +1145,14 @@ mod tests {
     #[test]
     fn test_sanitize_workspace_segment_normalizes_role_ids() {
         assert_eq!(
-            sanitize_workspace_segment("Project-AgentDesk"),
+            sanitize_memento_workspace_segment("Project-AgentDesk"),
             "project-agentdesk"
         );
-        assert_eq!(sanitize_workspace_segment("ch adk/cdx"), "ch-adk-cdx");
-        assert_eq!(sanitize_workspace_segment("___"), "default");
+        assert_eq!(
+            sanitize_memento_workspace_segment("ch adk/cdx"),
+            "ch-adk-cdx"
+        );
+        assert_eq!(sanitize_memento_workspace_segment("___"), "default");
     }
 
     #[test]
