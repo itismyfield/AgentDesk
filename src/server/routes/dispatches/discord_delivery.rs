@@ -334,7 +334,7 @@ async fn send_dispatch_to_discord_inner(
 
     // #359: Slot-pooled auto-queue threads live in auto_queue_slots.thread_id_map
     // and outlive a specific run/group assignment. Prefer that binding first.
-    let slot_thread_binding: Option<((String, i64), String)> = db.lock().ok().and_then(|conn| {
+    let slot_thread_binding: Option<((String, i64), Option<String>)> = db.lock().ok().and_then(|conn| {
         let row: Option<(String, Option<i64>, Option<String>)> = conn
             .query_row(
                 "SELECT e.agent_id, e.slot_index, s.thread_id_map \
@@ -378,12 +378,14 @@ async fn send_dispatch_to_discord_inner(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                 });
-            thread_id.map(|thread_id| ((agent_id, slot_index), thread_id))
+            Some(((agent_id, slot_index), thread_id))
         })
     });
     let slot_thread_id = slot_thread_binding
         .as_ref()
-        .map(|(_, thread_id)| thread_id.clone());
+        .and_then(|(_, thread_id)| thread_id.clone());
+    // slot_binding must be available even when thread_id_map is empty (first dispatch),
+    // so that newly created threads are recorded in the slot's thread_id_map.
     let slot_binding = slot_thread_binding
         .as_ref()
         .map(|((agent_id, slot_index), _)| (agent_id.clone(), *slot_index));
