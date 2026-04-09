@@ -136,8 +136,6 @@ impl GenerateMode {
     }
 }
 
-const DEFAULT_SLOT_POOL_SIZE: i64 = 3;
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 pub(crate) fn ensure_tables(conn: &rusqlite::Connection) {
@@ -277,8 +275,25 @@ pub(crate) fn ensure_tables(conn: &rusqlite::Connection) {
     }
 }
 
-fn ensure_agent_slot_rows(conn: &rusqlite::Connection, agent_id: &str) -> rusqlite::Result<()> {
-    for slot_index in 0..DEFAULT_SLOT_POOL_SIZE {
+fn run_slot_pool_size(conn: &rusqlite::Connection, run_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE(max_concurrent_threads, 1)
+         FROM auto_queue_runs
+         WHERE id = ?1",
+        [run_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(1)
+    .clamp(1, 10)
+}
+
+fn ensure_agent_slot_rows(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    agent_id: &str,
+) -> rusqlite::Result<()> {
+    let slot_pool_size = run_slot_pool_size(conn, run_id);
+    for slot_index in 0..slot_pool_size {
         conn.execute(
             "INSERT OR IGNORE INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
              VALUES (?1, ?2, '{}')",
@@ -399,7 +414,7 @@ fn allocate_slot_for_group_agent(
     thread_group: i64,
     agent_id: &str,
 ) -> Option<(i64, bool)> {
-    ensure_agent_slot_rows(conn, agent_id).ok()?;
+    ensure_agent_slot_rows(conn, run_id, agent_id).ok()?;
 
     let existing: Option<i64> = conn
         .query_row(
