@@ -411,6 +411,7 @@ pub fn ensure_runtime_layout(root: &Path) -> Result<LayoutReport, String> {
     normalize_agent_config_channels(root)?;
     synchronize_shared_prompt(root)?;
     update_role_map_prompt_paths(root)?;
+    merge_role_map_into_agentdesk_yaml(root)?;
     update_org_yaml_prompt_paths(root)?;
     ensure_managed_skills_manifest(root)?;
     migrate_legacy_skill_links(root)?;
@@ -997,6 +998,446 @@ fn update_org_yaml_prompt_paths(root: &Path) -> Result<(), String> {
     let rendered = serde_yaml::to_string(&yaml)
         .map_err(|e| format!("Failed to serialize '{}': {e}", path.display()))?;
     fs::write(&path, rendered).map_err(|e| format!("Failed to write '{}': {e}", path.display()))
+}
+
+#[derive(Debug, Default)]
+struct AgentChannelUpdate {
+    id: Option<String>,
+    name: Option<String>,
+    prompt_file: Option<String>,
+    workspace: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    peer_agents: Option<bool>,
+}
+
+fn merge_role_map_into_agentdesk_yaml(root: &Path) -> Result<(), String> {
+    let role_map = role_map_path(root);
+    if !role_map.is_file() {
+        return Ok(());
+    }
+
+    let yaml_path = config_file_path(root);
+    let mut config = if yaml_path.is_file() {
+        crate::config::load_from_path(&yaml_path)
+            .map_err(|e| format!("Failed to load config '{}': {e}", yaml_path.display()))?
+    } else {
+        crate::config::Config::default()
+    };
+
+    let content = fs::read_to_string(&role_map)
+        .map_err(|e| format!("Failed to read '{}': {e}", role_map.display()))?;
+    let json: Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse '{}': {e}", role_map.display()))?;
+
+    let mut changed = false;
+    changed |= merge_role_map_shared_prompt(&mut config, &json);
+    changed |= merge_role_map_meeting(&mut config, &json);
+
+    let mut providers_by_channel_id = BTreeMap::<String, String>::new();
+    if let Some(by_id) = json.get("byChannelId").and_then(Value::as_object) {
+        for (channel_id, entry) in by_id {
+            if let Some((provider_key, entry_changed)) =
+                merge_role_map_channel_id_entry(&mut config, channel_id, entry)
+            {
+                providers_by_channel_id.insert(channel_id.clone(), provider_key);
+                changed |= entry_changed;
+            }
+        }
+    }
+    if let Some(by_name) = json.get("byChannelName").and_then(Value::as_object) {
+        for (channel_name, entry) in by_name {
+            if merge_role_map_channel_name_entry(
+                &mut config,
+                channel_name,
+                entry,
+                &providers_by_channel_id,
+            ) {
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        crate::config::save_to_path(&yaml_path, &config)
+            .map_err(|e| format!("Failed to write config '{}': {e}", yaml_path.display()))?;
+    }
+    Ok(())
+}
+
+fn merge_role_map_shared_prompt(config: &mut crate::config::Config, json: &Value) -> bool {
+    if config.shared_prompt.is_some() {
+        return false;
+    }
+    let Some(shared_prompt) = json_string_field(json, &["sharedPromptFile", "shared_prompt"])
+    else {
+        return false;
+    };
+    config.shared_prompt = Some(shared_prompt);
+    true
+}
+
+fn merge_role_map_meeting(config: &mut crate::config::Config, json: &Value) -> bool {
+    if config.meeting.is_some() {
+        return false;
+    }
+    let Some(meeting) = json.get("meeting").and_then(role_map_meeting_to_config) else {
+        return false;
+    };
+    config.meeting = Some(meeting);
+    true
+}
+
+fn role_map_meeting_to_config(value: &Value) -> Option<crate::config::MeetingSettings> {
+    let meeting = value.as_object()?;
+    let channel_name = json_string_field_from_map(meeting, &["channel_name"])?;
+    let max_rounds = meeting
+        .get("max_rounds")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    let summary_agent = meeting
+        .get("summary_agent")
+        .and_then(role_map_summary_agent_to_config);
+    let available_agents = meeting
+        .get("available_agents")
+        .and_then(Value::as_array)
+        .map(|agents| {
+            agents
+                .iter()
+                .filter_map(role_map_meeting_agent_to_config)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(crate::config::MeetingSettings {
+        channel_name,
+        max_rounds,
+        summary_agent,
+        available_agents,
+    })
+}
+
+fn role_map_summary_agent_to_config(
+    value: &Value,
+) -> Option<crate::config::MeetingSummaryAgentDef> {
+    if let Some(agent) = value.as_str().and_then(|raw| normalize_non_empty(raw)) {
+        return Some(crate::config::MeetingSummaryAgentDef::Static(agent));
+    }
+
+    let obj = value.as_object()?;
+    let default = json_string_field_from_map(obj, &["default"])?;
+    let rules = obj
+        .get("rules")
+        .and_then(Value::as_array)
+        .map(|rules| {
+            rules
+                .iter()
+                .filter_map(|rule| {
+                    let rule_obj = rule.as_object()?;
+                    let agent = json_string_field_from_map(rule_obj, &["agent"])?;
+                    let keywords = rule_obj
+                        .get("keywords")
+                        .and_then(Value::as_array)
+                        .map(|keywords| {
+                            keywords
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .filter_map(normalize_non_empty)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    Some(crate::config::MeetingSummaryRuleDef { keywords, agent })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(crate::config::MeetingSummaryAgentDef::Dynamic { rules, default })
+}
+
+fn role_map_meeting_agent_to_config(value: &Value) -> Option<crate::config::MeetingAgentEntry> {
+    let obj = value.as_object()?;
+    let role_id = json_string_field_from_map(obj, &["role_id", "roleId"])?;
+    let display_name = json_string_field_from_map(obj, &["display_name", "displayName"]);
+    let prompt_file = json_string_field_from_map(obj, &["prompt_file", "promptFile"]);
+    let keywords = obj
+        .get("keywords")
+        .and_then(Value::as_array)
+        .map(|keywords| {
+            keywords
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(normalize_non_empty)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(crate::config::MeetingAgentEntry::Detailed(
+        crate::config::MeetingAgentDef {
+            role_id,
+            display_name,
+            keywords,
+            prompt_file,
+        },
+    ))
+}
+
+fn merge_role_map_channel_id_entry(
+    config: &mut crate::config::Config,
+    channel_id: &str,
+    entry: &Value,
+) -> Option<(String, bool)> {
+    let obj = entry.as_object()?;
+    let role_id = json_string_field_from_map(obj, &["roleId", "role_id"])?;
+    let provider_key = json_string_field_from_map(obj, &["provider"])
+        .as_deref()
+        .and_then(normalize_provider_name)
+        .or_else(|| infer_provider_for_role(config, &role_id, Some(channel_id), None))
+        .unwrap_or_else(|| "claude".to_string());
+
+    let (agent_index, agent_changed) = ensure_config_agent(config, &role_id, &provider_key);
+    let update = AgentChannelUpdate {
+        id: normalize_non_empty(channel_id),
+        name: json_string_field_from_map(obj, &["channelName", "channel_name"]),
+        prompt_file: json_string_field_from_map(obj, &["promptFile", "prompt_file"]),
+        workspace: json_string_field_from_map(obj, &["workspace"]),
+        provider: Some(provider_key.clone()),
+        model: json_string_field_from_map(obj, &["model"]),
+        reasoning_effort: json_string_field_from_map(obj, &["reasoningEffort", "reasoning_effort"]),
+        peer_agents: json_bool_field_from_map(obj, &["peerAgents", "peer_agents"]),
+    };
+
+    let agent = &mut config.agents[agent_index];
+    let slot = channel_slot_mut(&mut agent.channels, &provider_key)?;
+    let channel_changed = apply_channel_update(slot, update, None);
+    Some((provider_key, agent_changed || channel_changed))
+}
+
+fn merge_role_map_channel_name_entry(
+    config: &mut crate::config::Config,
+    channel_name: &str,
+    entry: &Value,
+    providers_by_channel_id: &BTreeMap<String, String>,
+) -> bool {
+    let Some(obj) = entry.as_object() else {
+        return false;
+    };
+    let Some(role_id) = json_string_field_from_map(obj, &["roleId", "role_id"]) else {
+        return false;
+    };
+    let channel_id = json_string_field_from_map(obj, &["channelId", "channel_id"]);
+    let provider_key = json_string_field_from_map(obj, &["provider"])
+        .as_deref()
+        .and_then(normalize_provider_name)
+        .or_else(|| {
+            channel_id
+                .as_ref()
+                .and_then(|channel_id| providers_by_channel_id.get(channel_id).cloned())
+        })
+        .or_else(|| {
+            infer_provider_for_role(config, &role_id, channel_id.as_deref(), Some(channel_name))
+        })
+        .unwrap_or_else(|| "claude".to_string());
+
+    let (agent_index, agent_changed) = ensure_config_agent(config, &role_id, &provider_key);
+    let update = AgentChannelUpdate {
+        id: channel_id,
+        name: normalize_non_empty(channel_name),
+        prompt_file: json_string_field_from_map(obj, &["promptFile", "prompt_file"]),
+        workspace: json_string_field_from_map(obj, &["workspace"]),
+        provider: Some(provider_key.clone()),
+        model: json_string_field_from_map(obj, &["model"]),
+        reasoning_effort: json_string_field_from_map(obj, &["reasoningEffort", "reasoning_effort"]),
+        peer_agents: json_bool_field_from_map(obj, &["peerAgents", "peer_agents"]),
+    };
+
+    let agent = &mut config.agents[agent_index];
+    let Some(slot) = channel_slot_mut(&mut agent.channels, &provider_key) else {
+        return agent_changed;
+    };
+    agent_changed || apply_channel_update(slot, update, None)
+}
+
+fn ensure_config_agent(
+    config: &mut crate::config::Config,
+    role_id: &str,
+    provider_key: &str,
+) -> (usize, bool) {
+    if let Some(index) = config.agents.iter().position(|agent| agent.id == role_id) {
+        let agent = &mut config.agents[index];
+        if normalize_provider_name(&agent.provider).is_none() {
+            agent.provider = provider_key.to_string();
+            return (index, true);
+        }
+        return (index, false);
+    }
+
+    config.agents.push(crate::config::AgentDef {
+        id: role_id.to_string(),
+        name: role_id.to_string(),
+        name_ko: None,
+        provider: provider_key.to_string(),
+        channels: crate::config::AgentChannels::default(),
+        keywords: Vec::new(),
+        department: None,
+        avatar_emoji: None,
+    });
+    (config.agents.len() - 1, true)
+}
+
+fn infer_provider_for_role(
+    config: &crate::config::Config,
+    role_id: &str,
+    channel_id: Option<&str>,
+    channel_name: Option<&str>,
+) -> Option<String> {
+    let agent = config.agents.iter().find(|agent| agent.id == role_id)?;
+    for (provider_key, maybe_channel) in agent.channels.iter() {
+        let Some(channel) = maybe_channel else {
+            continue;
+        };
+        if let Some(channel_id) = channel_id
+            && (channel.channel_id().as_deref() == Some(channel_id)
+                || channel.target().as_deref() == Some(channel_id))
+        {
+            return Some(provider_key.to_string());
+        }
+        if let Some(channel_name) = channel_name
+            && (channel.channel_name().as_deref() == Some(channel_name)
+                || channel.aliases().iter().any(|alias| alias == channel_name))
+        {
+            return Some(provider_key.to_string());
+        }
+    }
+    normalize_provider_name(&agent.provider)
+}
+
+fn channel_slot_mut<'a>(
+    channels: &'a mut crate::config::AgentChannels,
+    provider: &str,
+) -> Option<&'a mut Option<crate::config::AgentChannel>> {
+    match provider {
+        "claude" => Some(&mut channels.claude),
+        "codex" => Some(&mut channels.codex),
+        "gemini" => Some(&mut channels.gemini),
+        "qwen" => Some(&mut channels.qwen),
+        _ => None,
+    }
+}
+
+fn apply_channel_update(
+    slot: &mut Option<crate::config::AgentChannel>,
+    update: AgentChannelUpdate,
+    extra_aliases: Option<Vec<String>>,
+) -> bool {
+    let current = slot.clone();
+    let mut config = match current.clone() {
+        Some(crate::config::AgentChannel::Detailed(config)) => config,
+        Some(crate::config::AgentChannel::Legacy(raw)) => channel_config_from_legacy(raw),
+        None => crate::config::AgentChannelConfig::default(),
+    };
+
+    if config.id.is_none() {
+        config.id = update.id;
+    }
+    if let Some(name) = update.name {
+        match config.name.as_deref() {
+            Some(existing) if existing == name => {}
+            Some(_) => push_channel_alias(&mut config, name),
+            None => config.name = Some(name),
+        }
+    }
+    if config.prompt_file.is_none() {
+        config.prompt_file = update.prompt_file;
+    }
+    if config.workspace.is_none() {
+        config.workspace = update.workspace;
+    }
+    if config.provider.is_none() {
+        config.provider = update.provider;
+    }
+    if config.model.is_none() {
+        config.model = update.model;
+    }
+    if config.reasoning_effort.is_none() {
+        config.reasoning_effort = update.reasoning_effort;
+    }
+    if config.peer_agents.is_none() {
+        config.peer_agents = update.peer_agents;
+    }
+    if let Some(extra_aliases) = extra_aliases {
+        for alias in extra_aliases {
+            push_channel_alias(&mut config, alias);
+        }
+    }
+
+    let next = Some(crate::config::AgentChannel::Detailed(config));
+    if next != current {
+        *slot = next;
+        true
+    } else {
+        false
+    }
+}
+
+fn channel_config_from_legacy(raw: String) -> crate::config::AgentChannelConfig {
+    let mut config = crate::config::AgentChannelConfig::default();
+    let Some(raw) = normalize_non_empty(&raw) else {
+        return config;
+    };
+    if raw.parse::<u64>().is_ok() {
+        config.id = Some(raw);
+    } else {
+        config.name = Some(raw);
+    }
+    config
+}
+
+fn push_channel_alias(config: &mut crate::config::AgentChannelConfig, alias: String) {
+    let Some(alias) = normalize_non_empty(&alias) else {
+        return;
+    };
+    if config.name.as_deref() == Some(alias.as_str()) {
+        return;
+    }
+    if !config.aliases.iter().any(|existing| existing == &alias) {
+        config.aliases.push(alias);
+        config.aliases.sort();
+        config.aliases.dedup();
+    }
+}
+
+fn normalize_non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn json_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    let obj = value.as_object()?;
+    json_string_field_from_map(obj, keys)
+}
+
+fn json_string_field_from_map(
+    obj: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter().find_map(|key| {
+        obj.get(*key).and_then(|value| match value {
+            Value::String(raw) => normalize_non_empty(raw),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+    })
+}
+
+fn json_bool_field_from_map(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| obj.get(*key).and_then(Value::as_bool))
 }
 
 fn rewrite_prompt_paths_json(value: &mut Value, root: &Path) {
@@ -2033,6 +2474,95 @@ agents:
                 .is_symlink()
         );
         assert!(same_canonical_path(&legacy_alias, &canonical));
+    }
+
+    #[test]
+    fn ensure_runtime_layout_merges_role_map_into_agentdesk_yaml() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        write_text(
+            &config_file_path(root),
+            "server:\n  port: 9001\nagents: []\n",
+        );
+        write_json(
+            &role_map_path(root),
+            serde_json::json!({
+                "version": 1,
+                "sharedPromptFile": "/tmp/legacy/shared.md",
+                "byChannelId": {
+                    "1479671301387059200": {
+                        "roleId": "project-agentdesk",
+                        "provider": "codex",
+                        "promptFile": "/tmp/config/role-context/project-agentdesk/IDENTITY.md",
+                        "workspace": "/tmp/workspaces/agentdesk"
+                    }
+                },
+                "byChannelName": {
+                    "adk-cdx": {
+                        "roleId": "project-agentdesk",
+                        "channelId": "1479671301387059200",
+                        "workspace": "/tmp/workspaces/agentdesk"
+                    }
+                },
+                "meeting": {
+                    "channel_name": "round-table",
+                    "max_rounds": 4,
+                    "summary_agent": {
+                        "default": "project-agentdesk",
+                        "rules": [
+                            {
+                                "keywords": ["ops"],
+                                "agent": "project-agentdesk"
+                            }
+                        ]
+                    },
+                    "available_agents": [
+                        {
+                            "role_id": "project-agentdesk",
+                            "display_name": "AgentDesk",
+                            "keywords": ["ops"],
+                            "prompt_file": "/tmp/config/role-context/project-agentdesk/IDENTITY.md"
+                        }
+                    ]
+                }
+            }),
+        );
+
+        ensure_runtime_layout(root).unwrap();
+
+        let config = crate::config::load_from_path(&config_file_path(root)).unwrap();
+        let shared_prompt = shared_prompt_path(root).display().to_string();
+        assert_eq!(
+            config.shared_prompt.as_deref(),
+            Some(shared_prompt.as_str())
+        );
+
+        let meeting = config.meeting.expect("meeting config");
+        assert_eq!(meeting.channel_name, "round-table");
+        assert_eq!(meeting.max_rounds, Some(4));
+        assert_eq!(meeting.available_agents.len(), 1);
+
+        let agent = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == "project-agentdesk")
+            .expect("migrated agent");
+        assert_eq!(agent.provider, "codex");
+        let codex_channel = match agent.channels.codex.as_ref().expect("codex channel") {
+            crate::config::AgentChannel::Detailed(channel) => channel,
+            crate::config::AgentChannel::Legacy(_) => panic!("expected detailed channel config"),
+        };
+        assert_eq!(codex_channel.id.as_deref(), Some("1479671301387059200"));
+        assert_eq!(codex_channel.name.as_deref(), Some("adk-cdx"));
+        assert_eq!(
+            codex_channel.workspace.as_deref(),
+            Some("/tmp/workspaces/agentdesk")
+        );
+        assert_eq!(
+            codex_channel.prompt_file.as_deref(),
+            Some("/tmp/config/agents/project-agentdesk/IDENTITY.md")
+        );
     }
 
     #[test]

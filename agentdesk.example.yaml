@@ -10,15 +10,35 @@ discord:
       token: "YOUR_NOTIFY_BOT_TOKEN"
   guild_id: "YOUR_GUILD_ID"
 
+shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
+
 agents:
   - id: ch-td
     name: "TD"
     name_ko: "테크니컬 디렉터"
     provider: claude
     channels:
-      claude: "td-cc"
-      codex: "td-cdx"
+      claude:
+        id: "123456789012345678"
+        name: "td-cc"
+        workspace: "~/.adk/release/workspaces/ch-td"
+        prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
+      codex:
+        id: "223456789012345678"
+        name: "td-cdx"
+        workspace: "~/.adk/release/workspaces/ch-td"
+        prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
+    keywords:
+      - "아키텍처"
+      - "코드"
     department: engineering
+
+meeting:
+  channel_name: "round-table"
+  max_rounds: 3
+  summary_agent: "ch-td"
+  available_agents:
+    - "ch-td"
 
 github:
   repos:

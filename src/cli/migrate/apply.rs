@@ -2629,6 +2629,7 @@ fn merge_imported_agents(
             name_ko: None,
             provider,
             channels: AgentChannels::default(),
+            keywords: Vec::new(),
             department: None,
             avatar_emoji: agent.avatar_emoji.clone(),
         };
