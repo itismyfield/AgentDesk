@@ -5352,15 +5352,27 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
+        // #392: Session persistence — slot release preserves claude_session_id
+        // and tokens so the next dispatch can resume the conversation.
         assert_eq!(
-            first_slot_session,
-            ("idle".to_string(), None, 0, None),
-            "newly assigned slot must be cleared before the first dispatch of a new group"
+            first_slot_session.0, "idle",
+            "slot session status must be idle after release"
         );
         assert_eq!(
-            second_slot_session,
-            ("idle".to_string(), None, 0, None),
-            "each newly assigned slot must start from a cleared thread session"
+            first_slot_session.1, None,
+            "active_dispatch_id must be cleared on slot release"
+        );
+        assert!(
+            first_slot_session.3.is_some(),
+            "claude_session_id must be preserved for session reuse (#392)"
+        );
+        assert_eq!(
+            second_slot_session.0, "idle",
+            "slot session status must be idle after release"
+        );
+        assert_eq!(
+            second_slot_session.1, None,
+            "active_dispatch_id must be cleared on slot release"
         );
         let first_slot: Option<i64> = conn
             .query_row(
@@ -5483,10 +5495,14 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
+    // #392: Session persistence — slot release preserves session context for reuse
     assert_eq!(
-        recycled_slot_session,
-        ("idle".to_string(), None, 0, None),
-        "completed group slot must be cleared before it is released and reused"
+        recycled_slot_session.0, "idle",
+        "status must be idle after slot release"
+    );
+    assert_eq!(
+        recycled_slot_session.1, None,
+        "active_dispatch_id must be cleared"
     );
     assert_eq!(
         untouched_slot_session,
@@ -5587,11 +5603,16 @@ async fn auto_queue_activate_keeps_same_group_slot_context_between_entries() {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
+        // #392: Session persistence — slot release preserves session context
         assert_eq!(
-            cleared_session,
-            ("idle".to_string(), None, 0, None),
-            "the first group dispatch should clear any stale slot context"
+            cleared_session.0, "idle",
+            "status must be idle after slot release"
         );
+        assert_eq!(
+            cleared_session.1, None,
+            "active_dispatch_id must be cleared"
+        );
+        // claude_session_id and tokens are preserved for session reuse (#392)
         conn.execute(
             "UPDATE sessions
              SET status = 'working',

@@ -571,6 +571,10 @@ fn build_slot_clear_target(
 }
 
 fn clear_slot_sessions_db(conn: &rusqlite::Connection, thread_channel_ids: &[u64]) -> usize {
+    // #392: Preserve claude_session_id so the next dispatch can resume the
+    // conversation via --resume, keeping prompt cache and context alive.
+    // The live process handle stays in PROCESS_HANDLES until the tmux session
+    // dies (idle TTL via gc_stale_thread_sessions_db) or dcserver restarts.
     thread_channel_ids
         .iter()
         .map(|thread_channel_id| {
@@ -578,9 +582,7 @@ fn clear_slot_sessions_db(conn: &rusqlite::Connection, thread_channel_ids: &[u64
                 "UPDATE sessions
                  SET status = 'idle',
                      active_dispatch_id = NULL,
-                     session_info = 'Auto-queue slot cleared',
-                     tokens = 0,
-                     claude_session_id = NULL,
+                     session_info = 'Auto-queue slot idle',
                      last_heartbeat = datetime('now')
                  WHERE thread_channel_id = ?1
                    AND status IN ('working', 'idle')",
