@@ -298,19 +298,9 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
     };
 
     let prompts_root = schema.prompts_root.as_deref().map(expand_tilde);
-    // Use explicit meeting.available_agents if set, otherwise all agents
-    let eligible_agents: Box<dyn Iterator<Item = (&String, &AgentDef)>> =
-        if let Some(ref explicit_list) = meeting_def.available_agents {
-            Box::new(
-                schema
-                    .agents
-                    .iter()
-                    .filter(|(role_id, _)| explicit_list.contains(role_id)),
-            )
-        } else {
-            Box::new(schema.agents.iter())
-        };
-    let available_agents: Vec<MeetingAgentConfig> = eligible_agents
+    let agent_registry: Vec<MeetingAgentConfig> = schema
+        .agents
+        .iter()
         .map(|(role_id, def)| {
             let prompt_file = def
                 .prompt_file
@@ -326,16 +316,40 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                 role_id: role_id.clone(),
                 display_name: def.display_name.clone(),
                 keywords: def.keywords.clone().unwrap_or_default(),
-                prompt_file,
+                binding: RoleBinding {
+                    role_id: role_id.clone(),
+                    prompt_file,
+                    provider: def.provider.as_deref().and_then(ProviderKind::from_str),
+                    model: def.model.clone(),
+                    reasoning_effort: None,
+                    peer_agents_enabled: def.peer_agents.unwrap_or(true),
+                    memory: resolve_memory_settings(def.memory.as_ref(), None),
+                },
+                workspace: def.workspace.as_deref().map(expand_tilde),
             }
         })
         .collect();
+
+    let available_agents = if let Some(explicit_list) = meeting_def
+        .available_agents
+        .as_ref()
+        .filter(|agents| !agents.is_empty())
+    {
+        agent_registry
+            .iter()
+            .filter(|agent| explicit_list.contains(&agent.role_id))
+            .cloned()
+            .collect()
+    } else {
+        agent_registry.clone()
+    };
 
     Some(MeetingConfig {
         channel_name: meeting_def.channel_name.clone(),
         max_rounds: meeting_def.max_rounds.unwrap_or(3),
         summary_agent,
         available_agents,
+        agent_registry,
     })
 }
 

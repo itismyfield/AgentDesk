@@ -653,14 +653,14 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
             <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "진행 에이전트", en: "Primary Agent" })}
+              {t({ ko: "진행 프로바이더", en: "Primary Provider" })}
             </label>
             <div className="flex-1 space-y-2">
               <input
                 type="text"
                 value={primaryProviderQuery}
                 onChange={(e) => setPrimaryProviderQuery(e.target.value)}
-                placeholder={t({ ko: "진행 에이전트 검색", en: "Search primary agent" })}
+                placeholder={t({ ko: "진행 프로바이더 검색", en: "Search primary provider" })}
                 className="w-full px-3 py-1.5 rounded-lg text-sm"
                 style={inputStyle}
               />
@@ -670,7 +670,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               >
                 {filteredPrimaryProviders.length === 0 ? (
                   <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "조건에 맞는 진행 에이전트가 없습니다", en: "No primary agent matches the filter" })}
+                    {t({ ko: "조건에 맞는 진행 프로바이더가 없습니다", en: "No primary provider matches the filter" })}
                   </div>
                 ) : (
                   filteredPrimaryProviders.map((provider) => {
@@ -704,14 +704,14 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
             <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-24 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "리뷰 에이전트", en: "Reviewer Agent" })}
+              {t({ ko: "리뷰 프로바이더", en: "Reviewer Provider" })}
             </label>
             <div className="flex-1 space-y-2">
               <input
                 type="text"
                 value={reviewerProviderQuery}
                 onChange={(e) => setReviewerProviderQuery(e.target.value)}
-                placeholder={t({ ko: "리뷰 에이전트 검색", en: "Search reviewer agent" })}
+                placeholder={t({ ko: "리뷰 프로바이더 검색", en: "Search reviewer provider" })}
                 className="w-full px-3 py-1.5 rounded-lg text-sm"
                 style={inputStyle}
                 disabled={reviewerOptions.length === 0}
@@ -722,11 +722,11 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               >
                 {reviewerOptions.length === 0 ? (
                   <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "선택 가능한 리뷰 에이전트 없음", en: "No reviewer agent available" })}
+                    {t({ ko: "선택 가능한 리뷰 프로바이더 없음", en: "No reviewer provider available" })}
                   </div>
                 ) : filteredReviewerProviders.length === 0 ? (
                   <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "조건에 맞는 리뷰 에이전트가 없습니다", en: "No reviewer agent matches the filter" })}
+                    {t({ ko: "조건에 맞는 리뷰 프로바이더가 없습니다", en: "No reviewer provider matches the filter" })}
                   </div>
                 ) : (
                   filteredReviewerProviders.map((provider) => {
@@ -758,10 +758,10 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                 {selectedChannel
                   ? t({
-                      ko: "리뷰 에이전트는 채널 담당 에이전트, 진행 에이전트와 달라야 합니다",
-                      en: "Reviewer agent must differ from the channel owner and primary agent",
+                      ko: "리뷰 프로바이더는 채널 담당 프로바이더, 진행 프로바이더와 달라야 합니다",
+                      en: "Reviewer provider must differ from the channel owner and primary provider",
                     })
-                  : t({ ko: "채널 선택 후 리뷰 에이전트를 정하세요", en: "Pick a reviewer agent after selecting a channel" })}
+                  : t({ ko: "채널 선택 후 리뷰 프로바이더를 정하세요", en: "Pick a reviewer provider after selecting a channel" })}
               </span>
             </div>
           </div>
@@ -853,7 +853,11 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               </div>
 
               {/* Participants */}
-              <div className="flex items-center gap-1.5 flex-wrap">
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+                  {t({ ko: "도메인 전문가", en: "Domain Experts" })}
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
                 {m.participant_names.map((name) => (
                   <span
                     key={name}
@@ -863,6 +867,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     {name}
                   </span>
                 ))}
+                </div>
               </div>
 
               {(m.primary_provider || m.reviewer_provider) && (

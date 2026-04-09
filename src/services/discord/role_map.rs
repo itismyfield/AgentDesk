@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 
 use poise::serenity_prelude::ChannelId;
@@ -66,6 +67,56 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
         peer_agents_enabled,
         memory: resolve_memory_settings(None, memory_override.as_ref()),
     })
+}
+
+fn parse_meeting_agent_metadata(
+    value: &serde_json::Value,
+) -> Option<(String, String, Vec<String>)> {
+    let obj = value.as_object()?;
+    let role_id = obj.get("role_id")?.as_str()?.to_string();
+    let display_name = obj.get("display_name")?.as_str()?.to_string();
+    let keywords = obj
+        .get("keywords")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some((role_id, display_name, keywords))
+}
+
+fn collect_registry_entry(
+    registry: &mut BTreeMap<String, MeetingAgentConfig>,
+    value: &serde_json::Value,
+    metadata: &BTreeMap<String, (String, Vec<String>)>,
+) {
+    let Some(binding) = parse_role_binding(value) else {
+        return;
+    };
+
+    let role_id = binding.role_id.clone();
+    let workspace = value
+        .get("workspace")
+        .and_then(|v| v.as_str())
+        .map(expand_tilde);
+
+    let (display_name, keywords) = metadata
+        .get(&role_id)
+        .cloned()
+        .unwrap_or_else(|| (role_id.clone(), Vec::new()));
+
+    registry
+        .entry(role_id.clone())
+        .or_insert(MeetingAgentConfig {
+            role_id,
+            display_name,
+            keywords,
+            binding,
+            workspace,
+        });
 }
 
 fn fallback_enabled(json: &serde_json::Value) -> bool {
@@ -248,43 +299,56 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         .unwrap_or(3) as u32;
     let summary_agent = parse_summary_agent_config(meeting.get("summary_agent")?)?;
 
-    let agents_arr = meeting.get("available_agents")?.as_array()?;
-    let mut available_agents = Vec::new();
-    for agent in agents_arr {
-        let Some(role_id) = agent.get("role_id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(display_name) = agent.get("display_name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let prompt_file = expand_tilde(
-            agent
-                .get("prompt_file")
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-        );
-        let keywords = agent
-            .get("keywords")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        available_agents.push(MeetingAgentConfig {
-            role_id: role_id.to_string(),
-            display_name: display_name.to_string(),
-            keywords,
-            prompt_file,
-        });
+    let explicit_agents = meeting
+        .get("available_agents")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut metadata = BTreeMap::new();
+    for agent in &explicit_agents {
+        if let Some((role_id, display_name, keywords)) = parse_meeting_agent_metadata(agent) {
+            metadata.insert(role_id, (display_name, keywords));
+        }
     }
+
+    let mut registry = BTreeMap::new();
+    if let Some(by_id) = json.get("byChannelId").and_then(|v| v.as_object()) {
+        for entry in by_id.values() {
+            collect_registry_entry(&mut registry, entry, &metadata);
+        }
+    }
+    if let Some(by_name) = json.get("byChannelName").and_then(|v| v.as_object()) {
+        for (key, entry) in by_name {
+            if key == "enabled" {
+                continue;
+            }
+            collect_registry_entry(&mut registry, entry, &metadata);
+        }
+    }
+
+    let agent_registry: Vec<MeetingAgentConfig> = registry.into_values().collect();
+    let available_agents = if explicit_agents.is_empty() {
+        agent_registry.clone()
+    } else {
+        explicit_agents
+            .iter()
+            .filter_map(|agent| {
+                let role_id = agent.get("role_id").and_then(|v| v.as_str())?;
+                agent_registry
+                    .iter()
+                    .find(|candidate| candidate.role_id == role_id)
+                    .cloned()
+            })
+            .collect()
+    };
 
     Some(MeetingConfig {
         channel_name,
         max_rounds,
         summary_agent,
         available_agents,
+        agent_registry,
     })
 }
 
@@ -385,6 +449,61 @@ mod tests {
             assert_eq!(
                 binding.memory.mem0.ingestion.custom_instructions.as_deref(),
                 Some("Remember deployment facts")
+            );
+        });
+    }
+
+    #[test]
+    fn test_load_meeting_config_uses_registry_and_available_agents_subset() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(
+                temp_home.path(),
+                r#"{
+  "byChannelId": {
+    "123": {
+      "roleId": "ch-td",
+      "promptFile": "~/prompts/ch-td.md",
+      "provider": "claude",
+      "workspace": "~/workspaces/td"
+    },
+    "456": {
+      "roleId": "ch-pd",
+      "promptFile": "~/prompts/ch-pd.md",
+      "provider": "codex"
+    }
+  },
+  "meeting": {
+    "channel_name": "meeting-room",
+    "max_rounds": 4,
+    "summary_agent": "ch-td",
+    "available_agents": [
+      {
+        "role_id": "ch-pd",
+        "display_name": "PD",
+        "keywords": ["제품"]
+      }
+    ]
+  }
+}"#,
+            );
+
+            let config = load_meeting_config().expect("meeting config should load");
+            assert_eq!(config.max_rounds, 4);
+            assert_eq!(config.agent_registry.len(), 2);
+            assert_eq!(config.available_agents.len(), 1);
+            assert_eq!(config.available_agents[0].role_id, "ch-pd");
+            assert_eq!(config.available_agents[0].display_name, "PD");
+            assert_eq!(
+                config.available_agents[0].binding.provider,
+                Some(ProviderKind::Codex)
+            );
+            assert_eq!(
+                config
+                    .agent_registry
+                    .iter()
+                    .find(|agent| agent.role_id == "ch-td")
+                    .and_then(|agent| agent.workspace.as_deref()),
+                Some(&expand_tilde("~/workspaces/td")[..])
             );
         });
     }
