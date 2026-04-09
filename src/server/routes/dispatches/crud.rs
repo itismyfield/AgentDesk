@@ -236,6 +236,16 @@ pub async fn create_dispatch(
     State(state): State<AppState>,
     Json(body): Json<CreateDispatchBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    fn classify_create_dispatch_error(msg: &str) -> StatusCode {
+        if msg.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else if msg.starts_with("Cannot create ") || msg.contains("already exists") {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+
     let dispatch_type = body
         .dispatch_type
         .unwrap_or_else(|| "implementation".to_string());
@@ -265,14 +275,10 @@ pub async fn create_dispatch(
         }
         Err(e) => {
             let msg = format!("{e}");
-            if msg.contains("not found") {
-                (StatusCode::NOT_FOUND, Json(json!({"error": msg})))
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": msg})),
-                )
-            }
+            (
+                classify_create_dispatch_error(&msg),
+                Json(json!({"error": msg})),
+            )
         }
     }
 }

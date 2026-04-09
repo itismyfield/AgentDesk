@@ -663,34 +663,6 @@ fn create_dispatch_core_internal(
     context: &serde_json::Value,
     options: DispatchCreateOptions,
 ) -> Result<(String, String, bool)> {
-    let context_str = if dispatch_type == "review" {
-        build_review_context(db, kanban_card_id, to_agent_id, context)?
-    } else {
-        // #259: For ALL non-review dispatch types, inject worktree_path and
-        // worktree_branch so the session uses the same issue worktree as review
-        // dispatches. Without this, implementation/rework dispatches use the
-        // parent channel CWD (main repo), causing stale commit loops.
-        let mut base = serde_json::to_string(context)?;
-        if let Some((wt_path, wt_branch, _)) = resolve_card_worktree(db, kanban_card_id) {
-            if let Ok(mut obj) =
-                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&base)
-            {
-                obj.entry("worktree_path".to_string())
-                    .or_insert(json!(wt_path));
-                obj.entry("worktree_branch".to_string())
-                    .or_insert(json!(wt_branch));
-                tracing::info!(
-                    "[dispatch] {} dispatch for card {}: injecting worktree_path={}",
-                    dispatch_type,
-                    kanban_card_id,
-                    wt_path
-                );
-                base = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or(base);
-            }
-        }
-        base
-    };
-
     // Use separate_conn to avoid blocking request handlers while
     // engine/onTick holds the main DB Mutex via QuickJS.
     let conn = db
@@ -759,6 +731,34 @@ fn create_dispatch_core_internal(
             return Ok((eid, old_status, true));
         }
     }
+
+    let context_str = if dispatch_type == "review" {
+        build_review_context(db, kanban_card_id, to_agent_id, context)?
+    } else {
+        // #259: For ALL non-review dispatch types, inject worktree_path and
+        // worktree_branch so the session uses the same issue worktree as review
+        // dispatches. Without this, implementation/rework dispatches use the
+        // parent channel CWD (main repo), causing stale commit loops.
+        let mut base = serde_json::to_string(context)?;
+        if let Some((wt_path, wt_branch, _)) = resolve_card_worktree(db, kanban_card_id) {
+            if let Ok(mut obj) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&base)
+            {
+                obj.entry("worktree_path".to_string())
+                    .or_insert(json!(wt_path));
+                obj.entry("worktree_branch".to_string())
+                    .or_insert(json!(wt_branch));
+                tracing::info!(
+                    "[dispatch] {} dispatch for card {}: injecting worktree_path={}",
+                    dispatch_type,
+                    kanban_card_id,
+                    wt_path
+                );
+                base = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or(base);
+            }
+        }
+        base
+    };
 
     let is_review_type = dispatch_type == "review"
         || dispatch_type == "review-decision"

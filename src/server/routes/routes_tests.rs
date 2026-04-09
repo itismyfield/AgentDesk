@@ -1271,6 +1271,51 @@ async fn dispatch_create_and_get() {
 }
 
 #[tokio::test]
+async fn dispatch_create_for_terminal_card_returns_conflict_with_reason() {
+    let db = test_db();
+    seed_test_agents(&db);
+    let engine = test_engine(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, priority, assigned_agent_id, created_at, updated_at)
+             VALUES ('c-terminal', 'Terminal Card', 'done', 'medium', 'agent-1', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db, engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dispatches")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kanban_card_id":"c-terminal","to_agent_id":"agent-1","dispatch_type":"review","title":"Review Terminal"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("terminal card c-terminal (status: done)"),
+        "expected terminal-card detail, got {json}"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_create_with_skip_outbox_omits_notify_row() {
     let db = test_db();
     seed_test_agents(&db);

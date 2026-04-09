@@ -28,6 +28,23 @@ fn print_json(value: &Value) {
     println!("{}", serde_json::to_string_pretty(value).unwrap());
 }
 
+fn parse_error_message(body: &str) -> Option<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|msg| !msg.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            let trimmed = body.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+}
+
 fn request_json(method: &str, path: &str, body: Option<&str>) -> Result<Value, String> {
     let url = if path.starts_with('/') {
         format!("{}{}", api_base(), path)
@@ -50,15 +67,24 @@ fn request_json(method: &str, path: &str, body: Option<&str>) -> Result<Value, S
 
     let method_upper = method.to_ascii_uppercase();
     let resp = if let Some(b) = body {
-        req.set("Content-Type", "application/json")
-            .send_string(b)
-            .map_err(|e| format!("Request failed: {e}"))?
+        req.set("Content-Type", "application/json").send_string(b)
     } else if matches!(method_upper.as_str(), "POST" | "PATCH" | "PUT") {
         req.set("Content-Type", "application/json")
             .send_string("{}")
-            .map_err(|e| format!("Request failed: {e}"))?
     } else {
-        req.call().map_err(|e| format!("Request failed: {e}"))?
+        req.call()
+    };
+
+    let resp = match resp {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            let detail = parse_error_message(&body)
+                .map(|msg| format!("Request failed ({code}): {msg}"))
+                .unwrap_or_else(|| format!("Request failed ({code})"));
+            return Err(detail);
+        }
+        Err(ureq::Error::Transport(err)) => return Err(format!("Request failed: {err}")),
     };
 
     resp.into_json().map_err(|e| format!("Parse error: {e}"))
@@ -71,6 +97,43 @@ pub(crate) fn get_json(path: &str) -> Result<Value, String> {
 fn post_json(path: &str, body: Option<Value>) -> Result<Value, String> {
     let body_string = body.map(|value| value.to_string());
     request_json("POST", path, body_string.as_deref())
+}
+
+fn find_card_for_issue(issue_number: &str) -> Result<Value, String> {
+    let cards = get_json("/api/kanban-cards")?;
+    let issue_number: i64 = issue_number
+        .parse()
+        .map_err(|_| format!("Invalid issue number: {issue_number}"))?;
+    cards["cards"]
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|card| card["github_issue_number"] == issue_number)
+                .cloned()
+        })
+        .ok_or_else(|| format!("Card not found for issue #{issue_number}"))
+}
+
+fn load_card_dispatches(card_id: &str) -> Result<Vec<Value>, String> {
+    let dispatches = get_json(&format!("/api/dispatches?card_id={card_id}"))?;
+    dispatches
+        .as_array()
+        .or_else(|| dispatches["dispatches"].as_array())
+        .cloned()
+        .ok_or_else(|| format!("No dispatches found for card {card_id}"))
+}
+
+fn find_active_dispatch_by_type<'a>(
+    dispatches: &'a [Value],
+    dispatch_type: &str,
+) -> Option<&'a Value> {
+    dispatches.iter().find(|dispatch| {
+        dispatch["dispatch_type"] == dispatch_type
+            && matches!(
+                dispatch["status"].as_str(),
+                Some("pending") | Some("dispatched")
+            )
+    })
 }
 
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<Value, String> {
@@ -498,36 +561,22 @@ pub fn cmd_api(method: &str, path: &str, body: Option<&str>) -> Result<(), Strin
 
 /// `agentdesk advance <issue_number>`
 ///
-/// Complete the pending dispatch for an issue and create a review dispatch.
-/// Replaces the manual 4-step process: PATCH complete → force-transition → update review_status → POST review dispatch.
+/// Complete the pending implementation/rework dispatch for an issue and verify
+/// that the server created the follow-up review dispatch.
 pub fn cmd_advance(issue_number: &str) -> Result<(), String> {
-    // 1. Find card
-    let cards = get_json("/api/kanban-cards")?;
-    let card = cards["cards"]
-        .as_array()
-        .and_then(|arr| {
-            let num: i64 = issue_number.parse().unwrap_or(0);
-            arr.iter().find(|c| c["github_issue_number"] == num)
-        })
-        .ok_or_else(|| format!("Card not found for issue #{issue_number}"))?;
+    let card = find_card_for_issue(issue_number)?;
     let card_id = card["id"].as_str().unwrap_or("");
     let card_title = card["title"].as_str().unwrap_or("");
-    let status = card["status"].as_str().unwrap_or("");
 
-    // 2. Find and complete pending dispatch
-    let dispatches = get_json(&format!("/api/dispatches?card_id={card_id}"))?;
-    let ds = dispatches
-        .as_array()
-        .or_else(|| dispatches["dispatches"].as_array())
-        .ok_or("No dispatches found")?;
-    let pending = ds.iter().find(|d| {
+    let dispatches = load_card_dispatches(card_id)?;
+    let pending = dispatches.iter().find(|d| {
         d["status"] == "pending"
             && (d["dispatch_type"] == "implementation" || d["dispatch_type"] == "rework")
     });
     if let Some(d) = pending {
         let did = d["id"].as_str().unwrap_or("");
         println!("Completing dispatch {did}...");
-        let completion_result = build_cli_advance_completion_result(card, Some(d));
+        let completion_result = build_cli_advance_completion_result(&card, Some(d));
         request_json(
             "PATCH",
             &format!("/api/dispatches/{did}"),
@@ -536,54 +585,45 @@ pub fn cmd_advance(issue_number: &str) -> Result<(), String> {
                     .to_string(),
             ),
         )?;
+
+        let refreshed_card = find_card_for_issue(issue_number)?;
+        let refreshed_status = refreshed_card["status"].as_str().unwrap_or("");
+        let refreshed_dispatches = load_card_dispatches(card_id)?;
+        if let Some(review_dispatch) = find_active_dispatch_by_type(&refreshed_dispatches, "review")
+        {
+            let review_dispatch_id = review_dispatch["id"].as_str().unwrap_or("?");
+            println!("✅ #{issue_number} advanced to review (dispatch: {review_dispatch_id})");
+            return Ok(());
+        }
+
+        let card_label = if card_title.is_empty() {
+            format!("#{issue_number}")
+        } else {
+            format!("#{issue_number} ({card_title})")
+        };
+        return match refreshed_status {
+            "review" => Err(format!(
+                "Dispatch {did} completed, but {card_label} is in review without an active review dispatch. Check server logs for OnReviewEnter/create_dispatch errors."
+            )),
+            "done" => Err(format!(
+                "Dispatch {did} completed, but {card_label} ended in done without an active review dispatch. Review was bypassed before a review dispatch could be created."
+            )),
+            other => Err(format!(
+                "Dispatch {did} completed, but {card_label} is now '{other}' without an active review dispatch."
+            )),
+        };
     } else {
-        println!("No pending implementation/rework dispatch found.");
-    }
-
-    // 3. Force transition to review if not already
-    if status != "review" {
-        println!("Transitioning to review...");
-        // Need PMD channel for force-transition — read from DB via API
-        let kanban_mgr = get_json("/api/settings/runtime-config")
-            .ok()
-            .and_then(|v| {
-                v["current"]["kanbanManagerChannelId"]
-                    .as_str()
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_default();
-        let mut req = agent().post(&format!(
-            "{}/api/kanban-cards/{card_id}/force-transition",
-            api_base()
+        if let Some(review_dispatch) = find_active_dispatch_by_type(&dispatches, "review") {
+            let review_dispatch_id = review_dispatch["id"].as_str().unwrap_or("?");
+            println!(
+                "✅ #{issue_number} already has an active review dispatch ({review_dispatch_id})"
+            );
+            return Ok(());
+        }
+        return Err(format!(
+            "No pending implementation/rework dispatch found for #{issue_number}."
         ));
-        if let Some(token) = auth_token() {
-            req = req.set("Authorization", &format!("Bearer {token}"));
-        }
-        if !kanban_mgr.is_empty() {
-            req = req.set("X-Channel-Id", &kanban_mgr);
-        }
-        let _ = req
-            .set("Content-Type", "application/json")
-            .send_string(&serde_json::json!({"status": "review"}).to_string())
-            .ok();
     }
-
-    // 4. Create review dispatch
-    println!("Creating review dispatch...");
-    let review_title = format!("[Review] {card_title}");
-    let result = post_json(
-        "/api/dispatches",
-        Some(serde_json::json!({
-            "kanban_card_id": card_id,
-            "to_agent_id": card["assigned_agent_id"],
-            "dispatch_type": "review",
-            "title": review_title,
-            "context": {"cli_advance": true}
-        })),
-    )?;
-    let dispatch_id = result["dispatch"]["id"].as_str().unwrap_or("?");
-    println!("✅ #{issue_number} advanced to review (dispatch: {dispatch_id})");
-    Ok(())
 }
 
 /// `agentdesk queue`
@@ -802,10 +842,15 @@ pub fn cmd_terminations(
 #[cfg(test)]
 mod tests {
     use super::{build_cli_advance_completion_result, render_cards_table, runtime_config_payload};
+    use crate::cli::client::cmd_advance;
+    use axum::extract::{Path, Query, State};
+    use axum::routing::{get, patch, post};
+    use axum::{Json, Router};
     use serde_json::json;
     use std::ffi::OsString;
     use std::process::Command;
     use std::sync::MutexGuard;
+    use std::sync::{Arc, Mutex};
 
     fn env_lock() -> MutexGuard<'static, ()> {
         crate::services::discord::runtime_store::test_env_lock()
@@ -819,6 +864,12 @@ mod tests {
     }
 
     impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
         fn set_path(key: &'static str, value: &std::path::Path) -> Self {
             let previous = std::env::var_os(key);
             unsafe { std::env::set_var(key, value) };
@@ -847,6 +898,160 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[derive(Clone)]
+    struct AdvanceMockState {
+        completed: bool,
+        final_status: &'static str,
+        force_transition_calls: usize,
+        create_dispatch_calls: usize,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DispatchQuery {
+        card_id: Option<String>,
+    }
+
+    async fn advance_cards_handler(
+        State(state): State<Arc<Mutex<AdvanceMockState>>>,
+    ) -> Json<serde_json::Value> {
+        let state = state.lock().unwrap();
+        let status = if state.completed {
+            state.final_status
+        } else {
+            "in_progress"
+        };
+        let latest_dispatch_id = if state.completed && state.final_status == "review" {
+            json!("review-1")
+        } else if state.completed {
+            serde_json::Value::Null
+        } else {
+            json!("impl-1")
+        };
+        Json(json!({
+            "cards": [{
+                "id": "card-383",
+                "github_issue_number": 383,
+                "title": "Issue 383",
+                "status": status,
+                "assigned_agent_id": "agent-1",
+                "latest_dispatch_id": latest_dispatch_id
+            }]
+        }))
+    }
+
+    async fn advance_dispatches_handler(
+        State(state): State<Arc<Mutex<AdvanceMockState>>>,
+        Query(query): Query<DispatchQuery>,
+    ) -> Json<serde_json::Value> {
+        assert_eq!(query.card_id.as_deref(), Some("card-383"));
+        let state = state.lock().unwrap();
+        let dispatches = if state.completed && state.final_status == "review" {
+            json!({
+                "dispatches": [
+                    {
+                        "id": "impl-1",
+                        "dispatch_type": "implementation",
+                        "status": "completed"
+                    },
+                    {
+                        "id": "review-1",
+                        "dispatch_type": "review",
+                        "status": "pending"
+                    }
+                ]
+            })
+        } else if state.completed {
+            json!({
+                "dispatches": [{
+                    "id": "impl-1",
+                    "dispatch_type": "implementation",
+                    "status": "completed"
+                }]
+            })
+        } else {
+            json!({
+                "dispatches": [{
+                    "id": "impl-1",
+                    "dispatch_type": "implementation",
+                    "status": "pending",
+                    "context": {
+                        "worktree_path": "/tmp/worktree-383",
+                        "branch": "feature/383",
+                        "completed_commit": "b2c2f8ead0cedec5db3d724bb2eabaeccd713136"
+                    }
+                }]
+            })
+        };
+        Json(dispatches)
+    }
+
+    async fn advance_patch_handler(
+        State(state): State<Arc<Mutex<AdvanceMockState>>>,
+        Path(dispatch_id): Path<String>,
+    ) -> Json<serde_json::Value> {
+        assert_eq!(dispatch_id, "impl-1");
+        state.lock().unwrap().completed = true;
+        Json(json!({"dispatch": {"id": dispatch_id, "status": "completed"}}))
+    }
+
+    async fn advance_force_transition_handler(
+        State(state): State<Arc<Mutex<AdvanceMockState>>>,
+    ) -> Json<serde_json::Value> {
+        let mut state = state.lock().unwrap();
+        state.force_transition_calls += 1;
+        Json(json!({"ok": true}))
+    }
+
+    async fn advance_create_dispatch_handler(
+        State(state): State<Arc<Mutex<AdvanceMockState>>>,
+    ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+        let mut state = state.lock().unwrap();
+        state.create_dispatch_calls += 1;
+        (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({"error": "should not be called"})),
+        )
+    }
+
+    fn run_cmd_advance_against_mock_server(
+        final_status: &'static str,
+    ) -> (Result<(), String>, AdvanceMockState) {
+        let _lock = env_lock();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let state = Arc::new(Mutex::new(AdvanceMockState {
+                completed: false,
+                final_status,
+                force_transition_calls: 0,
+                create_dispatch_calls: 0,
+            }));
+            let app = Router::new()
+                .route("/api/kanban-cards", get(advance_cards_handler))
+                .route(
+                    "/api/dispatches",
+                    get(advance_dispatches_handler).post(advance_create_dispatch_handler),
+                )
+                .route("/api/dispatches/{id}", patch(advance_patch_handler))
+                .route(
+                    "/api/kanban-cards/{id}/force-transition",
+                    post(advance_force_transition_handler),
+                )
+                .with_state(state.clone());
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let _api_url = EnvVarGuard::set("AGENTDESK_API_URL", &format!("http://{addr}"));
+
+            let result = cmd_advance("383");
+            server.abort();
+            let state = state.lock().unwrap().clone();
+            (result, state)
+        })
     }
 
     #[test]
@@ -930,6 +1135,38 @@ mod tests {
         assert_eq!(
             result["completed_commit"],
             crate::services::platform::git_head_commit(&repo.path().to_string_lossy()).unwrap()
+        );
+    }
+
+    #[test]
+    fn cmd_advance_uses_server_created_review_dispatch() {
+        let (result, state) = run_cmd_advance_against_mock_server("review");
+        assert!(result.is_ok(), "advance should succeed: {result:?}");
+        assert_eq!(
+            state.force_transition_calls, 0,
+            "advance must not force-transition after finalize_dispatch"
+        );
+        assert_eq!(
+            state.create_dispatch_calls, 0,
+            "advance must not create a second review dispatch"
+        );
+    }
+
+    #[test]
+    fn cmd_advance_reports_done_without_review_dispatch() {
+        let (result, state) = run_cmd_advance_against_mock_server("done");
+        let err = result.expect_err("advance should fail when review dispatch is missing");
+        assert!(
+            err.contains("ended in done without an active review dispatch"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            state.force_transition_calls, 0,
+            "advance must not try to force-transition a terminal card"
+        );
+        assert_eq!(
+            state.create_dispatch_calls, 0,
+            "advance must not post a review dispatch after terminal completion"
         );
     }
 }
