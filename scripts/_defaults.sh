@@ -96,3 +96,109 @@ sync_launchd_plist_environment_from_file() {
     "$plistbuddy" -c "Add :EnvironmentVariables:$key string \"$escaped_value\"" "$plist_path" >/dev/null
   done < "$env_file"
 }
+
+_launchd_job_state() {
+  local label="$1"
+  launchctl print "gui/$(id -u)/$label" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*state = //p' \
+    | head -n 1
+}
+
+_kickstart_launchd_job_if_needed() {
+  local label="$1"
+  local state
+  state=$(_launchd_job_state "$label")
+  if [ "$state" = "not running" ]; then
+    echo "  ▸ launchd reports $label not running — kickstart"
+    launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+    return 0
+  fi
+  return 1
+}
+
+_health_json_status() {
+  local health_json="$1"
+  [ -n "$health_json" ] || return 1
+  printf '%s' "$health_json" | jq -r '.status // empty' 2>/dev/null
+}
+
+_health_json_reasons() {
+  local health_json="$1"
+  [ -n "$health_json" ] || return 1
+  printf '%s' "$health_json" | jq -r '(.degraded_reasons // []) | join(",")' 2>/dev/null
+}
+
+_health_json_reconcile_only() {
+  local health_json="$1"
+  [ -n "$health_json" ] || return 1
+  printf '%s' "$health_json" | jq -e '
+    .status == "degraded"
+    and (.db == true)
+    and ((.degraded_reasons // []) | length > 0)
+    and all((.degraded_reasons // [])[]; test("^provider:[^:]+:reconcile_in_progress$"))
+  ' >/dev/null 2>&1
+}
+
+health_json_is_ready() {
+  local health_json="$1"
+  local require_dashboard="${2:-0}"
+  local allow_reconcile_degraded="${3:-1}"
+
+  [ -n "$health_json" ] || return 1
+  printf '%s' "$health_json" | jq -e '.db == true' >/dev/null 2>&1 || return 1
+
+  if [ "$require_dashboard" = "1" ]; then
+    printf '%s' "$health_json" | jq -e '.dashboard == true' >/dev/null 2>&1 || return 1
+  fi
+
+  if printf '%s' "$health_json" | jq -e '.status == "healthy"' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ "$allow_reconcile_degraded" = "1" ] && _health_json_reconcile_only "$health_json"; then
+    return 0
+  fi
+
+  return 1
+}
+
+wait_for_http_service_health() {
+  local label="$1"
+  local port="$2"
+  local retries="$3"
+  local delay_secs="$4"
+  local require_dashboard="${5:-0}"
+  local allow_reconcile_degraded="${6:-1}"
+
+  WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON=""
+
+  local i health_json status reasons
+  for i in $(seq 1 "$retries"); do
+    health_json=$(curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" 2>/dev/null || true)
+    WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON="$health_json"
+
+    if health_json_is_ready "$health_json" "$require_dashboard" "$allow_reconcile_degraded"; then
+      return 0
+    fi
+
+    _kickstart_launchd_job_if_needed "$label" || true
+
+    status=$(_health_json_status "$health_json" || true)
+    reasons=$(_health_json_reasons "$health_json" || true)
+    if [ -n "$status" ]; then
+      if [ -n "$reasons" ]; then
+        echo "  ▸ Attempt $i/$retries — status=$status reasons=$reasons"
+      else
+        echo "  ▸ Attempt $i/$retries — status=$status"
+      fi
+    else
+      echo "  ▸ Attempt $i/$retries — not healthy yet"
+    fi
+
+    if [ "$i" -lt "$retries" ]; then
+      sleep "$delay_secs"
+    fi
+  done
+
+  return 1
+}
