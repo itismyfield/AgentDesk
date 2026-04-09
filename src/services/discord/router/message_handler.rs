@@ -268,8 +268,14 @@ pub(in crate::services::discord) async fn handle_text_message(
 
                     // Check worktree: always use worktree for thread sessions,
                     // or when conflict detected with another session on same path.
+                    // Use both dispatch_thread_parents (for reused threads) AND Discord API
+                    // thread detection (for first-turn in newly created threads where
+                    // dispatch_thread_parents hasn't been populated yet).
                     let wt_info = {
-                        let is_thread = shared.dispatch_thread_parents.contains_key(&channel_id);
+                        let is_thread = shared.dispatch_thread_parents.contains_key(&channel_id)
+                            || super::super::resolve_thread_parent(&ctx.http, channel_id)
+                                .await
+                                .is_some();
                         let data = shared.core.lock().await;
                         let conflict =
                             detect_worktree_conflict(&data.sessions, &canonical, channel_id);
