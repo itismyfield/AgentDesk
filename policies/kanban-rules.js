@@ -11,6 +11,92 @@
 
 // ── Helpers ──────────────────────────────────────────────────
 
+// #401: Auto-merge worktree branch into main on card done.
+// Finds the most recent completed dispatch for the card, extracts
+// completed_branch from the result, and merges it into main.
+// On conflict, creates a PR as fallback.
+function _autoMergeWorktreeBranch(cardId) {
+  var dispatches = agentdesk.db.query(
+    "SELECT result FROM task_dispatches " +
+    "WHERE kanban_card_id = ? AND status = 'completed' AND result IS NOT NULL " +
+    "ORDER BY completed_at DESC LIMIT 1",
+    [cardId]
+  );
+  if (dispatches.length === 0) return;
+
+  var result;
+  try { result = JSON.parse(dispatches[0].result); } catch(e) { return; }
+
+  var branch = result.completed_branch;
+  if (!branch) return;
+
+  // Skip non-worktree branches (e.g. main, feat/*)
+  if (branch === "main" || branch === "master") return;
+
+  // Get card info for PR title
+  var cards = agentdesk.db.query(
+    "SELECT title, github_issue_number, repo_id FROM kanban_cards WHERE id = ?",
+    [cardId]
+  );
+  var card = cards.length > 0 ? cards[0] : {};
+  var repoDir = result.completed_worktree_path;
+
+  // Check if branch has commits ahead of main
+  var logResult = agentdesk.exec("git", [
+    "-C", repoDir || ".",
+    "log", "main.." + branch, "--oneline"
+  ]);
+  if (!logResult || logResult.trim() === "") {
+    agentdesk.log.info("[kanban] #401: no commits in " + branch + " — skip merge");
+    return;
+  }
+
+  // Find the main workspace repo (not the worktree)
+  var mainRepo = agentdesk.config.get("workspace_root");
+  if (!mainRepo) {
+    // Fallback: derive from worktree path
+    var wtIdx = (repoDir || "").indexOf("/worktrees/");
+    if (wtIdx > 0) {
+      mainRepo = repoDir.substring(0, wtIdx) + "/workspaces/agentdesk";
+    }
+  }
+  if (!mainRepo) {
+    agentdesk.log.warn("[kanban] #401: cannot determine main repo path — skip merge");
+    return;
+  }
+
+  // Try merge
+  agentdesk.log.info("[kanban] #401: merging " + branch + " into main");
+  var mergeResult = agentdesk.exec("git", [
+    "-C", mainRepo,
+    "merge", branch, "--no-edit"
+  ]);
+
+  if (mergeResult && mergeResult.indexOf("CONFLICT") >= 0) {
+    // Abort failed merge
+    agentdesk.exec("git", ["-C", mainRepo, "merge", "--abort"]);
+    agentdesk.log.warn("[kanban] #401: merge conflict on " + branch + " — creating PR");
+
+    // Push branch and create PR
+    agentdesk.exec("git", ["-C", mainRepo, "push", "origin", branch]);
+    var issueNum = card.github_issue_number || "";
+    var repo = card.repo_id || "";
+    if (repo) {
+      agentdesk.exec("gh", [
+        "pr", "create",
+        "--repo", repo,
+        "--head", branch,
+        "--title", "#" + issueNum + " " + (card.title || branch),
+        "--body", "Auto-generated PR from worktree merge conflict.\n\nResolve conflicts and merge manually."
+      ]);
+    }
+  } else {
+    agentdesk.log.info("[kanban] #401: merged " + branch + " into main successfully");
+    // Push main
+    agentdesk.exec("git", ["-C", mainRepo, "push", "origin", "main"]);
+  }
+}
+
 function sendDiscordNotification(target, content, bot) {
   agentdesk.message.queue(target, content, bot || "announce", "system");
 }
@@ -536,6 +622,9 @@ var rules = {
         "UPDATE kanban_cards SET completed_at = datetime('now') WHERE id = ? AND completed_at IS NULL",
         [payload.card_id]
       );
+
+      // #401: Auto-merge worktree branch on done transition
+      _autoMergeWorktreeBranch(payload.card_id);
     }
   }
 };

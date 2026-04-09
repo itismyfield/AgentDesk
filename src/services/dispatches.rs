@@ -140,6 +140,10 @@ impl DispatchService {
                 let message = format!("{error}");
                 if message.contains("not found") {
                     Err(ServiceError::not_found(message))
+                } else if message.starts_with("Cannot create ")
+                    || message.contains("already exists")
+                {
+                    Err(ServiceError::conflict(message))
                 } else {
                     Err(ServiceError::internal(message))
                 }
