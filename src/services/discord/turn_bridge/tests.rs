@@ -474,6 +474,27 @@ fn review_decision_parser_accepts_keyword_in_tail() {
         extract_review_decision("불필요한 변경이므로 dismiss 합니다."),
         Some("dismiss")
     );
+    assert_eq!(
+        extract_review_decision("기여자가 직접 머지 가능하게 처리하겠습니다."),
+        Some("dismiss")
+    );
+}
+
+#[test]
+fn review_decision_parser_accepts_korean_dismiss_synonyms() {
+    assert_eq!(
+        extract_review_decision("결정: 리뷰 우회\n직접 머지로 진행합니다."),
+        Some("dismiss")
+    );
+    assert_eq!(
+        extract_review_decision("결정: 기여자가 직접 머지\n리뷰는 여기서 닫겠습니다."),
+        Some("dismiss")
+    );
+    assert_eq!(extract_review_decision("결정: 리뷰 스킵"), Some("dismiss"));
+    assert_eq!(
+        extract_review_decision("결정: direct merge"),
+        Some("dismiss")
+    );
 }
 
 #[test]
@@ -489,6 +510,23 @@ fn review_decision_parser_rejects_ambiguous_keywords() {
 fn review_decision_parser_ignores_unstructured_text() {
     assert_eq!(
         extract_review_decision("리뷰 피드백을 확인했습니다. 코드를 수정하겠습니다."),
+        None
+    );
+    assert_eq!(
+        extract_review_decision("리뷰 우회 인식이 왜 안먹는지 디버깅 중입니다."),
+        None
+    );
+}
+
+#[test]
+fn review_decision_parser_rejects_negative_dismiss_phrases() {
+    assert_eq!(extract_review_decision("결정: 직접 머지하지 마"), None);
+    assert_eq!(
+        extract_review_decision("결정: 리뷰 우회하면 안 됩니다"),
+        None
+    );
+    assert_eq!(
+        extract_review_decision("기여자가 직접 머지하면 안 됩니다."),
         None
     );
 }
