@@ -6,7 +6,7 @@ use poise::serenity_prelude as serenity;
 use serde::Serialize;
 use serenity::ChannelId;
 
-use super::SharedData;
+use super::{SharedData, mailbox_clear_channel};
 use crate::db::Db;
 use crate::services::provider::ProviderKind;
 
@@ -170,9 +170,8 @@ pub async fn clear_provider_channel_runtime(
     };
 
     let tmux_name = {
-        let mut data = shared.core.lock().await;
-        let tmux_name = data
-            .sessions
+        let data = shared.core.lock().await;
+        data.sessions
             .get(&channel_id)
             .and_then(|session| session.channel_name.as_ref())
             .map(|channel_name| provider.build_tmux_session_name(channel_name))
@@ -180,13 +179,17 @@ pub async fn clear_provider_channel_runtime(
                 session_key
                     .and_then(|key| key.split_once(':'))
                     .map(|(_, tmux_name)| tmux_name.to_string())
-            });
+            })
+    };
 
-        if let Some(token) = data.cancel_tokens.remove(&channel_id) {
-            super::turn_bridge::cancel_active_token(&token, true, "auto-queue slot clear");
-            shared.global_active.fetch_sub(1, Ordering::Relaxed);
-        }
+    let cleared = mailbox_clear_channel(&shared, &provider, channel_id).await;
+    if let Some(token) = cleared.removed_token {
+        super::turn_bridge::cancel_active_token(&token, true, "auto-queue slot clear");
+        shared.global_active.fetch_sub(1, Ordering::Relaxed);
+    }
 
+    {
+        let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             super::settings::cleanup_channel_uploads(channel_id);
             session.clear_provider_session();
@@ -194,11 +197,7 @@ pub async fn clear_provider_channel_runtime(
             session.pending_uploads.clear();
             session.cleared = true;
         }
-
-        data.active_request_owner.remove(&channel_id);
-        data.intervention_queue.remove(&channel_id);
-        tmux_name
-    };
+    }
 
     #[cfg(unix)]
     if provider == ProviderKind::Claude {
@@ -233,26 +232,21 @@ pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSn
     }
 
     for entry in providers.iter() {
-        // Use try_lock to avoid blocking the health endpoint when core is
-        // held by a long-running turn. Fall back to atomic counters so the
-        // unified API route always responds promptly.
-        let (active_turns, provider_queue_depth, session_count) = match entry.shared.core.try_lock()
-        {
-            Ok(data) => {
-                let at = data.cancel_tokens.len();
-                let qd: usize = data.intervention_queue.values().map(|q| q.len()).sum();
-                let sc = data.sessions.len();
-                (at, qd, sc)
-            }
-            Err(_) => {
-                // Lock contended — approximate from atomics
-                let at = entry
-                    .shared
-                    .global_active
-                    .load(std::sync::atomic::Ordering::Relaxed) as usize;
-                (at, 0, 0)
-            }
-        };
+        let session_count = entry
+            .shared
+            .core
+            .try_lock()
+            .map(|data| data.sessions.len())
+            .unwrap_or(0);
+        let mailbox_snapshots = entry.shared.mailboxes.snapshot_all().await;
+        let active_turns = mailbox_snapshots
+            .values()
+            .filter(|snapshot| snapshot.cancel_token.is_some())
+            .count();
+        let provider_queue_depth: usize = mailbox_snapshots
+            .values()
+            .map(|snapshot| snapshot.intervention_queue.len())
+            .sum();
 
         let restart_pending = entry
             .shared
@@ -389,11 +383,9 @@ impl TestHealthHarness {
         let shared = Arc::new(SharedData {
             core: tokio::sync::Mutex::new(super::CoreState {
                 sessions: std::collections::HashMap::new(),
-                cancel_tokens: std::collections::HashMap::new(),
-                active_request_owner: std::collections::HashMap::new(),
-                intervention_queue: std::collections::HashMap::new(),
                 active_meetings: std::collections::HashMap::new(),
             }),
+            mailboxes: super::ChannelMailboxRegistry::default(),
             settings: tokio::sync::RwLock::new(super::DiscordBotSettings::default()),
             api_timestamps: dashmap::DashMap::new(),
             skills_cache: tokio::sync::RwLock::new(Vec::new()),
@@ -453,8 +445,13 @@ impl TestHealthHarness {
     }
 
     pub(crate) async fn set_queue_depth(&self, depth: usize) {
-        let mut data = self.shared.core.lock().await;
-        data.intervention_queue.clear();
+        super::mailbox_replace_queue(
+            &self.shared,
+            &ProviderKind::Claude,
+            ChannelId::new(1),
+            Vec::new(),
+        )
+        .await;
         if depth == 0 {
             return;
         }
@@ -467,7 +464,13 @@ impl TestHealthHarness {
                 created_at: Instant::now(),
             })
             .collect::<Vec<_>>();
-        data.intervention_queue.insert(ChannelId::new(1), queue);
+        super::mailbox_replace_queue(
+            &self.shared,
+            &ProviderKind::Claude,
+            ChannelId::new(1),
+            queue,
+        )
+        .await;
     }
 }
 

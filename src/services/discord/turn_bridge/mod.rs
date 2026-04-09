@@ -875,45 +875,30 @@ pub(super) fn spawn_turn_bridge(
         shared_owned
             .global_finalizing
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let has_queued_turns = {
-            let mut data = shared_owned.core.lock().await;
-            if let Some(removed_token) = data.cancel_tokens.remove(&channel_id) {
-                // Mark the token as cancelled so any lingering watchdog timer exits cleanly
-                // instead of mistakenly firing on a newer turn's token.
-                removed_token
-                    .cancelled
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                shared_owned
-                    .global_active
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            // Clean up any pending watchdog deadline override for this channel
-            super::clear_watchdog_deadline_override(channel_id.get());
-            data.active_request_owner.remove(&channel_id);
-            // Clean up dispatch-thread parent mapping when the thread turn ends.
-            // Iterate and remove entries whose thread matches this channel_id.
+        let finish = super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
+        if let Some(removed_token) = finish.removed_token {
+            // Mark the token as cancelled so any lingering watchdog timer exits cleanly
+            // instead of mistakenly firing on a newer turn's token.
+            removed_token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             shared_owned
-                .dispatch_thread_parents
-                .retain(|_, thread| *thread != channel_id);
-            let mut remove_queue = false;
-            let has_pending = if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
-                let has_pending = super::has_soft_intervention(queue);
-                remove_queue = queue.is_empty();
-                has_pending
-            } else {
-                false
-            };
-            // Keep the override while queued turns remain so review/reused-thread routing
-            // survives restart-preserve and same-runtime dequeue paths.
-            if !has_pending {
-                shared_owned.dispatch_role_overrides.remove(&channel_id);
-            }
-            if remove_queue {
-                data.intervention_queue.remove(&channel_id);
-            }
-            drop(data);
-            has_pending
-        };
+                .global_active
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Clean up any pending watchdog deadline override for this channel
+        super::clear_watchdog_deadline_override(channel_id.get());
+        // Clean up dispatch-thread parent mapping when the thread turn ends.
+        // Iterate and remove entries whose thread matches this channel_id.
+        shared_owned
+            .dispatch_thread_parents
+            .retain(|_, thread| *thread != channel_id);
+        // Keep the override while queued turns remain so review/reused-thread routing
+        // survives restart-preserve and same-runtime dequeue paths.
+        if !finish.has_pending {
+            shared_owned.dispatch_role_overrides.remove(&channel_id);
+        }
+        let has_queued_turns = finish.has_pending;
 
         // Remove ⏳ only if NOT handing off to tmux watcher.
         // When tmux watcher is handling the response, it will do ⏳→✅ after delivery.
@@ -1675,16 +1660,12 @@ pub(super) fn spawn_turn_bridge(
                         channel_id, reason
                     );
                 } else {
-                    let next_intervention = {
-                        let mut data = shared_owned.core.lock().await;
-                        super::take_next_soft_intervention_persisted(
-                            &bot_owner_provider,
-                            &shared_owned.token_hash,
-                            channel_id,
-                            &mut data.intervention_queue,
-                            &shared_owned.dispatch_role_overrides,
-                        )
-                    };
+                    let next_intervention = super::mailbox_take_next_soft_intervention(
+                        &shared_owned,
+                        &bot_owner_provider,
+                        channel_id,
+                    )
+                    .await;
 
                     if let Some((intervention, has_more_queued_turns)) = next_intervention {
                         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1709,15 +1690,13 @@ pub(super) fn spawn_turn_bridge(
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             println!("  [{ts}]   ⚠ queued command failed: {e}");
-                            let mut data = shared_owned.core.lock().await;
-                            super::requeue_intervention_front_persisted(
+                            super::mailbox_requeue_intervention_front(
+                                &shared_owned,
                                 &bot_owner_provider,
-                                &shared_owned.token_hash,
                                 channel_id,
-                                &mut data.intervention_queue,
-                                &shared_owned.dispatch_role_overrides,
                                 intervention,
-                            );
+                            )
+                            .await;
                         }
                     }
                 }
