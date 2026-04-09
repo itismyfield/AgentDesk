@@ -4187,10 +4187,16 @@ mod tests {
         }
     }
 
+    fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+        test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Queue files must land under `{provider}/{token_hash}/` — not the legacy flat path.
     #[test]
     fn pending_queue_path_uses_token_hash() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4232,7 +4238,7 @@ mod tests {
     /// Bot A writes a queue; Bot B (different token_hash) must not see it on load.
     #[test]
     fn load_pending_queues_only_reads_own_namespace() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4263,7 +4269,7 @@ mod tests {
     /// save_pending_queues + load_pending_queues round-trip with token_hash namespacing.
     #[test]
     fn save_pending_queues_roundtrip() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4304,7 +4310,7 @@ mod tests {
 
     #[test]
     fn persisted_queue_helpers_keep_remaining_items_and_restore_requeued_item() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4399,7 +4405,7 @@ mod tests {
     /// must not collide — the namespace key is token_hash, not agent.
     #[test]
     fn agent_empty_or_duplicate_does_not_collide_namespace() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4424,7 +4430,7 @@ mod tests {
     /// This ensures dispatch_role_overrides are not lost on restart.
     #[test]
     fn review_thread_override_preserved_across_restart() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4457,7 +4463,7 @@ mod tests {
     /// P2: save_pending_queues captures dispatch_role_overrides into override_channel_id.
     #[test]
     fn save_pending_queues_captures_dispatch_role_overrides() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4493,7 +4499,7 @@ mod tests {
     /// by load_pending_queues, which only reads from the token_hash subdirectory.
     #[test]
     fn legacy_flat_queue_file_is_not_restored() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 

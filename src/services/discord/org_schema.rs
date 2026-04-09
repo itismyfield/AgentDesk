@@ -731,7 +731,14 @@ agents: {{}}
             write_org_yaml(temp_home.path(), &yaml);
 
             let shared = load_shared_prompt_path().expect("shared prompt path");
-            assert!(shared.ends_with("/config/agents/_shared.prompt.md"));
+            assert!(
+                std::path::Path::new(&shared).ends_with(
+                    std::path::Path::new("config")
+                        .join("agents")
+                        .join("_shared.prompt.md")
+                ),
+                "expected canonical shared prompt path, got: {shared}"
+            );
         });
     }
 
