@@ -1,4 +1,5 @@
 mod adk_session;
+mod channel_mailbox;
 mod commands;
 mod formatting;
 mod handoff;
@@ -48,6 +49,10 @@ use adk_session::{
     build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
     lookup_pending_dispatch_for_thread, parse_dispatch_id, post_adk_session_status,
 };
+use channel_mailbox::{
+    ChannelMailboxRegistry, ChannelMailboxSnapshot, ClearChannelResult, FinishTurnResult,
+    QueuePersistenceContext,
+};
 use formatting::{
     BUILTIN_SKILLS, add_reaction_raw, extract_skill_description, format_for_discord,
     format_skills_notice, format_tool_input, normalize_empty_lines, remove_reaction_raw,
@@ -94,10 +99,9 @@ const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 #[cfg(test)]
 pub(in crate::services::discord) use queue_io::channel_has_pending_soft_queue_at;
-pub(in crate::services::discord) use queue_io::{
-    channel_has_pending_soft_queue, schedule_deferred_idle_queue_kickoff,
-    watcher_should_kickoff_idle_queue,
-};
+pub(in crate::services::discord) use queue_io::schedule_deferred_idle_queue_kickoff;
+#[cfg(test)]
+pub(in crate::services::discord) use queue_io::watcher_should_kickoff_idle_queue;
 /// Minimum interval between Discord placeholder edits for progress status.
 /// Configurable via AGENTDESK_STATUS_INTERVAL_SECS env var. Default: 5 seconds.
 pub(super) fn status_update_interval() -> Duration {
@@ -420,13 +424,6 @@ pub(super) struct ModelPickerPendingState {
 pub(super) struct CoreState {
     /// Per-channel sessions (each Discord channel can have its own Claude Code session)
     pub(super) sessions: HashMap<ChannelId, DiscordSession>,
-    /// Per-channel cancel tokens for in-progress AI requests
-    pub(super) cancel_tokens: HashMap<ChannelId, Arc<CancelToken>>,
-    /// Per-channel owner of the currently running request
-    pub(super) active_request_owner: HashMap<ChannelId, UserId>,
-    /// Per-channel message queue: messages arriving during an active turn are queued here
-    /// and executed as subsequent turns after the current one finishes.
-    pub(super) intervention_queue: HashMap<ChannelId, Vec<Intervention>>,
     /// Per-channel active meeting (one meeting per channel)
     active_meetings: HashMap<ChannelId, meeting::Meeting>,
 }
@@ -435,6 +432,8 @@ pub(super) struct CoreState {
 pub(super) struct SharedData {
     /// Core state (sessions + request lifecycle) — requires atomic access
     pub(super) core: Mutex<CoreState>,
+    /// Per-channel request lifecycle actor registry.
+    mailboxes: ChannelMailboxRegistry,
     /// Bot settings — mostly reads, rare writes
     pub(super) settings: tokio::sync::RwLock<DiscordBotSettings>,
     /// Per-channel timestamps of the last Discord API call (for rate limiting)
@@ -530,6 +529,171 @@ pub(super) struct SharedData {
     pub(super) known_slash_commands: tokio::sync::OnceCell<std::collections::HashSet<String>>,
 }
 
+impl SharedData {
+    fn mailbox(&self, channel_id: ChannelId) -> channel_mailbox::ChannelMailboxHandle {
+        self.mailboxes.handle(channel_id)
+    }
+}
+
+fn queue_persistence_context(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> QueuePersistenceContext {
+    QueuePersistenceContext::new(
+        provider,
+        &shared.token_hash,
+        shared
+            .dispatch_role_overrides
+            .get(&channel_id)
+            .map(|override_id| override_id.value().get()),
+    )
+}
+
+async fn mailbox_snapshot(shared: &SharedData, channel_id: ChannelId) -> ChannelMailboxSnapshot {
+    shared.mailbox(channel_id).snapshot().await
+}
+
+async fn mailbox_cancel_token(
+    shared: &SharedData,
+    channel_id: ChannelId,
+) -> Option<Arc<CancelToken>> {
+    shared.mailbox(channel_id).cancel_token().await
+}
+
+async fn mailbox_has_active_turn(shared: &SharedData, channel_id: ChannelId) -> bool {
+    shared.mailbox(channel_id).has_active_turn().await
+}
+
+async fn mailbox_try_start_turn(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+) -> bool {
+    shared
+        .mailbox(channel_id)
+        .try_start_turn(cancel_token, request_owner)
+        .await
+}
+
+async fn mailbox_restore_active_turn(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    cancel_token: Arc<CancelToken>,
+    request_owner: UserId,
+) {
+    shared
+        .mailbox(channel_id)
+        .restore_active_turn(cancel_token, request_owner)
+        .await;
+}
+
+async fn mailbox_enqueue_intervention(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: Intervention,
+) -> bool {
+    shared
+        .mailbox(channel_id)
+        .enqueue(
+            intervention,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await
+}
+
+async fn mailbox_has_pending_soft_queue(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> channel_mailbox::HasPendingSoftQueueResult {
+    shared
+        .mailbox(channel_id)
+        .has_pending_soft_queue(queue_persistence_context(shared, provider, channel_id))
+        .await
+}
+
+async fn mailbox_take_next_soft_intervention(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<(Intervention, bool)> {
+    shared
+        .mailbox(channel_id)
+        .take_next_soft(queue_persistence_context(shared, provider, channel_id))
+        .await
+}
+
+async fn mailbox_requeue_intervention_front(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: Intervention,
+) {
+    shared
+        .mailbox(channel_id)
+        .requeue_front(
+            intervention,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await;
+}
+
+async fn mailbox_finish_turn(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> FinishTurnResult {
+    shared
+        .mailbox(channel_id)
+        .finish_turn(queue_persistence_context(shared, provider, channel_id))
+        .await
+}
+
+async fn mailbox_clear_channel(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> ClearChannelResult {
+    shared
+        .mailbox(channel_id)
+        .clear(queue_persistence_context(shared, provider, channel_id))
+        .await
+}
+
+async fn mailbox_replace_queue(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    queue: Vec<Intervention>,
+) {
+    shared
+        .mailbox(channel_id)
+        .replace_queue(
+            queue,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await;
+}
+
+async fn mailbox_queue_snapshots(shared: &SharedData) -> HashMap<ChannelId, Vec<Intervention>> {
+    shared
+        .mailboxes
+        .snapshot_all()
+        .await
+        .into_iter()
+        .filter_map(|(channel_id, snapshot)| {
+            if snapshot.intervention_queue.is_empty() {
+                None
+            } else {
+                Some((channel_id, snapshot.intervention_queue))
+            }
+        })
+        .collect()
+}
+
 /// Poise user data type
 pub(super) struct Data {
     pub(super) shared: Arc<SharedData>,
@@ -573,7 +737,10 @@ fn prune_interventions(queue: &mut Vec<Intervention>) {
     }
 }
 
-fn enqueue_intervention(queue: &mut Vec<Intervention>, intervention: Intervention) -> bool {
+pub(super) fn enqueue_intervention(
+    queue: &mut Vec<Intervention>,
+    intervention: Intervention,
+) -> bool {
     prune_interventions(queue);
 
     if let Some(last) = queue.last() {
@@ -619,6 +786,7 @@ pub(super) fn requeue_intervention_front(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn take_next_soft_intervention_persisted(
     provider: &ProviderKind,
     token_hash: &str,
@@ -666,6 +834,7 @@ pub(super) fn take_next_soft_intervention_persisted(
     Some((intervention, has_more))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn requeue_intervention_front_persisted(
     provider: &ProviderKind,
     token_hash: &str,
@@ -954,11 +1123,12 @@ async fn catch_up_missed_messages(
 
         // Collect existing message IDs in queue for dedup
         let existing_ids: std::collections::HashSet<u64> = {
-            let data = shared.core.lock().await;
-            data.intervention_queue
-                .get(&channel_id)
-                .map(|q| q.iter().map(|i| i.message_id.get()).collect())
-                .unwrap_or_default()
+            mailbox_snapshot(shared, channel_id)
+                .await
+                .intervention_queue
+                .into_iter()
+                .map(|i| i.message_id.get())
+                .collect()
         };
 
         let allowed_bot_ids: Vec<u64> = {
@@ -968,8 +1138,6 @@ async fn catch_up_missed_messages(
 
         let mut channel_recovered = 0usize;
         let mut max_recovered_id: Option<u64> = None;
-        let mut data = shared.core.lock().await;
-        let queue = data.intervention_queue.entry(channel_id).or_default();
 
         for msg in &messages {
             // Skip system messages (thread creation, slash commands, etc.)
@@ -1000,13 +1168,19 @@ async fn catch_up_missed_messages(
                 continue;
             }
 
-            queue.push(Intervention {
-                author_id: msg.author.id,
-                message_id: msg.id,
-                text: text.to_string(),
-                mode: InterventionMode::Soft,
-                created_at: now,
-            });
+            mailbox_enqueue_intervention(
+                shared,
+                provider,
+                channel_id,
+                Intervention {
+                    author_id: msg.author.id,
+                    message_id: msg.id,
+                    text: text.to_string(),
+                    mode: InterventionMode::Soft,
+                    created_at: now,
+                },
+            )
+            .await;
             channel_recovered += 1;
             // Track the newest actually-recovered message for checkpoint
             let mid = msg.id.get();
@@ -1014,7 +1188,6 @@ async fn catch_up_missed_messages(
                 max_recovered_id = Some(mid);
             }
         }
-        drop(data);
 
         if channel_recovered > 0 {
             total_recovered += channel_recovered;
@@ -1096,16 +1269,15 @@ async fn catch_up_missed_messages(
 
         // Collect existing queue IDs for dedup
         let existing_ids: std::collections::HashSet<u64> = {
-            let data = shared.core.lock().await;
-            data.intervention_queue
-                .get(&channel_id)
-                .map(|q| q.iter().map(|i| i.message_id.get()).collect())
-                .unwrap_or_default()
+            mailbox_snapshot(shared, channel_id)
+                .await
+                .intervention_queue
+                .into_iter()
+                .map(|i| i.message_id.get())
+                .collect()
         };
 
         let mut channel_recovered = 0usize;
-        let mut data = shared.core.lock().await;
-        let queue = data.intervention_queue.entry(channel_id).or_default();
 
         // Iterate in reverse (oldest first) for chronological queue order
         for msg in unanswered_slice.iter().rev() {
@@ -1133,16 +1305,21 @@ async fn catch_up_missed_messages(
                 continue;
             }
 
-            queue.push(Intervention {
-                author_id: msg.author.id,
-                message_id: msg.id,
-                text: text.to_string(),
-                mode: InterventionMode::Soft,
-                created_at: now,
-            });
+            mailbox_enqueue_intervention(
+                shared,
+                provider,
+                channel_id,
+                Intervention {
+                    author_id: msg.author.id,
+                    message_id: msg.id,
+                    text: text.to_string(),
+                    mode: InterventionMode::Soft,
+                    created_at: now,
+                },
+            )
+            .await;
             channel_recovered += 1;
         }
-        drop(data);
 
         if channel_recovered > 0 {
             phase2_recovered += channel_recovered;
@@ -1234,13 +1411,10 @@ async fn execute_handoff_turns(
         }
 
         // Skip if pending queue messages exist (user intent takes priority)
-        let has_pending = {
-            let data = shared.core.lock().await;
-            data.intervention_queue
-                .get(&channel_id)
-                .map(|q| !q.is_empty())
-                .unwrap_or(false)
-        };
+        let has_pending = !mailbox_snapshot(shared, channel_id)
+            .await
+            .intervention_queue
+            .is_empty();
         if has_pending {
             println!(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (pending queue has messages)",
@@ -1252,10 +1426,7 @@ async fn execute_handoff_turns(
         }
 
         // Skip if an active turn is already running
-        let has_active = {
-            let data = shared.core.lock().await;
-            data.cancel_tokens.contains_key(&channel_id)
-        };
+        let has_active = mailbox_has_active_turn(shared, channel_id).await;
         if has_active {
             println!(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (active turn running)",
@@ -1321,17 +1492,19 @@ async fn execute_handoff_turns(
         };
 
         // Inject as an intervention so the next turn picks it up.
-        {
-            let mut data = shared.core.lock().await;
-            let queue = data.intervention_queue.entry(channel_id).or_default();
-            queue.push(Intervention {
+        mailbox_enqueue_intervention(
+            shared,
+            provider,
+            channel_id,
+            Intervention {
                 author_id: serenity::UserId::new(1), // system-generated sentinel
                 message_id: placeholder.id,
                 text: handoff_prompt,
                 mode: InterventionMode::Soft,
                 created_at: Instant::now(),
-            });
-        }
+            },
+        )
+        .await;
 
         let _ = update_handoff_state(provider, record.channel_id, "completed");
         clear_handoff(provider, record.channel_id);
@@ -1508,7 +1681,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
 /// turn running. This bridges the gap where restored pending queues or
 /// handoff injections sit idle because no turn-completion event triggers
 /// the dequeue chain.
-async fn kickoff_idle_queues(
+pub(super) async fn kickoff_idle_queues(
     ctx: &serenity::Context,
     shared: &Arc<SharedData>,
     token: &str,
@@ -1516,23 +1689,17 @@ async fn kickoff_idle_queues(
 ) {
     // Collect channels with queued items that are idle (no active turn). Dequeue only
     // after the routing guard passes so a rejected channel stays preserved on disk/in memory.
-    let channels_to_kick: Vec<ChannelId> = {
-        let mut data = shared.core.lock().await;
-        let mut result = Vec::new();
-        let channel_ids: Vec<ChannelId> = data.intervention_queue.keys().cloned().collect();
-        for channel_id in channel_ids {
-            // Skip if active turn already running — it will dequeue when done
-            if data.cancel_tokens.contains_key(&channel_id) {
-                continue;
+    let mailbox_snapshots = shared.mailboxes.snapshot_all().await;
+    let channels_to_kick: Vec<ChannelId> = mailbox_snapshots
+        .into_iter()
+        .filter_map(|(channel_id, snapshot)| {
+            if snapshot.cancel_token.is_some() || snapshot.intervention_queue.is_empty() {
+                None
+            } else {
+                Some(channel_id)
             }
-            if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
-                if has_soft_intervention(queue) {
-                    result.push(channel_id);
-                }
-            }
-        }
-        result
-    };
+        })
+        .collect();
 
     if channels_to_kick.is_empty() {
         return;
@@ -1557,20 +1724,13 @@ async fn kickoff_idle_queues(
             continue;
         }
 
-        let Some((intervention, has_more)) = ({
-            let mut data = shared.core.lock().await;
-            if data.cancel_tokens.contains_key(&channel_id) {
-                None
-            } else {
-                take_next_soft_intervention_persisted(
-                    provider,
-                    &shared.token_hash,
-                    channel_id,
-                    &mut data.intervention_queue,
-                    &shared.dispatch_role_overrides,
-                )
-            }
-        }) else {
+        if mailbox_has_active_turn(shared, channel_id).await {
+            continue;
+        }
+
+        let Some((intervention, has_more)) =
+            mailbox_take_next_soft_intervention(shared, provider, channel_id).await
+        else {
             continue;
         };
 
@@ -1613,15 +1773,7 @@ async fn kickoff_idle_queues(
                 channel_id
             );
             // Requeue so the message is not lost, and persist immediately.
-            let mut data = shared.core.lock().await;
-            requeue_intervention_front_persisted(
-                provider,
-                &shared.token_hash,
-                channel_id,
-                &mut data.intervention_queue,
-                &shared.dispatch_role_overrides,
-                intervention,
-            );
+            mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
         }
     }
 }
@@ -1938,11 +2090,9 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
     let shared = Arc::new(SharedData {
         core: Mutex::new(CoreState {
             sessions: HashMap::new(),
-            cancel_tokens: HashMap::new(),
-            active_request_owner: HashMap::new(),
-            intervention_queue: HashMap::new(),
             active_meetings: HashMap::new(),
         }),
+        mailboxes: ChannelMailboxRegistry::default(),
         settings: tokio::sync::RwLock::new(bot_settings),
         api_timestamps: dashmap::DashMap::new(),
         skills_cache: tokio::sync::RwLock::new(initial_skills),
@@ -2126,11 +2276,16 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                         if g_active == 0 && g_finalizing == 0 && shared_for_deferred.restart_pending.load(Ordering::Relaxed) {
                             // Save pending queues before exiting so they survive restart
                             {
-                                let data = shared_for_deferred.core.lock().await;
+                                let queues = mailbox_queue_snapshots(&shared_for_deferred).await;
                                 let queue_count: usize =
-                                    data.intervention_queue.values().map(|q| q.len()).sum();
+                                    queues.values().map(|queue| queue.len()).sum();
                                 if queue_count > 0 {
-                                    save_pending_queues(&provider_for_deferred, &shared_for_deferred.token_hash, &data.intervention_queue, &shared_for_deferred.dispatch_role_overrides);
+                                    save_pending_queues(
+                                        &provider_for_deferred,
+                                        &shared_for_deferred.token_hash,
+                                        &queues,
+                                        &shared_for_deferred.dispatch_role_overrides,
+                                    );
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     println!("  [{ts}] 📋 DRAIN: saved {queue_count} pending queue item(s) before deferred restart");
                                 }
@@ -2211,21 +2366,27 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                     if !restored_queues.is_empty() {
                         let mut added = 0usize;
                         let mut skipped = 0usize;
-                        let mut data = shared_for_tmux2.core.lock().await;
                         for (channel_id, items) in restored_queues {
-                            let queue = data.intervention_queue.entry(channel_id).or_default();
-                            let existing_ids: std::collections::HashSet<u64> =
-                                queue.iter().map(|i| i.message_id.get()).collect();
+                            let snapshot = mailbox_snapshot(&shared_for_tmux2, channel_id).await;
+                            let mut queue = snapshot.intervention_queue;
+                            let mut existing_ids: std::collections::HashSet<u64> =
+                                queue.iter().map(|item| item.message_id.get()).collect();
                             for item in items {
-                                if existing_ids.contains(&item.message_id.get()) {
-                                    skipped += 1;
-                                } else {
+                                if existing_ids.insert(item.message_id.get()) {
                                     queue.push(item);
                                     added += 1;
+                                } else {
+                                    skipped += 1;
                                 }
                             }
+                            mailbox_replace_queue(
+                                &shared_for_tmux2,
+                                &provider_for_restore,
+                                channel_id,
+                                queue,
+                            )
+                            .await;
                         }
-                        drop(data);
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         println!("  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped} duplicates)");
                     }
@@ -2453,14 +2614,13 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
 
                 // Persist pending intervention queues so they survive restart
                 {
-                    let data = shared_for_signal.core.lock().await;
-                    let queue_count: usize =
-                        data.intervention_queue.values().map(|q| q.len()).sum();
+                    let queues = mailbox_queue_snapshots(&shared_for_signal).await;
+                    let queue_count: usize = queues.values().map(|queue| queue.len()).sum();
                     if queue_count > 0 {
                         save_pending_queues(
                             &provider_for_shutdown,
                             &shared_for_signal.token_hash,
-                            &data.intervention_queue,
+                            &queues,
                             &shared_for_signal.dispatch_role_overrides,
                         );
                         let ts3 = chrono::Local::now().format("%H:%M:%S");
@@ -2572,14 +2732,13 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                 // finished and mutated queues/last_message_ids. Re-save to capture
                 // any changes that occurred after the initial save.
                 {
-                    let data = shared_for_signal.core.lock().await;
-                    let queue_count: usize =
-                        data.intervention_queue.values().map(|q| q.len()).sum();
+                    let queues = mailbox_queue_snapshots(&shared_for_signal).await;
+                    let queue_count: usize = queues.values().map(|queue| queue.len()).sum();
                     if queue_count > 0 {
                         save_pending_queues(
                             &provider_for_shutdown,
                             &shared_for_signal.token_hash,
-                            &data.intervention_queue,
+                            &queues,
                             &shared_for_signal.dispatch_role_overrides,
                         );
                         let ts4 = chrono::Local::now().format("%H:%M:%S");
@@ -3046,9 +3205,9 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     if expired.is_empty() {
         return;
     }
+    let provider = shared.settings.read().await.provider.clone();
     // Collect session_keys for audit before removing from memory
     let expired_keys: Vec<(ChannelId, String)> = {
-        let provider = shared.settings.read().await.provider.clone();
         let data = shared.core.lock().await;
         expired
             .iter()
@@ -3079,16 +3238,15 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
                 }
             }
             data.sessions.remove(ch);
-            if data.cancel_tokens.remove(ch).is_some() {
-                shared
-                    .global_active
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            data.active_request_owner.remove(ch);
-            data.intervention_queue.remove(ch);
         }
     }
     for (ch, _) in &expired {
+        let cleared = mailbox_clear_channel(shared, &provider, *ch).await;
+        if cleared.removed_token.is_some() {
+            shared
+                .global_active
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
         shared.api_timestamps.remove(ch);
         shared.tmux_watchers.remove(ch);
     }

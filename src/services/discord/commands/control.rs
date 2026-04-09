@@ -9,7 +9,9 @@ use crate::services::provider::cancel_requested;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::settings::cleanup_channel_uploads;
 use super::super::turn_bridge::cancel_active_token;
-use super::super::{Context, Error, SharedData, check_auth};
+use super::super::{
+    Context, Error, SharedData, check_auth, mailbox_cancel_token, mailbox_clear_channel,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ManagedSessionClearBehavior {
@@ -148,21 +150,23 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     channel_id: serenity::ChannelId,
     clear_source: &str,
 ) {
-    let (cancel_token, tmux_name) = {
-        let mut data = shared.core.lock().await;
-        let cancel_token = data.cancel_tokens.remove(&channel_id);
-        if cancel_token.is_some() {
-            shared
-                .global_active
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        let tmux_name = data
-            .sessions
+    let tmux_name = {
+        let data = shared.core.lock().await;
+        data.sessions
             .get(&channel_id)
             .and_then(|s| s.channel_name.as_ref())
-            .map(|ch_name| provider.build_tmux_session_name(ch_name));
+            .map(|ch_name| provider.build_tmux_session_name(ch_name))
+    };
 
+    let cleared = mailbox_clear_channel(shared, provider, channel_id).await;
+    if cleared.removed_token.is_some() {
+        shared
+            .global_active
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    {
+        let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             cleanup_channel_uploads(channel_id);
             session.session_id = None;
@@ -170,18 +174,13 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
             session.pending_uploads.clear();
             session.cleared = true;
         }
-
-        data.active_request_owner.remove(&channel_id);
-        data.intervention_queue.remove(&channel_id);
-        (cancel_token, tmux_name)
-    };
+    }
 
     shared.dispatch_role_overrides.remove(&channel_id);
-    super::super::save_channel_queue(provider, &shared.token_hash, channel_id, &[], None);
 
     shared.model_session_reset_pending.remove(&channel_id);
 
-    if let Some(token) = cancel_token {
+    if let Some(token) = cleared.removed_token {
         cancel_active_token(&token, true, clear_source);
     }
 
@@ -238,10 +237,7 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     println!("  [{ts}] ◀ [{user_name}] /stop");
 
     let channel_id = ctx.channel_id();
-    let token = {
-        let data = ctx.data().shared.core.lock().await;
-        data.cancel_tokens.get(&channel_id).cloned()
-    };
+    let token = mailbox_cancel_token(&ctx.data().shared, channel_id).await;
 
     match token {
         Some(token) => {

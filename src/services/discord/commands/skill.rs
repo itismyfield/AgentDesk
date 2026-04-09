@@ -4,7 +4,9 @@ use serenity::CreateMessage;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::router::handle_text_message;
 use super::super::turn_bridge::cancel_active_token;
-use super::super::{Context, Error, auto_restore_session, check_auth};
+use super::super::{
+    Context, Error, auto_restore_session, check_auth, mailbox_cancel_token, mailbox_has_active_turn,
+};
 use crate::services::provider::{ProviderKind, cancel_requested};
 
 // Keep provider-specific skill wording in one helper so /cc and !cc stay aligned.
@@ -140,10 +142,7 @@ pub(in crate::services::discord) async fn cmd_cc(
         }
         "stop" => {
             let channel_id = ctx.channel_id();
-            let token = {
-                let data = ctx.data().shared.core.lock().await;
-                data.cancel_tokens.get(&channel_id).cloned()
-            };
+            let token = mailbox_cancel_token(&ctx.data().shared, channel_id).await;
             match token {
                 Some(token) => {
                     if cancel_requested(Some(token.as_ref())) {
@@ -284,14 +283,10 @@ pub(in crate::services::discord) async fn cmd_cc(
     }
 
     // Block if AI is in progress
-    {
-        let d = ctx.data().shared.core.lock().await;
-        if d.cancel_tokens.contains_key(&ctx.channel_id()) {
-            drop(d);
-            ctx.say("AI request in progress. Use `/stop` to cancel.")
-                .await?;
-            return Ok(());
-        }
+    if mailbox_has_active_turn(&ctx.data().shared, ctx.channel_id()).await {
+        ctx.say("AI request in progress. Use `/stop` to cancel.")
+            .await?;
+        return Ok(());
     }
 
     // Build the prompt that tells the active provider to invoke the skill

@@ -1137,15 +1137,20 @@ pub(super) async fn restore_inflight_turns(
             if session.remote_profile_name.is_none() {
                 session.remote_profile_name = saved_remote;
             }
-            if !data.cancel_tokens.contains_key(&channel_id) {
-                shared
-                    .global_active
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            data.cancel_tokens.insert(channel_id, cancel_token.clone());
-            data.active_request_owner
-                .insert(channel_id, UserId::new(state.request_owner_user_id));
         }
+
+        if !mailbox_has_active_turn(shared, channel_id).await {
+            shared
+                .global_active
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        mailbox_restore_active_turn(
+            shared,
+            channel_id,
+            cancel_token.clone(),
+            UserId::new(state.request_owner_user_id),
+        )
+        .await;
 
         let adk_session_key = build_adk_session_key(shared, channel_id, provider).await;
         let adk_session_name = channel_name.clone();

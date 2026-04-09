@@ -204,25 +204,19 @@ pub(super) async fn start_restart_handoff_from_state(
     }
 
     if !started_immediately {
-        let mut data = shared.core.lock().await;
-        let queue = data.intervention_queue.entry(channel_id).or_default();
-        queue.push(super::Intervention {
-            author_id,
-            message_id: placeholder_id,
-            text: handoff_prompt,
-            mode: super::InterventionMode::Soft,
-            created_at: std::time::Instant::now(),
-        });
-        super::save_channel_queue(
+        super::mailbox_enqueue_intervention(
+            shared,
             provider_kind,
-            &shared.token_hash,
             channel_id,
-            queue,
-            shared
-                .dispatch_role_overrides
-                .get(&channel_id)
-                .map(|r| r.value().get()),
-        );
+            super::Intervention {
+                author_id,
+                message_id: placeholder_id,
+                text: handoff_prompt,
+                mode: super::InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+            },
+        )
+        .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!(
             "  [{ts}] ↻ watcher death recovery: queued fallback handoff for channel {}",
@@ -1038,14 +1032,19 @@ pub(super) async fn tmux_output_watcher(
                     if dispatch_ok {
                         super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
                     }
-                    let should_kickoff_queue = {
-                        let mut data = shared.core.lock().await;
-                        let has_active_turn = data.cancel_tokens.contains_key(&channel_id);
-                        super::watcher_should_kickoff_idle_queue(
-                            has_active_turn,
-                            &mut data.intervention_queue,
-                            channel_id,
-                        )
+                    let mailbox = shared.mailbox(channel_id);
+                    let has_active_turn = mailbox.has_active_turn().await;
+                    let should_kickoff_queue = if has_active_turn {
+                        false
+                    } else {
+                        mailbox
+                            .has_pending_soft_queue(super::queue_persistence_context(
+                                &shared,
+                                &provider_kind,
+                                channel_id,
+                            ))
+                            .await
+                            .has_pending
                     };
                     if dispatch_ok && should_kickoff_queue {
                         super::schedule_deferred_idle_queue_kickoff(
