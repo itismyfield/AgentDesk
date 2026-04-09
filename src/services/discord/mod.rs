@@ -1,5 +1,4 @@
 mod adk_session;
-mod bot_init;
 mod commands;
 mod formatting;
 mod handoff;
@@ -14,14 +13,12 @@ pub(crate) mod org_writer;
 mod prompt_builder;
 mod queue_io;
 mod recovery;
-mod restart_ctrl;
 pub(crate) mod restart_report;
 mod role_map;
 mod router;
 pub mod runtime_store;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
-mod shared_state;
 #[cfg(unix)]
 mod tmux;
 mod turn_bridge;
@@ -67,8 +64,7 @@ use router::{handle_event, handle_text_message};
 use runtime_store::worktrees_root;
 use settings::{
     RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings, resolve_role_binding,
-    save_bot_settings, validate_bot_channel_routing,
-    validate_bot_channel_routing_with_provider_channel,
+    save_bot_settings, validate_bot_channel_routing_with_provider_channel,
 };
 #[cfg(unix)]
 use tmux::{
@@ -96,12 +92,12 @@ const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minut
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
-pub(crate) use bot_init::RunBotContext;
+#[cfg(test)]
+pub(in crate::services::discord) use queue_io::channel_has_pending_soft_queue_at;
 pub(in crate::services::discord) use queue_io::{
-    channel_has_pending_soft_queue, channel_has_pending_soft_queue_at,
-    schedule_deferred_idle_queue_kickoff, watcher_should_kickoff_idle_queue,
+    channel_has_pending_soft_queue, schedule_deferred_idle_queue_kickoff,
+    watcher_should_kickoff_idle_queue,
 };
-pub(in crate::services::discord) use shared_state::*;
 /// Minimum interval between Discord placeholder edits for progress status.
 /// Configurable via AGENTDESK_STATUS_INTERVAL_SECS env var. Default: 5 seconds.
 pub(super) fn status_update_interval() -> Duration {
@@ -232,6 +228,7 @@ pub(super) struct DiscordSession {
     /// If this session runs in a git worktree, store the info here
     pub(super) worktree: Option<WorktreeInfo>,
     /// Restart generation at which this session was created/restored.
+    #[allow(dead_code)]
     pub(super) born_generation: u64,
 }
 
@@ -519,6 +516,16 @@ pub(super) struct Data {
     pub(super) shared: Arc<SharedData>,
     pub(super) token: String,
     pub(super) provider: ProviderKind,
+}
+
+pub(crate) struct RunBotContext {
+    pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) health_registry: Arc<health::HealthRegistry>,
+    pub(crate) api_port: u16,
+    pub(crate) db: Option<crate::db::Db>,
+    pub(crate) engine: Option<crate::engine::PolicyEngine>,
 }
 
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {
@@ -2206,6 +2213,21 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
 
                     // P1-2: Warn about legacy queue files that cannot be restored
                     warn_legacy_pending_queue_files(&provider_for_restore);
+
+                    if let Some(ref db) = shared_for_tmux2.db {
+                        let (checked, cleared) =
+                            crate::server::routes::dispatches::validate_channel_thread_maps_on_startup(
+                                db,
+                                &token_for_kickoff,
+                            )
+                            .await;
+                        if checked > 0 || cleared > 0 {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!(
+                                "  [{ts}] 🧹 THREAD-MAP: validated {checked} mapping(s), cleared {cleared} stale binding(s)"
+                            );
+                        }
+                    }
 
                     // Startup catch-up polling: recover messages lost during restart gap
                     catch_up_missed_messages(

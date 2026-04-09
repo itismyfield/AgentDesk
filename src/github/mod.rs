@@ -40,7 +40,10 @@ fn tokio_gh_command() -> Result<tokio::process::Command, String> {
 
 /// Check whether the `gh` CLI is available on this system.
 pub fn gh_available() -> bool {
-    std::process::Command::new("gh")
+    let Ok(mut command) = gh_command() else {
+        return false;
+    };
+    command
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -52,7 +55,7 @@ pub fn gh_available() -> bool {
 /// Run a `gh` CLI command and return its stdout as a String.
 /// Returns an error if the command fails or is not available.
 pub(crate) fn run_gh(args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new("gh")
+    let output = gh_command()?
         .args(args)
         .output()
         .map_err(|e| format!("gh command failed to execute: {e}"))?;
@@ -81,7 +84,7 @@ pub async fn reopen_issue_by_url(url: &str) -> Result<(), String> {
     let number = &rest[slash_pos + "/issues/".len()..];
 
     // gh issue reopen <number> --repo <owner/repo>
-    let mut cmd = tokio::process::Command::new("gh");
+    let mut cmd = tokio_gh_command()?;
     cmd.kill_on_drop(true);
     cmd.args(["issue", "reopen", number, "--repo", repo]);
     let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())

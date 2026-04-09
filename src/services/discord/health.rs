@@ -44,10 +44,6 @@ impl HealthStatus {
     pub fn is_http_ready(self) -> bool {
         matches!(self, Self::Healthy | Self::Degraded)
     }
-
-    pub fn is_healthy(self) -> bool {
-        matches!(self, Self::Healthy)
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -362,19 +358,6 @@ pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSn
         degraded_reasons,
         providers: provider_entries,
     }
-}
-
-pub async fn build_health_json(registry: &HealthRegistry) -> String {
-    serde_json::to_string(&build_health_snapshot(registry).await)
-        .unwrap_or_else(|_| "{}".to_string())
-}
-
-pub async fn health_status(registry: &HealthRegistry) -> HealthStatus {
-    build_health_snapshot(registry).await.status
-}
-
-pub async fn is_healthy(registry: &HealthRegistry) -> bool {
-    health_status(registry).await.is_healthy()
 }
 
 fn recovery_duration_secs(shared: &SharedData) -> f64 {

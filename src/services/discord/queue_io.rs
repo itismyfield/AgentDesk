@@ -12,28 +12,6 @@ pub(super) fn prune_interventions(queue: &mut Vec<Intervention>) {
     prune_interventions_at(queue, Instant::now());
 }
 
-pub(super) fn enqueue_intervention(
-    queue: &mut Vec<Intervention>,
-    intervention: Intervention,
-) -> bool {
-    prune_interventions(queue);
-
-    if let Some(last) = queue.last()
-        && last.author_id == intervention.author_id
-        && last.text == intervention.text
-        && intervention.created_at.duration_since(last.created_at) <= INTERVENTION_DEDUP_WINDOW
-    {
-        return false;
-    }
-
-    queue.push(intervention);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
-        queue.drain(0..overflow);
-    }
-    true
-}
-
 pub(super) fn channel_has_pending_soft_queue(
     intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
     channel_id: ChannelId,
@@ -156,96 +134,8 @@ pub(super) fn save_channel_queue(
     }
 }
 
-/// Save all non-empty intervention queues to `discord_pending_queue/{provider}/`.
-pub(super) fn save_pending_queues(
-    provider: &ProviderKind,
-    queues: &HashMap<ChannelId, Vec<Intervention>>,
-) {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return;
-    };
-    let dir = root.join(provider.as_str());
-    let _ = fs::create_dir_all(&dir);
-    // Clean stale files first
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-    for (channel_id, queue) in queues {
-        if queue.is_empty() {
-            continue;
-        }
-        let items: Vec<PendingQueueItem> = queue
-            .iter()
-            .map(|i| PendingQueueItem {
-                author_id: i.author_id.get(),
-                message_id: i.message_id.get(),
-                text: i.text.clone(),
-            })
-            .collect();
-        if let Ok(json) = serde_json::to_string_pretty(&items) {
-            let path = dir.join(format!("{}.json", channel_id.get()));
-            let _ = runtime_store::atomic_write(&path, &json);
-        }
-    }
-}
-
-/// Load persisted pending queues and delete the files.
-pub(super) fn load_pending_queues(
-    provider: &ProviderKind,
-) -> HashMap<ChannelId, Vec<Intervention>> {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return HashMap::new();
-    };
-    let dir = root.join(provider.as_str());
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return HashMap::new();
-    };
-    let now = Instant::now();
-    let mut result: HashMap<ChannelId, Vec<Intervention>> = HashMap::new();
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let channel_id: u64 = match path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse().ok())
-        {
-            Some(id) => id,
-            None => continue,
-        };
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
-            let _ = fs::remove_file(&path);
-            continue;
-        };
-        let interventions: Vec<Intervention> = items
-            .into_iter()
-            .map(|item| Intervention {
-                author_id: UserId::new(item.author_id),
-                message_id: MessageId::new(item.message_id),
-                text: item.text,
-                mode: InterventionMode::Soft,
-                created_at: now,
-            })
-            .collect();
-        if !interventions.is_empty() {
-            result.insert(ChannelId::new(channel_id), interventions);
-        }
-        let _ = fs::remove_file(&path);
-    }
-    result
-}
-
-/// Startup catch-up polling: fetch messages that arrived during the restart gap.
-/// Uses saved last_message_ids to query Discord REST API for missed messages,
-/// filters out bot messages and duplicates, and inserts into intervention queue.
-pub(super) async fn catch_up_missed_messages(
+#[allow(dead_code)]
+async fn catch_up_missed_messages(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
