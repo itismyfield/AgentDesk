@@ -3,11 +3,11 @@ use std::fs;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
+use serde::Serialize;
 use serenity::{
     AutoArchiveDuration, ChannelId, ChannelType, CreateMessage,
     builder::{CreateThread, EditThread},
 };
-use serde::Serialize;
 
 use crate::services::memory::{RecallRequest, build_memory_backend};
 use crate::services::provider::ProviderKind;
@@ -526,16 +526,16 @@ pub(crate) async fn start_meeting_with_reviewer(
     )
     .await
     {
-            Ok(p) if !p.is_empty() => p,
-            Ok(_) => {
-                cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
-                return Err("참여자를 선정하지 못했어.".into());
-            }
-            Err(e) => {
-                cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
-                return Err(format!("참여자 선정 실패: {}", e).into());
-            }
-        };
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => {
+            cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+            return Err("참여자를 선정하지 못했어.".into());
+        }
+        Err(e) => {
+            cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+            return Err(format!("참여자 선정 실패: {}", e).into());
+        }
+    };
 
     // Check if cancelled or replaced during participant selection
     if active_meeting_state(shared, channel_id, &meeting_id).await != ActiveMeetingSlot::Active {
@@ -1019,7 +1019,10 @@ fn build_meeting_participants(
     }
 
     for required_role_id in required_role_ids {
-        if !normalized_selected.iter().any(|role_id| role_id == required_role_id) {
+        if !normalized_selected
+            .iter()
+            .any(|role_id| role_id == required_role_id)
+        {
             return Err(format!(
                 "Fixed participant '{}' is missing from final selection",
                 required_role_id
@@ -1069,7 +1072,10 @@ async fn select_participants(
         .collect();
 
     for fixed_role_id in &fixed_role_ids {
-        if !candidate_pool.iter().any(|agent| agent.role_id == *fixed_role_id) {
+        if !candidate_pool
+            .iter()
+            .any(|agent| agent.role_id == *fixed_role_id)
+        {
             return Err(format!(
                 "Fixed participant '{}' is not available in candidate pool",
                 fixed_role_id
@@ -1965,8 +1971,8 @@ mod tests {
         ActiveMeetingSlot, MAX_MEETING_PARTICIPANTS, MIN_MEETING_PARTICIPANTS, Meeting,
         MeetingAgentConfig, MeetingConfig, MeetingStatus, MeetingUtterance, ProviderKind,
         SummaryAgentConfig, build_meeting_participants, build_meeting_status_payload,
-        canonical_candidate_pool, effective_round_count, meeting_readonly_tools, meeting_slot_state,
-        parse_meeting_start_text,
+        canonical_candidate_pool, effective_round_count, meeting_readonly_tools,
+        meeting_slot_state, parse_meeting_start_text,
     };
     use crate::services::discord::settings::RoleBinding;
     use serde_json::json;
