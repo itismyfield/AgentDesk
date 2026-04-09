@@ -1031,19 +1031,19 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
           return (
             <div
               key={m.id}
-              className="rounded-2xl border p-4 sm:p-5 space-y-3"
+              className="min-w-0 max-w-full overflow-hidden rounded-2xl border p-4 sm:p-5 space-y-3"
               style={{ background: "var(--th-surface)", borderColor: "var(--th-border)" }}
             >
               {/* Top row */}
-              <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
-                  <h3 className="font-semibold text-base" style={{ color: "var(--th-text)" }}>
+                  <h3 className="text-base font-semibold break-words" style={{ color: "var(--th-text)", overflowWrap: "anywhere" }}>
                     {m.agenda}
                   </h3>
-                  <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                  <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-2">
                     {statusBadge(m.status)}
                     {(m.primary_provider || m.reviewer_provider) && (
-                      <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}>
+                      <span className="min-w-0 max-w-full rounded-full px-2 py-0.5 text-xs font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd", overflowWrap: "anywhere" }}>
                         {formatProviderFlow(m.primary_provider, m.reviewer_provider)}
                       </span>
                     )}
@@ -1068,12 +1068,12 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               </div>
 
               {/* Participants */}
-              <div className="flex items-center gap-1.5 flex-wrap">
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                 {m.participant_names.map((name) => (
                   <span
                     key={name}
-                    className="text-xs px-2 py-0.5 rounded-full font-medium"
-                    style={{ background: "rgba(99,102,241,0.15)", color: "#818cf8" }}
+                    className="max-w-full rounded-full px-2 py-0.5 text-xs font-medium"
+                    style={{ background: "rgba(99,102,241,0.15)", color: "#818cf8", overflowWrap: "anywhere" }}
                   >
                     {name}
                   </span>
@@ -1081,12 +1081,12 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               </div>
 
               {(m.primary_provider || m.reviewer_provider) && (
-                <div className="space-y-1.5">
+                <div className="min-w-0 max-w-full space-y-1.5 overflow-hidden">
                   <MeetingProviderFlow
                     primaryProvider={m.primary_provider}
                     reviewerProvider={m.reviewer_provider}
                   />
-                  <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                  <div className="text-xs break-words" style={{ color: "var(--th-text-muted)", overflowWrap: "anywhere" }}>
                     {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
                   </div>
                 </div>
@@ -1094,7 +1094,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
               {/* PMD Summary bubble */}
               {m.summary && (
-                <div className="flex items-start gap-2.5">
+                <div className="flex min-w-0 max-w-full items-start gap-2.5 overflow-hidden">
                   <div className="w-7 h-7 rounded-lg overflow-hidden shrink-0" style={{ background: "var(--th-bg-surface)" }}>
                     <img
                       src="/sprites/7-D-1.png"
@@ -1104,7 +1104,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     />
                   </div>
                   <div
-                    className="rounded-xl rounded-tl-sm px-3 py-2 text-sm flex-1"
+                    className="min-w-0 max-w-full flex-1 overflow-hidden rounded-xl rounded-tl-sm px-3 py-2 text-sm"
                     style={{
                       background: "rgba(99,102,241,0.08)",
                       border: "1px solid rgba(99,102,241,0.15)",
@@ -1114,29 +1114,31 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
                       <div className="text-xs font-semibold" style={{ color: "#818cf8" }}>{t({ ko: "PMD 요약", en: "PMD Summary" })}</div>
                       {(m.primary_provider || m.reviewer_provider) && (
-                        <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                        <div className="min-w-0 text-xs break-words" style={{ color: "var(--th-text-muted)", overflowWrap: "anywhere" }}>
                           {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
                         </div>
                       )}
                     </div>
-                    <MarkdownContent content={m.summary} />
+                    <MarkdownContent content={m.summary} className="pcd-markdown-preview" />
                   </div>
                 </div>
               )}
 
               {/* Proposed issues preview */}
               {hasProposedIssues && !issueProgress.allCreated && (
-                <div>
+                <div className="min-w-0 max-w-full overflow-hidden">
                   <button
                     onClick={() => toggleIssuePreview(m.id)}
-                    className="flex items-center gap-1.5 text-xs font-medium transition-colors hover:opacity-80"
-                    style={{ color: "#34d399" }}
+                    className="flex max-w-full items-center gap-1.5 text-left text-xs font-medium transition-colors hover:opacity-80"
+                    style={{ color: "#34d399", overflowWrap: "anywhere" }}
                   >
-                    {issuesExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                    {t({ ko: `생성될 일감 미리보기 (${m.proposed_issues!.length}건)`, en: `Preview issues to create (${m.proposed_issues!.length})` })}
+                    <span className="shrink-0">{issuesExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</span>
+                    <span className="min-w-0 break-words">
+                      {t({ ko: `생성될 일감 미리보기 (${m.proposed_issues!.length}건)`, en: `Preview issues to create (${m.proposed_issues!.length})` })}
+                    </span>
                   </button>
                   {issuesExpanded && (
-                    <div className="mt-2 space-y-1.5">
+                    <div className="mt-2 max-w-full space-y-1.5 overflow-hidden">
                       {m.proposed_issues!.map((issue, i) => {
                         const issueResult = getMeetingIssueResult(m, issue);
                         const issueState = getMeetingIssueState(issueResult);
@@ -1174,22 +1176,22 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                         return (
                           <div
                             key={i}
-                            className="rounded-lg px-3 py-2 text-xs"
+                            className="min-w-0 max-w-full overflow-hidden rounded-lg px-3 py-2 text-xs"
                             style={{
                               background: statusMeta.bg,
                               border: `1px solid ${statusMeta.border}`,
                             }}
                           >
-                            <div className="flex items-start justify-between gap-2">
+                            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                               <div className="min-w-0 flex-1">
-                                <div className="font-medium" style={{ color: "var(--th-text)" }}>
+                                <div className="font-medium break-words" style={{ color: "var(--th-text)", overflowWrap: "anywhere" }}>
                                   [RT] {issue.title}
                                 </div>
-                                <div className="mt-0.5" style={{ color: "var(--th-text-muted)" }}>
+                                <div className="mt-0.5 break-words" style={{ color: "var(--th-text-muted)", overflowWrap: "anywhere" }}>
                                   {t({ ko: `담당: ${issue.assignee}`, en: `Assignee: ${issue.assignee}` })}
                                 </div>
                                 {issueResult?.error && issueState === "failed" && (
-                                  <div className="mt-1" style={{ color: "#fbbf24" }}>
+                                  <div className="mt-1 break-words" style={{ color: "#fbbf24", overflowWrap: "anywhere" }}>
                                     {t({ ko: `실패: ${issueResult.error}`, en: `Failed: ${issueResult.error}` })}
                                   </div>
                                 )}
@@ -1198,14 +1200,14 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                                     href={issueResult.issue_url}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="mt-1 inline-flex hover:underline"
-                                    style={{ color: "#34d399" }}
+                                    className="mt-1 inline-flex max-w-full break-words hover:underline"
+                                    style={{ color: "#34d399", overflowWrap: "anywhere" }}
                                   >
                                     {t({ ko: "생성된 이슈 열기", en: "Open created issue" })}
                                   </a>
                                 )}
                               </div>
-                              <div className="flex shrink-0 items-center gap-1.5">
+                              <div className="flex shrink-0 flex-wrap items-center gap-1.5 sm:justify-end">
                                 <span
                                   className="rounded-full px-2 py-0.5 text-xs font-semibold"
                                   style={{ background: statusMeta.bg, color: statusMeta.color }}

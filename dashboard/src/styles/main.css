@@ -222,7 +222,15 @@ body {
 .pcd-markdown {
   color: inherit;
   line-height: 1.7;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.pcd-markdown-preview {
+  max-height: 12rem;
+  overflow: hidden;
 }
 
 .pcd-markdown > :first-child {
@@ -262,7 +270,17 @@ body {
 .pcd-markdown blockquote,
 .pcd-markdown pre,
 .pcd-markdown table {
+  max-width: 100%;
   margin: 0.65rem 0;
+}
+
+.pcd-markdown p,
+.pcd-markdown li,
+.pcd-markdown blockquote,
+.pcd-markdown a,
+.pcd-markdown code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .pcd-markdown ul,
@@ -303,6 +321,7 @@ body {
 }
 
 .pcd-markdown pre {
+  max-width: 100%;
   overflow-x: auto;
   padding: 0.85rem 0.95rem;
   border-radius: 0.9rem;
@@ -316,6 +335,7 @@ body {
   border-radius: 0;
   background: transparent;
   color: inherit;
+  white-space: pre-wrap;
 }
 
 .pcd-markdown strong {

@@ -109,24 +109,24 @@ export default function MeetingProviderFlow({
   const reviewer = getProviderMeta(reviewerProvider);
 
   return (
-    <div className={`flex items-center gap-1.5 flex-wrap ${compact ? "" : "rounded-xl px-3 py-2"}`} style={compact ? undefined : {
+    <div className={`flex min-w-0 max-w-full flex-wrap items-center gap-1.5 ${compact ? "" : "rounded-xl px-3 py-2"}`} style={compact ? undefined : {
       background: "rgba(148,163,184,0.08)",
       border: "1px solid rgba(148,163,184,0.14)",
     }}>
       {!compact && (
-        <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
+        <span className="min-w-0 text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)", overflowWrap: "anywhere" }}>
           Provider Flow
         </span>
       )}
       <ProviderChip label={primary.label} bg={primary.bg} color={primary.color} border={primary.border} />
-      <span className="text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
+      <span className="min-w-0 text-xs font-semibold" style={{ color: "var(--th-text-muted)", overflowWrap: "anywhere" }}>
         {t({ ko: "초안/최종", en: "draft/final" })}
       </span>
       <span className="text-xs font-semibold px-1" style={{ color: "var(--th-text-muted)" }}>
         →
       </span>
       <ProviderChip label={reviewer.label} bg={reviewer.bg} color={reviewer.color} border={reviewer.border} />
-      <span className="text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
+      <span className="min-w-0 text-xs font-semibold" style={{ color: "var(--th-text-muted)", overflowWrap: "anywhere" }}>
         {t({ ko: "비판 검토", en: "critique" })}
       </span>
     </div>
@@ -146,8 +146,8 @@ function ProviderChip({
 }) {
   return (
     <span
-      className="text-xs px-2 py-0.5 rounded-full font-semibold"
-      style={{ background: bg, color, border: `1px solid ${border}` }}
+      className="max-w-full rounded-full px-2 py-0.5 text-xs font-semibold"
+      style={{ background: bg, color, border: `1px solid ${border}`, overflowWrap: "anywhere" }}
     >
       {label}
     </span>
