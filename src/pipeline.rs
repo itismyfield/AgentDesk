@@ -306,6 +306,14 @@ impl PipelineConfig {
             .find(|t| t.from == from && t.to == to)
     }
 
+    /// Find the first gated transition target from a state.
+    pub fn next_gated_target(&self, from: &str) -> Option<&str> {
+        self.transitions
+            .iter()
+            .find(|t| t.from == from && t.transition_type == TransitionType::Gated)
+            .map(|t| t.to.as_str())
+    }
+
     /// Check if a state is terminal (no outbound transitions allowed).
     pub fn is_terminal(&self, state: &str) -> bool {
         self.states.iter().any(|s| s.id == state && s.terminal)
