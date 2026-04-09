@@ -41,7 +41,7 @@ struct Cli {
 enum Commands {
     /// Start Discord bot server(s)
     Dcserver {
-        /// Bot token (defaults to bot_settings.json or AGENTDESK_TOKEN env)
+        /// Bot token (defaults to configured Discord bots or AGENTDESK_TOKEN env)
         token: Option<String>,
     },
     /// Run the initial setup wizard
@@ -79,7 +79,7 @@ enum Commands {
         /// Message text
         #[arg(long)]
         message: String,
-        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN or bot_settings.json)
+        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN or configured Discord bots)
         #[arg(long)]
         key: Option<String>,
     },
@@ -91,7 +91,7 @@ enum Commands {
         /// Message text
         #[arg(long)]
         message: String,
-        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN or bot_settings.json)
+        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN or configured Discord bots)
         #[arg(long)]
         key: Option<String>,
     },

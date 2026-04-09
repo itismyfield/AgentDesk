@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -48,14 +49,101 @@ pub struct DiscordConfig {
     pub bots: std::collections::HashMap<String, BotConfig>,
     #[serde(default)]
     pub guild_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub owner_id: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct BotConfig {
     #[serde(default)]
     pub token: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "DiscordBotAuthConfig::is_empty")]
+    pub auth: DiscordBotAuthConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DiscordBotAuthConfig {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_channel_ids: Option<Vec<u64>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_user_ids: Option<Vec<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_all_users: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_bot_ids: Option<Vec<u64>>,
+}
+
+impl DiscordBotAuthConfig {
+    pub fn is_empty(&self) -> bool {
+        self.allowed_channel_ids.is_none()
+            && self.allowed_user_ids.is_none()
+            && self.allowed_tools.is_none()
+            && self.allow_all_users.is_none()
+            && self.allowed_bot_ids.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum U64Like {
+    Int(u64),
+    String(String),
+}
+
+impl U64Like {
+    fn into_u64(self) -> Option<u64> {
+        match self {
+            Self::Int(value) => Some(value),
+            Self::String(raw) => raw.trim().parse::<u64>().ok(),
+        }
+    }
+}
+
+fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<U64Like>::deserialize(deserializer)?.and_then(U64Like::into_u64))
+}
+
+fn deserialize_optional_u64_vec<'de, D>(deserializer: D) -> Result<Option<Vec<u64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<Vec<U64Like>>::deserialize(deserializer)?.map(|values| {
+            values
+                .into_iter()
+                .filter_map(U64Like::into_u64)
+                .collect::<Vec<_>>()
+        }),
+    )
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -101,16 +189,6 @@ impl AgentChannels {
                 .and_then(AgentChannel::target)
                 .is_none()
             && self.qwen.as_ref().and_then(AgentChannel::target).is_none()
-    }
-
-    pub fn channel_for_provider(&self, provider: &str) -> Option<&AgentChannel> {
-        match provider.trim().to_ascii_lowercase().as_str() {
-            "claude" => self.claude.as_ref(),
-            "codex" => self.codex.as_ref(),
-            "gemini" => self.gemini.as_ref(),
-            "qwen" => self.qwen.as_ref(),
-            _ => None,
-        }
     }
 
     pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 4] {
@@ -851,9 +929,9 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 mod tests {
     use super::{
         AgentChannel, AgentChannels, AgentDef, AutomationConfig, BotConfig, Config,
-        FileMemoryConfig, KanbanConfig, McpMemoryConfig, MemoryConfig, ReviewConfig,
-        RuntimeSettingsConfig, load_from_path, resolve_graceful_config_path, runtime_root,
-        save_to_path,
+        DiscordBotAuthConfig, FileMemoryConfig, KanbanConfig, McpMemoryConfig, MemoryConfig,
+        ReviewConfig, RuntimeSettingsConfig, load_from_path, resolve_graceful_config_path,
+        runtime_root, save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
@@ -1027,11 +1105,21 @@ mod tests {
         config.server.host = "127.0.0.42".to_string();
         config.server.auth_token = Some("secret-token".to_string());
         config.discord.guild_id = Some("guild-123".to_string());
+        config.discord.owner_id = Some(343742347365974026);
         config.discord.bots.insert(
             "announce".to_string(),
             BotConfig {
                 token: Some("bot-token".to_string()),
                 description: Some("announce bot".to_string()),
+                provider: Some("codex".to_string()),
+                agent: Some("agent-1".to_string()),
+                auth: DiscordBotAuthConfig {
+                    allowed_channel_ids: Some(vec![123456789012345678]),
+                    allowed_user_ids: Some(vec![343742347365974026]),
+                    allowed_tools: Some(vec!["Bash".to_string(), "WebFetch".to_string()]),
+                    allow_all_users: Some(false),
+                    allowed_bot_ids: Some(vec![1479017284805722200]),
+                },
             },
         );
         config.agents.push(AgentDef {
@@ -1108,10 +1196,51 @@ mod tests {
         assert_eq!(loaded.server.host, "127.0.0.42");
         assert_eq!(loaded.server.auth_token.as_deref(), Some("secret-token"));
         assert_eq!(loaded.discord.guild_id.as_deref(), Some("guild-123"));
+        assert_eq!(loaded.discord.owner_id, Some(343742347365974026));
         assert_eq!(loaded.discord.bots.len(), 1);
         assert_eq!(
             loaded.discord.bots["announce"].description.as_deref(),
             Some("announce bot")
+        );
+        assert_eq!(
+            loaded.discord.bots["announce"].provider.as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            loaded.discord.bots["announce"].agent.as_deref(),
+            Some("agent-1")
+        );
+        assert_eq!(
+            loaded.discord.bots["announce"]
+                .auth
+                .allowed_channel_ids
+                .as_deref(),
+            Some(&[123456789012345678][..])
+        );
+        assert_eq!(
+            loaded.discord.bots["announce"]
+                .auth
+                .allowed_user_ids
+                .as_deref(),
+            Some(&[343742347365974026][..])
+        );
+        assert_eq!(
+            loaded.discord.bots["announce"]
+                .auth
+                .allowed_tools
+                .as_deref(),
+            Some(&["Bash".to_string(), "WebFetch".to_string()][..])
+        );
+        assert_eq!(
+            loaded.discord.bots["announce"].auth.allow_all_users,
+            Some(false)
+        );
+        assert_eq!(
+            loaded.discord.bots["announce"]
+                .auth
+                .allowed_bot_ids
+                .as_deref(),
+            Some(&[1479017284805722200][..])
         );
         assert_eq!(loaded.agents.len(), 1);
         assert_eq!(loaded.agents[0].id, "agent-1");

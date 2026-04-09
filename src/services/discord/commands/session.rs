@@ -5,10 +5,10 @@ use poise::serenity_prelude as serenity;
 
 use super::super::formatting::send_long_message_ctx;
 use super::super::runtime_store::{self, workspace_root};
+use super::super::settings::save_last_session_runtime;
 use super::super::{
     Context, DiscordSession, Error, WorktreeInfo, auto_restore_session, check_auth,
-    create_git_worktree, detect_worktree_conflict, resolve_channel_category, save_bot_settings,
-    scan_skills,
+    create_git_worktree, detect_worktree_conflict, resolve_channel_category, scan_skills,
 };
 
 /// Autocomplete handler for remote profile names in /start
@@ -302,26 +302,18 @@ pub(in crate::services::discord) async fn cmd_start(
         };
         drop(data);
 
-        let mut settings = ctx.data().shared.settings.write().await;
-        settings
-            .last_sessions
-            .insert(ch_key.clone(), canonical_path.clone());
-        // Persist remote profile: store if active, remove if cleared
-        match &remote_override {
-            Some(Some(name)) => {
-                settings.last_remotes.insert(ch_key, name.clone());
-            }
-            Some(None) => {
-                settings.last_remotes.remove(&ch_key);
-            }
-            None => {
-                if let Some(name) = current_remote_for_settings {
-                    settings.last_remotes.insert(ch_key, name);
-                }
-            }
-        }
-        save_bot_settings(&ctx.data().token, &settings);
-        drop(settings);
+        let remote_for_runtime = match &remote_override {
+            Some(Some(name)) => Some(name.as_str()),
+            Some(None) => None,
+            None => current_remote_for_settings.as_deref(),
+        };
+        save_last_session_runtime(
+            ctx.data().shared.db.as_ref(),
+            &ctx.data().shared.token_hash,
+            ch_key.parse::<u64>().unwrap_or_default(),
+            &canonical_path,
+            remote_for_runtime,
+        );
 
         // Rescan skills with project path to pick up project-level commands
         let new_skills = scan_skills(&ctx.data().provider, Some(&effective_path));

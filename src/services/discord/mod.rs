@@ -69,8 +69,9 @@ use restart_report::flush_restart_reports;
 use router::{handle_event, handle_text_message};
 use runtime_store::worktrees_root;
 use settings::{
-    RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings, resolve_role_binding,
-    save_bot_settings, validate_bot_channel_routing_with_provider_channel,
+    RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings,
+    load_last_remote_profile, load_last_session_path, resolve_role_binding, save_bot_settings,
+    validate_bot_channel_routing_with_provider_channel,
 };
 #[cfg(unix)]
 use tmux::{
@@ -330,10 +331,6 @@ pub(super) struct DiscordBotSettings {
     /// Explicit Discord channel allowlist for this bot token.
     /// Empty means "no channel restriction".
     pub(super) allowed_channel_ids: Vec<u64>,
-    /// channel_id (string) → last working directory path
-    pub(super) last_sessions: std::collections::HashMap<String, String>,
-    /// channel_id (string) → last remote profile name
-    pub(super) last_remotes: std::collections::HashMap<String, String>,
     /// channel_id (string) → persisted model override
     pub(super) channel_model_overrides: std::collections::HashMap<String, String>,
     /// Discord user ID of the registered owner (imprinting auth)
@@ -356,8 +353,6 @@ impl Default for DiscordBotSettings {
                 .map(|s| s.to_string())
                 .collect(),
             allowed_channel_ids: Vec::new(),
-            last_sessions: std::collections::HashMap::new(),
-            last_remotes: std::collections::HashMap::new(),
             channel_model_overrides: std::collections::HashMap::new(),
             owner_user_id: None,
             allowed_user_ids: Vec::new(),
@@ -3540,14 +3535,13 @@ pub(super) async fn auto_restore_session(
         channel_id,
     );
 
-    // Read settings first to get last_sessions/last_remotes info
+    // Read settings first to get provider and runtime restore metadata.
     let (last_path, saved_remote, provider) = {
         let settings = shared.settings.read().await;
-        let channel_key = channel_id.get().to_string();
-        let yaml_path = settings.last_sessions.get(&channel_key).cloned();
-        let saved_remote = settings.last_remotes.get(&channel_key).cloned();
         let provider = settings.provider.clone();
         let configured_path = settings::resolve_workspace(channel_id, restore_ch_name.as_deref());
+        let saved_remote =
+            load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
 
         // Use the effective tmux channel name here so restart recovery keeps
         // looking up the same session key for thread sessions that intentionally
@@ -3572,6 +3566,8 @@ pub(super) async fn auto_restore_session(
                 })
             })
         });
+        let persisted_path =
+            load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get());
 
         if let (Some(configured), Some(restored)) = (configured_path.as_ref(), db_cwd.as_ref()) {
             if configured != restored {
@@ -3586,7 +3582,7 @@ pub(super) async fn auto_restore_session(
         let last_path = select_restored_session_path(
             configured_path,
             db_cwd,
-            yaml_path,
+            persisted_path,
             saved_remote.as_deref(),
         );
 
