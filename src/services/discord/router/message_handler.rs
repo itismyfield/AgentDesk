@@ -6,10 +6,6 @@ use crate::services::memory::{
 use crate::services::provider::{CancelToken, cancel_requested};
 use std::sync::Arc;
 
-const DISCORD_FORMATTING_REMINDER: &str = "<system-reminder>\n\
-     Discord formatting: minimize code blocks, keep messages concise.\n\
-     </system-reminder>";
-
 fn normalize_control_intent_text(text: &str) -> String {
     text.to_lowercase()
         .split_whitespace()
