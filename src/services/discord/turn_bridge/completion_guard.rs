@@ -30,21 +30,106 @@ pub(super) async fn fetch_dispatch_snapshot(
     })
 }
 
+fn normalize_review_decision_text(text: &str) -> String {
+    text.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_review_decision_meta_discussion(normalized: &str) -> bool {
+    [
+        "인식",
+        "안먹",
+        "안 먹",
+        "원인",
+        "버그",
+        "로그",
+        "테스트",
+        "디버그",
+        "debug",
+        "parser",
+        "파서",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term))
+}
+
+fn has_review_decision_negation(normalized: &str) -> bool {
+    [
+        "하지 마",
+        "하지마",
+        "하면 안",
+        "안 돼",
+        "안돼",
+        "안 됩니다",
+        "안됩니다",
+        "안됨",
+        "못 하게",
+        "못하게",
+        "막아",
+        "막아줘",
+        "보류",
+        "금지",
+        "불가",
+        "불가능",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term))
+}
+
+fn classify_review_decision_phrase(text: &str) -> Option<&'static str> {
+    let normalized = normalize_review_decision_text(text);
+    if normalized.is_empty()
+        || is_review_decision_meta_discussion(&normalized)
+        || has_review_decision_negation(&normalized)
+    {
+        return None;
+    }
+
+    if normalized.starts_with("accept") {
+        return Some("accept");
+    }
+    if normalized.starts_with("dispute") {
+        return Some("dispute");
+    }
+    if normalized.starts_with("dismiss") {
+        return Some("dismiss");
+    }
+
+    const DISMISS_PHRASES: &[&str] = &[
+        "리뷰 우회",
+        "리뷰 무시",
+        "리뷰 스킵",
+        "직접 머지",
+        "직접 merge",
+        "머지 가능하게",
+        "머지가능하게",
+        "merge 가능하게",
+        "merge가능하게",
+        "기여자가 직접 머지",
+        "contributor can merge",
+        "author can merge",
+        "direct merge",
+    ];
+    if DISMISS_PHRASES
+        .iter()
+        .any(|phrase| normalized.contains(phrase))
+    {
+        return Some("dismiss");
+    }
+
+    None
+}
+
 pub(in crate::services::discord) fn extract_review_decision(
     full_response: &str,
 ) -> Option<&'static str> {
     // Match explicit patterns like "DECISION: accept" or "결정: dismiss"
     let explicit =
-        regex::Regex::new(r"(?im)^\s*(?:decision|결정)\s*:\s*\**\s*(accept|dispute|dismiss)\b")
-            .ok()?;
+        regex::Regex::new(r"(?im)^\s*(?:decision|결정)\s*:\s*\**\s*([^\n\r]+?)\s*\**\s*$").ok()?;
     if let Some(caps) = explicit.captures(full_response) {
-        let decision = caps.get(1)?.as_str().to_ascii_lowercase();
-        return match decision.as_str() {
-            "accept" => Some("accept"),
-            "dispute" => Some("dispute"),
-            "dismiss" => Some("dismiss"),
-            _ => None,
-        };
+        return classify_review_decision_phrase(caps.get(1)?.as_str());
     }
     // Fallback: scan for standalone keywords in the last ~500 bytes (char-boundary safe)
     let tail = safe_suffix(full_response, 500);
@@ -64,7 +149,7 @@ pub(in crate::services::discord) fn extract_review_decision(
         }
         found = Some(candidate);
     }
-    found
+    found.or_else(|| classify_review_decision_phrase(tail))
 }
 
 async fn submit_review_decision_fallback(
