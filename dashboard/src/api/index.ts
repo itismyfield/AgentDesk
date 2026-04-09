@@ -40,6 +40,7 @@ export {
   getAgentDispatchedSessions,
   getAgentSkills,
   getSkillRanking,
+  getHealth,
   getDiscordBindings,
   getCronJobs,
   getMachineStatus,
@@ -120,6 +121,9 @@ export type {
   GitHubComment,
   ChatMessage,
   RuntimeConfigResponse,
+  HealthResponse,
+  HealthProviderStatus,
+  HealthDispatchOutboxStats,
   TimelineEvent,
   PipelineConfigResponse,
 } from "./client";

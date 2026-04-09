@@ -33,6 +33,7 @@ import {
   SkillTrendWidget,
   StreakWidget,
 } from "./dashboard/ExtraWidgets";
+import HealthWidget from "./dashboard/HealthWidget";
 import RateLimitWidget from "./dashboard/RateLimitWidget";
 import ReceiptWidget from "./dashboard/ReceiptWidget";
 import { DEPT_COLORS, useNow, type TFunction } from "./dashboard/model";
@@ -340,6 +341,7 @@ export default function DashboardPageView({
         </div>
 
         <div className="space-y-4 min-w-0">
+          <HealthWidget t={t} />
           <RateLimitWidget t={t} onOpenSettings={onOpenSettings} />
           <ReceiptWidget t={t} />
         </div>
