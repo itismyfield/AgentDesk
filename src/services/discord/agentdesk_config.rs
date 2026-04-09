@@ -285,6 +285,32 @@ pub(super) fn find_discord_bot_by_token(token: &str) -> Option<ResolvedDiscordBo
         .find(|bot| bot.token == token)
 }
 
+/// Collect bot names that are actually referenced by agent channel configs.
+/// Only these bots should be launched as full agent bots via `run_bot()`.
+/// Utility bots (e.g. announce, notify) that aren't mapped to any agent channel
+/// are excluded, preventing them from processing agent messages.
+pub(super) fn collect_agent_bot_names() -> HashSet<String> {
+    let Some(config) = load_agentdesk_config() else {
+        return HashSet::new();
+    };
+    let mut names = HashSet::new();
+    for agent in &config.agents {
+        if agent.channels.claude.is_some() {
+            names.insert("claude".to_string());
+        }
+        if agent.channels.codex.is_some() {
+            names.insert("codex".to_string());
+        }
+        if agent.channels.gemini.is_some() {
+            names.insert("gemini".to_string());
+        }
+        if agent.channels.qwen.is_some() {
+            names.insert("qwen".to_string());
+        }
+    }
+    names
+}
+
 pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {
     let config = load_agentdesk_config()?;
     Some(config.agents.iter().any(|agent| agent.id == role_id))

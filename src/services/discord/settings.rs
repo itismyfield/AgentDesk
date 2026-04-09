@@ -1241,8 +1241,13 @@ pub(super) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
 pub fn load_discord_bot_launch_configs() -> Vec<DiscordBotLaunchConfig> {
     let configured = agentdesk_config::load_discord_bot_configs();
     if !configured.is_empty() {
+        // Only launch bots that are mapped to at least one agent channel.
+        // Utility bots (announce, notify) that aren't referenced by any agent
+        // channel config are excluded to prevent them from processing agent messages.
+        let agent_bot_names = agentdesk_config::collect_agent_bot_names();
         let mut configs = configured
             .into_iter()
+            .filter(|bot| agent_bot_names.contains(&bot.name))
             .map(|bot| {
                 let legacy = load_legacy_bot_settings_entry(&bot.token);
                 DiscordBotLaunchConfig {
