@@ -120,7 +120,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
 
           <div className="space-y-2">
             <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "에이전트", en: "Agents" })}
+              {t({ ko: "전문 에이전트", en: "Specialist Agents" })}
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               {meeting.participant_names.map((name) => (
@@ -138,7 +138,7 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <MetaCard label={t({ ko: "상태", en: "Status" })} value={statusLabel} />
             <MetaCard label={t({ ko: "라운드", en: "Rounds" })} value={`${meeting.total_rounds}R`} />
-            <MetaCard label={t({ ko: "에이전트", en: "Agents" })} value={`${meeting.participant_names.length}`} />
+            <MetaCard label={t({ ko: "전문 에이전트", en: "Specialist Agents" })} value={`${meeting.participant_names.length}`} />
             <MetaCard
               label={t({ ko: "시작", en: "Started" })}
               value={new Date(meeting.started_at).toLocaleString(locale, {

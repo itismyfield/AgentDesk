@@ -503,7 +503,7 @@ pub(crate) async fn start_meeting_with_reviewer(
         .send_message(
             http,
             CreateMessage::new().content(format!(
-                "📋 **라운드 테이블 회의 시작**\n안건: {}\n진행자: {}\n리뷰어: {}\n{}\n에이전트 선정 중...",
+                "📋 **라운드 테이블 회의 시작**\n안건: {}\n진행자: {}\n리뷰어: {}\n{}\n전문 에이전트 선정 중...",
                 agenda,
                 primary_provider.display_name(),
                 reviewer_provider.display_name(),
@@ -553,7 +553,7 @@ pub(crate) async fn start_meeting_with_reviewer(
         .send_message(
             http,
             CreateMessage::new().content(format!(
-                "👥 **에이전트 확정** ({}명)\n{}",
+                "👥 **전문 에이전트 확정** ({}명)\n{}",
                 participants.len(),
                 participant_list.join("\n")
             )),
@@ -789,7 +789,7 @@ pub(super) async fn meeting_status(
                 .send_message(
                     http,
                     CreateMessage::new().content(format!(
-                        "📊 **회의 현황**\n안건: {}\n상태: {}\n진행자: {} / 리뷰어: {}\n라운드: {}/{}\n에이전트: {}명\n발언: {}개",
+                        "📊 **회의 현황**\n안건: {}\n상태: {}\n진행자: {} / 리뷰어: {}\n라운드: {}/{}\n전문 에이전트: {}명\n발언: {}개",
                         agenda,
                         status_str,
                         primary.display_name(),
@@ -869,7 +869,7 @@ fn build_meeting_expert_system_prompt(
     memory_context: &str,
 ) -> String {
     let mut sections = vec![format!(
-        "당신은 라운드 테이블 회의에 참여하는 에이전트 `{}` ({})이다.\n\
+        "당신은 라운드 테이블 회의에 참여하는 전문 에이전트 `{}` ({})이다.\n\
          - 당신은 회의 운영자(진행자/리뷰어)가 아니라 실제 참가자다.\n\
          - 회의 중에는 `meeting_readonly` 정책을 따른다.\n\
          - memory write, capture, 파일 수정, 외부 상태 변경, 자동 저장은 금지다.\n\
@@ -1093,20 +1093,20 @@ async fn select_participants(
     };
 
     let selection_prompt = format!(
-        r#"다음 안건에 대한 라운드 테이블 회의에 참여할 에이전트를 선정해줘.
+        r#"다음 안건에 대한 라운드 테이블 회의에 참여할 전문 에이전트를 선정해줘.
 
 안건: {}
 
-반드시 포함해야 하는 고정 에이전트:
+반드시 포함해야 하는 고정 전문 에이전트:
 {}
 
-사용 가능한 에이전트:
+사용 가능한 전문 에이전트:
 {}
 
 규칙:
-- 고정 에이전트는 모두 포함
+- 고정 전문 에이전트는 모두 포함
 - 최종 결과는 2~5명
-- 안건과 관련된 전문성을 가진 에이전트만 선택
+- 안건과 관련된 전문성을 가진 전문 에이전트만 선택
 - JSON 배열로만 응답 (다른 텍스트 없이)
 - 형식: ["role_id1", "role_id2", ...]"#,
         agenda,
@@ -1123,10 +1123,10 @@ async fn select_participants(
 
 안건: {agenda}
 
-반드시 포함해야 하는 고정 에이전트:
+반드시 포함해야 하는 고정 전문 에이전트:
 {fixed}
 
-사용 가능한 에이전트:
+사용 가능한 전문 에이전트:
 {agents}
 
 현재 선정안:
@@ -1134,7 +1134,7 @@ async fn select_participants(
 
 검토 규칙:
 - 빠진 역할, 중복 역할, 안건과의 부적합만 짚어라
-- 고정 에이전트 누락 여부를 먼저 확인하라
+- 고정 전문 에이전트 누락 여부를 먼저 확인하라
 - 4개 이하 bullet만 사용하라
 - 전체를 다시 쓰지 말고, 비판적으로만 검토하라
 - 도구나 명령 실행은 하지 마라"#,
@@ -1152,10 +1152,10 @@ async fn select_participants(
 
 안건: {agenda}
 
-반드시 포함해야 하는 고정 에이전트:
+반드시 포함해야 하는 고정 전문 에이전트:
 {fixed}
 
-사용 가능한 에이전트:
+사용 가능한 전문 에이전트:
 {agents}
 
 초기 선정안:
@@ -1166,7 +1166,7 @@ async fn select_participants(
 
 규칙:
 - 리뷰가 타당하면 반영하고, 타당하지 않으면 유지하라
-- 고정 에이전트는 모두 포함해야 한다
+- 고정 전문 에이전트는 모두 포함해야 한다
 - 최종 결과는 2~5명이어야 한다
 - JSON 배열로만 응답하라
 - 형식: ["role_id1", "role_id2", ...]"#,
@@ -1830,7 +1830,7 @@ fn build_meeting_markdown(m: &Meeting) -> String {
         .unwrap_or_else(|| "_회의록이 작성되지 않았습니다._".to_string());
 
     format!(
-        "---\ntags: [meeting, cookingheart]\ndate: {date}\nstatus: {status}\nparticipants: [{participants}]\nagenda: \"{agenda}\"\nmeeting_id: {id}\nprimary_provider: {primary_provider}\nreviewer_provider: {reviewer_provider}\n---\n\n# 회의록: {agenda}\n\n> **날짜**: {datetime}\n> **참여 에이전트**: {participants}\n> **라운드**: {rounds}/{max_rounds}\n> **상태**: {status}\n> **진행자**: {primary_provider}\n> **리뷰어**: {reviewer_provider}\n\n---\n\n## 요약\n\n{summary}\n\n---\n\n## 전체 발언 기록\n\n{transcript}\n",
+        "---\ntags: [meeting, cookingheart]\ndate: {date}\nstatus: {status}\nparticipants: [{participants}]\nagenda: \"{agenda}\"\nmeeting_id: {id}\nprimary_provider: {primary_provider}\nreviewer_provider: {reviewer_provider}\n---\n\n# 회의록: {agenda}\n\n> **날짜**: {datetime}\n> **참여 전문 에이전트**: {participants}\n> **라운드**: {rounds}/{max_rounds}\n> **상태**: {status}\n> **진행자**: {primary_provider}\n> **리뷰어**: {reviewer_provider}\n\n---\n\n## 요약\n\n{summary}\n\n---\n\n## 전체 발언 기록\n\n{transcript}\n",
         date = date_str,
         status = status_str,
         participants = participants_inline,

@@ -843,14 +843,14 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
             <label className={formLabelClassName} style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "고정 에이전트", en: "Pinned Agents" })}
+              {t({ ko: "고정 전문 에이전트", en: "Pinned Specialist Agents" })}
             </label>
             <div className="flex-1 space-y-2">
               <input
                 type="text"
                 value={expertQuery}
                 onChange={(e) => setExpertQuery(e.target.value)}
-                placeholder={t({ ko: "에이전트 검색 후 고정 선택", en: "Search agents and pin" })}
+                placeholder={t({ ko: "전문 에이전트 검색 후 고정 선택", en: "Search specialist agents and pin" })}
                 className="w-full px-3 py-1.5 rounded-lg text-sm"
                 style={inputStyle}
                 disabled={!selectedChannel || availableExperts.length === 0}
@@ -865,11 +865,11 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                   </div>
                 ) : availableExperts.length === 0 ? (
                   <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "이 채널에 등록된 에이전트가 없습니다", en: "No agents are registered for this channel" })}
+                    {t({ ko: "이 채널에 등록된 전문 에이전트가 없습니다", en: "No specialist agents are registered for this channel" })}
                   </div>
                 ) : filteredExperts.length === 0 ? (
                   <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "조건에 맞는 에이전트가 없습니다", en: "No agent matches the filter" })}
+                    {t({ ko: "조건에 맞는 전문 에이전트가 없습니다", en: "No specialist agent matches the filter" })}
                   </div>
                 ) : (
                   filteredExperts.map((expert) => {
@@ -1034,7 +1034,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               {/* Participants */}
               <div className="space-y-1.5">
                   <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
-                  {t({ ko: "에이전트", en: "Agents" })}
+                  {t({ ko: "전문 에이전트", en: "Specialist Agents" })}
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                 {m.participant_names.map((name) => (
