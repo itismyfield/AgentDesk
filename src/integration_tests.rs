@@ -3422,6 +3422,71 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn scenario_389_legacy_wait_ci_tracking_imports_into_canonical_lifecycle() {
+        let _gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:list",
+                contains: Some("--head wt/card-389"),
+                stdout: "[{\"number\":389,\"headRefName\":\"wt/card-389\",\"headRefOid\":\"eee5555\"}]",
+            },
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "eee5555",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-389"),
+                stdout: "[{\"databaseId\":839,\"status\":\"completed\",\"conclusion\":\"success\",\"headSha\":\"eee5555\",\"event\":\"pull_request\"}]",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-389", "review", "test/repo", 389, None);
+        seed_completed_review_dispatch(&db, "review-389-pass", "card-389", "pass");
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-389'",
+                [],
+            )
+            .unwrap();
+        }
+        set_kv(
+            &db,
+            "pr:card-389",
+            r#"{"number":389,"repo":"test/repo","branch":"wt/card-389"}"#,
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(pr_tracking_state(&db, "card-389").as_deref(), Some("merge"));
+        assert_eq!(pr_tracking_pr_number(&db, "card-389"), Some(389));
+        assert_eq!(
+            pr_tracking_branch(&db, "card-389").as_deref(),
+            Some("wt/card-389")
+        );
+        assert_eq!(get_card_status(&db, "card-389"), "done");
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-389'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocked_reason, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn scenario_208_on_tick_creates_codex_rework_and_dedups_review() {
         let _gh = install_mock_gh(&[
             MockGhReply {

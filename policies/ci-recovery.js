@@ -15,6 +15,8 @@
  *      - ambiguous/exhausted: escalate to pending_decision
  */
 
+var prTracking = agentdesk.prTracking;
+
 var CI_MAX_RETRIES = 3;
 var CI_LOG_MAX_LINES = 50;
 
@@ -47,145 +49,22 @@ var CODE_JOB_PATTERNS = [
   "scripts"
 ];
 
-function parseJsonObject(raw) {
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) || {};
-  } catch (e) {
-    return {};
-  }
-}
-
-function extractRepoFromIssueUrl(url) {
-  var match = String(url || "").match(/github\.com\/([^/]+\/[^/]+)/);
-  return match ? match[1] : null;
-}
-
 function getRepoForCard(cardId) {
-  var cards = agentdesk.db.query(
-    "SELECT github_issue_url FROM kanban_cards WHERE id = ?", [cardId]
-  );
-  if (cards.length === 0 || !cards[0].github_issue_url) return null;
-  // Extract "owner/repo" from "https://github.com/owner/repo/issues/123"
-  var match = cards[0].github_issue_url.match(/github\.com\/([^/]+\/[^/]+)/);
-  return match ? match[1] : null;
+  return prTracking.repoForCard(cardId);
 }
 
 function loadPrTracking(cardId) {
-  var rows = agentdesk.db.query(
-    "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error " +
-    "FROM pr_tracking WHERE card_id = ?",
-    [cardId]
-  );
-  return rows.length > 0 ? rows[0] : null;
+  return prTracking.load(cardId, { fallback_state: "wait-ci" });
 }
 
 function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
-  agentdesk.db.execute(
-    "INSERT INTO pr_tracking (card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, created_at, updated_at) " +
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now')) " +
-    "ON CONFLICT(card_id) DO UPDATE SET " +
-    "repo_id = COALESCE(excluded.repo_id, pr_tracking.repo_id), " +
-    "worktree_path = COALESCE(excluded.worktree_path, pr_tracking.worktree_path), " +
-    "branch = COALESCE(excluded.branch, pr_tracking.branch), " +
-    "pr_number = COALESCE(excluded.pr_number, pr_tracking.pr_number), " +
-    "head_sha = COALESCE(excluded.head_sha, pr_tracking.head_sha), " +
-    "state = COALESCE(excluded.state, pr_tracking.state), " +
-    "last_error = excluded.last_error, " +
-    "updated_at = datetime('now')",
-    [cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError]
-  );
-}
-
-function findOpenPrByTrackedBranch(repo, branch) {
-  if (!repo || !branch) return null;
-  var prJson = agentdesk.exec("gh", [
-    "pr", "list",
-    "--head", branch,
-    "--state", "open",
-    "--json", "number,headRefName,headRefOid",
-    "--limit", "1",
-    "--repo", repo
-  ]);
-  if (!prJson || prJson.indexOf("ERROR") === 0) return null;
-  try {
-    var prs = JSON.parse(prJson);
-    if (!prs || prs.length === 0) return null;
-    return {
-      number: prs[0].number,
-      branch: prs[0].headRefName,
-      sha: prs[0].headRefOid,
-      repo: repo
-    };
-  } catch (e) {
-    return null;
-  }
-}
-
-function importLegacyPrTracking(cardId) {
-  var cached = agentdesk.kv.get("pr:" + cardId);
-  if (!cached) return null;
-  try {
-    var info = JSON.parse(cached);
-    var rows = agentdesk.db.query(
-      "SELECT repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
-      [cardId]
-    );
-    var repoId = info.repo || (rows.length > 0 ? (rows[0].repo_id || extractRepoFromIssueUrl(rows[0].github_issue_url)) : null);
-    upsertPrTracking(
-      cardId,
-      repoId,
-      null,
-      info.branch || info.headRefName || null,
-      info.number || info.pr_number || null,
-      info.sha || info.head_sha || null,
-      "wait-ci",
-      null
-    );
-    return loadPrTracking(cardId);
-  } catch (e) {
-    return null;
-  }
+  return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
 }
 
 // ── Helper: Find canonical PR info for card via pr_tracking ──
 
 function findPrInfoForCard(cardId) {
-  var tracking = loadPrTracking(cardId) || importLegacyPrTracking(cardId);
-  if (!tracking) return null;
-
-  var repo = tracking.repo_id || getRepoForCard(cardId);
-  if (!repo) {
-    var repos = agentdesk.db.query("SELECT id FROM github_repos LIMIT 1", []);
-    if (repos.length > 0) repo = repos[0].id;
-  }
-  if (!repo) return null;
-
-  if ((!tracking.pr_number || !tracking.head_sha) && tracking.branch) {
-    var discovered = findOpenPrByTrackedBranch(repo, tracking.branch);
-    if (discovered) {
-      upsertPrTracking(
-        cardId,
-        repo,
-        tracking.worktree_path,
-        discovered.branch || tracking.branch,
-        discovered.number,
-        discovered.sha,
-        tracking.state || "wait-ci",
-        null
-      );
-      tracking = loadPrTracking(cardId) || tracking;
-    }
-  }
-
-  if (!tracking.pr_number || !tracking.branch) return null;
-  return {
-    number: tracking.pr_number,
-    branch: tracking.branch,
-    sha: tracking.head_sha,
-    repo: repo,
-    worktree_path: tracking.worktree_path
-  };
+  return prTracking.resolvePrInfoForCard(cardId, { fallback_state: "wait-ci" });
 }
 
 // ── Helper: Get current PR head SHA ──
@@ -561,6 +440,8 @@ var ciRecovery = {
   priority: 46,
 
   onTick1min: function() {
+    prTracking.importLegacyOnce("wait-ci");
+
     // Find canonical PR lifecycle entries that are waiting for CI.
     var cards = agentdesk.db.query(
       "SELECT p.card_id AS id, c.blocked_reason AS blocked_reason " +
