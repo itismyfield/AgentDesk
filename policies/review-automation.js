@@ -8,6 +8,8 @@
  *   onReviewVerdict     — 외부 API verdict 수신 처리
  */
 
+var prTracking = agentdesk.prTracking;
+
 function sendDiscordReview(target, content, bot) {
   agentdesk.message.queue(target, content, bot || "announce", "system");
 }
@@ -420,8 +422,7 @@ function firstPresent() {
 }
 
 function extractRepoFromIssueUrl(url) {
-  var match = String(url || "").match(/github\.com\/([^/]+\/[^/]+)/);
-  return match ? match[1] : null;
+  return prTracking.extractRepoFromIssueUrl(url);
 }
 
 function loadLatestCompletedWorkTarget(cardId) {
@@ -480,53 +481,15 @@ function loadLatestCompletedWorkTarget(cardId) {
 }
 
 function loadPrTracking(cardId) {
-  var rows = agentdesk.db.query(
-    "SELECT card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error " +
-    "FROM pr_tracking WHERE card_id = ?",
-    [cardId]
-  );
-  return rows.length > 0 ? rows[0] : null;
+  return prTracking.load(cardId);
 }
 
 function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
-  agentdesk.db.execute(
-    "INSERT INTO pr_tracking (card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, last_error, created_at, updated_at) " +
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now')) " +
-    "ON CONFLICT(card_id) DO UPDATE SET " +
-    "repo_id = COALESCE(excluded.repo_id, pr_tracking.repo_id), " +
-    "worktree_path = COALESCE(excluded.worktree_path, pr_tracking.worktree_path), " +
-    "branch = COALESCE(excluded.branch, pr_tracking.branch), " +
-    "pr_number = COALESCE(excluded.pr_number, pr_tracking.pr_number), " +
-    "head_sha = COALESCE(excluded.head_sha, pr_tracking.head_sha), " +
-    "state = COALESCE(excluded.state, pr_tracking.state), " +
-    "last_error = excluded.last_error, " +
-    "updated_at = datetime('now')",
-    [cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError]
-  );
+  return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
 }
 
 function findOpenPrByTrackedBranch(repoId, branch) {
-  if (!repoId || !branch) return null;
-  var prJson = agentdesk.exec("gh", [
-    "pr", "list",
-    "--head", branch,
-    "--state", "open",
-    "--json", "number,headRefName,headRefOid",
-    "--limit", "1",
-    "--repo", repoId
-  ]);
-  if (!prJson || prJson.indexOf("ERROR") === 0) return null;
-  try {
-    var prs = JSON.parse(prJson);
-    if (!prs || prs.length === 0) return null;
-    return {
-      number: prs[0].number,
-      branch: prs[0].headRefName,
-      sha: prs[0].headRefOid
-    };
-  } catch (e) {
-    return null;
-  }
+  return prTracking.findOpenPrByBranch(repoId, branch);
 }
 
 function processVerdict(cardId, verdict, result) {
