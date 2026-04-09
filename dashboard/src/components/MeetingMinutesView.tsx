@@ -22,6 +22,7 @@ import {
 import { FileText, Plus, Trash2, ChevronDown, ChevronUp, Settings2 } from "lucide-react";
 import MeetingDetailModal from "./MeetingDetailModal";
 import MeetingProviderFlow, {
+  formatProviderFlow,
   getProviderMeta,
   providerFlowCaption,
 } from "./MeetingProviderFlow";
@@ -622,7 +623,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
       style={{ paddingBottom: "max(7rem, calc(7rem + env(safe-area-inset-bottom)))" }}
     >
       {/* Header */}
-      <div className="mb-4 flex flex-col gap-3 sm:mb-6 sm:flex-row sm:items-center sm:justify-between">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <FileText className="text-amber-400" size={24} />
           <div className="min-w-0">
@@ -639,10 +640,10 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
         </div>
         <button
           onClick={() => setShowStartForm((v) => !v)}
-          className="inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-amber-500 sm:w-auto"
+          className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-amber-500"
         >
           <Plus size={14} />
-          {t({ ko: "회의", en: "Meeting" })}
+          {t({ ko: "새 회의", en: "New Meeting" })}
         </button>
       </div>
 
@@ -1047,7 +1048,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
         <div className="text-center py-16" style={{ color: "var(--th-text-muted)" }}>
           <FileText size={48} className="mx-auto mb-4 opacity-30" />
           <p>{t({ ko: "회의 기록이 없습니다", en: "No meeting records" })}</p>
-          <p className="text-sm mt-1">{t({ ko: "\"회의\" 버튼으로 라운드 테이블을 시작하세요", en: "Start a round table with the \"Meeting\" button" })}</p>
+          <p className="text-sm mt-1">{t({ ko: "\"새 회의\" 버튼으로 라운드 테이블을 시작하세요", en: "Start a round table with the \"New Meeting\" button" })}</p>
         </div>
       )}
 
@@ -1077,11 +1078,9 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                   <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                     {statusBadge(m.status)}
                     {(m.primary_provider || m.reviewer_provider) && (
-                      <MeetingProviderFlow
-                        primaryProvider={m.primary_provider}
-                        reviewerProvider={m.reviewer_provider}
-                        compact
-                      />
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd" }}>
+                        {formatProviderFlow(m.primary_provider, m.reviewer_provider)}
+                      </span>
                     )}
                     <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                       {new Date(m.started_at).toLocaleDateString(locale)}
@@ -1104,11 +1103,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
               </div>
 
               {/* Participants */}
-              <div className="space-y-1.5">
-                  <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
-                  {t({ ko: "전문 에이전트", en: "Specialist Agents" })}
-                </div>
-                <div className="flex items-center gap-1.5 flex-wrap">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 {m.participant_names.map((name) => (
                   <span
                     key={name}
@@ -1118,7 +1113,6 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
                     {name}
                   </span>
                 ))}
-                </div>
               </div>
 
               {(m.primary_provider || m.reviewer_provider) && (

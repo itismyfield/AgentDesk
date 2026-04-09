@@ -74,7 +74,7 @@ export function formatProviderFlow(
 ): string {
   const primary = getProviderMeta(primaryProvider).label;
   const reviewer = getProviderMeta(reviewerProvider).label;
-  return `${primary} / ${reviewer}`;
+  return `${primary} -> ${reviewer}`;
 }
 
 export function providerFlowCaption(
@@ -86,11 +86,11 @@ export function providerFlowCaption(
   const reviewer = getProviderMeta(reviewerProvider).label;
   if (t) {
     return t({
-      ko: `진행자: ${primary} · 리뷰어: ${reviewer}`,
-      en: `Facilitator: ${primary} · Reviewer: ${reviewer}`,
+      ko: `초안/최종: ${primary} · 비판 검토: ${reviewer}`,
+      en: `Draft/Final: ${primary} · Critique: ${reviewer}`,
     });
   }
-  return `Facilitator: ${primary} · Reviewer: ${reviewer}`;
+  return `Draft/Final: ${primary} · Critique: ${reviewer}`;
 }
 
 export default function MeetingProviderFlow({
@@ -115,19 +115,19 @@ export default function MeetingProviderFlow({
     }}>
       {!compact && (
         <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
-          {t({ ko: "운영자", en: "Operator Roles" })}
+          Provider Flow
         </span>
       )}
       <ProviderChip label={primary.label} bg={primary.bg} color={primary.color} border={primary.border} />
       <span className="text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
-        {t({ ko: "진행자", en: "Facilitator" })}
+        {t({ ko: "초안/최종", en: "draft/final" })}
       </span>
       <span className="text-xs font-semibold px-1" style={{ color: "var(--th-text-muted)" }}>
         →
       </span>
       <ProviderChip label={reviewer.label} bg={reviewer.bg} color={reviewer.color} border={reviewer.border} />
       <span className="text-xs font-semibold" style={{ color: "var(--th-text-muted)" }}>
-        {t({ ko: "리뷰어", en: "Reviewer" })}
+        {t({ ko: "비판 검토", en: "critique" })}
       </span>
     </div>
   );

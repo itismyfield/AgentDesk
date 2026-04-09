@@ -118,27 +118,10 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
             </div>
           )}
 
-          <div className="space-y-2">
-            <div className="text-xs font-semibold uppercase tracking-widest" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "전문 에이전트", en: "Specialist Agents" })}
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              {meeting.participant_names.map((name) => (
-                <span
-                  key={`participant:${name}`}
-                  className="text-xs px-2 py-0.5 rounded-full font-medium"
-                  style={{ background: "rgba(99,102,241,0.15)", color: "#818cf8" }}
-                >
-                  {name}
-                </span>
-              ))}
-            </div>
-          </div>
-
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <MetaCard label={t({ ko: "상태", en: "Status" })} value={statusLabel} />
             <MetaCard label={t({ ko: "라운드", en: "Rounds" })} value={`${meeting.total_rounds}R`} />
-            <MetaCard label={t({ ko: "전문 에이전트", en: "Specialist Agents" })} value={`${meeting.participant_names.length}`} />
+            <MetaCard label={t({ ko: "참여자", en: "Participants" })} value={`${meeting.participant_names.length}`} />
             <MetaCard
               label={t({ ko: "시작", en: "Started" })}
               value={new Date(meeting.started_at).toLocaleString(locale, {
