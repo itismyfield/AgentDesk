@@ -439,8 +439,25 @@ function processVerdict(cardId, verdict, result) {
           agentdesk.kanban.setStatus(cardId, inProgressState);
           agentdesk.log.info("[review] Card " + cardId + " queued for self-hosted stage: " + nextStage.stage_name);
         }
-        // #197: Counter-model stage (e2e-test) — dispatch to counter agent
+        // #197: Counter-model stage (e2e-test) — dispatch only if DoD contains e2e item
         else if (nextStage.provider === "counter") {
+          // Skip e2e if DoD doesn't mention it — review pass goes straight to done
+          var dodCheck = agentdesk.db.query(
+            "SELECT description FROM kanban_cards WHERE id = ?", [cardId]
+          );
+          var dodText = (dodCheck.length > 0 && dodCheck[0].description) ? dodCheck[0].description.toLowerCase() : "";
+          if (dodText.indexOf("e2e") === -1 && dodText.indexOf("end-to-end") === -1 && dodText.indexOf("end to end") === -1) {
+            agentdesk.log.info("[review] Skipping e2e-test for card " + cardId + " — DoD has no e2e item");
+            // Skip remaining pipeline stages and go to done
+            agentdesk.db.execute(
+              "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
+              [cardId]
+            );
+            var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
+            var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
+            agentdesk.kanban.setStatus(cardId, skipTerminal);
+            return;
+          }
           var counterCardInfo = agentdesk.db.query(
             "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?", [cardId]
           );
