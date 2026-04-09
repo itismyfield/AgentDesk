@@ -170,11 +170,13 @@ wait_for_http_service_health() {
   local require_dashboard="${5:-0}"
   local allow_reconcile_degraded="${6:-1}"
 
+  # shellcheck disable=SC2034 # Read by callers after the function returns.
   WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON=""
 
   local i health_json status reasons
   for i in $(seq 1 "$retries"); do
     health_json=$(curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health" 2>/dev/null || true)
+    # shellcheck disable=SC2034 # Read by callers after the function returns.
     WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON="$health_json"
 
     if health_json_is_ready "$health_json" "$require_dashboard" "$allow_reconcile_degraded"; then
