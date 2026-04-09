@@ -69,9 +69,7 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
     })
 }
 
-fn parse_meeting_agent_metadata(
-    value: &serde_json::Value,
-) -> Option<(String, String, Vec<String>)> {
+fn parse_meeting_agent_metadata(value: &serde_json::Value) -> Option<ParsedMeetingAgentMetadata> {
     let obj = value.as_object()?;
     let role_id = obj.get("role_id")?.as_str()?.to_string();
     let display_name = obj.get("display_name")?.as_str()?.to_string();
@@ -85,13 +83,74 @@ fn parse_meeting_agent_metadata(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Some((role_id, display_name, keywords))
+    let domain_summary = obj
+        .get("domain_summary")
+        .and_then(|v| v.as_str())
+        .map(|value| value.to_string());
+    let strengths = obj
+        .get("strengths")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let task_types = obj
+        .get("task_types")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let anti_signals = obj
+        .get("anti_signals")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let provider_hint = obj
+        .get("provider_hint")
+        .and_then(|v| v.as_str())
+        .map(|value| value.to_string());
+    let metadata_missing = domain_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+        && strengths.is_empty()
+        && task_types.is_empty()
+        && anti_signals.is_empty()
+        && provider_hint
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none();
+    Some(ParsedMeetingAgentMetadata {
+        role_id,
+        display_name,
+        keywords,
+        domain_summary,
+        strengths,
+        task_types,
+        anti_signals,
+        provider_hint,
+        metadata_missing,
+    })
 }
 
 fn collect_registry_entry(
     registry: &mut BTreeMap<String, MeetingAgentConfig>,
     value: &serde_json::Value,
-    metadata: &BTreeMap<String, (String, Vec<String>)>,
+    metadata: &BTreeMap<String, ParsedMeetingAgentMetadata>,
 ) {
     let Some(binding) = parse_role_binding(value) else {
         return;
@@ -103,20 +162,49 @@ fn collect_registry_entry(
         .and_then(|v| v.as_str())
         .map(expand_tilde);
 
-    let (display_name, keywords) = metadata
+    let metadata = metadata
         .get(&role_id)
         .cloned()
-        .unwrap_or_else(|| (role_id.clone(), Vec::new()));
+        .unwrap_or_else(|| ParsedMeetingAgentMetadata {
+            role_id: role_id.clone(),
+            display_name: role_id.clone(),
+            keywords: Vec::new(),
+            domain_summary: None,
+            strengths: Vec::new(),
+            task_types: Vec::new(),
+            anti_signals: Vec::new(),
+            provider_hint: None,
+            metadata_missing: true,
+        });
 
     registry
         .entry(role_id.clone())
         .or_insert(MeetingAgentConfig {
             role_id,
-            display_name,
-            keywords,
+            display_name: metadata.display_name,
+            keywords: metadata.keywords,
+            domain_summary: metadata.domain_summary,
+            strengths: metadata.strengths,
+            task_types: metadata.task_types,
+            anti_signals: metadata.anti_signals,
+            provider_hint: metadata.provider_hint,
+            metadata_missing: metadata.metadata_missing,
             binding,
             workspace,
         });
+}
+
+#[derive(Clone, Debug)]
+struct ParsedMeetingAgentMetadata {
+    role_id: String,
+    display_name: String,
+    keywords: Vec<String>,
+    domain_summary: Option<String>,
+    strengths: Vec<String>,
+    task_types: Vec<String>,
+    anti_signals: Vec<String>,
+    provider_hint: Option<String>,
+    metadata_missing: bool,
 }
 
 fn fallback_enabled(json: &serde_json::Value) -> bool {
@@ -307,8 +395,8 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
 
     let mut metadata = BTreeMap::new();
     for agent in &explicit_agents {
-        if let Some((role_id, display_name, keywords)) = parse_meeting_agent_metadata(agent) {
-            metadata.insert(role_id, (display_name, keywords));
+        if let Some(parsed) = parse_meeting_agent_metadata(agent) {
+            metadata.insert(parsed.role_id.clone(), parsed);
         }
     }
 
@@ -480,7 +568,12 @@ mod tests {
       {
         "role_id": "ch-pd",
         "display_name": "PD",
-        "keywords": ["제품"]
+        "keywords": ["제품"],
+        "domain_summary": "제품 방향과 사용자 가치 판단",
+        "strengths": ["우선순위", "문제 정의"],
+        "task_types": ["기획", "검토"],
+        "anti_signals": ["코드 세부 구현 단독 담당"],
+        "provider_hint": "gemini"
       }
     ]
   }
@@ -493,6 +586,24 @@ mod tests {
             assert_eq!(config.available_agents.len(), 1);
             assert_eq!(config.available_agents[0].role_id, "ch-pd");
             assert_eq!(config.available_agents[0].display_name, "PD");
+            assert_eq!(
+                config.available_agents[0].domain_summary.as_deref(),
+                Some("제품 방향과 사용자 가치 판단")
+            );
+            assert_eq!(
+                config.available_agents[0].strengths,
+                vec!["우선순위", "문제 정의"]
+            );
+            assert_eq!(config.available_agents[0].task_types, vec!["기획", "검토"]);
+            assert_eq!(
+                config.available_agents[0].anti_signals,
+                vec!["코드 세부 구현 단독 담당"]
+            );
+            assert_eq!(
+                config.available_agents[0].provider_hint.as_deref(),
+                Some("gemini")
+            );
+            assert!(!config.available_agents[0].metadata_missing);
             assert_eq!(
                 config.available_agents[0].binding.provider,
                 Some(ProviderKind::Codex)

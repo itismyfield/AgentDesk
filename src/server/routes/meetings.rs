@@ -139,6 +139,12 @@ pub async fn list_meeting_channels(
                 "role_id": agent.role_id,
                 "display_name": agent.display_name,
                 "keywords": agent.keywords,
+                "domain_summary": agent.domain_summary,
+                "strengths": agent.strengths,
+                "task_types": agent.task_types,
+                "anti_signals": agent.anti_signals,
+                "provider_hint": agent.provider_hint,
+                "metadata_missing": agent.metadata_missing,
             })).collect::<Vec<_>>(),
         }));
     }

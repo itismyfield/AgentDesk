@@ -39,6 +39,11 @@ pub(super) struct AgentDef {
     pub display_name: String,
     pub prompt_file: Option<String>,
     pub keywords: Option<Vec<String>>,
+    pub domain_summary: Option<String>,
+    pub strengths: Option<Vec<String>>,
+    pub task_types: Option<Vec<String>>,
+    pub anti_signals: Option<Vec<String>>,
+    pub provider_hint: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub workspace: Option<String>,
@@ -316,6 +321,38 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                 role_id: role_id.clone(),
                 display_name: def.display_name.clone(),
                 keywords: def.keywords.clone().unwrap_or_default(),
+                domain_summary: def.domain_summary.clone(),
+                strengths: def.strengths.clone().unwrap_or_default(),
+                task_types: def.task_types.clone().unwrap_or_default(),
+                anti_signals: def.anti_signals.clone().unwrap_or_default(),
+                provider_hint: def.provider_hint.clone(),
+                metadata_missing: def
+                    .domain_summary
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                    && def
+                        .strengths
+                        .as_ref()
+                        .map(|values| values.is_empty())
+                        .unwrap_or(true)
+                    && def
+                        .task_types
+                        .as_ref()
+                        .map(|values| values.is_empty())
+                        .unwrap_or(true)
+                    && def
+                        .anti_signals
+                        .as_ref()
+                        .map(|values| values.is_empty())
+                        .unwrap_or(true)
+                    && def
+                        .provider_hint
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .is_none(),
                 binding: RoleBinding {
                     role_id: role_id.clone(),
                     prompt_file,
@@ -708,6 +745,11 @@ agents:
   td:
     display_name: "TD"
     keywords: ["code"]
+    domain_summary: "코드 구조와 구현 위험을 본다"
+    strengths: ["아키텍처", "구현 검토"]
+    task_types: ["설계", "리뷰"]
+    anti_signals: ["사업성 판단 단독 담당"]
+    provider_hint: "codex"
   pd:
     display_name: "PD"
     keywords: ["product"]
@@ -739,6 +781,20 @@ channels:
                 "qad should NOT be in available_agents"
             );
             assert_eq!(config.available_agents.len(), 2);
+            let td = config
+                .available_agents
+                .iter()
+                .find(|agent| agent.role_id == "td")
+                .expect("td metadata");
+            assert_eq!(
+                td.domain_summary.as_deref(),
+                Some("코드 구조와 구현 위험을 본다")
+            );
+            assert_eq!(td.strengths, vec!["아키텍처", "구현 검토"]);
+            assert_eq!(td.task_types, vec!["설계", "리뷰"]);
+            assert_eq!(td.anti_signals, vec!["사업성 판단 단독 담당"]);
+            assert_eq!(td.provider_hint.as_deref(), Some("codex"));
+            assert!(!td.metadata_missing);
         });
     }
 

@@ -3,11 +3,11 @@ use std::fs;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
+use serde::{Deserialize, Serialize};
 use serenity::{
     AutoArchiveDuration, ChannelId, ChannelType, CreateMessage,
     builder::{CreateThread, EditThread},
 };
-use serde::Serialize;
 
 use crate::services::memory::{RecallRequest, build_memory_backend};
 use crate::services::provider::ProviderKind;
@@ -31,6 +31,12 @@ pub(crate) struct MeetingExpertOption {
     pub role_id: String,
     pub display_name: String,
     pub keywords: Vec<String>,
+    pub domain_summary: Option<String>,
+    pub strengths: Vec<String>,
+    pub task_types: Vec<String>,
+    pub anti_signals: Vec<String>,
+    pub provider_hint: Option<String>,
+    pub metadata_missing: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -132,8 +138,19 @@ pub(super) struct MeetingAgentConfig {
     pub role_id: String,
     pub display_name: String,
     pub keywords: Vec<String>,
+    pub domain_summary: Option<String>,
+    pub strengths: Vec<String>,
+    pub task_types: Vec<String>,
+    pub anti_signals: Vec<String>,
+    pub provider_hint: Option<String>,
+    pub metadata_missing: bool,
     pub binding: RoleBinding,
     pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MeetingSelectionResponse {
+    selected_role_ids: Vec<String>,
 }
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -208,6 +225,27 @@ fn parse_json_array_fragment(text: &str) -> Result<Vec<String>, String> {
     };
 
     serde_json::from_str(json_str).map_err(|e| format!("Failed to parse JSON array: {}", e))
+}
+
+fn parse_selected_role_ids_response(text: &str) -> Result<Vec<String>, String> {
+    if let Ok(role_ids) = parse_json_array_fragment(text) {
+        return Ok(role_ids);
+    }
+
+    let trimmed = text.trim();
+    let json_str = if let Some(start) = trimmed.find('{') {
+        if let Some(end) = trimmed.rfind('}') {
+            &trimmed[start..=end]
+        } else {
+            return Err("Invalid JSON object response".to_string());
+        }
+    } else {
+        return Err("No JSON object found".to_string());
+    };
+
+    serde_json::from_str::<MeetingSelectionResponse>(json_str)
+        .map(|parsed| parsed.selected_role_ids)
+        .map_err(|e| format!("Failed to parse meeting selection JSON: {}", e))
 }
 
 fn truncate_for_meeting(text: &str, max_chars: usize) -> String {
@@ -355,6 +393,12 @@ pub(crate) fn load_meeting_expert_options() -> Vec<MeetingExpertOption> {
                     role_id: agent.role_id,
                     display_name: agent.display_name,
                     keywords: agent.keywords,
+                    domain_summary: agent.domain_summary,
+                    strengths: agent.strengths,
+                    task_types: agent.task_types,
+                    anti_signals: agent.anti_signals,
+                    provider_hint: agent.provider_hint,
+                    metadata_missing: agent.metadata_missing,
                 })
                 .collect()
         })
@@ -526,16 +570,16 @@ pub(crate) async fn start_meeting_with_reviewer(
     )
     .await
     {
-            Ok(p) if !p.is_empty() => p,
-            Ok(_) => {
-                cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
-                return Err("참여자를 선정하지 못했어.".into());
-            }
-            Err(e) => {
-                cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
-                return Err(format!("참여자 선정 실패: {}", e).into());
-            }
-        };
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => {
+            cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+            return Err("참여자를 선정하지 못했어.".into());
+        }
+        Err(e) => {
+            cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+            return Err(format!("참여자 선정 실패: {}", e).into());
+        }
+    };
 
     // Check if cancelled or replaced during participant selection
     if active_meeting_state(shared, channel_id, &meeting_id).await != ActiveMeetingSlot::Active {
@@ -1002,6 +1046,46 @@ fn canonical_candidate_pool<'a>(
         .collect()
 }
 
+fn join_or_none(values: &[String]) -> String {
+    if values.is_empty() {
+        "없음".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn format_optional_or_none(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("없음")
+        .to_string()
+}
+
+fn build_selection_candidate_card(agent: &MeetingAgentConfig, fixed: bool) -> String {
+    let bound_provider = agent
+        .binding
+        .provider
+        .as_ref()
+        .map(ProviderKind::as_str)
+        .unwrap_or("unspecified");
+
+    format!(
+        "- role_id: {role_id}\n  display_name: {display_name}\n  fixed: {fixed}\n  bound_provider: {bound_provider}\n  provider_hint: {provider_hint}\n  metadata_missing: {metadata_missing}\n  keywords: {keywords}\n  domain_summary: {domain_summary}\n  strengths: {strengths}\n  task_types: {task_types}\n  anti_signals: {anti_signals}",
+        role_id = agent.role_id,
+        display_name = agent.display_name,
+        fixed = if fixed { "yes" } else { "no" },
+        bound_provider = bound_provider,
+        provider_hint = format_optional_or_none(agent.provider_hint.as_deref()),
+        metadata_missing = if agent.metadata_missing { "yes" } else { "no" },
+        keywords = join_or_none(&agent.keywords),
+        domain_summary = format_optional_or_none(agent.domain_summary.as_deref()),
+        strengths = join_or_none(&agent.strengths),
+        task_types = join_or_none(&agent.task_types),
+        anti_signals = join_or_none(&agent.anti_signals),
+    )
+}
+
 fn build_meeting_participants(
     candidate_pool: &[&MeetingAgentConfig],
     selected_role_ids: &[String],
@@ -1019,7 +1103,10 @@ fn build_meeting_participants(
     }
 
     for required_role_id in required_role_ids {
-        if !normalized_selected.iter().any(|role_id| role_id == required_role_id) {
+        if !normalized_selected
+            .iter()
+            .any(|role_id| role_id == required_role_id)
+        {
             return Err(format!(
                 "Fixed participant '{}' is missing from final selection",
                 required_role_id
@@ -1056,20 +1143,11 @@ async fn select_participants(
     let candidate_pool = canonical_candidate_pool(config, &primary_provider, &reviewer_provider);
     let fixed_role_ids = normalize_role_id_list(fixed_participant_role_ids);
 
-    let agents_desc: Vec<String> = candidate_pool
-        .iter()
-        .map(|a| {
-            format!(
-                "- {} ({}): keywords=[{}]",
-                a.role_id,
-                a.display_name,
-                a.keywords.join(", ")
-            )
-        })
-        .collect();
-
     for fixed_role_id in &fixed_role_ids {
-        if !candidate_pool.iter().any(|agent| agent.role_id == *fixed_role_id) {
+        if !candidate_pool
+            .iter()
+            .any(|agent| agent.role_id == *fixed_role_id)
+        {
             return Err(format!(
                 "Fixed participant '{}' is not available in candidate pool",
                 fixed_role_id
@@ -1078,7 +1156,7 @@ async fn select_participants(
     }
 
     let fixed_desc = if fixed_role_ids.is_empty() {
-        "- 없음".to_string()
+        "없음".to_string()
     } else {
         fixed_role_ids
             .iter()
@@ -1086,29 +1164,57 @@ async fn select_participants(
                 candidate_pool
                     .iter()
                     .find(|agent| agent.role_id == *role_id)
-                    .map(|agent| format!("- {} ({}): 고정", agent.role_id, agent.display_name))
+                    .map(|agent| format!("{} ({})", agent.role_id, agent.display_name))
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join(", ")
     };
+
+    let agents_desc: Vec<String> = candidate_pool
+        .iter()
+        .map(|agent| {
+            build_selection_candidate_card(
+                agent,
+                fixed_role_ids
+                    .iter()
+                    .any(|role_id| role_id == &agent.role_id),
+            )
+        })
+        .collect();
 
     let selection_prompt = format!(
         r#"다음 안건에 대한 라운드 테이블 회의에 참여할 전문 에이전트를 선정해줘.
 
 안건: {}
 
-반드시 포함해야 하는 고정 전문 에이전트:
+고정 전문 에이전트:
 {}
 
 사용 가능한 전문 에이전트:
 {}
 
-규칙:
+내부적으로 반드시 다음 순서로 판단하라:
+1. 안건을 한두 문장으로 해석한다.
+2. 이 안건을 다루는 데 필요한 전문성 축을 2~4개 도출한다.
+3. 각 후보를 전문성 축, strengths, task_types, anti_signals, provider_hint, metadata_missing 여부로 비교한다.
+4. 고정 전문 에이전트를 포함한 최종 조합을 고른다.
+
+선정 규칙:
 - 고정 전문 에이전트는 모두 포함
 - 최종 결과는 2~5명
-- 안건과 관련된 전문성을 가진 전문 에이전트만 선택
-- JSON 배열로만 응답 (다른 텍스트 없이)
-- 형식: ["role_id1", "role_id2", ...]"#,
+- 서로 다른 전문성 축을 균형 있게 커버하라
+- `metadata_missing=yes` 후보는 꼭 필요할 때만 포함하라
+- anti_signals와 안건이 강하게 충돌하는 후보는 제외하라
+- provider_hint는 보조 신호로만 쓰고, 실제 역할 적합성이 더 중요하다
+
+응답 형식:
+- JSON만 출력, 다른 텍스트 금지
+- 형식:
+  {{
+    "selected_role_ids": ["role_id1", "role_id2"],
+    "required_axes": ["축1", "축2"],
+    "selection_notes": ["짧은 메모 1", "짧은 메모 2"]
+  }}"#,
         agenda,
         fixed_desc,
         agents_desc.join("\n")
@@ -1116,7 +1222,7 @@ async fn select_participants(
 
     let initial_response =
         provider_exec::execute_simple(primary_provider.clone(), selection_prompt).await?;
-    let initial_selected = parse_json_array_fragment(&initial_response)?;
+    let initial_selected = parse_selected_role_ids_response(&initial_response)?;
 
     let review_prompt = format!(
         r#"당신은 회의 참가자 선정을 비판적으로 검토하는 리뷰어다.
@@ -1133,8 +1239,10 @@ async fn select_participants(
 {current}
 
 검토 규칙:
-- 빠진 역할, 중복 역할, 안건과의 부적합만 짚어라
+- 빠진 전문성 축, 과한 중복, 안건과의 부적합만 짚어라
 - 고정 전문 에이전트 누락 여부를 먼저 확인하라
+- metadata_missing 후보가 불필요하게 많이 포함됐는지 확인하라
+- anti_signals와 안건의 충돌이 있는지 확인하라
 - 4개 이하 bullet만 사용하라
 - 전체를 다시 쓰지 말고, 비판적으로만 검토하라
 - 도구나 명령 실행은 하지 마라"#,
@@ -1168,8 +1276,14 @@ async fn select_participants(
 - 리뷰가 타당하면 반영하고, 타당하지 않으면 유지하라
 - 고정 전문 에이전트는 모두 포함해야 한다
 - 최종 결과는 2~5명이어야 한다
-- JSON 배열로만 응답하라
-- 형식: ["role_id1", "role_id2", ...]"#,
+- 전문성 축 커버가 겹치기만 하지 않도록 균형을 맞춰라
+- JSON만 응답하라
+- 형식:
+  {{
+    "selected_role_ids": ["role_id1", "role_id2"],
+    "required_axes": ["축1", "축2"],
+    "selection_notes": ["짧은 메모 1", "짧은 메모 2"]
+  }}"#,
         agenda = agenda,
         fixed = fixed_desc,
         agents = agents_desc.join("\n"),
@@ -1179,7 +1293,7 @@ async fn select_participants(
 
     let final_response =
         provider_exec::execute_simple(primary_provider.clone(), finalize_prompt).await?;
-    let selected = parse_json_array_fragment(&final_response)?;
+    let selected = parse_selected_role_ids_response(&final_response)?;
     build_meeting_participants(&candidate_pool, &selected, &fixed_role_ids)
 }
 
@@ -1965,8 +2079,8 @@ mod tests {
         ActiveMeetingSlot, MAX_MEETING_PARTICIPANTS, MIN_MEETING_PARTICIPANTS, Meeting,
         MeetingAgentConfig, MeetingConfig, MeetingStatus, MeetingUtterance, ProviderKind,
         SummaryAgentConfig, build_meeting_participants, build_meeting_status_payload,
-        canonical_candidate_pool, effective_round_count, meeting_readonly_tools, meeting_slot_state,
-        parse_meeting_start_text,
+        canonical_candidate_pool, effective_round_count, meeting_readonly_tools,
+        meeting_slot_state, parse_meeting_start_text, parse_selected_role_ids_response,
     };
     use crate::services::discord::settings::RoleBinding;
     use serde_json::json;
@@ -2100,6 +2214,12 @@ mod tests {
             role_id: role_id.to_string(),
             display_name: role_id.to_uppercase(),
             keywords: Vec::new(),
+            domain_summary: None,
+            strengths: Vec::new(),
+            task_types: Vec::new(),
+            anti_signals: Vec::new(),
+            provider_hint: None,
+            metadata_missing: true,
             binding: RoleBinding {
                 role_id: role_id.to_string(),
                 prompt_file: String::new(),
@@ -2198,5 +2318,19 @@ mod tests {
 
         assert_eq!(participants.len(), MAX_MEETING_PARTICIPANTS);
         assert_eq!(role_ids, vec!["td", "pd", "uxd", "qad", "devops"]);
+    }
+
+    #[test]
+    fn test_parse_selected_role_ids_response_accepts_structured_json() {
+        let parsed = parse_selected_role_ids_response(
+            r#"{
+  "selected_role_ids": ["td", "pd"],
+  "required_axes": ["기획", "구현"],
+  "selection_notes": ["축 균형 유지"]
+}"#,
+        )
+        .expect("structured response should parse");
+
+        assert_eq!(parsed, vec!["td".to_string(), "pd".to_string()]);
     }
 }
