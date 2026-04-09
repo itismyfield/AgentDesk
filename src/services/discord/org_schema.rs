@@ -226,19 +226,19 @@ pub(super) fn resolve_workspace(
 
 pub(super) fn load_shared_prompt_path() -> Option<String> {
     let schema = load_org_schema()?;
-    // Explicit shared_prompt > auto-derived from prompts_root/_shared.md
+    // Explicit shared_prompt > auto-derived from prompts_root/agents/_shared.prompt.md
     schema
         .shared_prompt
         .as_deref()
         .map(expand_tilde)
         .or_else(|| {
             let root = expand_tilde(schema.prompts_root.as_deref()?);
-            let path = format!("{}/_shared.md", root);
-            if std::path::Path::new(&path).exists() {
-                Some(path)
-            } else {
-                None
+            let canonical = format!("{}/agents/_shared.prompt.md", root);
+            if std::path::Path::new(&canonical).exists() {
+                return Some(canonical);
             }
+            let legacy = format!("{}/_shared.md", root);
+            std::path::Path::new(&legacy).exists().then_some(legacy)
         })
 }
 
@@ -704,6 +704,40 @@ channels:
                     .contains("/prompts/agents/my-agent/IDENTITY.md"),
                 "Expected auto-derived prompt path, got: {}",
                 binding.prompt_file
+            );
+        });
+    }
+
+    #[test]
+    fn test_shared_prompt_auto_derive_prefers_canonical_agents_path() {
+        with_temp_root(|temp_home: &TempDir| {
+            let canonical = temp_home
+                .path()
+                .join(".adk")
+                .join("config")
+                .join("agents")
+                .join("_shared.prompt.md");
+            fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+            fs::write(&canonical, "# shared").unwrap();
+            let prompts_root = temp_home.path().join(".adk").join("config");
+            let yaml = format!(
+                r#"
+version: 1
+prompts_root: '{}'
+agents: {{}}
+"#,
+                prompts_root.display()
+            );
+            write_org_yaml(temp_home.path(), &yaml);
+
+            let shared = load_shared_prompt_path().expect("shared prompt path");
+            assert!(
+                std::path::Path::new(&shared).ends_with(
+                    std::path::Path::new("config")
+                        .join("agents")
+                        .join("_shared.prompt.md")
+                ),
+                "expected canonical shared prompt path, got: {shared}"
             );
         });
     }

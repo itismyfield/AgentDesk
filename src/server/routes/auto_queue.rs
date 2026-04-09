@@ -18,6 +18,7 @@ pub struct GenerateBody {
     pub agent_id: Option<String>,
     pub issue_numbers: Option<Vec<i64>>,
     pub mode: Option<String>, // "priority-sort" (default), "dependency-aware", "similarity-aware", or "pm-assisted"
+    pub unified_thread: Option<bool>,
     pub parallel: Option<bool>,
     pub max_concurrent_threads: Option<i64>,
     pub max_concurrent_per_agent: Option<i64>,
@@ -134,8 +135,6 @@ impl GenerateMode {
         parallel.unwrap_or(false)
     }
 }
-
-const DEFAULT_SLOT_POOL_SIZE: i64 = 3;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -276,8 +275,25 @@ pub(crate) fn ensure_tables(conn: &rusqlite::Connection) {
     }
 }
 
-fn ensure_agent_slot_rows(conn: &rusqlite::Connection, agent_id: &str) -> rusqlite::Result<()> {
-    for slot_index in 0..DEFAULT_SLOT_POOL_SIZE {
+fn run_slot_pool_size(conn: &rusqlite::Connection, run_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE(max_concurrent_threads, 1)
+         FROM auto_queue_runs
+         WHERE id = ?1",
+        [run_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(1)
+    .clamp(1, 10)
+}
+
+fn ensure_agent_slot_rows(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    agent_id: &str,
+) -> rusqlite::Result<()> {
+    let slot_pool_size = run_slot_pool_size(conn, run_id);
+    for slot_index in 0..slot_pool_size {
         conn.execute(
             "INSERT OR IGNORE INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
              VALUES (?1, ?2, '{}')",
@@ -398,7 +414,7 @@ fn allocate_slot_for_group_agent(
     thread_group: i64,
     agent_id: &str,
 ) -> Option<(i64, bool)> {
-    ensure_agent_slot_rows(conn, agent_id).ok()?;
+    ensure_agent_slot_rows(conn, run_id, agent_id).ok()?;
 
     let existing: Option<i64> = conn
         .query_row(
@@ -1433,9 +1449,16 @@ pub async fn generate(
         // Create pending run
         let run_id = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale) VALUES (?1, ?2, ?3, 'pending', 'pm-assisted', ?4)",
-            rusqlite::params![run_id, body.repo, body.agent_id, format!("PMD 분석 대기 중 — {}개 카드 제출", cards.len())],
-        ).ok();
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, unified_thread) VALUES (?1, ?2, ?3, 'pending', 'pm-assisted', ?4, ?5)",
+            rusqlite::params![
+                run_id,
+                body.repo,
+                body.agent_id,
+                format!("PMD 분석 대기 중 — {}개 카드 제출", cards.len()),
+                body.unified_thread.unwrap_or(false)
+            ],
+        )
+        .ok();
 
         // Collect card info for PMD request
         let mut card_summaries = Vec::new();
@@ -1694,9 +1717,19 @@ pub async fn generate(
     };
     let ai_model_str = ai_model.to_string();
     conn.execute(
-        "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, max_concurrent_threads, max_concurrent_per_agent, thread_group_count) \
-         VALUES (?1, ?2, ?3, 'generated', ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![run_id, body.repo, body.agent_id, ai_model_str, ai_rationale, max_concurrent, max_per_agent, thread_group_count],
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, max_concurrent_per_agent, thread_group_count) \
+         VALUES (?1, ?2, ?3, 'generated', ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            run_id,
+            body.repo,
+            body.agent_id,
+            ai_model_str,
+            ai_rationale,
+            body.unified_thread.unwrap_or(false),
+            max_concurrent,
+            max_per_agent,
+            thread_group_count
+        ],
     )
     .ok();
 

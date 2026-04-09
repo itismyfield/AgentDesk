@@ -154,7 +154,7 @@ pub async fn run(
 
     // Seed config defaults + store server port in kv_meta so policy JS can read them
     if let Ok(conn) = db.lock() {
-        routes::settings::seed_config_defaults(&conn);
+        routes::settings::seed_config_defaults(&conn, &config);
         // server_port is always overwritten (not INSERT OR IGNORE) to match current config
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_port', ?1)",
@@ -170,6 +170,7 @@ pub async fn run(
             routes::api_router(
                 db.clone(),
                 engine.clone(),
+                config.clone(),
                 broadcast_tx.clone(),
                 batch_buffer,
                 health_registry,

@@ -1936,6 +1936,7 @@ mod tests {
         let state = crate::server::routes::AppState {
             db: db.clone(),
             engine: engine.clone(),
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,

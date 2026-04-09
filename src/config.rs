@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -7,14 +8,28 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_prompt: Option<String>,
     #[serde(default)]
     pub agents: Vec<AgentDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting: Option<MeetingSettings>,
     #[serde(default)]
     pub github: GitHubConfig,
     #[serde(default)]
     pub policies: PoliciesConfig,
     #[serde(default)]
     pub data: DataConfig,
+    #[serde(default, skip_serializing_if = "KanbanConfig::is_empty")]
+    pub kanban: KanbanConfig,
+    #[serde(default, skip_serializing_if = "ReviewConfig::is_empty")]
+    pub review: ReviewConfig,
+    #[serde(default, skip_serializing_if = "RuntimeSettingsConfig::is_empty")]
+    pub runtime: RuntimeSettingsConfig,
+    #[serde(default, skip_serializing_if = "AutomationConfig::is_empty")]
+    pub automation: AutomationConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -51,12 +66,267 @@ pub struct AgentDef {
     pub name_ko: Option<String>,
     #[serde(default = "default_provider")]
     pub provider: String,
-    #[serde(default)]
-    pub channels: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "AgentChannels::is_empty")]
+    pub channels: AgentChannels,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
     #[serde(default)]
     pub department: Option<String>,
     #[serde(default)]
     pub avatar_emoji: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AgentChannels {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<AgentChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<AgentChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini: Option<AgentChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qwen: Option<AgentChannel>,
+}
+
+impl AgentChannels {
+    pub fn is_empty(&self) -> bool {
+        self.claude
+            .as_ref()
+            .and_then(AgentChannel::target)
+            .is_none()
+            && self.codex.as_ref().and_then(AgentChannel::target).is_none()
+            && self
+                .gemini
+                .as_ref()
+                .and_then(AgentChannel::target)
+                .is_none()
+            && self.qwen.as_ref().and_then(AgentChannel::target).is_none()
+    }
+
+    pub fn channel_for_provider(&self, provider: &str) -> Option<&AgentChannel> {
+        match provider.trim().to_ascii_lowercase().as_str() {
+            "claude" => self.claude.as_ref(),
+            "codex" => self.codex.as_ref(),
+            "gemini" => self.gemini.as_ref(),
+            "qwen" => self.qwen.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 4] {
+        [
+            ("claude", self.claude.as_ref()),
+            ("codex", self.codex.as_ref()),
+            ("gemini", self.gemini.as_ref()),
+            ("qwen", self.qwen.as_ref()),
+        ]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum AgentChannel {
+    Legacy(String),
+    Detailed(AgentChannelConfig),
+}
+
+impl From<String> for AgentChannel {
+    fn from(value: String) -> Self {
+        Self::Legacy(value)
+    }
+}
+
+impl From<&str> for AgentChannel {
+    fn from(value: &str) -> Self {
+        Self::Legacy(value.to_string())
+    }
+}
+
+impl AgentChannel {
+    pub fn target(&self) -> Option<String> {
+        match self {
+            Self::Legacy(raw) => normalized_channel_value(Some(raw.clone())),
+            Self::Detailed(config) => config.target(),
+        }
+    }
+
+    pub fn channel_id(&self) -> Option<String> {
+        match self {
+            Self::Legacy(raw) => normalized_channel_value(Some(raw.clone()))
+                .filter(|value| value.parse::<u64>().is_ok()),
+            Self::Detailed(config) => config.channel_id(),
+        }
+    }
+
+    pub fn channel_name(&self) -> Option<String> {
+        match self {
+            Self::Legacy(raw) => {
+                let value = normalized_channel_value(Some(raw.clone()))?;
+                (value.parse::<u64>().is_err()).then_some(value)
+            }
+            Self::Detailed(config) => config.channel_name(),
+        }
+    }
+
+    pub fn aliases(&self) -> Vec<String> {
+        match self {
+            Self::Legacy(raw) => normalized_channel_value(Some(raw.clone()))
+                .into_iter()
+                .filter(|value| value.parse::<u64>().is_err())
+                .collect(),
+            Self::Detailed(config) => config.all_names(),
+        }
+    }
+
+    pub fn prompt_file(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.prompt_file.clone()),
+        }
+    }
+
+    pub fn workspace(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.workspace.clone()),
+        }
+    }
+
+    pub fn provider(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.provider.clone()),
+        }
+    }
+
+    pub fn model(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.model.clone()),
+        }
+    }
+
+    pub fn reasoning_effort(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.reasoning_effort.clone()),
+        }
+    }
+
+    pub fn peer_agents(&self) -> Option<bool> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => config.peer_agents,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AgentChannelConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(
+        default,
+        alias = "channel_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_agents: Option<bool>,
+}
+
+impl AgentChannelConfig {
+    pub fn target(&self) -> Option<String> {
+        self.channel_id()
+            .or_else(|| self.channel_name())
+            .or_else(|| {
+                self.aliases
+                    .iter()
+                    .find_map(|alias| normalized_channel_value(Some(alias.clone())))
+            })
+    }
+
+    pub fn channel_id(&self) -> Option<String> {
+        normalized_channel_value(self.id.clone()).filter(|value| value.parse::<u64>().is_ok())
+    }
+
+    pub fn channel_name(&self) -> Option<String> {
+        normalized_channel_value(self.name.clone())
+    }
+
+    pub fn all_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Some(name) = self.channel_name() {
+            names.push(name);
+        }
+        for alias in &self.aliases {
+            if let Some(alias) = normalized_channel_value(Some(alias.clone())) {
+                if !names.contains(&alias) {
+                    names.push(alias);
+                }
+            }
+        }
+        names
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingSettings {
+    pub channel_name: String,
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_agent: Option<MeetingSummaryAgentDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_agents: Vec<MeetingAgentEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MeetingSummaryAgentDef {
+    Static(String),
+    Dynamic {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rules: Vec<MeetingSummaryRuleDef>,
+        default: String,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingSummaryRuleDef {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    pub agent: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MeetingAgentEntry {
+    RoleId(String),
+    Detailed(MeetingAgentDef),
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MeetingAgentDef {
+    pub role_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -81,6 +351,171 @@ pub struct DataConfig {
     pub dir: PathBuf,
     #[serde(default = "default_db_name")]
     pub db_name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KanbanConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadlock_manager_channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pm_decision_gate_enabled: Option<bool>,
+}
+
+impl KanbanConfig {
+    pub fn is_empty(&self) -> bool {
+        self.manager_channel_id.is_none()
+            && self.deadlock_manager_channel_id.is_none()
+            && self.pm_decision_gate_enabled.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReviewConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_model_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+}
+
+impl ReviewConfig {
+    pub fn is_empty(&self) -> bool {
+        self.enabled.is_none() && self.counter_model_enabled.is_none() && self.max_rounds.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RuntimeSettingsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_timeout_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_progress_stale_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact_percent: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact_percent_codex: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact_percent_claude: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrate_progress: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_poll_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_sync_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue_sync_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_rate_limit_poll_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_rate_limit_poll_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_triage_poll_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceo_warn_depth: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_reminder_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_warning_pct: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_danger_pct: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo_cache_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_stale_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reset_overrides_on_restart: bool,
+}
+
+impl RuntimeSettingsConfig {
+    pub fn is_empty(&self) -> bool {
+        self.requested_timeout_min.is_none()
+            && self.in_progress_stale_min.is_none()
+            && self.context_compact_percent.is_none()
+            && self.context_compact_percent_codex.is_none()
+            && self.context_compact_percent_claude.is_none()
+            && self.narrate_progress.is_none()
+            && self.dispatch_poll_sec.is_none()
+            && self.agent_sync_sec.is_none()
+            && self.github_issue_sync_sec.is_none()
+            && self.claude_rate_limit_poll_sec.is_none()
+            && self.codex_rate_limit_poll_sec.is_none()
+            && self.issue_triage_poll_sec.is_none()
+            && self.ceo_warn_depth.is_none()
+            && self.max_retries.is_none()
+            && self.review_reminder_min.is_none()
+            && self.rate_limit_warning_pct.is_none()
+            && self.rate_limit_danger_pct.is_none()
+            && self.github_repo_cache_sec.is_none()
+            && self.rate_limit_stale_sec.is_none()
+            && !self.reset_overrides_on_restart
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AutomationConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_authors: Option<String>,
+}
+
+impl AutomationConfig {
+    pub fn is_empty(&self) -> bool {
+        self.enabled.is_none() && self.strategy.is_none() && self.allowed_authors.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MemoryConfig {
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
+    #[serde(default)]
+    pub file: FileMemoryConfig,
+    #[serde(default)]
+    pub mcp: McpMemoryConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct FileMemoryConfig {
+    #[serde(default = "default_sak_path")]
+    pub sak_path: String,
+    #[serde(default = "default_sam_path")]
+    pub sam_path: String,
+    #[serde(default = "default_ltm_root")]
+    pub ltm_root: String,
+    #[serde(default = "default_auto_memory_root")]
+    pub auto_memory_root: String,
+}
+
+impl Default for FileMemoryConfig {
+    fn default() -> Self {
+        Self {
+            sak_path: default_sak_path(),
+            sam_path: default_sam_path(),
+            ltm_root: default_ltm_root(),
+            auto_memory_root: default_auto_memory_root(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct McpMemoryConfig {
+    pub endpoint: String,
+    pub access_key_env: String,
 }
 
 /// Compile-time defaults loaded from the project-root `defaults.json`.
@@ -112,6 +547,13 @@ fn default_host() -> String {
 fn default_provider() -> String {
     "claude".into()
 }
+
+fn normalized_channel_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+}
+
 fn default_sync_interval() -> u64 {
     10
 }
@@ -121,6 +563,9 @@ fn default_policies_dir() -> PathBuf {
 fn default_true() -> bool {
     true
 }
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 fn default_data_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -128,6 +573,21 @@ fn default_data_dir() -> PathBuf {
 }
 fn default_db_name() -> String {
     "agentdesk.sqlite".into()
+}
+fn default_memory_backend() -> String {
+    "auto".into()
+}
+fn default_sak_path() -> String {
+    "memories/shared-agent-knowledge/shared_knowledge.md".into()
+}
+fn default_sam_path() -> String {
+    "memories/shared-agent-memory".into()
+}
+fn default_ltm_root() -> String {
+    "memories/long-term".into()
+}
+fn default_auto_memory_root() -> String {
+    "~/.claude/projects/*{workspace}*/memory/".into()
 }
 
 impl Default for ServerConfig {
@@ -200,10 +660,17 @@ impl Default for Config {
         Self {
             server: ServerConfig::default(),
             discord: DiscordConfig::default(),
+            shared_prompt: None,
             agents: Vec::new(),
+            meeting: None,
             github: GitHubConfig::default(),
             policies: PoliciesConfig::default(),
             data: DataConfig::default(),
+            kanban: KanbanConfig::default(),
+            review: ReviewConfig::default(),
+            runtime: RuntimeSettingsConfig::default(),
+            automation: AutomationConfig::default(),
+            memory: None,
         }
     }
 }
@@ -257,6 +724,42 @@ fn resolve_graceful_config_path(
     home_dir: Option<std::path::PathBuf>,
 ) -> std::path::PathBuf {
     if let Some(path) = explicit {
+        if path.exists() {
+            return path;
+        }
+
+        let mut candidates = Vec::new();
+        if let Some(root) = runtime_root.as_ref() {
+            let canonical = crate::runtime_layout::config_file_path(root);
+            let legacy = crate::runtime_layout::legacy_config_file_path(root);
+            if path == legacy {
+                candidates.push(canonical);
+            } else if path == canonical {
+                candidates.push(legacy);
+            }
+        }
+
+        if path.file_name() == Some(OsStr::new("agentdesk.yaml")) {
+            if let Some(parent) = path.parent() {
+                if parent.file_name() == Some(OsStr::new("config")) {
+                    if let Some(root) = parent.parent() {
+                        let legacy = root.join("agentdesk.yaml");
+                        if legacy != path {
+                            candidates.push(legacy);
+                        }
+                    }
+                } else {
+                    let canonical = parent.join("config").join("agentdesk.yaml");
+                    if canonical != path {
+                        candidates.push(canonical);
+                    }
+                }
+            }
+        }
+
+        if let Some(candidate) = candidates.into_iter().find(|candidate| candidate.exists()) {
+            return candidate;
+        }
         return path;
     }
     if let Some(root) = runtime_root.as_ref() {
@@ -347,7 +850,9 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDef, BotConfig, Config, load_from_path, resolve_graceful_config_path, runtime_root,
+        AgentChannel, AgentChannels, AgentDef, AutomationConfig, BotConfig, Config,
+        FileMemoryConfig, KanbanConfig, McpMemoryConfig, MemoryConfig, ReviewConfig,
+        RuntimeSettingsConfig, load_from_path, resolve_graceful_config_path, runtime_root,
         save_to_path,
     };
     use std::path::PathBuf;
@@ -491,6 +996,28 @@ mod tests {
     }
 
     #[test]
+    fn resolve_graceful_config_path_follows_migrated_runtime_config_when_explicit_legacy_is_missing()
+     {
+        let root = make_temp_dir("explicit-legacy-migrated");
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config").join("agentdesk.yaml"),
+            "server:\n  port: 9301\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_graceful_config_path(
+            Some(root.join("agentdesk.yaml")),
+            Some(root.clone()),
+            None,
+            None,
+        );
+        assert_eq!(resolved, root.join("config").join("agentdesk.yaml"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn save_and_load_round_trip_preserves_config_fields() {
         let dir = make_temp_dir("roundtrip");
         let path = dir.join("nested").join("agentdesk.yaml");
@@ -512,12 +1039,65 @@ mod tests {
             name: "Agent One".to_string(),
             name_ko: Some("에이전트 원".to_string()),
             provider: "codex".to_string(),
-            channels: std::collections::HashMap::from([(
-                "claude".to_string(),
-                "123456789012345678".to_string(),
-            )]),
+            channels: AgentChannels {
+                claude: Some("123456789012345678".into()),
+                codex: None,
+                gemini: None,
+                qwen: None,
+            },
+            keywords: Vec::new(),
             department: Some("platform".to_string()),
             avatar_emoji: Some(":robot:".to_string()),
+        });
+        config.kanban = KanbanConfig {
+            manager_channel_id: Some("123456789012345678".to_string()),
+            deadlock_manager_channel_id: Some("223456789012345678".to_string()),
+            pm_decision_gate_enabled: Some(true),
+        };
+        config.review = ReviewConfig {
+            enabled: Some(true),
+            counter_model_enabled: Some(false),
+            max_rounds: Some(4),
+        };
+        config.runtime = RuntimeSettingsConfig {
+            requested_timeout_min: Some(55),
+            in_progress_stale_min: Some(180),
+            context_compact_percent: Some(70),
+            context_compact_percent_codex: Some(82),
+            context_compact_percent_claude: Some(74),
+            narrate_progress: Some(false),
+            dispatch_poll_sec: Some(45),
+            agent_sync_sec: Some(420),
+            github_issue_sync_sec: Some(1200),
+            claude_rate_limit_poll_sec: Some(90),
+            codex_rate_limit_poll_sec: Some(105),
+            issue_triage_poll_sec: Some(360),
+            ceo_warn_depth: Some(4),
+            max_retries: Some(5),
+            review_reminder_min: Some(25),
+            rate_limit_warning_pct: Some(78),
+            rate_limit_danger_pct: Some(93),
+            github_repo_cache_sec: Some(480),
+            rate_limit_stale_sec: Some(750),
+            reset_overrides_on_restart: true,
+        };
+        config.automation = AutomationConfig {
+            enabled: Some(true),
+            strategy: Some("rebase".to_string()),
+            allowed_authors: Some("itismyfield,octocat".to_string()),
+        };
+        config.memory = Some(MemoryConfig {
+            backend: "memento".to_string(),
+            file: FileMemoryConfig {
+                sak_path: "/tmp/shared.md".to_string(),
+                sam_path: "/tmp/sam".to_string(),
+                ltm_root: "/tmp/ltm".to_string(),
+                auto_memory_root: "/tmp/auto/{workspace}".to_string(),
+            },
+            mcp: McpMemoryConfig {
+                endpoint: "http://127.0.0.1:8765".to_string(),
+                access_key_env: "MEMENTO_API_KEY".to_string(),
+            },
         });
 
         save_to_path(&path, &config).unwrap();
@@ -541,8 +1121,69 @@ mod tests {
         assert_eq!(loaded.agents[0].department.as_deref(), Some("platform"));
         assert_eq!(loaded.agents[0].avatar_emoji.as_deref(), Some(":robot:"));
         assert_eq!(
-            loaded.agents[0].channels.get("claude").map(String::as_str),
+            loaded.kanban.manager_channel_id.as_deref(),
             Some("123456789012345678")
+        );
+        assert_eq!(
+            loaded.kanban.deadlock_manager_channel_id.as_deref(),
+            Some("223456789012345678")
+        );
+        assert_eq!(loaded.kanban.pm_decision_gate_enabled, Some(true));
+        assert_eq!(loaded.review.enabled, Some(true));
+        assert_eq!(loaded.review.counter_model_enabled, Some(false));
+        assert_eq!(loaded.review.max_rounds, Some(4));
+        assert_eq!(loaded.runtime.requested_timeout_min, Some(55));
+        assert_eq!(loaded.runtime.in_progress_stale_min, Some(180));
+        assert_eq!(loaded.runtime.context_compact_percent, Some(70));
+        assert_eq!(loaded.runtime.context_compact_percent_codex, Some(82));
+        assert_eq!(loaded.runtime.context_compact_percent_claude, Some(74));
+        assert_eq!(loaded.runtime.narrate_progress, Some(false));
+        assert_eq!(loaded.runtime.dispatch_poll_sec, Some(45));
+        assert_eq!(loaded.runtime.agent_sync_sec, Some(420));
+        assert_eq!(loaded.runtime.github_issue_sync_sec, Some(1200));
+        assert_eq!(loaded.runtime.claude_rate_limit_poll_sec, Some(90));
+        assert_eq!(loaded.runtime.codex_rate_limit_poll_sec, Some(105));
+        assert_eq!(loaded.runtime.issue_triage_poll_sec, Some(360));
+        assert_eq!(loaded.runtime.ceo_warn_depth, Some(4));
+        assert_eq!(loaded.runtime.max_retries, Some(5));
+        assert_eq!(loaded.runtime.review_reminder_min, Some(25));
+        assert_eq!(loaded.runtime.rate_limit_warning_pct, Some(78));
+        assert_eq!(loaded.runtime.rate_limit_danger_pct, Some(93));
+        assert_eq!(loaded.runtime.github_repo_cache_sec, Some(480));
+        assert_eq!(loaded.runtime.rate_limit_stale_sec, Some(750));
+        assert!(loaded.runtime.reset_overrides_on_restart);
+        assert_eq!(loaded.automation.enabled, Some(true));
+        assert_eq!(loaded.automation.strategy.as_deref(), Some("rebase"));
+        assert_eq!(
+            loaded.automation.allowed_authors.as_deref(),
+            Some("itismyfield,octocat")
+        );
+        assert_eq!(
+            loaded.agents[0]
+                .channels
+                .claude
+                .as_ref()
+                .and_then(AgentChannel::target)
+                .as_deref(),
+            Some("123456789012345678")
+        );
+        assert_eq!(
+            loaded.memory.as_ref().map(|memory| memory.backend.as_str()),
+            Some("memento")
+        );
+        assert_eq!(
+            loaded
+                .memory
+                .as_ref()
+                .map(|memory| memory.file.auto_memory_root.as_str()),
+            Some("/tmp/auto/{workspace}")
+        );
+        assert_eq!(
+            loaded
+                .memory
+                .as_ref()
+                .map(|memory| memory.mcp.access_key_env.as_str()),
+            Some("MEMENTO_API_KEY")
         );
 
         let _ = std::fs::remove_dir_all(dir);

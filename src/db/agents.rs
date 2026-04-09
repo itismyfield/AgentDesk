@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::config::AgentDef;
+use crate::config::{AgentChannel, AgentDef};
 use crate::db::Db;
 use crate::services::provider::ProviderKind;
 
@@ -157,8 +157,12 @@ pub fn sync_agents_from_config(db: &Db, agents: &[AgentDef]) -> Result<usize> {
     let mut count = 0;
 
     for agent in agents {
-        let discord_channel_cc = agent.channels.get("claude").cloned();
-        let discord_channel_cdx = agent.channels.get("codex").cloned();
+        let discord_channel_cc = agent
+            .channels
+            .claude
+            .as_ref()
+            .and_then(AgentChannel::target);
+        let discord_channel_cdx = agent.channels.codex.as_ref().and_then(AgentChannel::target);
         let discord_channel_id = discord_channel_cc.clone();
         let discord_channel_alt = discord_channel_cdx.clone();
 
@@ -200,7 +204,7 @@ pub fn sync_agents_from_config(db: &Db, agents: &[AgentDef]) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::config::AgentChannels;
 
     fn test_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -217,12 +221,13 @@ mod tests {
             name: "Alpha".into(),
             name_ko: Some("알파".into()),
             provider: "claude".into(),
-            channels: {
-                let mut m = HashMap::new();
-                m.insert("claude".into(), "111".into());
-                m.insert("codex".into(), "222".into());
-                m
+            channels: AgentChannels {
+                claude: Some("111".into()),
+                codex: Some("222".into()),
+                gemini: None,
+                qwen: None,
             },
+            keywords: Vec::new(),
             department: Some("eng".into()),
             avatar_emoji: Some("🤖".into()),
         }];
@@ -284,7 +289,8 @@ mod tests {
             name: "Alpha".into(),
             name_ko: None,
             provider: "claude".into(),
-            channels: HashMap::new(),
+            channels: AgentChannels::default(),
+            keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
         }];
@@ -295,11 +301,13 @@ mod tests {
             name: "Alpha-v2".into(),
             name_ko: Some("알파v2".into()),
             provider: "codex".into(),
-            channels: {
-                let mut m = HashMap::new();
-                m.insert("claude".into(), "333".into());
-                m
+            channels: AgentChannels {
+                claude: Some("333".into()),
+                codex: None,
+                gemini: None,
+                qwen: None,
             },
+            keywords: Vec::new(),
             department: Some("design".into()),
             avatar_emoji: Some("🎨".into()),
         }];

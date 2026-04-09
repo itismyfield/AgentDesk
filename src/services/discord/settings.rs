@@ -13,6 +13,7 @@ use crate::services::agent_protocol::DEFAULT_ALLOWED_TOOLS;
 use crate::services::provider::ProviderKind;
 
 use super::DiscordBotSettings;
+use super::agentdesk_config;
 use super::formatting::normalize_allowed_tools;
 use super::org_schema;
 use super::role_map::{
@@ -564,6 +565,9 @@ pub(super) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<RoleBinding> {
+    if let Some(binding) = agentdesk_config::resolve_role_binding(channel_id, channel_name) {
+        return Some(binding);
+    }
     if org_schema::org_schema_exists() {
         if let Some(binding) = org_schema::resolve_role_binding(channel_id, channel_name) {
             return Some(binding);
@@ -577,6 +581,9 @@ pub(super) fn resolve_workspace(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<String> {
+    if let Some(ws) = agentdesk_config::resolve_workspace(channel_id, channel_name) {
+        return Some(ws);
+    }
     if org_schema::org_schema_exists() {
         if let Some(ws) = org_schema::resolve_workspace(channel_id, channel_name) {
             return Some(ws);
@@ -737,12 +744,15 @@ pub(super) fn load_narrate_progress(db: Option<&crate::db::Db>) -> bool {
 /// Load the shared agent prompt (e.g. AGENTS.md) configured in org.yaml or role_map.json.
 /// Returns None if not configured or file not found.
 pub(super) fn load_shared_prompt() -> Option<String> {
-    let path_str = if org_schema::org_schema_exists() {
-        org_schema::load_shared_prompt_path()
-    } else {
-        None
-    }
-    .or_else(load_shared_prompt_path_from_role_map)?;
+    let path_str = agentdesk_config::load_shared_prompt_path()
+        .or_else(|| {
+            if org_schema::org_schema_exists() {
+                org_schema::load_shared_prompt_path()
+            } else {
+                None
+            }
+        })
+        .or_else(load_shared_prompt_path_from_role_map)?;
 
     let raw = fs::read_to_string(Path::new(&path_str)).ok()?;
     const MAX_CHARS: usize = 6_000;
@@ -775,6 +785,9 @@ pub(super) fn load_review_tuning_guidance() -> Option<String> {
 /// Unlike load_peer_agents() which reads meeting.available_agents in legacy mode,
 /// this checks the full agent/channel binding registry.
 pub(super) fn is_known_agent(role_id: &str) -> bool {
+    if let Some(known) = agentdesk_config::is_known_agent(role_id) {
+        return known;
+    }
     if org_schema::org_schema_exists() {
         if let Some(known) = org_schema::is_known_agent(role_id) {
             return known;
@@ -784,6 +797,10 @@ pub(super) fn is_known_agent(role_id: &str) -> bool {
 }
 
 pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
+    let peers = agentdesk_config::load_peer_agents();
+    if !peers.is_empty() {
+        return peers;
+    }
     if org_schema::org_schema_exists() {
         let peers = org_schema::load_peer_agents();
         if !peers.is_empty() {
@@ -1166,6 +1183,16 @@ mod tests {
         fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
     }
 
+    fn write_agentdesk_yaml(temp_home: &TempDir, contents: &str) {
+        let path = temp_home
+            .path()
+            .join(".adk")
+            .join("config")
+            .join("agentdesk.yaml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
     fn with_env_vars<F>(values: &[(&str, Option<&str>)], f: F)
     where
         F: FnOnce(),
@@ -1224,12 +1251,9 @@ mod tests {
     fn test_resolve_memory_settings_defaults_to_file_and_code_defaults() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto"
-                }),
+                "server:\n  port: 8791\nmemory:\n  backend: auto\n",
             );
 
             with_env_vars(&[("MEM0_API_KEY", None), ("MEM0_BASE_URL", None)], || {
@@ -1310,16 +1334,16 @@ mod tests {
     fn test_resolve_memory_settings_auto_detects_memento_then_mem0_then_file() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto",
-                    "mcp": {
-                        "endpoint": "http://127.0.0.1:8765",
-                        "access_key_env": "MEMENTO_TEST_KEY"
-                    }
-                }),
+                r#"server:
+  port: 8791
+memory:
+  backend: auto
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_TEST_KEY
+"#,
             );
 
             with_env_vars(
@@ -1364,16 +1388,16 @@ mod tests {
     fn test_resolve_memory_settings_explicit_backend_skips_auto_detection() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto",
-                    "mcp": {
-                        "endpoint": "http://127.0.0.1:8765",
-                        "access_key_env": "MEMENTO_TEST_KEY"
-                    }
-                }),
+                r#"server:
+  port: 8791
+memory:
+  backend: auto
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_TEST_KEY
+"#,
             );
 
             with_env_vars(
@@ -1418,16 +1442,16 @@ mod tests {
     fn test_resolve_memory_settings_accepts_local_alias_and_ignores_available_mcps() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto",
-                    "mcp": {
-                        "endpoint": "http://127.0.0.1:8765",
-                        "access_key_env": "MEMENTO_TEST_KEY"
-                    }
-                }),
+                r#"server:
+  port: 8791
+memory:
+  backend: auto
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_TEST_KEY
+"#,
             );
 
             with_env_vars(
@@ -1454,16 +1478,16 @@ mod tests {
     fn test_resolve_memory_settings_explicit_backend_falls_back_to_file_when_unavailable() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto",
-                    "mcp": {
-                        "endpoint": "http://127.0.0.1:8765",
-                        "access_key_env": "MEMENTO_TEST_KEY"
-                    }
-                }),
+                r#"server:
+  port: 8791
+memory:
+  backend: auto
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_TEST_KEY
+"#,
             );
 
             with_env_vars(
@@ -1540,6 +1564,36 @@ mod tests {
                     assert!(!prompt.contains("`remember` MCP tool"));
                     assert!(!prompt.contains("`search_memory` MCP tool"));
                     assert!(!prompt.contains("`add_memories` MCP tool"));
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_resolve_memory_settings_uses_legacy_json_fallback_when_yaml_memory_is_absent() {
+        crate::services::memory::reset_backend_health_for_tests();
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "memento",
+                    "mcp": {
+                        "endpoint": "http://127.0.0.1:8765",
+                        "access_key_env": "MEMENTO_TEST_KEY"
+                    }
+                }),
+            );
+
+            with_env_vars(
+                &[
+                    ("MEMENTO_TEST_KEY", Some("memento-key")),
+                    ("MEM0_API_KEY", None),
+                    ("MEM0_BASE_URL", None),
+                ],
+                || {
+                    let resolved = resolve_memory_settings(None, None);
+                    assert_eq!(resolved.backend, super::MemoryBackendKind::Memento);
                 },
             );
         });

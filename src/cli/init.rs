@@ -657,7 +657,6 @@ pub fn handle_init(reconfigure: bool) {
     println!("  [OK] {}", bs_path.display());
 
     // Create prompts
-    let prompts_root = config_dir.clone();
     let agents_root = crate::runtime_layout::managed_agents_root(&root);
     if let Err(e) = fs::create_dir_all(&agents_root) {
         eprintln!(
@@ -668,8 +667,14 @@ pub fn handle_init(reconfigure: bool) {
         return;
     }
 
-    let shared_path = prompts_root.join("_shared.md");
+    let shared_path = crate::runtime_layout::shared_prompt_path(&root);
     if !shared_path.exists() {
+        if let Some(parent) = shared_path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("Failed to create directory {}: {}", parent.display(), e);
+                return;
+            }
+        }
         if let Err(e) = fs::write(&shared_path, default_shared_prompt()) {
             eprintln!("Failed to write {}: {}", shared_path.display(), e);
             return;

@@ -10,19 +10,50 @@ discord:
       token: "YOUR_NOTIFY_BOT_TOKEN"
   guild_id: "YOUR_GUILD_ID"
 
+shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
+
 agents:
   - id: ch-td
     name: "TD"
     name_ko: "테크니컬 디렉터"
     provider: claude
     channels:
-      claude: "td-cc"
-      codex: "td-cdx"
+      claude:
+        id: "123456789012345678"
+        name: "td-cc"
+        workspace: "~/.adk/release/workspaces/ch-td"
+        prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
+      codex:
+        id: "223456789012345678"
+        name: "td-cdx"
+        workspace: "~/.adk/release/workspaces/ch-td"
+        prompt_file: "~/.adk/release/config/agents/ch-td/IDENTITY.md"
+    keywords:
+      - "아키텍처"
+      - "코드"
     department: engineering
+
+meeting:
+  channel_name: "round-table"
+  max_rounds: 3
+  summary_agent: "ch-td"
+  available_agents:
+    - "ch-td"
 
 github:
   repos:
     - "owner/repo"
+
+memory:
+  backend: auto
+  file:
+    sak_path: "memories/shared-agent-knowledge/shared_knowledge.md"
+    sam_path: "memories/shared-agent-memory"
+    ltm_root: "memories/long-term"
+    auto_memory_root: "~/.claude/projects/*{workspace}*/memory/"
+  mcp:
+    endpoint: "http://127.0.0.1:8765"
+    access_key_env: "MEMENTO_API_KEY"
 
 policies:
   dir: "./policies"
@@ -31,5 +62,42 @@ policies:
 data:
   dir: "~/.adk"
 
-# Kanban/timeout/review settings are now managed via the dashboard (kv_meta config)
-# and seeded with defaults on startup. See CONFIG_KEYS in settings.rs.
+kanban:
+  manager_channel_id: "123456789012345678"
+  deadlock_manager_channel_id: "223456789012345678"
+  pm_decision_gate_enabled: true
+
+review:
+  enabled: true
+  counter_model_enabled: true
+  max_rounds: 3
+
+runtime:
+  requested_timeout_min: 45
+  in_progress_stale_min: 120
+  context_compact_percent: 60
+  context_compact_percent_codex: 75
+  context_compact_percent_claude: 70
+  narrate_progress: true
+  dispatch_poll_sec: 30
+  agent_sync_sec: 300
+  github_issue_sync_sec: 900
+  claude_rate_limit_poll_sec: 120
+  codex_rate_limit_poll_sec: 120
+  issue_triage_poll_sec: 300
+  ceo_warn_depth: 3
+  max_retries: 3
+  review_reminder_min: 30
+  rate_limit_warning_pct: 80
+  rate_limit_danger_pct: 95
+  github_repo_cache_sec: 300
+  rate_limit_stale_sec: 600
+  reset_overrides_on_restart: false
+
+automation:
+  enabled: false
+  strategy: "squash"
+  allowed_authors: "itismyfield,octocat"
+
+# Dashboard edits still write runtime overrides into kv_meta.
+# On restart, YAML values above are treated as the canonical startup baseline.

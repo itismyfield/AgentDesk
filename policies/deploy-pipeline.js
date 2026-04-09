@@ -172,6 +172,19 @@ function advancePipelineStage(cardId) {
     agentdesk.log.info("[deploy-pipeline] Card " + cardId + " advancing to stage: " + stage.stage_name);
 
     if (stage.provider === "counter") {
+      // Skip e2e if DoD doesn't mention it
+      var dodText = (card[0].description || "").toLowerCase();
+      if (dodText.indexOf("e2e") === -1 && dodText.indexOf("end-to-end") === -1 && dodText.indexOf("end to end") === -1) {
+        agentdesk.log.info("[deploy-pipeline] Skipping e2e-test for card " + cardId + " — DoD has no e2e item");
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
+          [cardId]
+        );
+        var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
+        var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
+        agentdesk.kanban.setStatus(cardId, skipTerminal);
+        return;
+      }
       createE2eTestDispatch(cardId, card[0].assigned_agent_id);
     } else if (stage.provider === "self") {
       agentdesk.db.execute(

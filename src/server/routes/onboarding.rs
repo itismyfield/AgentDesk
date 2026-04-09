@@ -672,6 +672,125 @@ fn cleanup_legacy_yaml_discord_section(runtime_root: &Path) -> Result<(), String
     Ok(())
 }
 
+fn tilde_display_path(path: &Path) -> String {
+    dirs::home_dir()
+        .and_then(|home| {
+            path.strip_prefix(&home)
+                .ok()
+                .map(|relative| format!("~/{}", relative.display()))
+        })
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn agent_channel_slot_mut<'a>(
+    channels: &'a mut crate::config::AgentChannels,
+    provider: &str,
+) -> Option<&'a mut Option<crate::config::AgentChannel>> {
+    match provider {
+        "claude" => Some(&mut channels.claude),
+        "codex" => Some(&mut channels.codex),
+        "gemini" => Some(&mut channels.gemini),
+        "qwen" => Some(&mut channels.qwen),
+        _ => None,
+    }
+}
+
+fn channel_config_from_existing(
+    current: Option<crate::config::AgentChannel>,
+) -> crate::config::AgentChannelConfig {
+    match current {
+        Some(crate::config::AgentChannel::Detailed(config)) => config,
+        Some(crate::config::AgentChannel::Legacy(raw)) => {
+            let mut config = crate::config::AgentChannelConfig::default();
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                if trimmed.parse::<u64>().is_ok() {
+                    config.id = Some(trimmed.to_string());
+                } else {
+                    config.name = Some(trimmed.to_string());
+                }
+            }
+            config
+        }
+        None => crate::config::AgentChannelConfig::default(),
+    }
+}
+
+fn push_channel_alias(config: &mut crate::config::AgentChannelConfig, alias: String) {
+    let trimmed = alias.trim();
+    if trimmed.is_empty() || config.name.as_deref() == Some(trimmed) {
+        return;
+    }
+    if !config.aliases.iter().any(|existing| existing == trimmed) {
+        config.aliases.push(trimmed.to_string());
+        config.aliases.sort();
+        config.aliases.dedup();
+    }
+}
+
+fn write_agentdesk_channel_bindings(
+    runtime_root: &Path,
+    provider: &str,
+    resolved_channels: &[ResolvedChannelMapping],
+) -> Result<(), String> {
+    let config_path = crate::runtime_layout::config_file_path(runtime_root);
+    let mut config = if config_path.is_file() {
+        crate::config::load_from_path(&config_path)
+            .map_err(|e| format!("Failed to load config {}: {e}", config_path.display()))?
+    } else {
+        crate::config::Config::default()
+    };
+
+    for mapping in resolved_channels {
+        let workspace = tilde_display_path(&runtime_root.join("workspaces").join(&mapping.role_id));
+        let agent_index = if let Some(index) = config
+            .agents
+            .iter()
+            .position(|agent| agent.id == mapping.role_id)
+        {
+            index
+        } else {
+            config.agents.push(crate::config::AgentDef {
+                id: mapping.role_id.clone(),
+                name: mapping.role_id.clone(),
+                name_ko: None,
+                provider: provider.to_string(),
+                channels: crate::config::AgentChannels::default(),
+                keywords: Vec::new(),
+                department: None,
+                avatar_emoji: None,
+            });
+            config.agents.len() - 1
+        };
+
+        let agent = &mut config.agents[agent_index];
+        agent.provider = provider.to_string();
+
+        let Some(slot) = agent_channel_slot_mut(&mut agent.channels, provider) else {
+            return Err(format!(
+                "unsupported provider for onboarding yaml sync: {provider}"
+            ));
+        };
+
+        let mut channel = channel_config_from_existing(slot.clone());
+        if let Some(existing_name) = channel
+            .name
+            .clone()
+            .filter(|existing| existing != &mapping.channel_name)
+        {
+            push_channel_alias(&mut channel, existing_name);
+        }
+        channel.id = Some(mapping.channel_id.clone());
+        channel.name = Some(mapping.channel_name.clone());
+        channel.workspace = Some(workspace);
+        channel.provider = Some(provider.to_string());
+        *slot = Some(crate::config::AgentChannel::Detailed(channel));
+    }
+
+    crate::config::save_to_path(&config_path, &config)
+        .map_err(|e| format!("Failed to write config {}: {e}", config_path.display()))
+}
+
 /// POST /api/onboarding/complete
 /// Saves onboarding configuration and sets up agents.
 pub async fn complete(
@@ -879,19 +998,7 @@ pub async fn complete(
     let mut by_channel_name = serde_json::Map::new();
 
     for mapping in &resolved_channels {
-        let workspace_tilde = dirs::home_dir()
-            .and_then(|home| {
-                let ws = root.join("workspaces").join(&mapping.role_id);
-                ws.strip_prefix(&home)
-                    .ok()
-                    .map(|rel| format!("~/{}", rel.display()))
-            })
-            .unwrap_or_else(|| {
-                root.join("workspaces")
-                    .join(&mapping.role_id)
-                    .display()
-                    .to_string()
-            });
+        let workspace_tilde = tilde_display_path(&root.join("workspaces").join(&mapping.role_id));
         by_channel_id.insert(
             mapping.channel_id.clone(),
             json!({
@@ -920,6 +1027,13 @@ pub async fn complete(
     let role_map_path = crate::runtime_layout::role_map_path(&root);
     if let Ok(json_str) = serde_json::to_string_pretty(&role_map) {
         std::fs::write(&role_map_path, json_str).ok();
+    }
+
+    if let Err(error) = write_agentdesk_channel_bindings(&root, provider, &resolved_channels) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to write agentdesk.yaml: {error}")})),
+        );
     }
 
     // Mark onboarding complete

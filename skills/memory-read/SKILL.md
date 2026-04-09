@@ -17,24 +17,21 @@ description: 4계층 메모리에서 주제/키워드로 관련 지식을 검색
 - `--limit {N}` — 최대 결과 수 (기본: 5)
 
 ## 백엔드 설정
-`~/.adk/release/config/memory-backend.json`을 읽는다.
+우선 `~/.adk/release/config/agentdesk.yaml`의 `memory:` 섹션을 읽는다.
+`memory:` 섹션이 없으면 `~/.adk/release/config/memory-backend.json`을 legacy fallback으로 읽는다.
 
 예시:
-```json
-{
-  "version": 2,
-  "backend": "auto",
-  "file": {
-    "sak_path": "memories/shared-agent-knowledge/shared_knowledge.md",
-    "sam_path": "memories/shared-agent-memory",
-    "ltm_root": "memories/long-term",
-    "auto_memory_root": "~/.claude/projects/*{workspace}*/memory/"
-  },
-  "mcp": {
-    "endpoint": "http://127.0.0.1:8765",
-    "access_key_env": "MEMENTO_API_KEY"
-  }
-}
+```yaml
+memory:
+  backend: auto
+  file:
+    sak_path: "memories/shared-agent-knowledge/shared_knowledge.md"
+    sam_path: "memories/shared-agent-memory"
+    ltm_root: "memories/long-term"
+    auto_memory_root: "~/.claude/projects/*{workspace}*/memory/"
+  mcp:
+    endpoint: "http://127.0.0.1:8765"
+    access_key_env: "MEMENTO_API_KEY"
 ```
 
 규칙:
@@ -46,7 +43,7 @@ description: 4계층 메모리에서 주제/키워드로 관련 지식을 검색
 ## 실행 전략
 
 ### 1. 백엔드 결정
-1. `memory-backend.json`을 읽는다.
+1. `agentdesk.yaml`의 `memory:`를 읽고, 없으면 `memory-backend.json` fallback을 읽는다.
 2. `backend=auto`면 `memento -> mem0 -> file` 순서로 사용 가능 여부를 판단한다.
 3. `backend`가 명시돼 있으면 그대로 사용한다.
 

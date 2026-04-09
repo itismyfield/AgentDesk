@@ -1044,16 +1044,10 @@ mod tests {
         let config_dir = temp.path().join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
-            config_dir.join("memory-backend.json"),
-            serde_json::to_string_pretty(&json!({
-                "version": 2,
-                "backend": "memento",
-                "mcp": {
-                    "endpoint": base_url,
-                    "access_key_env": "MEMENTO_TEST_KEY"
-                }
-            }))
-            .unwrap(),
+            config_dir.join("agentdesk.yaml"),
+            format!(
+                "server:\n  port: 8791\nmemory:\n  backend: memento\n  mcp:\n    endpoint: {base_url}\n    access_key_env: MEMENTO_TEST_KEY\n"
+            ),
         )
         .unwrap();
         unsafe {

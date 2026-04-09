@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, LazyLock};
 
 use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
@@ -11,12 +11,270 @@ use crate::services::tmux_diagnostics::{
     tmux_session_exists, tmux_session_has_live_pane,
 };
 
-use super::formatting::{format_tool_input, normalize_empty_lines, send_long_message_raw};
+use super::formatting::{
+    format_tool_input, normalize_empty_lines, send_long_message_raw, truncate_str,
+};
 use super::settings::{
     channel_supports_provider, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
 use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};
+
+const PROVIDER_OVERLOAD_MAX_RETRIES: u8 = 3;
+
+static PROVIDER_OVERLOAD_RETRY_STATE: LazyLock<dashmap::DashMap<u64, ProviderOverloadRetryState>> =
+    LazyLock::new(dashmap::DashMap::new);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderOverloadRetryState {
+    fingerprint: String,
+    attempts: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProviderOverloadDecision {
+    Retry {
+        attempt: u8,
+        delay: std::time::Duration,
+        fingerprint: String,
+    },
+    Exhausted,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct WatcherLineOutcome {
+    pub found_result: bool,
+    pub is_prompt_too_long: bool,
+    pub is_auth_error: bool,
+    pub is_provider_overloaded: bool,
+    pub provider_overload_message: Option<String>,
+    pub result_tokens: Option<u64>,
+    pub stale_resume_detected: bool,
+}
+
+fn is_prompt_too_long_message(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("prompt is too long")
+        || lower.contains("prompt too long")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("conversation too long")
+        || lower.contains("context window")
+}
+
+fn is_auth_error_message(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("not logged in")
+        || lower.contains("authentication error")
+        || lower.contains("unauthorized")
+        || lower.contains("please run /login")
+        || lower.contains("oauth")
+        || lower.contains("token expired")
+        || lower.contains("invalid api key")
+        || (lower.contains("api key")
+            && (lower.contains("missing")
+                || lower.contains("invalid")
+                || lower.contains("expired")))
+}
+
+fn detect_provider_overload_message(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_lowercase();
+    let looks_overloaded = lower.contains("selected model is at capacity")
+        || lower.contains("model is at capacity")
+        || (lower.contains("at capacity") && lower.contains("model"))
+        || lower.contains("try a different model")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("provider overloaded")
+        || lower.contains("server overloaded")
+        || lower.contains("service overloaded")
+        || lower.contains("overloaded")
+        || lower.contains("please try again later");
+
+    if looks_overloaded {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_result_error_text(value: &serde_json::Value) -> String {
+    let errors = value
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::trim))
+                .filter(|item| !item.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+
+    if !errors.trim().is_empty() {
+        errors
+    } else {
+        value
+            .get("result")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    }
+}
+
+fn normalized_retry_payload_text(user_text: &str) -> &str {
+    let trimmed = user_text.trim();
+    if let Some((header, body)) = trimmed.split_once("\n\n") {
+        if header.contains("이전 대화 복원") || header.contains("자동 재시도") {
+            return body.trim();
+        }
+    }
+    trimmed
+}
+
+fn provider_overload_fingerprint(user_text: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    normalized_retry_payload_text(user_text).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn provider_overload_retry_delay(attempt: u8) -> std::time::Duration {
+    let shift = u32::from(attempt.saturating_sub(1));
+    std::time::Duration::from_secs(120 * (1u64 << shift))
+}
+
+fn clear_provider_overload_retry_state(channel_id: ChannelId) {
+    PROVIDER_OVERLOAD_RETRY_STATE.remove(&channel_id.get());
+}
+
+fn record_provider_overload_retry(
+    channel_id: ChannelId,
+    user_text: &str,
+) -> ProviderOverloadDecision {
+    let fingerprint = provider_overload_fingerprint(user_text);
+    let next_attempt = PROVIDER_OVERLOAD_RETRY_STATE
+        .get(&channel_id.get())
+        .and_then(|state| {
+            if state.fingerprint == fingerprint {
+                Some(state.attempts.saturating_add(1))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(1);
+
+    if next_attempt > PROVIDER_OVERLOAD_MAX_RETRIES {
+        clear_provider_overload_retry_state(channel_id);
+        ProviderOverloadDecision::Exhausted
+    } else {
+        PROVIDER_OVERLOAD_RETRY_STATE.insert(
+            channel_id.get(),
+            ProviderOverloadRetryState {
+                fingerprint: fingerprint.clone(),
+                attempts: next_attempt,
+            },
+        );
+        ProviderOverloadDecision::Retry {
+            attempt: next_attempt,
+            delay: provider_overload_retry_delay(next_attempt),
+            fingerprint,
+        }
+    }
+}
+
+fn schedule_provider_overload_retry(
+    shared: Arc<SharedData>,
+    http: Arc<serenity::Http>,
+    channel_id: ChannelId,
+    retry_text: String,
+    attempt: u8,
+    delay: std::time::Duration,
+    fingerprint: String,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+
+        if shared.shutting_down.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let should_send = PROVIDER_OVERLOAD_RETRY_STATE
+            .get(&channel_id.get())
+            .map(|state| state.fingerprint == fingerprint && state.attempts == attempt)
+            .unwrap_or(false);
+        if !should_send {
+            return;
+        }
+
+        if super::mailbox_has_active_turn(&shared, channel_id).await {
+            clear_provider_overload_retry_state(channel_id);
+            return;
+        }
+
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!(
+            "  [{ts}] ↻ watcher overload auto-retry: channel {} attempt {}/{} after {}s",
+            channel_id.get(),
+            attempt,
+            PROVIDER_OVERLOAD_MAX_RETRIES,
+            delay.as_secs()
+        );
+        super::turn_bridge::auto_retry_with_history(
+            &http,
+            channel_id,
+            &retry_text,
+            shared.api_port,
+        )
+        .await;
+    });
+}
+
+async fn clear_provider_session_for_retry(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    fallback_session_id: Option<&str>,
+) {
+    let stale_sid = {
+        let mut data = shared.core.lock().await;
+        let old = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|session| session.session_id.clone())
+            .or_else(|| fallback_session_id.map(ToString::to_string));
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+        }
+        old
+    };
+
+    let session_key = format!(
+        "{}:{}",
+        crate::services::platform::hostname_short(),
+        tmux_session_name
+    );
+    super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
+
+    if let Some(sid) = stale_sid {
+        let _ = reqwest::Client::new()
+            .post(crate::config::local_api_url(
+                shared.api_port,
+                "/api/dispatched-sessions/clear-stale-session-id",
+            ))
+            .json(&serde_json::json!({ "session_id": sid }))
+            .send()
+            .await;
+    }
+}
 
 /// #226: Atomically claim a channel for watcher creation using DashMap::entry().
 /// Returns true if the claim succeeded (caller should spawn the watcher).
@@ -307,6 +565,9 @@ pub(super) async fn tmux_output_watcher(
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!("  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset}");
 
+    let watcher_provider = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
+        .map(|(provider, _)| provider)
+        .unwrap_or(crate::services::provider::ProviderKind::Claude);
     let mut current_offset = initial_offset;
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
@@ -462,18 +723,19 @@ pub(super) async fn tmux_output_watcher(
         let mut last_edit_text = String::new();
 
         // Process any complete lines we already have
-        let (
-            mut found_result,
-            mut is_prompt_too_long,
-            mut is_auth_error,
-            mut result_tokens,
-            mut stale_resume_detected,
-        ) = process_watcher_lines(
+        let initial_outcome = process_watcher_lines(
             &mut all_data,
             &mut state,
             &mut full_response,
             &mut tool_state,
         );
+        let mut found_result = initial_outcome.found_result;
+        let mut is_prompt_too_long = initial_outcome.is_prompt_too_long;
+        let mut is_auth_error = initial_outcome.is_auth_error;
+        let mut is_provider_overloaded = initial_outcome.is_provider_overloaded;
+        let mut provider_overload_message = initial_outcome.provider_overload_message;
+        let mut result_tokens = initial_outcome.result_tokens;
+        let mut stale_resume_detected = initial_outcome.stale_resume_detected;
 
         // Keep reading until result or timeout
         // Check if a Discord turn claimed this data since our epoch snapshot
@@ -520,18 +782,24 @@ pub(super) async fn tmux_output_watcher(
                     Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
                         all_data.push_str(&String::from_utf8_lossy(&chunk));
-                        let (fr, ptl, ae, rt, sr) = process_watcher_lines(
+                        let outcome = process_watcher_lines(
                             &mut all_data,
                             &mut state,
                             &mut full_response,
                             &mut tool_state,
                         );
-                        found_result = fr;
-                        is_prompt_too_long = is_prompt_too_long || ptl;
-                        is_auth_error = is_auth_error || ae;
-                        stale_resume_detected = stale_resume_detected || sr;
-                        if rt.is_some() {
-                            result_tokens = rt;
+                        found_result = found_result || outcome.found_result;
+                        is_prompt_too_long = is_prompt_too_long || outcome.is_prompt_too_long;
+                        is_auth_error = is_auth_error || outcome.is_auth_error;
+                        is_provider_overloaded =
+                            is_provider_overloaded || outcome.is_provider_overloaded;
+                        stale_resume_detected =
+                            stale_resume_detected || outcome.stale_resume_detected;
+                        if provider_overload_message.is_none() {
+                            provider_overload_message = outcome.provider_overload_message;
+                        }
+                        if outcome.result_tokens.is_some() {
+                            result_tokens = outcome.result_tokens;
                         }
                     }
                     _ => {
@@ -609,6 +877,7 @@ pub(super) async fn tmux_output_watcher(
 
         // Handle prompt-too-long: kill session so next message creates a fresh one
         if is_prompt_too_long {
+            clear_provider_overload_retry_state(channel_id);
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "  [{ts}] 👁 Prompt too long detected in watcher for {tmux_session_name}, killing session"
@@ -651,6 +920,7 @@ pub(super) async fn tmux_output_watcher(
 
         // Handle auth error: kill session and notify user to re-authenticate
         if is_auth_error {
+            clear_provider_overload_retry_state(channel_id);
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "  [{ts}] 👁 Auth error detected in watcher for {tmux_session_name}, killing session"
@@ -685,6 +955,152 @@ pub(super) async fn tmux_output_watcher(
                 }
                 None => {
                     let _ = channel_id.say(&http, notice).await;
+                }
+            }
+            continue;
+        }
+
+        if is_provider_overloaded {
+            let overload_message = provider_overload_message
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("provider overload detected");
+            let inflight_state =
+                super::inflight::load_inflight_state(&watcher_provider, channel_id.get());
+            let retry_text = inflight_state
+                .as_ref()
+                .map(|state| state.user_text.clone())
+                .filter(|text| !text.trim().is_empty());
+            let fallback_session_id = inflight_state
+                .as_ref()
+                .and_then(|state| state.session_id.as_deref());
+            let dispatch_id = inflight_state
+                .as_ref()
+                .and_then(|state| state.dispatch_id.clone())
+                .or_else(|| {
+                    inflight_state
+                        .as_ref()
+                        .and_then(|state| super::adk_session::parse_dispatch_id(&state.user_text))
+                })
+                .or(super::adk_session::lookup_pending_dispatch_for_thread(
+                    shared.api_port,
+                    channel_id.get(),
+                )
+                .await);
+
+            let decision = retry_text
+                .as_deref()
+                .map(|text| record_provider_overload_retry(channel_id, text))
+                .unwrap_or(ProviderOverloadDecision::Exhausted);
+            let retry_notice = match &decision {
+                ProviderOverloadDecision::Retry { attempt, delay, .. } => format!(
+                    "⚠️ 모델 capacity 상태를 감지해 세션을 정리했습니다. {}분 후 자동 재시도합니다. ({}/{})",
+                    delay.as_secs() / 60,
+                    attempt,
+                    PROVIDER_OVERLOAD_MAX_RETRIES
+                ),
+                ProviderOverloadDecision::Exhausted => format!(
+                    "⚠️ 모델 capacity 상태가 계속되어 자동 재시도를 중단했습니다. 잠시 후 다시 시도해 주세요.\n\n사유: {}",
+                    truncate_str(overload_message, 300)
+                ),
+            };
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] 👁 Provider overload detected in watcher for {}: {}",
+                tmux_session_name, overload_message
+            );
+            prompt_too_long_killed = true;
+
+            clear_provider_session_for_retry(
+                &shared,
+                channel_id,
+                &tmux_session_name,
+                fallback_session_id,
+            )
+            .await;
+
+            let sess = tmux_session_name.clone();
+            let termination_reason = match &decision {
+                ProviderOverloadDecision::Retry { .. } => "provider_overload_retry",
+                ProviderOverloadDecision::Exhausted => "provider_overload_exhausted",
+            };
+            let termination_detail = format!("watcher cleanup: {overload_message}");
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    crate::services::termination_audit::record_termination_for_tmux(
+                        &sess,
+                        None,
+                        "tmux_watcher",
+                        termination_reason,
+                        Some(&termination_detail),
+                        None,
+                    );
+                    record_tmux_exit_reason(&sess, &termination_detail);
+                    crate::services::platform::tmux::kill_session(&sess);
+                }),
+            )
+            .await;
+
+            match placeholder_msg_id {
+                Some(msg_id) => {
+                    rate_limit_wait(&shared, channel_id).await;
+                    let _ = channel_id
+                        .edit_message(
+                            &http,
+                            msg_id,
+                            serenity::EditMessage::new().content(&retry_notice),
+                        )
+                        .await;
+                }
+                None => {
+                    let _ = channel_id.say(&http, &retry_notice).await;
+                }
+            }
+
+            if let Some(state) = inflight_state.as_ref() {
+                let user_msg_id = serenity::MessageId::new(state.user_msg_id);
+                super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
+                if matches!(&decision, ProviderOverloadDecision::Exhausted) {
+                    super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '⚠').await;
+                }
+            }
+            super::inflight::clear_inflight_state(&watcher_provider, channel_id.get());
+
+            match decision {
+                ProviderOverloadDecision::Retry {
+                    attempt,
+                    delay,
+                    fingerprint,
+                } => {
+                    if let Some(retry_text) = retry_text {
+                        schedule_provider_overload_retry(
+                            shared.clone(),
+                            http.clone(),
+                            channel_id,
+                            retry_text,
+                            attempt,
+                            delay,
+                            fingerprint,
+                        );
+                    } else {
+                        clear_provider_overload_retry_state(channel_id);
+                    }
+                }
+                ProviderOverloadDecision::Exhausted => {
+                    let failure_text = format!(
+                        "provider overloaded after {} auto-retries: {}",
+                        PROVIDER_OVERLOAD_MAX_RETRIES,
+                        truncate_str(overload_message, 300)
+                    );
+                    super::turn_bridge::fail_dispatch_with_retry(
+                        shared.api_port,
+                        dispatch_id.as_deref(),
+                        &failure_text,
+                    )
+                    .await;
                 }
             }
             continue;
@@ -727,6 +1143,7 @@ pub(super) async fn tmux_output_watcher(
         // Detect stale session resume failure in watcher output
         let is_stale_resume = stale_resume_detected;
         if is_stale_resume {
+            clear_provider_overload_retry_state(channel_id);
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
                 "  [{ts}] ⚠ Watcher detected stale session resume failure (channel {}), clearing session_id",
@@ -838,9 +1255,6 @@ pub(super) async fn tmux_output_watcher(
         // Send the terminal response to Discord
         // #225 P1-2: Track relay success across branches
         let relay_ok = if !full_response.trim().is_empty() {
-            let watcher_provider = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
-                .map(|(p, _)| p)
-                .unwrap_or(crate::services::provider::ProviderKind::Claude);
             let formatted = super::formatting::format_for_discord_with_provider(
                 &full_response,
                 &watcher_provider,
@@ -890,6 +1304,9 @@ pub(super) async fn tmux_output_watcher(
             }
             // Record the offset range we just relayed to prevent duplicate relay.
             last_relayed_offset = Some(data_start_offset);
+            if relay_ok {
+                clear_provider_overload_retry_state(channel_id);
+            }
             relay_ok
         } else {
             if let Some(msg_id) = placeholder_msg_id {
@@ -1294,19 +1711,13 @@ impl WatcherToolState {
 /// Process buffered lines for the tmux watcher.
 /// Extracts text content, tracks tool status, and detects result events.
 /// Returns true if a "result" event was found.
-/// Return value:
-/// (found_result, is_prompt_too_long, is_auth_error, result_tokens, stale_resume_detected)
 pub(super) fn process_watcher_lines(
     buffer: &mut String,
     state: &mut claude::StreamLineState,
     full_response: &mut String,
     tool_state: &mut WatcherToolState,
-) -> (bool, bool, bool, Option<u64>, bool) {
-    let mut found_result = false;
-    let mut is_prompt_too_long = false;
-    let mut is_auth_error = false;
-    let mut result_tokens: Option<u64> = None;
-    let mut stale_resume_detected = false;
+) -> WatcherLineOutcome {
+    let mut outcome = WatcherLineOutcome::default();
 
     while let Some(pos) = buffer.find('\n') {
         let line: String = buffer.drain(..=pos).collect();
@@ -1352,7 +1763,7 @@ pub(super) fn process_watcher_lines(
                                             format!("⚙ {}", name)
                                         } else {
                                             let truncated: String =
-                                                summary.chars().take(120).collect();
+                                                summary.chars().take(500).collect();
                                             format!("⚙ {}: {}", name, truncated)
                                         };
                                         tool_state.set_current_tool_line(Some(display));
@@ -1411,36 +1822,24 @@ pub(super) fn process_watcher_lines(
                     }
                 }
                 "result" => {
-                    stale_resume_detected = stale_resume_detected
+                    outcome.stale_resume_detected = outcome.stale_resume_detected
                         || super::turn_bridge::result_event_has_stale_resume_error(&val);
                     let is_error = val
                         .get("is_error")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    let result_str = val.get("result").and_then(|r| r.as_str()).unwrap_or("");
+                    let result_str = extract_result_error_text(&val);
 
                     if is_error {
-                        let lower = result_str.to_lowercase();
-                        if lower.contains("prompt is too long")
-                            || lower.contains("prompt too long")
-                            || lower.contains("context_length_exceeded")
-                            || lower.contains("conversation too long")
-                        {
-                            is_prompt_too_long = true;
+                        if is_prompt_too_long_message(&result_str) {
+                            outcome.is_prompt_too_long = true;
                         }
-                        if lower.contains("not logged in")
-                            || lower.contains("authentication error")
-                            || lower.contains("unauthorized")
-                            || lower.contains("please run /login")
-                            || lower.contains("oauth")
-                            || lower.contains("token expired")
-                            || lower.contains("invalid api key")
-                            || lower.contains("api key")
-                                && (lower.contains("missing")
-                                    || lower.contains("invalid")
-                                    || lower.contains("expired"))
-                        {
-                            is_auth_error = true;
+                        if is_auth_error_message(&result_str) {
+                            outcome.is_auth_error = true;
+                        }
+                        if let Some(message) = detect_provider_overload_message(&result_str) {
+                            outcome.is_provider_overloaded = true;
+                            outcome.provider_overload_message.get_or_insert(message);
                         }
                     }
 
@@ -1448,12 +1847,16 @@ pub(super) fn process_watcher_lines(
                     // 1. full_response is empty — no text was streamed at all
                     // 2. tools were used but no text was streamed after the last tool
                     //    (accumulated text is stale pre-tool narration)
-                    if !is_prompt_too_long && !is_auth_error && !result_str.is_empty() {
+                    if !outcome.is_prompt_too_long
+                        && !outcome.is_auth_error
+                        && !outcome.is_provider_overloaded
+                        && !result_str.is_empty()
+                    {
                         if full_response.is_empty()
                             || (tool_state.any_tool_used && !tool_state.has_post_tool_text)
                         {
                             full_response.clear();
-                            full_response.push_str(result_str);
+                            full_response.push_str(&result_str);
                         }
                     }
                     // Extract token usage from result event for context tracking.
@@ -1472,24 +1875,23 @@ pub(super) fn process_watcher_lines(
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        result_tokens = Some(input + cache_read + cache_creation);
+                        outcome.result_tokens = Some(input + cache_read + cache_creation);
                     }
 
                     state.final_result = Some(String::new());
-                    found_result = true;
+                    outcome.found_result = true;
                 }
                 _ => {}
             }
+        } else if let Some(message) = detect_provider_overload_message(trimmed) {
+            outcome.found_result = true;
+            outcome.is_provider_overloaded = true;
+            outcome.provider_overload_message.get_or_insert(message);
+            state.final_result = Some(String::new());
         }
     }
 
-    (
-        found_result,
-        is_prompt_too_long,
-        is_auth_error,
-        result_tokens,
-        stale_resume_detected,
-    )
+    outcome
 }
 
 /// On startup, scan for surviving tmux sessions (AgentDesk-*) and restore watchers.
@@ -2270,11 +2672,16 @@ async fn process_unified_thread_kill_signals(_shared: &Arc<SharedData>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        RestartHandoffScope, WatcherToolState, process_watcher_lines, resolve_restart_handoff_scope,
+        PROVIDER_OVERLOAD_RETRY_STATE, ProviderOverloadDecision, RestartHandoffScope,
+        WatcherToolState, clear_provider_overload_retry_state, detect_provider_overload_message,
+        is_auth_error_message, is_prompt_too_long_message, normalized_retry_payload_text,
+        process_watcher_lines, provider_overload_fingerprint, provider_overload_retry_delay,
+        record_provider_overload_retry, resolve_restart_handoff_scope,
     };
     use crate::services::claude::StreamLineState;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::ChannelId;
 
     fn sample_inflight_state() -> InflightTurnState {
         InflightTurnState::new(
@@ -2326,11 +2733,11 @@ mod tests {
         let mut full_response = String::new();
         let mut tool_state = WatcherToolState::new();
 
-        let (found_result, _, _, _, stale_resume_detected) =
+        let outcome =
             process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
 
-        assert!(found_result);
-        assert!(!stale_resume_detected);
+        assert!(outcome.found_result);
+        assert!(!outcome.stale_resume_detected);
         assert_eq!(
             full_response,
             "The log contained No conversation found while I was debugging."
@@ -2348,11 +2755,424 @@ mod tests {
         let mut full_response = String::new();
         let mut tool_state = WatcherToolState::new();
 
-        let (found_result, _, _, _, stale_resume_detected) =
+        let outcome =
             process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
 
-        assert!(found_result);
-        assert!(stale_resume_detected);
+        assert!(outcome.found_result);
+        assert!(outcome.stale_resume_detected);
         assert_eq!(full_response, "partial");
+    }
+
+    #[test]
+    fn watcher_detects_provider_overload_from_structured_errors() {
+        let mut buffer = concat!(
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"Selected model is at capacity. Please try a different model.\"]}\n"
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_provider_overloaded);
+        assert_eq!(
+            outcome.provider_overload_message.as_deref(),
+            Some("Selected model is at capacity. Please try a different model.")
+        );
+        assert!(full_response.is_empty());
+    }
+
+    #[test]
+    fn watcher_detects_plain_text_provider_overload_line() {
+        let mut buffer =
+            "Selected model is at capacity. Please try a different model.\n".to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_provider_overloaded);
+        assert_eq!(
+            outcome.provider_overload_message.as_deref(),
+            Some("Selected model is at capacity. Please try a different model.")
+        );
+        assert!(full_response.is_empty());
+    }
+
+    // ── #378 E2E: detect_provider_overload_message pattern coverage ──
+
+    #[test]
+    fn overload_detects_rate_limit_text() {
+        assert!(detect_provider_overload_message("Rate limit exceeded").is_some());
+        assert!(detect_provider_overload_message("rate limit reached for model").is_some());
+    }
+
+    #[test]
+    fn overload_detects_too_many_requests() {
+        assert!(detect_provider_overload_message("Too many requests").is_some());
+        assert!(
+            detect_provider_overload_message("429 Too Many Requests — please slow down").is_some()
+        );
+    }
+
+    #[test]
+    fn overload_detects_server_overloaded_variants() {
+        assert!(detect_provider_overload_message("provider overloaded").is_some());
+        assert!(detect_provider_overload_message("Server overloaded").is_some());
+        assert!(detect_provider_overload_message("Service overloaded").is_some());
+        assert!(detect_provider_overload_message("The API is overloaded right now").is_some());
+    }
+
+    #[test]
+    fn overload_detects_please_try_again_later() {
+        assert!(detect_provider_overload_message("Please try again later.").is_some());
+    }
+
+    #[test]
+    fn overload_detects_at_capacity_with_model() {
+        assert!(
+            detect_provider_overload_message(
+                "The selected model is at capacity. Please try a different model."
+            )
+            .is_some()
+        );
+        assert!(detect_provider_overload_message("model is at capacity").is_some());
+        assert!(detect_provider_overload_message("This model is currently at capacity").is_some());
+    }
+
+    #[test]
+    fn overload_ignores_empty_and_normal_text() {
+        assert!(detect_provider_overload_message("").is_none());
+        assert!(detect_provider_overload_message("   ").is_none());
+        assert!(detect_provider_overload_message("Hello world").is_none());
+        assert!(detect_provider_overload_message("Build succeeded").is_none());
+        assert!(
+            detect_provider_overload_message(
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn overload_preserves_original_message_text() {
+        let msg = "  Selected model is at capacity. Please try a different model.  ";
+        let result = detect_provider_overload_message(msg).unwrap();
+        assert_eq!(result, msg.trim());
+    }
+
+    // ── #378 E2E: is_prompt_too_long_message coverage ──
+
+    #[test]
+    fn prompt_too_long_detects_all_variants() {
+        assert!(is_prompt_too_long_message("prompt is too long"));
+        assert!(is_prompt_too_long_message("Error: prompt too long"));
+        assert!(is_prompt_too_long_message("context_length_exceeded"));
+        assert!(is_prompt_too_long_message("conversation too long"));
+        assert!(is_prompt_too_long_message("exceeded context window"));
+    }
+
+    #[test]
+    fn prompt_too_long_ignores_normal() {
+        assert!(!is_prompt_too_long_message("everything is fine"));
+        assert!(!is_prompt_too_long_message(""));
+    }
+
+    // ── #378 E2E: is_auth_error_message coverage ──
+
+    #[test]
+    fn auth_error_detects_all_variants() {
+        assert!(is_auth_error_message("not logged in"));
+        assert!(is_auth_error_message("Authentication error"));
+        assert!(is_auth_error_message("Unauthorized"));
+        assert!(is_auth_error_message("Please run /login first"));
+        assert!(is_auth_error_message("OAuth token refresh failed"));
+        assert!(is_auth_error_message("Token expired"));
+        assert!(is_auth_error_message("Invalid API key"));
+        assert!(is_auth_error_message("API key is missing"));
+        assert!(is_auth_error_message("API key expired"));
+    }
+
+    #[test]
+    fn auth_error_ignores_normal() {
+        assert!(!is_auth_error_message("Build succeeded"));
+        assert!(!is_auth_error_message(""));
+    }
+
+    // ── #378 E2E: retry state machine ──
+
+    #[test]
+    fn retry_delay_is_exponential_backoff() {
+        assert_eq!(provider_overload_retry_delay(1).as_secs(), 120); // 2min
+        assert_eq!(provider_overload_retry_delay(2).as_secs(), 240); // 4min
+        assert_eq!(provider_overload_retry_delay(3).as_secs(), 480); // 8min
+    }
+
+    #[test]
+    fn retry_state_machine_escalates_then_exhausts() {
+        // Use a unique channel ID to avoid test interference
+        let channel = ChannelId::new(999_000_378_001);
+        clear_provider_overload_retry_state(channel);
+
+        let text = "── dispatch ──\nDISPATCH:abc test task";
+
+        // Attempt 1
+        let d1 = record_provider_overload_retry(channel, text);
+        match &d1 {
+            ProviderOverloadDecision::Retry { attempt, .. } => assert_eq!(*attempt, 1),
+            _ => panic!("expected Retry, got {:?}", d1),
+        }
+
+        // Attempt 2
+        let d2 = record_provider_overload_retry(channel, text);
+        match &d2 {
+            ProviderOverloadDecision::Retry { attempt, .. } => assert_eq!(*attempt, 2),
+            _ => panic!("expected Retry, got {:?}", d2),
+        }
+
+        // Attempt 3
+        let d3 = record_provider_overload_retry(channel, text);
+        match &d3 {
+            ProviderOverloadDecision::Retry { attempt, .. } => assert_eq!(*attempt, 3),
+            _ => panic!("expected Retry, got {:?}", d3),
+        }
+
+        // Attempt 4 → Exhausted
+        let d4 = record_provider_overload_retry(channel, text);
+        assert_eq!(d4, ProviderOverloadDecision::Exhausted);
+
+        // State should be cleared after exhaustion
+        assert!(!PROVIDER_OVERLOAD_RETRY_STATE.contains_key(&channel.get()));
+    }
+
+    #[test]
+    fn retry_state_resets_on_different_fingerprint() {
+        let channel = ChannelId::new(999_000_378_002);
+        clear_provider_overload_retry_state(channel);
+
+        let text_a = "first task payload";
+        let text_b = "totally different payload";
+
+        let d1 = record_provider_overload_retry(channel, text_a);
+        match &d1 {
+            ProviderOverloadDecision::Retry { attempt, .. } => assert_eq!(*attempt, 1),
+            _ => panic!("expected Retry"),
+        }
+
+        // Different text → fingerprint mismatch → resets to attempt 1
+        let d2 = record_provider_overload_retry(channel, text_b);
+        match &d2 {
+            ProviderOverloadDecision::Retry { attempt, .. } => assert_eq!(*attempt, 1),
+            _ => panic!("expected Retry after fingerprint change"),
+        }
+
+        clear_provider_overload_retry_state(channel);
+    }
+
+    #[test]
+    fn clear_retry_state_removes_entry() {
+        let channel = ChannelId::new(999_000_378_003);
+        record_provider_overload_retry(channel, "some text");
+        assert!(PROVIDER_OVERLOAD_RETRY_STATE.contains_key(&channel.get()));
+        clear_provider_overload_retry_state(channel);
+        assert!(!PROVIDER_OVERLOAD_RETRY_STATE.contains_key(&channel.get()));
+    }
+
+    // ── #378 E2E: normalized_retry_payload_text strips retry headers ──
+
+    #[test]
+    fn normalized_payload_strips_retry_header() {
+        let input = "⚠️ 자동 재시도 (2/3)\n\noriginal user message";
+        assert_eq!(
+            normalized_retry_payload_text(input),
+            "original user message"
+        );
+    }
+
+    #[test]
+    fn normalized_payload_strips_history_restore_header() {
+        let input = "📋 이전 대화 복원 중...\n\nactual prompt text";
+        assert_eq!(normalized_retry_payload_text(input), "actual prompt text");
+    }
+
+    #[test]
+    fn normalized_payload_keeps_plain_text() {
+        let input = "just a normal message";
+        assert_eq!(normalized_retry_payload_text(input), input);
+    }
+
+    // ── #378 E2E: fingerprint consistency ──
+
+    #[test]
+    fn fingerprint_stable_for_same_input() {
+        let a = provider_overload_fingerprint("hello world");
+        let b = provider_overload_fingerprint("hello world");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_differs_for_different_input() {
+        let a = provider_overload_fingerprint("task A");
+        let b = provider_overload_fingerprint("task B");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_normalizes_retry_headers() {
+        let raw = "original message";
+        let with_header = "⚠️ 자동 재시도 (1/3)\n\noriginal message";
+        assert_eq!(
+            provider_overload_fingerprint(raw),
+            provider_overload_fingerprint(with_header)
+        );
+    }
+
+    // ── #378 E2E: process_watcher_lines integration — overload does NOT leak into full_response ──
+
+    #[test]
+    fn overload_in_structured_result_does_not_populate_response() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"working...\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"Too many requests\"]}\n"
+        ).to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_provider_overloaded);
+        // full_response should NOT contain the overload error
+        assert!(
+            !full_response.contains("Too many requests"),
+            "overload error should not leak into full_response, got: {full_response}"
+        );
+    }
+
+    #[test]
+    fn overload_in_plain_text_does_not_populate_response() {
+        let mut buffer = "Server overloaded, please retry later\n".to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_provider_overloaded);
+        assert!(full_response.is_empty());
+    }
+
+    // ── #378 E2E: overload flag does NOT interfere with other error types ──
+
+    #[test]
+    fn prompt_too_long_error_is_not_flagged_as_overload() {
+        let mut buffer =
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"prompt is too long\"}\n"
+                .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_prompt_too_long);
+        assert!(!outcome.is_provider_overloaded);
+    }
+
+    #[test]
+    fn auth_error_is_not_flagged_as_overload() {
+        let mut buffer =
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"not logged in\"}\n"
+                .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_auth_error);
+        assert!(!outcome.is_provider_overloaded);
+    }
+
+    // ── #378 E2E: mixed error + overload in errors array ──
+
+    #[test]
+    fn mixed_auth_and_overload_errors_sets_both_flags() {
+        let mut buffer =
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"not logged in\",\"server overloaded\"]}\n"
+                .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_auth_error);
+        assert!(outcome.is_provider_overloaded);
+    }
+
+    // ── #378 E2E: normal success result is not flagged ──
+
+    #[test]
+    fn normal_success_result_has_no_error_flags() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Here is the answer.\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+        ).to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(!outcome.is_prompt_too_long);
+        assert!(!outcome.is_auth_error);
+        assert!(!outcome.is_provider_overloaded);
+        assert!(!outcome.stale_resume_detected);
+        assert_eq!(full_response, "Here is the answer.");
+    }
+
+    #[test]
+    fn watcher_tracks_previous_tool_status_for_two_line_trail() {
+        let mut buffer = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"file_path\":\"src/config.rs\"}}]}}\n",
+            "{\"type\":\"content_block_stop\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo build\"}}]}}\n"
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(!outcome.found_result);
+        assert_eq!(
+            tool_state.prev_tool_status.as_deref(),
+            Some("✓ Read: src/config.rs")
+        );
+        assert_eq!(
+            tool_state.current_tool_line.as_deref(),
+            Some("⚙ Bash: `cargo build`")
+        );
     }
 }

@@ -17,6 +17,7 @@ describe("auto-queue-actions", () => {
       "test-repo",
       "agent-selected",
       "priority-sort",
+      true,
     );
 
     expect(resetAutoQueue).toHaveBeenCalledWith({
@@ -27,6 +28,7 @@ describe("auto-queue-actions", () => {
       "test-repo",
       "agent-selected",
       "priority-sort",
+      true,
     );
   });
 

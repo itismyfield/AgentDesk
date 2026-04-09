@@ -7,6 +7,7 @@ use serenity::{ChannelId, CreateMessage};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
+use super::agentdesk_config;
 use super::formatting::send_long_message_raw;
 use super::org_schema;
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
@@ -330,8 +331,11 @@ async fn cleanup_meeting_if_current(
 
 // ─── Config Parsing ──────────────────────────────────────────────────────────
 
-/// Load meeting config from org.yaml or role_map.json "meeting" section
+/// Load meeting config from agentdesk.yaml, then org.yaml, then role_map.json.
 pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
+    if let Some(cfg) = agentdesk_config::load_meeting_config() {
+        return Some(cfg);
+    }
     if org_schema::org_schema_exists() {
         if let Some(cfg) = org_schema::load_meeting_config() {
             return Some(cfg);
@@ -359,7 +363,7 @@ pub(super) async fn start_meeting(
     primary_provider: ProviderKind,
     shared: &Arc<SharedData>,
 ) -> Result<Option<String>, Error> {
-    let config = load_meeting_config().ok_or("Meeting config not found in role_map.json")?;
+    let config = load_meeting_config().ok_or("Meeting config not found in configuration")?;
     let reviewer_provider = primary_provider.counterpart();
 
     let meeting_id = generate_meeting_id();

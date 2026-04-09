@@ -127,6 +127,17 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
     json.get("sharedPromptFile")
         .and_then(|v| v.as_str())
         .map(|s| expand_tilde(s))
+        .or_else(|| {
+            let root = crate::config::runtime_root()?;
+            let canonical = crate::runtime_layout::shared_prompt_path(&root);
+            canonical
+                .exists()
+                .then(|| canonical.display().to_string())
+                .or_else(|| {
+                    let legacy = crate::runtime_layout::config_dir(&root).join("_shared.md");
+                    legacy.exists().then(|| legacy.display().to_string())
+                })
+        })
 }
 
 /// Check if a role_id exists in any channel binding in role_map.json.
@@ -389,6 +400,31 @@ mod tests {
             assert_eq!(
                 binding.memory.mem0.ingestion.custom_instructions.as_deref(),
                 Some("Remember deployment facts")
+            );
+        });
+    }
+
+    #[test]
+    fn test_load_shared_prompt_path_falls_back_to_canonical_runtime_path() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(temp_home.path(), r#"{"byChannelId": {}}"#);
+            let canonical = temp_home
+                .path()
+                .join(".adk")
+                .join("config")
+                .join("agents")
+                .join("_shared.prompt.md");
+            std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+            std::fs::write(&canonical, "# shared").unwrap();
+
+            let shared = load_shared_prompt_path().expect("shared prompt path");
+            assert!(
+                std::path::Path::new(&shared).ends_with(
+                    std::path::Path::new("config")
+                        .join("agents")
+                        .join("_shared.prompt.md")
+                ),
+                "expected canonical shared prompt path, got: {shared}"
             );
         });
     }

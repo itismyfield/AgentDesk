@@ -190,6 +190,33 @@ mod tests {
         .unwrap();
     }
 
+    fn seed_completed_review_dispatch(
+        db: &db::Db,
+        dispatch_id: &str,
+        card_id: &str,
+        verdict: &str,
+    ) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                result, created_at, updated_at, completed_at
+            ) VALUES (
+                ?1, ?2, 'agent-1', 'review', 'completed', 'Completed review',
+                ?3, datetime('now', '-1 minutes'), datetime('now', '-1 minutes'), datetime('now', '-1 minutes')
+            )",
+            rusqlite::params![
+                dispatch_id,
+                card_id,
+                serde_json::json!({
+                    "verdict": verdict,
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+    }
+
     fn seed_repo(db: &db::Db, repo_id: &str) {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -241,6 +268,56 @@ mod tests {
             rusqlite::params![key, value],
         )
         .unwrap();
+    }
+
+    fn seed_pr_tracking(
+        db: &db::Db,
+        card_id: &str,
+        repo_id: &str,
+        worktree_path: Option<&str>,
+        branch: &str,
+        pr_number: Option<i64>,
+        head_sha: Option<&str>,
+        state: &str,
+    ) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO pr_tracking \
+             (card_id, repo_id, worktree_path, branch, pr_number, head_sha, state, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))",
+            rusqlite::params![card_id, repo_id, worktree_path, branch, pr_number, head_sha, state],
+        )
+        .unwrap();
+    }
+
+    fn pr_tracking_state(db: &db::Db, card_id: &str) -> Option<String> {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT state FROM pr_tracking WHERE card_id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    fn pr_tracking_branch(db: &db::Db, card_id: &str) -> Option<String> {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT branch FROM pr_tracking WHERE card_id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    fn pr_tracking_pr_number(db: &db::Db, card_id: &str) -> Option<i64> {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT pr_number FROM pr_tracking WHERE card_id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
     }
 
     fn count_dispatches_by_type(db: &db::Db, card_id: &str, dispatch_type: &str) -> i64 {
@@ -528,6 +605,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine: test_engine(&db),
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
@@ -1113,6 +1191,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine: engine.clone(),
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
@@ -2726,6 +2805,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine,
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
@@ -2849,6 +2929,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine,
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
@@ -2924,6 +3005,7 @@ mod tests {
         let state = AppState {
             db: db.clone(),
             engine,
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,
@@ -3096,6 +3178,248 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scenario_211_review_pass_seeds_pr_tracking_and_create_pr_dispatch() {
+        let (repo, _repo_guard) = setup_test_repo();
+        run_git(repo.path(), &["checkout", "-b", "wt/card-211-review"]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-211-review",
+            "review",
+            "test/repo",
+            211,
+            Some("123456789012345678"),
+        );
+        seed_completed_work_dispatch_for_review(
+            &db,
+            "impl-211-review",
+            "card-211-review",
+            "implementation",
+        );
+        seed_completed_review_dispatch(&db, "review-211-pass", "card-211-review", "pass");
+
+        engine
+            .try_fire_hook_by_name(
+                "OnReviewVerdict",
+                serde_json::json!({"card_id": "card-211-review", "verdict": "pass"}),
+            )
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            count_active_dispatches_by_type(&db, "card-211-review", "create-pr"),
+            1
+        );
+        assert_eq!(
+            pr_tracking_state(&db, "card-211-review").as_deref(),
+            Some("create-pr")
+        );
+        assert_eq!(
+            pr_tracking_branch(&db, "card-211-review").as_deref(),
+            Some("wt/card-211-review")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_211_create_pr_completion_advances_tracking_to_wait_ci() {
+        let _gh = install_mock_gh(&[MockGhReply {
+            key: "pr:list",
+            contains: Some("--head wt/card-211-create"),
+            stdout: "[{\"number\":411,\"headRefName\":\"wt/card-211-create\",\"headRefOid\":\"abc111\"}]",
+        }]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-211-create", "review", "test/repo", 212, None);
+        seed_pr_tracking(
+            &db,
+            "card-211-create",
+            "test/repo",
+            None,
+            "wt/card-211-create",
+            None,
+            Some("oldsha"),
+            "create-pr",
+        );
+        seed_dispatch(
+            &db,
+            "create-pr-211",
+            "card-211-create",
+            "create-pr",
+            "pending",
+        );
+
+        let result = dispatch::complete_dispatch(
+            &db,
+            &engine,
+            "create-pr-211",
+            &serde_json::json!({"completion_source": "test_harness"}),
+        );
+        assert!(
+            result.is_ok(),
+            "create-pr completion should succeed: {:?}",
+            result.err()
+        );
+
+        assert_eq!(
+            pr_tracking_state(&db, "card-211-create").as_deref(),
+            Some("wait-ci")
+        );
+        assert_eq!(pr_tracking_pr_number(&db, "card-211-create"), Some(411));
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-211-create'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocked_reason.as_deref(), Some("ci:waiting"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_211_ci_success_advances_tracking_to_merge_and_card_done() {
+        let _gh = install_mock_gh(&[
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "bbb2222",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-211-ci"),
+                stdout: "[{\"databaseId\":512,\"status\":\"completed\",\"conclusion\":\"success\",\"headSha\":\"bbb2222\",\"event\":\"pull_request\"}]",
+            },
+        ]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-211-ci", "review", "test/repo", 213, None);
+        seed_completed_review_dispatch(&db, "review-211-ci-pass", "card-211-ci", "pass");
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = 'card-211-ci'",
+                [],
+            )
+            .unwrap();
+        }
+        seed_pr_tracking(
+            &db,
+            "card-211-ci",
+            "test/repo",
+            None,
+            "wt/card-211-ci",
+            Some(512),
+            Some("bbb2222"),
+            "wait-ci",
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick1min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            pr_tracking_state(&db, "card-211-ci").as_deref(),
+            Some("merge")
+        );
+        assert_eq!(get_card_status(&db, "card-211-ci"), "done");
+
+        let conn = db.lock().unwrap();
+        let blocked_reason: Option<String> = conn
+            .query_row(
+                "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-211-ci'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocked_reason, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scenario_211_cleanup_closes_tracking_and_removes_worktree() {
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+        run_git(repo.path(), &["branch", "wt/card-211-cleanup"]);
+        let worktrees_dir = repo.path().join("worktrees");
+        fs::create_dir_all(&worktrees_dir).unwrap();
+        let worktree_path = worktrees_dir.join("card-211-cleanup");
+        run_git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                worktree_path.to_str().unwrap(),
+                "wt/card-211-cleanup",
+            ],
+        );
+        let _gh = install_mock_gh(&[MockGhReply {
+            key: "pr:view",
+            contains: Some("--json mergedAt,headRefName"),
+            stdout: "{\"mergedAt\":\"2026-04-09T00:00:00Z\",\"headRefName\":\"wt/card-211-cleanup\"}",
+        }]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-211-cleanup", "done", "test/repo", 214, None);
+        set_kv(&db, "merge_automation_enabled", "true");
+        seed_pr_tracking(
+            &db,
+            "card-211-cleanup",
+            "test/repo",
+            Some(worktree_path.to_str().unwrap()),
+            "wt/card-211-cleanup",
+            Some(613),
+            Some("ccc3333"),
+            "post-merge-cleanup",
+        );
+
+        engine
+            .try_fire_hook_by_name("OnTick5min", serde_json::json!({}))
+            .unwrap();
+        kanban::drain_hook_side_effects(&db, &engine);
+
+        assert_eq!(
+            pr_tracking_state(&db, "card-211-cleanup").as_deref(),
+            Some("closed")
+        );
+        assert!(
+            !worktree_path.exists(),
+            "cleanup must remove the tracked worktree path"
+        );
+
+        let branch_output = Command::new("git")
+            .args(["branch", "--list", "wt/card-211-cleanup"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branch_output.stdout)
+                .trim()
+                .is_empty(),
+            "cleanup must delete the tracked branch"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn scenario_208_on_tick_creates_codex_rework_and_dedups_review() {
@@ -3236,8 +3560,18 @@ mod tests {
         let gh = install_mock_gh(&[
             MockGhReply {
                 key: "pr:view",
-                contains: None,
+                contains: Some("--json author"),
                 stdout: "itismyfield",
+            },
+            MockGhReply {
+                key: "pr:view",
+                contains: Some("--json headRefOid"),
+                stdout: "ddd4444",
+            },
+            MockGhReply {
+                key: "run:list",
+                contains: Some("--branch wt/card-208-guard"),
+                stdout: "[{\"databaseId\":725,\"status\":\"completed\",\"conclusion\":\"success\",\"headSha\":\"ddd4444\",\"event\":\"pull_request\"}]",
             },
             MockGhReply {
                 key: "api:repos/test/repo/pulls/325/reviews",
@@ -3264,10 +3598,15 @@ mod tests {
         seed_thread_session(&db, "s-208-guard", "thread-guard");
         set_kv(&db, "merge_automation_enabled", "true");
         set_kv(&db, "merge_allowed_authors", "itismyfield");
-        set_kv(
+        seed_pr_tracking(
             &db,
-            "pr:card-208-guard",
-            r#"{"number":325,"repo":"test/repo","branch":"wt/card-208-guard"}"#,
+            "card-208-guard",
+            "test/repo",
+            None,
+            "wt/card-208-guard",
+            Some(325),
+            Some("ddd4444"),
+            "merge",
         );
 
         assert!(

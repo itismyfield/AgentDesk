@@ -1087,10 +1087,15 @@ pub fn handle_dcserver(token: Option<String>) {
             use std::collections::HashSet;
             let mut workspaces = HashSet::new();
 
-            // Collect workspace paths from role_map.json
-            if let Some(rm_path) = agentdesk_runtime_root()
-                .map(|r| r.join("config").join("role_map.json"))
-                .filter(|p| p.exists())
+            for workspace in crate::services::discord::agentdesk_config::configured_workspaces() {
+                workspaces.insert(workspace);
+            }
+
+            // Fall back to role_map.json while older installs are still migrating.
+            if workspaces.is_empty()
+                && let Some(rm_path) = agentdesk_runtime_root()
+                    .map(|r| r.join("config").join("role_map.json"))
+                    .filter(|p| p.exists())
                 && let Ok(content) = std::fs::read_to_string(&rm_path)
                 && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
             {

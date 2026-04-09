@@ -590,7 +590,7 @@ fn noop_completion_context(
 /// Review and review-decision dispatches stay pending until their explicit
 /// API submissions arrive. Work dispatches use explicit PATCH/finalize flows.
 /// Fail a dispatch with retry on PATCH failure.
-pub(super) async fn fail_dispatch_with_retry(
+pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     api_port: u16,
     dispatch_id: Option<&str>,
     error_msg: &str,

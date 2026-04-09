@@ -297,6 +297,20 @@ server:
 
 discord:
   bots: {}
+
+memory:
+  backend: auto
+
+# Optional startup baselines for dashboard-managed settings:
+# kanban:
+#   manager_channel_id: "123456789012345678"
+# review:
+#   enabled: true
+# runtime:
+#   dispatch_poll_sec: 30
+#   reset_overrides_on_restart: false
+# automation:
+#   strategy: "squash"
 YAML
   ok "Created default config: $INSTALL_DIR/agentdesk.yaml"
 fi

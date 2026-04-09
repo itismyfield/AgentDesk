@@ -882,6 +882,50 @@ mod tests {
     }
 
     #[test]
+    fn test_triage_policy_uses_typed_facade() {
+        let dir = tempfile::tempdir().unwrap();
+        let triage_src = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/triage-rules.js"),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("triage-rules.js"), triage_src).unwrap();
+
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, discord_channel_id) \
+                 VALUES ('ch-backend', 'Backend', 'claude', '111')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, priority, metadata, github_issue_number, github_issue_url, created_at, updated_at) \
+                 VALUES ('triage-card', 'Typed facade triage', 'backlog', 'medium', '{\"labels\":\"agent:backend priority:high\"}', 348, 'https://github.com/itismyfield/AgentDesk/issues/348', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+
+        let conn = db.lock().unwrap();
+        let (assigned_agent_id, priority): (Option<String>, String) = conn
+            .query_row(
+                "SELECT assigned_agent_id, priority FROM kanban_cards WHERE id = 'triage-card'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(assigned_agent_id.as_deref(), Some("ch-backend"));
+        assert_eq!(priority, "high");
+    }
+
+    #[test]
     fn test_engine_fire_hook_with_payload() {
         let dir = tempfile::tempdir().unwrap();
         let policy_path = dir.path().join("payload-policy.js");

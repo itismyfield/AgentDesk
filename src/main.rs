@@ -587,6 +587,11 @@ fn main() -> Result<()> {
             .with_env_filter(EnvFilter::from_default_env().add_directive(directive))
             .init();
 
+        if let Some(root) = config::runtime_root() {
+            crate::runtime_layout::ensure_runtime_layout(&root)
+                .map_err(|error| anyhow::anyhow!("Failed to prepare runtime layout: {error}"))?;
+        }
+
         let config = config::load().context("Failed to load config")?;
         let db = db::init(&config).context("Failed to init DB")?;
         services::termination_audit::init_audit_db(db.clone());

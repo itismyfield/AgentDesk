@@ -44,7 +44,14 @@ fn test_api_router(
 ) -> axum::Router {
     let tx = crate::server::ws::new_broadcast();
     let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-    api_router(db, engine, tx, buf, health_registry)
+    api_router(
+        db,
+        engine,
+        crate::config::Config::default(),
+        tx,
+        buf,
+        health_registry,
+    )
 }
 
 fn env_lock() -> MutexGuard<'static, ()> {
@@ -5660,6 +5667,135 @@ async fn auto_queue_activate_keeps_same_group_slot_context_between_entries() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-slot-expand");
+    ensure_auto_queue_tables(&db);
+
+    for issue_number in 0..4 {
+        seed_auto_queue_card(
+            &db,
+            &format!("card-slot-expand-{issue_number}"),
+            1900 + issue_number,
+            "ready",
+            "agent-slot-expand",
+        );
+    }
+
+    {
+        let conn = db.lock().unwrap();
+        for slot_index in 0..3 {
+            conn.execute(
+                "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+                 VALUES (?1, ?2, '{}')",
+                rusqlite::params!["agent-slot-expand", slot_index],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, unified_thread,
+                max_concurrent_threads, max_concurrent_per_agent, thread_group_count
+            ) VALUES (
+                'run-slot-expand', 'test-repo', 'agent-slot-expand', 'active', 1, 4, 4, 4
+            )",
+            [],
+        )
+        .unwrap();
+        for (priority_rank, thread_group) in (0..4).enumerate() {
+            conn.execute(
+                "INSERT INTO auto_queue_entries (
+                    id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+                ) VALUES (?1, 'run-slot-expand', ?2, 'agent-slot-expand', 'pending', ?3, ?4)",
+                rusqlite::params![
+                    format!("entry-slot-expand-{thread_group}"),
+                    format!("card-slot-expand-{thread_group}"),
+                    priority_rank as i64,
+                    thread_group as i64,
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-slot-expand",
+                        "active_only": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["count"], 4,
+        "activate should dispatch 4 groups when the run requests 4 concurrent threads"
+    );
+    assert_eq!(json["active_groups"], 4);
+
+    let conn = db.lock().unwrap();
+    let slot_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_slots WHERE agent_id = 'agent-slot-expand'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        slot_count, 4,
+        "slot pool should expand from 3 seeded rows to match run max_concurrent_threads"
+    );
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT slot_index
+             FROM auto_queue_entries
+             WHERE run_id = 'run-slot-expand'
+             ORDER BY priority_rank ASC",
+        )
+        .unwrap();
+    let mut assigned_slots = stmt
+        .query_map([], |row| row.get::<_, Option<i64>>(0))
+        .unwrap()
+        .filter_map(|row| row.ok().flatten())
+        .collect::<Vec<_>>();
+    assigned_slots.sort_unstable();
+    assert_eq!(assigned_slots, vec![0, 1, 2, 3]);
+
+    let fourth_slot_group: Option<i64> = conn
+        .query_row(
+            "SELECT assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-slot-expand' AND slot_index = 3",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        fourth_slot_group,
+        Some(3),
+        "newly created slot must be assigned to the fourth thread group"
+    );
+}
+
 // NOTE: auto_queue_activate_requested_card_not_blocked_by_own_status and
 // auto_queue_activate_walks_backlog_card_to_dispatchable_state tests already
 // defined above (from main branch merge). Duplicate definitions removed.
@@ -6106,6 +6242,64 @@ async fn auto_queue_generate_issue_numbers_filters_cards_and_promotes_backlog() 
     assert_eq!(
         backlog_status, "ready",
         "selected backlog card must be promoted before queue generation"
+    );
+}
+
+#[tokio::test]
+async fn auto_queue_generate_persists_unified_thread_flag() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-generate-unified");
+    seed_repo(&db, "test-repo");
+    seed_auto_queue_card(
+        &db,
+        "card-generate-unified",
+        3881,
+        "ready",
+        "agent-generate-unified",
+    );
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "agent-generate-unified",
+                        "unified_thread": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["run"]["unified_thread"], serde_json::json!(true));
+
+    let run_id = json["run"]["id"]
+        .as_str()
+        .expect("generated run id must be present");
+    let conn = db.lock().unwrap();
+    let stored_unified_thread: i64 = conn
+        .query_row(
+            "SELECT unified_thread FROM auto_queue_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored_unified_thread, 1,
+        "generate must persist unified_thread to the run"
     );
 }
 

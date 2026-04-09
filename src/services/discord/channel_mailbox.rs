@@ -376,8 +376,9 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
                     let _ = reply.send(enqueued);
                 }
                 ChannelMailboxMsg::HasPendingSoftQueue { persistence, reply } => {
+                    let previous_len = state.intervention_queue.len();
                     let has_pending = super::has_soft_intervention(&mut state.intervention_queue);
-                    if state.intervention_queue.is_empty() {
+                    if state.intervention_queue.len() != previous_len {
                         persist_queue(channel_id, &state.intervention_queue, &persistence);
                     }
                     let _ = reply.send(HasPendingSoftQueueResult { has_pending });
@@ -400,8 +401,9 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
                 ChannelMailboxMsg::FinishTurn { persistence, reply } => {
                     let removed_token = state.cancel_token.take();
                     state.active_request_owner = None;
+                    let previous_len = state.intervention_queue.len();
                     let has_pending = super::has_soft_intervention(&mut state.intervention_queue);
-                    if state.intervention_queue.is_empty() {
+                    if state.intervention_queue.len() != previous_len {
                         persist_queue(channel_id, &state.intervention_queue, &persistence);
                     }
                     let _ = reply.send(FinishTurnResult {
@@ -429,4 +431,138 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
         }
     });
     ChannelMailboxHandle { sender: tx }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::discord::runtime_store::test_env_lock;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+    fn queue_file_path(
+        root: &Path,
+        provider: &ProviderKind,
+        token_hash: &str,
+        channel_id: serenity::ChannelId,
+    ) -> PathBuf {
+        root.join("runtime")
+            .join("discord_pending_queue")
+            .join(provider.as_str())
+            .join(token_hash)
+            .join(format!("{}.json", channel_id.get()))
+    }
+
+    fn read_saved_items(
+        root: &Path,
+        provider: &ProviderKind,
+        token_hash: &str,
+        channel_id: serenity::ChannelId,
+    ) -> Vec<super::super::PendingQueueItem> {
+        let path = queue_file_path(root, provider, token_hash, channel_id);
+        let json = std::fs::read_to_string(path).unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn make_intervention(message_id: u64, text: &str, created_at: Instant) -> Intervention {
+        Intervention {
+            author_id: serenity::UserId::new(1),
+            message_id: serenity::MessageId::new(message_id),
+            text: text.to_string(),
+            mode: InterventionMode::Soft,
+            created_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn has_pending_soft_queue_persists_pruned_queue_state() {
+        let _lock = test_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-prune-pending";
+        let channel_id = serenity::ChannelId::new(41);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+        let now = Instant::now();
+
+        handle
+            .replace_queue(
+                vec![
+                    make_intervention(
+                        1,
+                        "stale",
+                        now - super::super::INTERVENTION_TTL - Duration::from_secs(1),
+                    ),
+                    make_intervention(2, "fresh", now),
+                ],
+                persistence.clone(),
+            )
+            .await;
+
+        assert_eq!(
+            read_saved_items(tmp.path(), &provider, token_hash, channel_id).len(),
+            2
+        );
+
+        let result = handle.has_pending_soft_queue(persistence).await;
+        assert!(result.has_pending);
+        assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
+
+        let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "fresh");
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    #[tokio::test]
+    async fn finish_turn_persists_pruned_queue_state() {
+        let _lock = test_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-prune-finish";
+        let channel_id = serenity::ChannelId::new(42);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+        let now = Instant::now();
+
+        handle
+            .replace_queue(
+                vec![
+                    make_intervention(
+                        1,
+                        "stale",
+                        now - super::super::INTERVENTION_TTL - Duration::from_secs(1),
+                    ),
+                    make_intervention(2, "fresh", now),
+                ],
+                persistence.clone(),
+            )
+            .await;
+        handle
+            .restore_active_turn(Arc::new(CancelToken::new()), serenity::UserId::new(7))
+            .await;
+
+        let result = handle.finish_turn(persistence).await;
+        assert!(result.removed_token.is_some());
+        assert!(result.has_pending);
+
+        let snapshot = handle.snapshot().await;
+        assert!(snapshot.cancel_token.is_none());
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+
+        let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "fresh");
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
 }

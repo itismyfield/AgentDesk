@@ -1,4 +1,5 @@
 mod adk_session;
+pub(crate) mod agentdesk_config;
 mod channel_mailbox;
 mod commands;
 mod formatting;
@@ -3670,9 +3671,36 @@ async fn bootstrap_thread_session(
             worktree: None,
             born_generation: runtime_store::load_generation(),
         });
-    session.current_path = Some(parent_path.to_string());
+    // Always create a worktree for thread sessions to isolate concurrent work.
+    let effective_path = {
+        let ch = session.channel_name.as_deref().unwrap_or("unknown");
+        let provider_str = shared.settings.read().await.provider.as_str().to_string();
+        match create_git_worktree(parent_path, ch, &provider_str) {
+            Ok((wt_path, branch)) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] 🌿 Thread worktree created: {} (branch: {})",
+                    wt_path, branch
+                );
+                session.worktree = Some(WorktreeInfo {
+                    original_path: parent_path.to_string(),
+                    worktree_path: wt_path.clone(),
+                    branch_name: branch,
+                });
+                wt_path
+            }
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ Thread worktree creation failed: {e}, falling back to parent path"
+                );
+                parent_path.to_string()
+            }
+        }
+    };
+    session.current_path = Some(effective_path.clone());
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ↻ Bootstrapped thread session from parent path: {parent_path}");
+    println!("  [{ts}] ↻ Bootstrapped thread session: {effective_path}");
 }
 
 /// Resolve the channel name and parent category name for a Discord channel.
@@ -4159,10 +4187,16 @@ mod tests {
         }
     }
 
+    fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+        test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Queue files must land under `{provider}/{token_hash}/` — not the legacy flat path.
     #[test]
     fn pending_queue_path_uses_token_hash() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4204,7 +4238,7 @@ mod tests {
     /// Bot A writes a queue; Bot B (different token_hash) must not see it on load.
     #[test]
     fn load_pending_queues_only_reads_own_namespace() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4235,7 +4269,7 @@ mod tests {
     /// save_pending_queues + load_pending_queues round-trip with token_hash namespacing.
     #[test]
     fn save_pending_queues_roundtrip() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4276,7 +4310,7 @@ mod tests {
 
     #[test]
     fn persisted_queue_helpers_keep_remaining_items_and_restore_requeued_item() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4371,7 +4405,7 @@ mod tests {
     /// must not collide — the namespace key is token_hash, not agent.
     #[test]
     fn agent_empty_or_duplicate_does_not_collide_namespace() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4396,7 +4430,7 @@ mod tests {
     /// This ensures dispatch_role_overrides are not lost on restart.
     #[test]
     fn review_thread_override_preserved_across_restart() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4429,7 +4463,7 @@ mod tests {
     /// P2: save_pending_queues captures dispatch_role_overrides into override_channel_id.
     #[test]
     fn save_pending_queues_captures_dispatch_role_overrides() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 
@@ -4465,7 +4499,7 @@ mod tests {
     /// by load_pending_queues, which only reads from the token_hash subdirectory.
     #[test]
     fn legacy_flat_queue_file_is_not_restored() {
-        let _lock = test_env_lock().lock().unwrap();
+        let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
 

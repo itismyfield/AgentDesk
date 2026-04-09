@@ -491,7 +491,12 @@ export default function AutoQueuePanel({
         repo: selectedRepo || null,
         agentId: selectedAgentId || null,
       });
-      const result = await api.generateAutoQueue(selectedRepo || null, selectedAgentId, generateMode) as Record<string, unknown>;
+      const result = await api.generateAutoQueue(
+        selectedRepo || null,
+        selectedAgentId,
+        generateMode,
+        unifiedThread,
+      ) as Record<string, unknown>;
       if (result.entries && Array.isArray(result.entries) && result.entries.length === 0) {
         const counts = result.counts as Record<string, number> | undefined;
         const backlog = counts?.backlog ?? 0;
