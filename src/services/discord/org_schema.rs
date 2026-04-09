@@ -723,7 +723,7 @@ channels:
             let yaml = format!(
                 r#"
 version: 1
-prompts_root: "{}"
+prompts_root: '{}'
 agents: {{}}
 "#,
                 prompts_root.display()
