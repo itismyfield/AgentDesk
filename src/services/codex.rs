@@ -203,6 +203,7 @@ pub fn execute_command_streaming(
             return execute_streaming_local_tmux(
                 &prompt,
                 model,
+                session_id,
                 working_dir,
                 sender,
                 cancel_token,
@@ -217,6 +218,7 @@ pub fn execute_command_streaming(
         return execute_streaming_local_process_codex(
             &prompt,
             model,
+            session_id,
             working_dir,
             sender,
             cancel_token,
@@ -397,6 +399,7 @@ fn execute_streaming_remote_tmux(
 fn execute_streaming_local_tmux(
     prompt: &str,
     model: Option<&str>,
+    session_id: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -496,7 +499,7 @@ fn execute_streaming_local_tmux(
         --input-fifo {input_fifo} \\\n  \
         --prompt-file {prompt} \\\n  \
         --cwd {wd} \\\n  \
-        --codex-bin {codex_bin}{readonly_arg}{model_arg}{effort_arg}{compact_arg}\n",
+        --codex-bin {codex_bin}{readonly_arg}{model_arg}{effort_arg}{resume_arg}{compact_arg}\n",
         env = env_lines,
         exe = shell_escape(&exe.display().to_string()),
         output = shell_escape(&output_path),
@@ -522,6 +525,11 @@ fn execute_streaming_local_tmux(
             .ok()
             .filter(|v| !v.trim().is_empty())
             .map(|v| format!(" \\\n  --reasoning-effort {}", shell_escape(&v)))
+            .unwrap_or_default(),
+        resume_arg = session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" \\\n  --resume-session-id {}", shell_escape(value)))
             .unwrap_or_default(),
     );
 
@@ -656,6 +664,7 @@ fn send_followup_to_tmux(
 fn execute_streaming_local_process_codex(
     prompt: &str,
     model: Option<&str>,
+    session_id: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -781,6 +790,10 @@ fn execute_streaming_local_process_codex(
                     args.push("--reasoning-effort".to_string());
                     args.push(effort);
                 }
+            }
+            if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
+                args.push("--resume-session-id".to_string());
+                args.push(session_id.to_string());
             }
             if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
                 args.push("--compact-token-limit".to_string());
@@ -1190,6 +1203,23 @@ mod tests {
             !args
                 .iter()
                 .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+        );
+    }
+
+    #[test]
+    fn test_base_exec_args_includes_resume_before_flags() {
+        let args = base_exec_args(Some("thread-123"), "hello", None, false);
+        assert_eq!(
+            args,
+            vec![
+                "exec".to_string(),
+                "resume".to_string(),
+                "thread-123".to_string(),
+                "--skip-git-repo-check".to_string(),
+                "--json".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "hello".to_string(),
+            ]
         );
     }
 

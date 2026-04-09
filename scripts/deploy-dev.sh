@@ -311,22 +311,16 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST.plist"
 DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
 echo "▸ Waiting for dev health on :${DEV_PORT}..."
 DEV_HEALTHY=false
-
-for i in $(seq 1 "$DEV_HEALTH_RETRIES"); do
-    HEALTH_JSON=$(curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${DEV_PORT}/api/health" 2>/dev/null || true)
-    if echo "$HEALTH_JSON" | grep -q '"status":"healthy"'; then
-        DEV_HEALTHY=true
-        break
-    fi
-
-    echo "  ▸ Attempt $i/$DEV_HEALTH_RETRIES — not healthy yet"
-    if [ "$i" -lt "$DEV_HEALTH_RETRIES" ]; then
-        sleep "$DEV_HEALTH_DELAY_SECS"
-    fi
-done
+if wait_for_http_service_health "$PLIST" "$DEV_PORT" "$DEV_HEALTH_RETRIES" "$DEV_HEALTH_DELAY_SECS" 0 1; then
+    DEV_HEALTHY=true
+fi
 
 if [ "$DEV_HEALTHY" = true ]; then
-    echo "✓ Dev is healthy on :${DEV_PORT}"
+    if _health_json_reconcile_only "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
+        echo "✓ Dev is serving on :${DEV_PORT} (provider reconcile in progress)"
+    else
+        echo "✓ Dev is healthy on :${DEV_PORT}"
+    fi
 else
     echo "✗ Health check failed after $DEV_HEALTH_RETRIES attempts — check logs: $ADK_DEV/logs/"
     exit 1

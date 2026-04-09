@@ -1,8 +1,12 @@
 use super::settings::{
-    discord_token_hash, load_review_tuning_guidance, load_role_prompt, load_shared_prompt,
-    render_peer_agent_guidance,
+    MemoryBackendKind, ResolvedMemorySettings, discord_token_hash, load_review_tuning_guidance,
+    load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
 };
 use super::*;
+use crate::services::memory::{
+    UNBOUND_MEMORY_ROLE_ID, resolve_memento_agent_id, resolve_memento_workspace,
+    sanitize_memento_workspace_segment,
+};
 
 const CONTEXT_COMPRESSION_SECTION_ORDER: &str = "`Goal`, `Progress`, `Decisions`, `Files`, `Next`";
 const STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE: &str =
@@ -30,6 +34,69 @@ pub(crate) fn build_followup_turn_system_reminder() -> String {
          Replace stale tool chatter, raw logs, and old command output with placeholders like {STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE} instead of replaying them verbatim.\n\
          </system-reminder>"
     )
+}
+
+fn proactive_memory_guidance(
+    memory_settings: Option<&ResolvedMemorySettings>,
+    current_path: &str,
+    channel_id: ChannelId,
+    role_binding: Option<&RoleBinding>,
+    profile: DispatchProfile,
+) -> Option<String> {
+    if profile != DispatchProfile::Full {
+        return None;
+    }
+
+    let settings = memory_settings?;
+    let (backend_name, read_tool, write_tool, extra_note) = match settings.backend {
+        MemoryBackendKind::File => (
+            "local",
+            "`memory-read` skill",
+            "`memory-write` skill",
+            String::new(),
+        ),
+        MemoryBackendKind::Mem0 => (
+            "mem0",
+            "`search_memory` MCP tool",
+            "`add_memories` MCP tool",
+            String::new(),
+        ),
+        MemoryBackendKind::Memento => {
+            let role_id = role_binding
+                .map(|binding| binding.role_id.as_str())
+                .unwrap_or(UNBOUND_MEMORY_ROLE_ID);
+            let workspace_scope = current_path
+                .trim()
+                .split('/')
+                .rev()
+                .find(|segment| !segment.trim().is_empty())
+                .map(sanitize_memento_workspace_segment)
+                .unwrap_or_else(|| "default".to_string());
+            let agent_workspace = resolve_memento_workspace(role_id, channel_id.get(), None);
+            let agent_id = resolve_memento_agent_id(role_id, channel_id.get());
+            (
+                "memento",
+                "`recall` MCP tool",
+                "`remember` MCP tool",
+                format!(
+                    "\n- 스코프 규칙: 전역 정보는 `workspace`를 생략하고 `agentId`를 `default`로 둔다.\n\
+                     - 스코프 규칙: 현재 프로젝트/도메인 사실과 기술 결정은 `workspace={workspace_scope}` + `agentId=default`로 저장한다.\n\
+                     - 스코프 규칙: 이 에이전트만의 반복 에러, 작업 습관, 도구 사용 패턴은 `workspace={agent_workspace}` + `agentId={agent_id}`로 저장한다.\n\
+                     - 현재 채널 힌트: workspace 스코프 이름은 `{workspace_scope}`, 에이전트 스코프 이름은 `{agent_workspace}`, 에이전트 ID는 `{agent_id}`다.\n\
+                     - 원칙: 전역이 아니면 `workspace`를 명시하고, 에이전트 전용이 아니면 `agentId`는 `default`를 유지한다.\n\
+                     - 참고: 턴 시작 `context` 주입과 세션 종료 시 `reflect`는 서버가 담당한다. 턴 중 보강만 `recall`/`remember`로 수행한다."
+                ),
+            )
+        }
+    };
+
+    Some(format!(
+        "\n\n[Proactive Memory Guidance]\n\
+         이 세션에서 `{backend_name}` 메모리를 사용할 수 있습니다.\n\
+         - 읽기: {read_tool} — 새로운 맥락 발견 시 추가 조회\n\
+         - 쓰기: {write_tool} — 중요한 결정/에러/절차 발견 시 기록\n\
+         - 트리거: 에러 원인 확정, 아키텍처 결정, 설정 변경, \"이전에\" 언급 시{extra_note}"
+    ))
 }
 /// Dispatch prompt profile — controls which system prompt sections are injected.
 /// `Full` includes everything (used for implementation dispatches and normal turns).
@@ -68,6 +135,7 @@ pub(super) fn build_system_prompt(
     dispatch_type: Option<&str>,
     shared_knowledge: Option<&str>,
     longterm_catalog: Option<&str>,
+    memory_settings: Option<&ResolvedMemorySettings>,
 ) -> String {
     let narration_guidance = if narrate_progress {
         "\n\nAlways keep the user informed about what you are doing. Briefly explain each step as you work \
@@ -209,6 +277,16 @@ pub(super) fn build_system_prompt(
         system_prompt_owned.push_str(sak);
     }
 
+    if let Some(memory_guidance) = proactive_memory_guidance(
+        memory_settings,
+        current_path,
+        channel_id,
+        role_binding,
+        profile,
+    ) {
+        system_prompt_owned.push_str(&memory_guidance);
+    }
+
     if queued_turn {
         system_prompt_owned.push_str(
             "\n\n[Queued Turn Rules]\n\
@@ -258,6 +336,7 @@ mod tests {
             None, // dispatch_type
             None, // shared_knowledge
             None, // longterm_catalog
+            None, // memory_settings
         )
     }
 
@@ -339,6 +418,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         assert!(!output.contains("Always keep the user informed about what you are doing."));
@@ -410,6 +490,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let without_skills = build_system_prompt(
             "ctx",
@@ -423,6 +504,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review"),
+            None,
             None,
             None,
         );
@@ -449,6 +531,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review"),
+            None,
             None,
             None,
         );
@@ -484,6 +567,7 @@ mod tests {
             Some("review"),
             None,
             None,
+            None,
         );
         let decision_prompt = build_system_prompt(
             "ctx",
@@ -497,6 +581,7 @@ mod tests {
             false,
             DispatchProfile::ReviewLite,
             Some("review-decision"),
+            None,
             None,
             None,
         );
@@ -537,6 +622,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         assert!(!prompt.contains("[Peer Agent Directory]"));
@@ -570,9 +656,111 @@ mod tests {
             None,
             None,
             Some("- facts.md: deployment notes"),
+            None,
         );
 
         assert!(prompt.contains("[Long-term Memory]"));
         assert!(prompt.contains("facts.md"));
+    }
+
+    #[test]
+    fn test_full_prompt_injects_mem0_memory_guidance() {
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            true,
+            None,
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+            Some(&ResolvedMemorySettings {
+                backend: MemoryBackendKind::Mem0,
+                ..ResolvedMemorySettings::default()
+            }),
+        );
+
+        assert!(prompt.contains("[Proactive Memory Guidance]"));
+        assert!(prompt.contains("`search_memory` MCP tool"));
+        assert!(prompt.contains("`add_memories` MCP tool"));
+    }
+
+    #[test]
+    fn test_full_prompt_injects_memento_memory_guidance() {
+        use super::super::settings::RoleBinding;
+
+        let binding = RoleBinding {
+            role_id: "project-agentdesk".to_string(),
+            prompt_file: "/nonexistent".to_string(),
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            peer_agents_enabled: false,
+            memory: Default::default(),
+        };
+        let prompt = build_system_prompt(
+            "ctx",
+            "/Users/test/.adk/release/workspaces/agentdesk",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            true,
+            Some(&binding),
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+            Some(&ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            }),
+        );
+
+        assert!(prompt.contains("[Proactive Memory Guidance]"));
+        assert!(prompt.contains("`recall` MCP tool"));
+        assert!(prompt.contains("`remember` MCP tool"));
+        assert!(prompt.contains("`context`"));
+        assert!(prompt.contains("`reflect`"));
+        assert!(prompt.contains("`workspace`를 생략"));
+        assert!(prompt.contains("`workspace=agentdesk` + `agentId=default`"));
+        assert!(
+            prompt
+                .contains("`workspace=agentdesk-project-agentdesk` + `agentId=project-agentdesk`")
+        );
+        assert!(prompt.contains("workspace 스코프 이름은 `agentdesk`"));
+    }
+
+    #[test]
+    fn test_review_lite_omits_memory_guidance() {
+        let prompt = build_system_prompt(
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            true,
+            None,
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review"),
+            None,
+            None,
+            Some(&ResolvedMemorySettings {
+                backend: MemoryBackendKind::Mem0,
+                ..ResolvedMemorySettings::default()
+            }),
+        );
+
+        assert!(!prompt.contains("[Proactive Memory Guidance]"));
+        assert!(!prompt.contains("`search_memory`"));
+        assert!(!prompt.contains("`add_memories`"));
     }
 }

@@ -512,6 +512,8 @@ pub(super) async fn restore_inflight_turns(
                             .entry(channel_id)
                             .or_insert_with(|| DiscordSession {
                                 session_id: state.session_id.clone(),
+                                memento_context_loaded: state.session_id.is_some(),
+                                memento_reflected: false,
                                 current_path: None,
                                 history: Vec::new(),
                                 pending_uploads: Vec::new(),
@@ -1002,6 +1004,8 @@ pub(super) async fn restore_inflight_turns(
                     .entry(channel_id)
                     .or_insert_with(|| DiscordSession {
                         session_id: state.session_id.clone(),
+                        memento_context_loaded: state.session_id.is_some(),
+                        memento_reflected: false,
                         current_path: None,
                         history: Vec::new(),
                         pending_uploads: Vec::new(),
@@ -1110,6 +1114,8 @@ pub(super) async fn restore_inflight_turns(
                 .entry(channel_id)
                 .or_insert_with(|| DiscordSession {
                     session_id: state.session_id.clone(),
+                    memento_context_loaded: state.session_id.is_some(),
+                    memento_reflected: false,
                     current_path: None,
                     history: Vec::new(),
                     pending_uploads: Vec::new(),
@@ -1134,15 +1140,20 @@ pub(super) async fn restore_inflight_turns(
             if session.remote_profile_name.is_none() {
                 session.remote_profile_name = saved_remote;
             }
-            if !data.cancel_tokens.contains_key(&channel_id) {
-                shared
-                    .global_active
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            data.cancel_tokens.insert(channel_id, cancel_token.clone());
-            data.active_request_owner
-                .insert(channel_id, UserId::new(state.request_owner_user_id));
         }
+
+        if !mailbox_has_active_turn(shared, channel_id).await {
+            shared
+                .global_active
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        mailbox_restore_active_turn(
+            shared,
+            channel_id,
+            cancel_token.clone(),
+            UserId::new(state.request_owner_user_id),
+        )
+        .await;
 
         let adk_session_key = build_adk_session_key(shared, channel_id, provider).await;
         let adk_session_name = channel_name.clone();
@@ -1272,6 +1283,7 @@ pub(super) async fn restore_inflight_turns(
                 adk_session_info: Some(adk_session_info),
                 adk_cwd: last_path.clone(),
                 dispatch_id: recovery_dispatch_id,
+                memory_recall_usage: crate::services::memory::TokenUsage::default(),
                 current_msg_id,
                 response_sent_offset: state.response_sent_offset,
                 full_response: state.full_response.clone(),
@@ -1519,6 +1531,7 @@ mod tests {
             full_response: "중간까지 정리했습니다.".to_string(),
             response_sent_offset: 0,
             current_tool_line: None,
+            prev_tool_status: None,
             started_at: "2026-03-29 22:00:34".to_string(),
             updated_at: "2026-03-29 22:03:53".to_string(),
             born_generation: 7,

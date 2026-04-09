@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 ADK_DEV="$HOME/.adk/dev"
 ADK_REL="$HOME/.adk/release"
+PLIST_DEV="com.agentdesk.dev"
 PLIST_REL="com.agentdesk.release"
 REPO="${AGENTDESK_REPO_DIR:-}"
 if [ -z "$REPO" ]; then
@@ -23,6 +24,8 @@ PROMOTE_DETACHED_CHILD="${AGENTDESK_PROMOTE_DETACHED_CHILD:-0}"
 PROMOTE_LOG_PATH="${AGENTDESK_PROMOTE_LOG_PATH:-}"
 PROMOTE_TEST_MODE="${AGENTDESK_PROMOTE_TEST_MODE:-0}"
 PROMOTE_DELAY_SECS="${AGENTDESK_PROMOTE_DELAY_SECS:-2}"
+PROMOTE_HEALTH_RETRIES="${AGENTDESK_PROMOTE_HEALTH_RETRIES:-20}"
+PROMOTE_HEALTH_DELAY_SECS="${AGENTDESK_PROMOTE_HEALTH_DELAY_SECS:-2}"
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 DASHBOARD_SOURCE=""
@@ -253,12 +256,22 @@ fi
 
 # Safety check: dev must be healthy
 DEV_PORT="${AGENTDESK_DEV_PORT:-8799}"
-if ! curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${DEV_PORT}/api/health" | grep -q '"status":"healthy"'; then
-    echo "✗ Dev is not healthy — aborting promotion"
+echo "▸ Waiting for dev health on :${DEV_PORT}..."
+DEV_READY=false
+if wait_for_http_service_health "$PLIST_DEV" "$DEV_PORT" "$PROMOTE_HEALTH_RETRIES" "$PROMOTE_HEALTH_DELAY_SECS" 0 1; then
+    DEV_READY=true
+fi
+
+if [ "$DEV_READY" != true ]; then
+    echo "✗ Dev is not healthy after $PROMOTE_HEALTH_RETRIES attempts — aborting promotion"
     exit 1
 fi
 
-echo "▸ Dev is healthy — proceeding"
+if _health_json_reconcile_only "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
+    echo "▸ Dev is serving (provider reconcile in progress) — proceeding"
+else
+    echo "▸ Dev is healthy — proceeding"
+fi
 
 if ! DASHBOARD_SOURCE=$(_resolve_dashboard_source); then
     echo "✗ Dashboard dist not found in dev or workspace — aborting promotion"
@@ -378,20 +391,24 @@ fi
 echo "▸ Starting release..."
 xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"
-sleep 3
 
 # Health check (server health + dashboard availability)
 REL_PORT="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
-HEALTH_JSON=$(curl -s --max-time 5 "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}/api/health")
-if echo "$HEALTH_JSON" | grep -q '"status":"healthy"'; then
-    echo "✓ Release is healthy on :${REL_PORT}"
-else
-    echo "✗ Release health check failed — check logs: $ADK_REL/logs/"
+echo "▸ Waiting for release health on :${REL_PORT}..."
+REL_HEALTHY=false
+if wait_for_http_service_health "$PLIST_REL" "$REL_PORT" "$PROMOTE_HEALTH_RETRIES" "$PROMOTE_HEALTH_DELAY_SECS" 1 1; then
+    REL_HEALTHY=true
+fi
+
+if [ "$REL_HEALTHY" != true ]; then
+    echo "✗ Release health check failed after $PROMOTE_HEALTH_RETRIES attempts — check logs: $ADK_REL/logs/"
     exit 1
 fi
-if ! echo "$HEALTH_JSON" | grep -q '"dashboard":true'; then
-    echo "✗ Dashboard not available after promotion — check dist copy"
-    exit 1
+
+if _health_json_reconcile_only "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
+    echo "✓ Release is serving on :${REL_PORT} (provider reconcile in progress)"
+else
+    echo "✓ Release is healthy on :${REL_PORT}"
 fi
 
 echo "═══ Promotion Complete ═══"

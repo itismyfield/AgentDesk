@@ -216,6 +216,8 @@ pub(in crate::services::discord) async fn cmd_start(
             .entry(channel_id)
             .or_insert_with(|| DiscordSession {
                 session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
                 current_path: None,
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
@@ -241,7 +243,7 @@ pub(in crate::services::discord) async fn cmd_start(
             let old_remote = session.remote_profile_name.clone();
             session.remote_profile_name = new_remote.clone();
             if old_remote != *new_remote {
-                session.session_id = None;
+                session.clear_provider_session();
             }
         }
 

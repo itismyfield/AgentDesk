@@ -1,1 +1,0 @@
-../../../../../../.agentdesk/skills/agentdesk-runtime-ops/SKILL.md

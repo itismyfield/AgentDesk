@@ -6,10 +6,10 @@ use std::time::Duration;
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 
-use super::SharedData;
 use super::formatting::send_long_message_raw;
 use super::runtime_store::{atomic_write, discord_restart_reports_root};
 use super::settings::{BotChannelRoutingGuardFailure, validate_bot_channel_routing};
+use super::{SharedData, mailbox_has_active_turn, mailbox_snapshot};
 use crate::services::provider::ProviderKind;
 
 const RESTART_REPORT_VERSION: u32 = 1;
@@ -271,10 +271,7 @@ pub(super) async fn flush_restart_reports(
             // Skip pending reports if the turn that created them is still active.
             // The turn will clear the report on normal completion.
             let age = report_age(&report).unwrap_or_default();
-            let has_active_turn = {
-                let data = shared.core.lock().await;
-                data.cancel_tokens.contains_key(&channel_id)
-            };
+            let has_active_turn = mailbox_has_active_turn(shared, channel_id).await;
             let has_finalizing = shared
                 .finalizing_turns
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -301,8 +298,9 @@ pub(super) async fn flush_restart_reports(
             s if s == "ok" || s == "pending" || s == "sigterm" => {
                 // Build queue preview (skip "진행 중인 턴" — silently handled)
                 let queue_preview = {
-                    let data = shared.core.lock().await;
-                    if let Some(queue) = data.intervention_queue.get(&channel_id) {
+                    let snapshot = mailbox_snapshot(shared, channel_id).await;
+                    let queue = &snapshot.intervention_queue;
+                    if !queue.is_empty() {
                         let items: Vec<String> = queue
                             .iter()
                             .take(5)
