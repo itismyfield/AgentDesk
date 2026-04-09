@@ -972,33 +972,33 @@ pub(super) fn spawn_turn_bridge(
                         && output_file_has_stale_resume_error_after_offset(
                             path,
                             inflight_state.last_offset,
-                        ) {
-                            resume_failed = true;
-                            resume_failure_detected = true;
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!(
-                                "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
-                                channel_id
-                            );
-                            reset_session_for_auto_retry(
-                                &shared_owned,
-                                channel_id,
-                                &cancel_token,
-                                adk_session_key.as_deref(),
-                                &mut new_session_id,
-                                &mut inflight_state,
-                                "stale session_id in output file",
-                            )
-                            .await;
-                            let gateway_c = gateway.clone();
-                            let retry_text = user_text_owned.clone();
-                            tokio::spawn(async move {
-                                gateway_c
-                                    .schedule_retry_with_history(channel_id, &retry_text)
-                                    .await;
-                            });
-                            full_response = String::new();
-                        }
+                        )
+                    {
+                        resume_failed = true;
+                        resume_failure_detected = true;
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!(
+                            "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
+                            channel_id
+                        );
+                        reset_session_for_auto_retry(
+                            &shared_owned,
+                            channel_id,
+                            &cancel_token,
+                            adk_session_key.as_deref(),
+                            &mut new_session_id,
+                            &mut inflight_state,
+                            "stale session_id in output file",
+                        )
+                        .await;
+                        let gateway_c = gateway.clone();
+                        let retry_text = user_text_owned.clone();
+                        tokio::spawn(async move {
+                            gateway_c
+                                .schedule_retry_with_history(channel_id, &retry_text)
+                                .await;
+                        });
+                        full_response = String::new();
                     }
                     // Method 2: quick exit (<10s) + empty response + had a session_id to resume
                     if !resume_failed && quick_exit && rx_disconnected {
