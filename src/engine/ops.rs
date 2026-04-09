@@ -19,15 +19,26 @@ mod message_ops;
 mod pipeline_ops;
 mod queue_ops;
 mod review_ops;
+mod runtime_ops;
 
 #[cfg(test)]
 mod tests;
 
 use crate::db::Db;
+use crate::supervisor::BridgeHandle;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 
 /// Register all `agentdesk.*` globals in the given JS context.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
+    register_globals_with_supervisor(ctx, db, BridgeHandle::new())
+}
+
+pub fn register_globals_with_supervisor(
+    ctx: &Ctx<'_>,
+    db: Db,
+    supervisor_bridge: BridgeHandle,
+) -> JsResult<()> {
     let globals = ctx.globals();
 
     let ad = Object::new(ctx.clone())?;
@@ -80,6 +91,9 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
 
     // ── agentdesk.queue ──────────────────────────────────────────
     queue_ops::register_queue_ops(ctx, db.clone())?;
+
+    // ── agentdesk.runtime ────────────────────────────────────────
+    runtime_ops::register_runtime_ops(ctx, db.clone(), supervisor_bridge)?;
 
     // ── agentdesk.message ────────────────────────────────────────
     let db_for_pipeline = db.clone();
