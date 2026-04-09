@@ -27,6 +27,7 @@ const MIN_MEETING_PARTICIPANTS: usize = 2;
 const MAX_MEETING_PARTICIPANTS: usize = 5;
 const MEETING_READONLY_ALLOWED_TOOLS: &[&str] = &["Read"];
 const MEETING_SELECTION_STAGE_TIMEOUT: Duration = Duration::from_secs(45);
+const MEETING_TURN_STAGE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct MeetingExpertOption {
@@ -1091,6 +1092,7 @@ async fn execute_meeting_expert_prompt(
     round: u32,
     transcript: &str,
     fallback_provider: &ProviderKind,
+    stage_key: &str,
     prompt: String,
 ) -> Result<String, String> {
     let runtime = build_meeting_expert_runtime(
@@ -1104,9 +1106,18 @@ async fn execute_meeting_expert_prompt(
     )
     .await;
 
-    provider_exec::execute_structured(runtime.provider, prompt, runtime.request)
-        .await
-        .map(|text| truncate_for_meeting(&text, 1500))
+    provider_exec::execute_structured_with_timeout(
+        runtime.provider,
+        prompt,
+        runtime.request,
+        MEETING_TURN_STAGE_TIMEOUT,
+        &format!(
+            "meeting turn stage `{}` for participant `{}`",
+            stage_key, participant.role_id
+        ),
+    )
+    .await
+    .map(|text| truncate_for_meeting(&text, 1500))
 }
 
 fn canonical_candidate_pool<'a>(
@@ -1250,6 +1261,17 @@ fn resolve_final_selection(
         Err(error) => {
             fallback_to_initial_selection(initial_selected, "전문 에이전트 최종 확정", &error)
         }
+    }
+}
+
+fn fallback_to_valid_turn_draft(draft: &str) -> String {
+    draft.to_string()
+}
+
+fn resolve_turn_final_response(draft: &str, final_response: Result<String, String>) -> String {
+    match final_response {
+        Ok(content) => content,
+        Err(_) => fallback_to_valid_turn_draft(draft),
     }
 }
 
@@ -1631,6 +1653,15 @@ async fn run_meeting_round(
             return Ok(None);
         }
 
+        tracing::info!(
+            "[meeting] participant turn start meeting_id={} channel_id={} round={} role_id={}",
+            meeting_id,
+            channel_id.get(),
+            round,
+            participant.role_id
+        );
+        let turn_started_at = Instant::now();
+
         // Get current transcript for context
         let transcript_text = {
             let core = shared.core.lock().await;
@@ -1658,6 +1689,14 @@ async fn run_meeting_round(
         .await
         {
             Ok(response) => {
+                tracing::info!(
+                    "[meeting] participant turn completed meeting_id={} channel_id={} round={} role_id={} elapsed_ms={}",
+                    meeting_id,
+                    channel_id.get(),
+                    round,
+                    participant.role_id,
+                    turn_started_at.elapsed().as_millis()
+                );
                 if active_meeting_state(shared, channel_id, meeting_id).await
                     != ActiveMeetingSlot::Active
                 {
@@ -1688,6 +1727,15 @@ async fn run_meeting_round(
                 }
             }
             Err(e) => {
+                tracing::warn!(
+                    "[meeting] participant turn failed meeting_id={} channel_id={} round={} role_id={} elapsed_ms={} error={}",
+                    meeting_id,
+                    channel_id.get(),
+                    round,
+                    participant.role_id,
+                    turn_started_at.elapsed().as_millis(),
+                    e
+                );
                 // Skip this agent, post error to thread
                 rate_limit_wait(shared, msg_channel).await;
                 let _ = msg_channel
@@ -1761,9 +1809,11 @@ async fn execute_agent_turn(
         round,
         transcript,
         &primary_provider,
+        "turn_draft",
         draft_prompt,
     )
-    .await?;
+    .await
+    .map_err(|error| format!("초안 생성 실패: {}", error))?;
 
     let critique_prompt = format!(
         r#"당신은 회의 발언 초안을 비판적으로 검토하는 리뷰어다.
@@ -1796,7 +1846,30 @@ async fn execute_agent_turn(
         },
         draft = draft.trim(),
     );
-    let critique = provider_exec::execute_simple(reviewer_provider, critique_prompt).await?;
+    let critique = match provider_exec::execute_simple_with_timeout(
+        reviewer_provider.clone(),
+        critique_prompt,
+        MEETING_TURN_STAGE_TIMEOUT,
+        &format!(
+            "meeting turn stage `turn_review` for participant `{}`",
+            participant.role_id
+        ),
+    )
+    .await
+    {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                "[meeting] participant review fallback meeting_id={} channel_id={} round={} role_id={} stage=turn_review error={}",
+                meeting_id,
+                channel_id.get(),
+                round,
+                participant.role_id,
+                error
+            );
+            return Ok(fallback_to_valid_turn_draft(&draft));
+        }
+    };
 
     let final_prompt = format!(
         r#"회의 안건:
@@ -1830,7 +1903,7 @@ async fn execute_agent_turn(
         critique = critique.trim(),
     );
 
-    execute_meeting_expert_prompt(
+    let final_response = execute_meeting_expert_prompt(
         participant,
         channel_id,
         meeting_id,
@@ -1838,9 +1911,23 @@ async fn execute_agent_turn(
         round,
         transcript,
         &primary_provider,
+        "turn_finalize",
         final_prompt,
     )
-    .await
+    .await;
+
+    if let Err(error) = &final_response {
+        tracing::warn!(
+            "[meeting] participant final fallback meeting_id={} channel_id={} round={} role_id={} stage=turn_finalize error={}",
+            meeting_id,
+            channel_id.get(),
+            round,
+            participant.role_id,
+            error
+        );
+    }
+
+    Ok(resolve_turn_final_response(&draft, final_response))
 }
 
 /// Check if majority of participants in a given round used CONSENSUS: keyword
@@ -2382,8 +2469,9 @@ mod tests {
         MeetingAgentConfig, MeetingConfig, MeetingStatus, MeetingUtterance, ProviderKind,
         SummaryAgentConfig, build_meeting_participants, build_meeting_status_payload,
         canonical_candidate_pool, derive_agent_metadata_quality, effective_round_count,
-        fallback_to_initial_selection, meeting_readonly_tools, meeting_slot_state,
-        parse_meeting_start_text, parse_selected_role_ids_response, resolve_final_selection,
+        fallback_to_initial_selection, fallback_to_valid_turn_draft, meeting_readonly_tools,
+        meeting_slot_state, parse_meeting_start_text, parse_selected_role_ids_response,
+        resolve_final_selection, resolve_turn_final_response,
     };
     use crate::services::discord::settings::RoleBinding;
     use serde_json::json;
@@ -2707,6 +2795,22 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("응답 파싱 실패")
+        );
+    }
+
+    #[test]
+    fn test_fallback_to_valid_turn_draft_keeps_existing_draft() {
+        assert_eq!(
+            fallback_to_valid_turn_draft("초안 응답"),
+            "초안 응답".to_string()
+        );
+    }
+
+    #[test]
+    fn test_resolve_turn_final_response_uses_draft_when_final_stage_fails() {
+        assert_eq!(
+            resolve_turn_final_response("초안 응답", Err("timeout".to_string())),
+            "초안 응답".to_string()
         );
     }
 }
