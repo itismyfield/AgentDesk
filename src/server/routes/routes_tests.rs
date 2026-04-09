@@ -510,6 +510,116 @@ async fn stop_agent_turn_force_kills_matching_tmux_session() {
 }
 
 #[tokio::test]
+async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
+    let _env_lock = env_lock();
+    if Command::new("tmux").arg("-V").output().is_err() {
+        return;
+    }
+
+    let tmux_name = format!("AgentDesk-codex-turn-cancel-{}", std::process::id());
+    let session_key = format!("mac-mini:{tmux_name}");
+    let channel_id = "1485506232256168011";
+
+    let tmux_started = Command::new("tmux")
+        .args(["new-session", "-d", "-s", &tmux_name, "sleep 30"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !tmux_started {
+        return;
+    }
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ('agent-queue-stop', 'Agent Queue Stop', 'codex', ?1, datetime('now'), datetime('now'))",
+            [channel_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+             VALUES ('card-turn-cancel', 'Turn Cancel', 'in_progress', 'agent-queue-stop', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-turn-cancel', 'card-turn-cancel', 'agent-queue-stop', 'implementation', 'dispatched', 'Cancel me', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at)
+             VALUES (?1, 'agent-queue-stop', 'codex', 'working', 'dispatch-turn-cancel', datetime('now'), datetime('now'))",
+            [session_key.clone()],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/turns/{channel_id}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let tmux_still_alive = Command::new("tmux")
+        .args(["has-session", "-t", &tmux_name])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if tmux_still_alive {
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &tmux_name])
+            .status();
+    }
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["session_key"], session_key);
+    assert_eq!(json["tmux_session"], tmux_name);
+    assert_eq!(json["tmux_killed"], true);
+    assert_eq!(json["dispatch_cancelled"], "dispatch-turn-cancel");
+    assert!(
+        !tmux_still_alive,
+        "tmux session should be gone after /turns/{{channel_id}}/cancel"
+    );
+
+    let conn = db.lock().unwrap();
+    let session_row: (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, active_dispatch_id FROM sessions WHERE session_key = ?1",
+            [session_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(session_row.0, "disconnected");
+    assert_eq!(session_row.1, None);
+
+    let dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-turn-cancel'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatch_status, "cancelled");
+}
+
+#[tokio::test]
 async fn health_returns_ok_with_db_status() {
     let db = test_db();
     let engine = test_engine(&db);
