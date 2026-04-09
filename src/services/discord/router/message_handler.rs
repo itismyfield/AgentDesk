@@ -431,6 +431,14 @@ pub(in crate::services::discord) async fn handle_text_message(
             .map(ChannelId::new);
 
         if is_already_thread {
+            // Ensure thread is accessible (unarchive if needed) before proceeding
+            if !super::verify_thread_accessible(ctx, channel_id).await {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ Dispatch {did} thread {channel_id} is not accessible (archived/locked), skipping"
+                );
+                return Ok(());
+            }
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "  [{ts}] 🧵 Dispatch {did} arrived in existing thread, skipping thread creation"

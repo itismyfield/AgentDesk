@@ -2246,9 +2246,36 @@ pub(super) async fn bootstrap_thread_session(
             worktree: None,
             born_generation: runtime_store::load_generation(),
         });
-    session.current_path = Some(parent_path.to_string());
+    // Always create a worktree for thread sessions to isolate concurrent work.
+    let effective_path = {
+        let ch = ch_name.as_deref().unwrap_or("unknown");
+        let provider_str = shared.settings.read().await.provider.to_string();
+        match create_git_worktree(parent_path, ch, &provider_str) {
+            Ok((wt_path, branch)) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] 🌿 Thread worktree created: {} (branch: {})",
+                    wt_path, branch
+                );
+                session.worktree = Some(super::WorktreeInfo {
+                    original_path: parent_path.to_string(),
+                    worktree_path: wt_path.clone(),
+                    branch_name: branch,
+                });
+                wt_path
+            }
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ Thread worktree creation failed: {e}, falling back to parent path"
+                );
+                parent_path.to_string()
+            }
+        }
+    };
+    session.current_path = Some(effective_path.clone());
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ↻ Bootstrapped thread session from parent path: {parent_path}");
+    println!("  [{ts}] ↻ Bootstrapped thread session: {effective_path}");
 }
 
 /// Resolve the channel name and parent category name for a Discord channel.
