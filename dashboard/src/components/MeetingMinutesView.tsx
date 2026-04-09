@@ -622,11 +622,11 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
       style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-3">
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
           <FileText className="text-amber-400" size={24} />
-          <div>
-            <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
+          <div className="min-w-0">
+            <h1 className="text-xl font-bold break-words" style={{ color: "var(--th-text-heading)" }}>
               {t({ ko: "회의 기록", en: "Meeting Records" })}
             </h1>
             <p className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
@@ -639,7 +639,7 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
         </div>
         <button
           onClick={() => setShowStartForm((v) => !v)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors"
+          className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-amber-500 sm:w-auto sm:self-auto"
         >
           <Plus size={14} />
           {t({ ko: "회의", en: "Meeting" })}
@@ -1023,7 +1023,14 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
             </div>
           )}
 
-          <div className="flex items-center gap-2 justify-end">
+          <div
+            className="sticky bottom-0 z-10 -mx-4 mt-2 flex items-center justify-end gap-2 border-t px-4 pt-3 sm:static sm:mx-0 sm:mt-0 sm:border-t-0 sm:px-0 sm:pt-0"
+            style={{
+              background: "linear-gradient(180deg, rgba(17,24,39,0) 0%, var(--th-surface) 18%)",
+              borderColor: "var(--th-border)",
+              paddingBottom: "max(0.75rem, calc(0.75rem + env(safe-area-inset-bottom)))",
+            }}
+          >
             <button
               onClick={() => setShowStartForm(false)}
               className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-surface-subtle"
