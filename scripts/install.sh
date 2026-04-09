@@ -297,6 +297,9 @@ server:
 
 discord:
   bots: {}
+
+memory:
+  backend: auto
 YAML
   ok "Created default config: $INSTALL_DIR/agentdesk.yaml"
 fi

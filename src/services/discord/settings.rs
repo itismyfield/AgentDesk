@@ -1166,6 +1166,16 @@ mod tests {
         fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
     }
 
+    fn write_agentdesk_yaml(temp_home: &TempDir, contents: &str) {
+        let path = temp_home
+            .path()
+            .join(".adk")
+            .join("config")
+            .join("agentdesk.yaml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
     fn with_env_vars<F>(values: &[(&str, Option<&str>)], f: F)
     where
         F: FnOnce(),
@@ -1224,12 +1234,9 @@ mod tests {
     fn test_resolve_memory_settings_defaults_to_file_and_code_defaults() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto"
-                }),
+                "server:\n  port: 8791\nmemory:\n  backend: auto\n",
             );
 
             with_env_vars(&[("MEM0_API_KEY", None), ("MEM0_BASE_URL", None)], || {
@@ -1310,16 +1317,16 @@ mod tests {
     fn test_resolve_memory_settings_auto_detects_memento_then_mem0_then_file() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto",
-                    "mcp": {
-                        "endpoint": "http://127.0.0.1:8765",
-                        "access_key_env": "MEMENTO_TEST_KEY"
-                    }
-                }),
+                r#"server:
+  port: 8791
+memory:
+  backend: auto
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_TEST_KEY
+"#,
             );
 
             with_env_vars(
@@ -1364,16 +1371,16 @@ mod tests {
     fn test_resolve_memory_settings_explicit_backend_skips_auto_detection() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto",
-                    "mcp": {
-                        "endpoint": "http://127.0.0.1:8765",
-                        "access_key_env": "MEMENTO_TEST_KEY"
-                    }
-                }),
+                r#"server:
+  port: 8791
+memory:
+  backend: auto
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_TEST_KEY
+"#,
             );
 
             with_env_vars(
@@ -1418,16 +1425,16 @@ mod tests {
     fn test_resolve_memory_settings_accepts_local_alias_and_ignores_available_mcps() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto",
-                    "mcp": {
-                        "endpoint": "http://127.0.0.1:8765",
-                        "access_key_env": "MEMENTO_TEST_KEY"
-                    }
-                }),
+                r#"server:
+  port: 8791
+memory:
+  backend: auto
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_TEST_KEY
+"#,
             );
 
             with_env_vars(
@@ -1454,16 +1461,16 @@ mod tests {
     fn test_resolve_memory_settings_explicit_backend_falls_back_to_file_when_unavailable() {
         crate::services::memory::reset_backend_health_for_tests();
         with_temp_home(|temp_home: &TempDir| {
-            write_memory_backend_config(
+            write_agentdesk_yaml(
                 temp_home,
-                serde_json::json!({
-                    "version": 2,
-                    "backend": "auto",
-                    "mcp": {
-                        "endpoint": "http://127.0.0.1:8765",
-                        "access_key_env": "MEMENTO_TEST_KEY"
-                    }
-                }),
+                r#"server:
+  port: 8791
+memory:
+  backend: auto
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_TEST_KEY
+"#,
             );
 
             with_env_vars(
@@ -1540,6 +1547,36 @@ mod tests {
                     assert!(!prompt.contains("`remember` MCP tool"));
                     assert!(!prompt.contains("`search_memory` MCP tool"));
                     assert!(!prompt.contains("`add_memories` MCP tool"));
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_resolve_memory_settings_uses_legacy_json_fallback_when_yaml_memory_is_absent() {
+        crate::services::memory::reset_backend_health_for_tests();
+        with_temp_home(|temp_home: &TempDir| {
+            write_memory_backend_config(
+                temp_home,
+                serde_json::json!({
+                    "version": 2,
+                    "backend": "memento",
+                    "mcp": {
+                        "endpoint": "http://127.0.0.1:8765",
+                        "access_key_env": "MEMENTO_TEST_KEY"
+                    }
+                }),
+            );
+
+            with_env_vars(
+                &[
+                    ("MEMENTO_TEST_KEY", Some("memento-key")),
+                    ("MEM0_API_KEY", None),
+                    ("MEM0_BASE_URL", None),
+                ],
+                || {
+                    let resolved = resolve_memory_settings(None, None);
+                    assert_eq!(resolved.backend, super::MemoryBackendKind::Memento);
                 },
             );
         });

@@ -16,6 +16,8 @@ pub struct Config {
     pub policies: PoliciesConfig,
     #[serde(default)]
     pub data: DataConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -99,6 +101,48 @@ pub struct DataConfig {
     pub db_name: String,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MemoryConfig {
+    #[serde(default = "default_memory_backend")]
+    pub backend: String,
+    #[serde(default)]
+    pub file: FileMemoryConfig,
+    #[serde(default)]
+    pub mcp: McpMemoryConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct FileMemoryConfig {
+    #[serde(default = "default_sak_path")]
+    pub sak_path: String,
+    #[serde(default = "default_sam_path")]
+    pub sam_path: String,
+    #[serde(default = "default_ltm_root")]
+    pub ltm_root: String,
+    #[serde(default = "default_auto_memory_root")]
+    pub auto_memory_root: String,
+}
+
+impl Default for FileMemoryConfig {
+    fn default() -> Self {
+        Self {
+            sak_path: default_sak_path(),
+            sam_path: default_sam_path(),
+            ltm_root: default_ltm_root(),
+            auto_memory_root: default_auto_memory_root(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct McpMemoryConfig {
+    pub endpoint: String,
+    pub access_key_env: String,
+}
+
 /// Compile-time defaults loaded from the project-root `defaults.json`.
 /// This is the single source of truth for port/host values shared across
 /// Rust, Vite, and shell scripts.
@@ -151,6 +195,21 @@ fn default_data_dir() -> PathBuf {
 }
 fn default_db_name() -> String {
     "agentdesk.sqlite".into()
+}
+fn default_memory_backend() -> String {
+    "auto".into()
+}
+fn default_sak_path() -> String {
+    "memories/shared-agent-knowledge/shared_knowledge.md".into()
+}
+fn default_sam_path() -> String {
+    "memories/shared-agent-memory".into()
+}
+fn default_ltm_root() -> String {
+    "memories/long-term".into()
+}
+fn default_auto_memory_root() -> String {
+    "~/.claude/projects/*{workspace}*/memory/".into()
 }
 
 impl Default for ServerConfig {
@@ -227,6 +286,7 @@ impl Default for Config {
             github: GitHubConfig::default(),
             policies: PoliciesConfig::default(),
             data: DataConfig::default(),
+            memory: None,
         }
     }
 }
@@ -406,8 +466,8 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentChannels, AgentDef, BotConfig, Config, load_from_path, resolve_graceful_config_path,
-        runtime_root, save_to_path,
+        AgentChannels, AgentDef, BotConfig, Config, FileMemoryConfig, McpMemoryConfig,
+        MemoryConfig, load_from_path, resolve_graceful_config_path, runtime_root, save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
@@ -600,6 +660,19 @@ mod tests {
             department: Some("platform".to_string()),
             avatar_emoji: Some(":robot:".to_string()),
         });
+        config.memory = Some(MemoryConfig {
+            backend: "memento".to_string(),
+            file: FileMemoryConfig {
+                sak_path: "/tmp/shared.md".to_string(),
+                sam_path: "/tmp/sam".to_string(),
+                ltm_root: "/tmp/ltm".to_string(),
+                auto_memory_root: "/tmp/auto/{workspace}".to_string(),
+            },
+            mcp: McpMemoryConfig {
+                endpoint: "http://127.0.0.1:8765".to_string(),
+                access_key_env: "MEMENTO_API_KEY".to_string(),
+            },
+        });
 
         save_to_path(&path, &config).unwrap();
         assert!(path.exists());
@@ -624,6 +697,24 @@ mod tests {
         assert_eq!(
             loaded.agents[0].channels.claude.as_deref(),
             Some("123456789012345678")
+        );
+        assert_eq!(
+            loaded.memory.as_ref().map(|memory| memory.backend.as_str()),
+            Some("memento")
+        );
+        assert_eq!(
+            loaded
+                .memory
+                .as_ref()
+                .map(|memory| memory.file.auto_memory_root.as_str()),
+            Some("/tmp/auto/{workspace}")
+        );
+        assert_eq!(
+            loaded
+                .memory
+                .as_ref()
+                .map(|memory| memory.mcp.access_key_env.as_str()),
+            Some("MEMENTO_API_KEY")
         );
 
         let _ = std::fs::remove_dir_all(dir);

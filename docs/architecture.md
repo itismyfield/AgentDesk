@@ -582,6 +582,17 @@ github:
   sync_interval_minutes: 10
   triage_interval_minutes: 5
 
+memory:
+  backend: auto
+  file:
+    sak_path: "memories/shared-agent-knowledge/shared_knowledge.md"
+    sam_path: "memories/shared-agent-memory"
+    ltm_root: "memories/long-term"
+    auto_memory_root: "~/.claude/projects/*{workspace}*/memory/"
+  mcp:
+    endpoint: "http://127.0.0.1:8765"
+    access_key_env: "MEMENTO_API_KEY"
+
 policies:
   dir: "./policies"              # JS 정책 파일 디렉토리
   hot_reload: true               # 파일 변경 시 자동 리로드

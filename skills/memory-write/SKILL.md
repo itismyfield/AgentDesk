@@ -28,7 +28,8 @@ description: 4계층 메모리에 지식을 저장한다. 저장 계층(SAM/SAK/
 | 전체 에이전트 + 영구적 | System Prompt 반영 검토로 보고 |
 
 ## 백엔드 설정
-`~/.adk/release/config/memory-backend.json`을 읽는다.
+우선 `~/.adk/release/config/agentdesk.yaml`의 `memory:` 섹션을 읽는다.
+`memory:` 섹션이 없으면 `~/.adk/release/config/memory-backend.json`을 legacy fallback으로 읽는다.
 
 규칙:
 - `backend`: `auto | memento | mem0 | file`
@@ -39,7 +40,7 @@ description: 4계층 메모리에 지식을 저장한다. 저장 계층(SAM/SAK/
 ## 실행 전략
 
 ### 1. 백엔드 결정
-1. `memory-backend.json`을 읽는다.
+1. `agentdesk.yaml`의 `memory:`를 읽고, 없으면 `memory-backend.json` fallback을 읽는다.
 2. `backend=auto`면 `memento -> mem0 -> file` 순서로 사용 가능 여부를 판단한다.
 3. 명시 지정이면 그대로 사용한다.
 

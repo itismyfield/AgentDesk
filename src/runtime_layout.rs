@@ -381,6 +381,10 @@ pub fn resolve_memory_path(root: &Path, raw: &str) -> PathBuf {
 }
 
 pub fn load_memory_backend(root: &Path) -> MemoryBackendConfig {
+    if let Some(config) = load_memory_backend_from_yaml(root) {
+        return config.with_defaults();
+    }
+
     let candidates = [memory_backend_path(root), root.join("memory-backend.json")];
     for path in candidates {
         if let Ok(content) = fs::read_to_string(&path) {
@@ -410,7 +414,6 @@ pub fn ensure_runtime_layout(root: &Path) -> Result<LayoutReport, String> {
     update_org_yaml_prompt_paths(root)?;
     ensure_managed_skills_manifest(root)?;
     migrate_legacy_skill_links(root)?;
-    write_memory_backend(root)?;
     Ok(report)
 }
 
@@ -512,26 +515,6 @@ fn ensure_layout_dirs(root: &Path) -> Result<(), String> {
     ] {
         fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create '{}': {e}", dir.display()))?;
-    }
-    Ok(())
-}
-
-fn write_memory_backend(root: &Path) -> Result<(), String> {
-    let path = memory_backend_path(root);
-    let mut config = load_memory_backend(root).with_defaults();
-    config.version = MEMORY_LAYOUT_VERSION;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create '{}': {e}", parent.display()))?;
-    }
-    let rendered = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Failed to serialize '{}': {e}", path.display()))?;
-    let needs_write = fs::read_to_string(&path)
-        .map(|existing| existing != rendered)
-        .unwrap_or(true);
-    if needs_write {
-        fs::write(&path, rendered)
-            .map_err(|e| format!("Failed to write '{}': {e}", path.display()))?;
     }
     Ok(())
 }
@@ -802,6 +785,50 @@ fn rewrite_legacy_managed_memory_paths(root: &Path, backend: &mut MemoryBackendC
         ],
         default_ltm_root,
     );
+}
+
+fn load_memory_backend_from_yaml(root: &Path) -> Option<MemoryBackendConfig> {
+    for path in [config_file_path(root), legacy_config_file_path(root)] {
+        if !path.is_file() {
+            continue;
+        }
+
+        match crate::config::load_from_path(&path) {
+            Ok(config) => {
+                if let Some(memory) = config.memory {
+                    return Some(memory_backend_from_config(memory));
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "  [memory] Warning: failed to parse '{}' for memory config: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    None
+}
+
+fn memory_backend_from_config(config: crate::config::MemoryConfig) -> MemoryBackendConfig {
+    MemoryBackendConfig {
+        version: MEMORY_LAYOUT_VERSION,
+        backend: config.backend,
+        file: FileMemoryBackendConfig {
+            sak_path: config.file.sak_path,
+            sam_path: config.file.sam_path,
+            ltm_root: config.file.ltm_root,
+            auto_memory_root: config.file.auto_memory_root,
+        },
+        mcp: McpMemoryBackendConfig {
+            endpoint: config.mcp.endpoint,
+            access_key_env: config.mcp.access_key_env,
+        },
+        legacy_sak_path: None,
+        legacy_sam_path: None,
+        legacy_ltm_root: None,
+    }
 }
 
 fn rewrite_legacy_managed_memory_path(
@@ -2060,6 +2087,66 @@ agents:
             !path_exists(&link_path),
             "legacy symlink itself should be removed after migration"
         );
+    }
+
+    #[test]
+    fn load_memory_backend_prefers_agentdesk_yaml_memory_section() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let _home_guard = TestHomeGuard::install(&temp.path().join("home"), root);
+        write_text(
+            &config_file_path(root),
+            r#"server:
+  port: 9001
+memory:
+  backend: memento
+  file:
+    sak_path: /tmp/yaml/shared.md
+    sam_path: /tmp/yaml/sam
+    ltm_root: /tmp/yaml/ltm
+    auto_memory_root: /tmp/yaml/auto/{workspace}
+  mcp:
+    endpoint: http://127.0.0.1:8765
+    access_key_env: MEMENTO_API_KEY
+"#,
+        );
+        write_json(
+            &memory_backend_path(root),
+            serde_json::json!({
+                "version": 2,
+                "backend": "file",
+                "file": {
+                    "sak_path": "/tmp/json/shared.md",
+                    "sam_path": "/tmp/json/sam",
+                    "ltm_root": "/tmp/json/ltm",
+                    "auto_memory_root": "/tmp/json/auto/{workspace}"
+                }
+            }),
+        );
+
+        let backend = load_memory_backend(root);
+
+        assert_eq!(backend.version, 2);
+        assert_eq!(backend.backend, "memento");
+        assert_eq!(backend.file.sak_path, "/tmp/yaml/shared.md");
+        assert_eq!(backend.file.sam_path, "/tmp/yaml/sam");
+        assert_eq!(backend.file.ltm_root, "/tmp/yaml/ltm");
+        assert_eq!(backend.file.auto_memory_root, "/tmp/yaml/auto/{workspace}");
+        assert_eq!(backend.mcp.endpoint, "http://127.0.0.1:8765");
+        assert_eq!(backend.mcp.access_key_env, "MEMENTO_API_KEY");
+    }
+
+    #[test]
+    fn ensure_runtime_layout_does_not_materialize_memory_backend_json_without_legacy_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let _home_guard = TestHomeGuard::install(&temp.path().join("home"), root);
+        write_text(&config_file_path(root), "server:\n  port: 9001\n");
+
+        let report = ensure_runtime_layout(root).unwrap();
+
+        assert!(!report.migrated);
+        assert!(!memory_backend_path(root).exists());
     }
 
     #[test]
