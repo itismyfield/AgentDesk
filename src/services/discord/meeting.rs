@@ -1211,6 +1211,48 @@ fn build_meeting_participants(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectionResolution {
+    selected_role_ids: Vec<String>,
+    warning_message: Option<String>,
+}
+
+fn fallback_to_initial_selection(
+    initial_selected: &[String],
+    stage_label: &str,
+    error: &str,
+) -> SelectionResolution {
+    SelectionResolution {
+        selected_role_ids: normalize_role_id_list(initial_selected),
+        warning_message: Some(format!(
+            "⚠️ **{} 실패**\nreason: {}\n1차 선정안으로 계속 진행합니다.",
+            stage_label, error
+        )),
+    }
+}
+
+fn resolve_final_selection(
+    initial_selected: &[String],
+    final_response: Result<String, String>,
+) -> SelectionResolution {
+    match final_response {
+        Ok(text) => match parse_selected_role_ids_response(&text) {
+            Ok(selected_role_ids) => SelectionResolution {
+                selected_role_ids,
+                warning_message: None,
+            },
+            Err(error) => fallback_to_initial_selection(
+                initial_selected,
+                "전문 에이전트 최종 확정",
+                &format!("응답 파싱 실패: {}", error),
+            ),
+        },
+        Err(error) => {
+            fallback_to_initial_selection(initial_selected, "전문 에이전트 최종 확정", &error)
+        }
+    }
+}
+
 async fn send_meeting_selection_status(
     http: &serenity::Http,
     shared: &Arc<SharedData>,
@@ -1450,7 +1492,29 @@ async fn select_participants(
         "전문 에이전트 선정 리뷰",
         review_prompt,
     )
-    .await?;
+    .await;
+
+    let review_notes = match review_notes {
+        Ok(text) => text,
+        Err(error) => {
+            let fallback =
+                fallback_to_initial_selection(&initial_selected, "전문 에이전트 선정 리뷰", &error);
+            tracing::warn!(
+                "[meeting] selection review fallback meeting_id={} channel_id={} warning={}",
+                meeting_id,
+                channel_id.get(),
+                fallback.warning_message.as_deref().unwrap_or_default()
+            );
+            if let Some(warning) = fallback.warning_message.as_deref() {
+                send_meeting_selection_status(http, shared, msg_channel, warning).await;
+            }
+            return build_meeting_participants(
+                &candidate_pool,
+                &fallback.selected_role_ids,
+                &fixed_role_ids,
+            );
+        }
+    };
 
     let finalize_prompt = format!(
         r#"다음 안건에 대한 회의 참가자 선정을 최종 확정해줘.
@@ -1502,20 +1566,37 @@ async fn select_participants(
         review = review_notes.trim(),
     );
 
-    let final_response = execute_selection_stage(
-        http,
-        shared,
-        channel_id,
-        msg_channel,
-        meeting_id,
-        primary_provider.clone(),
-        "selection_finalize",
-        "전문 에이전트 최종 확정",
-        finalize_prompt,
+    let final_resolution = resolve_final_selection(
+        &initial_selected,
+        execute_selection_stage(
+            http,
+            shared,
+            channel_id,
+            msg_channel,
+            meeting_id,
+            primary_provider.clone(),
+            "selection_finalize",
+            "전문 에이전트 최종 확정",
+            finalize_prompt,
+        )
+        .await,
+    );
+
+    if let Some(warning) = final_resolution.warning_message.as_deref() {
+        tracing::warn!(
+            "[meeting] selection finalize fallback meeting_id={} channel_id={} warning={}",
+            meeting_id,
+            channel_id.get(),
+            warning
+        );
+        send_meeting_selection_status(http, shared, msg_channel, warning).await;
+    }
+
+    build_meeting_participants(
+        &candidate_pool,
+        &final_resolution.selected_role_ids,
+        &fixed_role_ids,
     )
-    .await?;
-    let selected = parse_selected_role_ids_response(&final_response)?;
-    build_meeting_participants(&candidate_pool, &selected, &fixed_role_ids)
 }
 
 /// Run one round: each participant speaks in order
@@ -2301,8 +2382,8 @@ mod tests {
         MeetingAgentConfig, MeetingConfig, MeetingStatus, MeetingUtterance, ProviderKind,
         SummaryAgentConfig, build_meeting_participants, build_meeting_status_payload,
         canonical_candidate_pool, derive_agent_metadata_quality, effective_round_count,
-        meeting_readonly_tools, meeting_slot_state, parse_meeting_start_text,
-        parse_selected_role_ids_response,
+        fallback_to_initial_selection, meeting_readonly_tools, meeting_slot_state,
+        parse_meeting_start_text, parse_selected_role_ids_response, resolve_final_selection,
     };
     use crate::services::discord::settings::RoleBinding;
     use serde_json::json;
@@ -2587,5 +2668,45 @@ mod tests {
         .expect("selected shape should parse");
 
         assert_eq!(parsed, vec!["ch-td".to_string(), "ch-pd".to_string()]);
+    }
+
+    #[test]
+    fn test_fallback_to_initial_selection_keeps_initial_ids_and_warning() {
+        let resolution = fallback_to_initial_selection(
+            &["td".to_string(), "pd".to_string()],
+            "전문 에이전트 선정 리뷰",
+            "meeting selection stage `selection_review` timed out after 45s",
+        );
+
+        assert_eq!(
+            resolution.selected_role_ids,
+            vec!["td".to_string(), "pd".to_string()]
+        );
+        assert_eq!(
+            resolution.warning_message,
+            Some(
+                "⚠️ **전문 에이전트 선정 리뷰 실패**\nreason: meeting selection stage `selection_review` timed out after 45s\n1차 선정안으로 계속 진행합니다.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_resolve_final_selection_falls_back_to_initial_when_final_response_is_invalid() {
+        let resolution = resolve_final_selection(
+            &["td".to_string(), "pd".to_string()],
+            Ok("not json".to_string()),
+        );
+
+        assert_eq!(
+            resolution.selected_role_ids,
+            vec!["td".to_string(), "pd".to_string()]
+        );
+        assert!(
+            resolution
+                .warning_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("응답 파싱 실패")
+        );
     }
 }
