@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -51,12 +52,27 @@ pub struct AgentDef {
     pub name_ko: Option<String>,
     #[serde(default = "default_provider")]
     pub provider: String,
-    #[serde(default)]
-    pub channels: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "AgentChannels::is_empty")]
+    pub channels: AgentChannels,
     #[serde(default)]
     pub department: Option<String>,
     #[serde(default)]
     pub avatar_emoji: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AgentChannels {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex: Option<String>,
+}
+
+impl AgentChannels {
+    pub fn is_empty(&self) -> bool {
+        normalized_channel_value(self.claude.clone()).is_none()
+            && normalized_channel_value(self.codex.clone()).is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -112,6 +128,13 @@ fn default_host() -> String {
 fn default_provider() -> String {
     "claude".into()
 }
+
+fn normalized_channel_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+}
+
 fn default_sync_interval() -> u64 {
     10
 }
@@ -257,6 +280,42 @@ fn resolve_graceful_config_path(
     home_dir: Option<std::path::PathBuf>,
 ) -> std::path::PathBuf {
     if let Some(path) = explicit {
+        if path.exists() {
+            return path;
+        }
+
+        let mut candidates = Vec::new();
+        if let Some(root) = runtime_root.as_ref() {
+            let canonical = crate::runtime_layout::config_file_path(root);
+            let legacy = crate::runtime_layout::legacy_config_file_path(root);
+            if path == legacy {
+                candidates.push(canonical);
+            } else if path == canonical {
+                candidates.push(legacy);
+            }
+        }
+
+        if path.file_name() == Some(OsStr::new("agentdesk.yaml")) {
+            if let Some(parent) = path.parent() {
+                if parent.file_name() == Some(OsStr::new("config")) {
+                    if let Some(root) = parent.parent() {
+                        let legacy = root.join("agentdesk.yaml");
+                        if legacy != path {
+                            candidates.push(legacy);
+                        }
+                    }
+                } else {
+                    let canonical = parent.join("config").join("agentdesk.yaml");
+                    if canonical != path {
+                        candidates.push(canonical);
+                    }
+                }
+            }
+        }
+
+        if let Some(candidate) = candidates.into_iter().find(|candidate| candidate.exists()) {
+            return candidate;
+        }
         return path;
     }
     if let Some(root) = runtime_root.as_ref() {
@@ -347,8 +406,8 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentDef, BotConfig, Config, load_from_path, resolve_graceful_config_path, runtime_root,
-        save_to_path,
+        AgentChannels, AgentDef, BotConfig, Config, load_from_path, resolve_graceful_config_path,
+        runtime_root, save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
@@ -491,6 +550,28 @@ mod tests {
     }
 
     #[test]
+    fn resolve_graceful_config_path_follows_migrated_runtime_config_when_explicit_legacy_is_missing()
+     {
+        let root = make_temp_dir("explicit-legacy-migrated");
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config").join("agentdesk.yaml"),
+            "server:\n  port: 9301\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_graceful_config_path(
+            Some(root.join("agentdesk.yaml")),
+            Some(root.clone()),
+            None,
+            None,
+        );
+        assert_eq!(resolved, root.join("config").join("agentdesk.yaml"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn save_and_load_round_trip_preserves_config_fields() {
         let dir = make_temp_dir("roundtrip");
         let path = dir.join("nested").join("agentdesk.yaml");
@@ -512,10 +593,10 @@ mod tests {
             name: "Agent One".to_string(),
             name_ko: Some("에이전트 원".to_string()),
             provider: "codex".to_string(),
-            channels: std::collections::HashMap::from([(
-                "claude".to_string(),
-                "123456789012345678".to_string(),
-            )]),
+            channels: AgentChannels {
+                claude: Some("123456789012345678".to_string()),
+                codex: None,
+            },
             department: Some("platform".to_string()),
             avatar_emoji: Some(":robot:".to_string()),
         });
@@ -541,7 +622,7 @@ mod tests {
         assert_eq!(loaded.agents[0].department.as_deref(), Some("platform"));
         assert_eq!(loaded.agents[0].avatar_emoji.as_deref(), Some(":robot:"));
         assert_eq!(
-            loaded.agents[0].channels.get("claude").map(String::as_str),
+            loaded.agents[0].channels.claude.as_deref(),
             Some("123456789012345678")
         );
 

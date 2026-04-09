@@ -322,6 +322,10 @@ pub fn managed_agents_root(root: &Path) -> PathBuf {
     config_dir(root).join("agents")
 }
 
+pub fn shared_prompt_path(root: &Path) -> PathBuf {
+    managed_agents_root(root).join("_shared.prompt.md")
+}
+
 pub fn managed_memories_root(root: &Path) -> PathBuf {
     config_dir(root).join("memories")
 }
@@ -400,6 +404,10 @@ pub fn ensure_runtime_layout(root: &Path) -> Result<LayoutReport, String> {
     }
 
     ensure_layout_dirs(root)?;
+    normalize_agent_config_channels(root)?;
+    synchronize_shared_prompt(root)?;
+    update_role_map_prompt_paths(root)?;
+    update_org_yaml_prompt_paths(root)?;
     ensure_managed_skills_manifest(root)?;
     migrate_legacy_skill_links(root)?;
     write_memory_backend(root)?;
@@ -593,9 +601,130 @@ fn migrate_legacy_layout(root: &Path) -> Result<(), String> {
     migrate_memory_backend_file(root)?;
     migrate_role_context(root)?;
     migrate_shared_agent_memory(root)?;
-    update_role_map_prompt_paths(root)?;
-    update_org_yaml_prompt_paths(root)?;
     Ok(())
+}
+
+fn normalize_agent_config_channels(root: &Path) -> Result<(), String> {
+    let path = config_file_path(root);
+    if !path.is_file() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read '{}': {e}", path.display()))?;
+    let normalized = strip_dead_agent_channel_token_lines(&content);
+    if normalized != content {
+        fs::write(&path, normalized)
+            .map_err(|e| format!("Failed to write '{}': {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn strip_dead_agent_channel_token_lines(content: &str) -> String {
+    let mut output = Vec::new();
+    let mut in_agents = false;
+    let mut in_agent_channels = false;
+
+    for line in content.lines() {
+        let indent = line.chars().take_while(|ch| *ch == ' ').count();
+        let trimmed = line.trim_start();
+
+        if indent == 0 && trimmed.starts_with("agents:") {
+            in_agents = true;
+            in_agent_channels = false;
+            output.push(line);
+            continue;
+        }
+        if indent == 0 && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            in_agents = false;
+            in_agent_channels = false;
+        }
+        if in_agents && indent == 4 && trimmed.starts_with("channels:") {
+            in_agent_channels = true;
+            output.push(line);
+            continue;
+        }
+        if in_agent_channels && indent <= 4 && !trimmed.is_empty() {
+            in_agent_channels = false;
+        }
+        if in_agent_channels && indent >= 6 && trimmed.starts_with("token:") {
+            continue;
+        }
+        output.push(line);
+    }
+
+    let mut rendered = output.join("\n");
+    if content.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered
+}
+
+fn synchronize_shared_prompt(root: &Path) -> Result<(), String> {
+    let canonical = shared_prompt_path(root);
+    let aliases = shared_prompt_aliases(root);
+    let source = std::iter::once(canonical.clone())
+        .chain(aliases.iter().cloned())
+        .find(|path| path.is_file());
+
+    let Some(source_path) = source else {
+        return Ok(());
+    };
+
+    if canonical != source_path {
+        if let Some(parent) = canonical.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create '{}': {e}", parent.display()))?;
+        }
+        copy_path_resolving_symlinks(&source_path, &canonical)?;
+    }
+
+    for alias in aliases {
+        if same_canonical_path(&alias, &canonical) {
+            continue;
+        }
+        if let Some(parent) = alias.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create '{}': {e}", parent.display()))?;
+        }
+        if path_exists(&alias) {
+            remove_link_or_path(&alias)?;
+        }
+        create_symlink_entry(&canonical, &alias, false)?;
+    }
+
+    Ok(())
+}
+
+fn shared_prompt_aliases(root: &Path) -> Vec<PathBuf> {
+    let mut aliases = vec![
+        config_dir(root).join("_shared.md"),
+        managed_agents_root(root).join("_shared.md"),
+        config_dir(root)
+            .join("role-context")
+            .join("_shared.prompt.md"),
+        root.join("role-context").join("_shared.prompt.md"),
+    ];
+
+    if let Some(home) =
+        current_home_dir().filter(|home| manages_home_shared_prompt_aliases(root, home))
+    {
+        aliases.push(home.join(".agentdesk").join("prompts").join("_shared.md"));
+        aliases.push(
+            home.join(".agentdesk")
+                .join("role-context")
+                .join("_shared.prompt.md"),
+        );
+    }
+
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn manages_home_shared_prompt_aliases(root: &Path, home: &Path) -> bool {
+    let release_root = home.join(".adk").join("release");
+    same_canonical_path(root, &release_root)
 }
 
 fn migrate_legacy_config_file(root: &Path) -> Result<(), String> {
@@ -822,7 +951,7 @@ fn update_role_map_prompt_paths(root: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to read '{}': {e}", path.display()))?;
     let mut json: Value = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse '{}': {e}", path.display()))?;
-    rewrite_prompt_paths_json(&mut json);
+    rewrite_prompt_paths_json(&mut json, root);
     let rendered = serde_json::to_string_pretty(&json)
         .map_err(|e| format!("Failed to serialize '{}': {e}", path.display()))?;
     fs::write(&path, rendered).map_err(|e| format!("Failed to write '{}': {e}", path.display()))
@@ -837,13 +966,13 @@ fn update_org_yaml_prompt_paths(root: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to read '{}': {e}", path.display()))?;
     let mut yaml: serde_yaml::Value = serde_yaml::from_str(&content)
         .map_err(|e| format!("Failed to parse '{}': {e}", path.display()))?;
-    rewrite_prompt_paths_yaml(&mut yaml);
+    rewrite_prompt_paths_yaml(&mut yaml, root);
     let rendered = serde_yaml::to_string(&yaml)
         .map_err(|e| format!("Failed to serialize '{}': {e}", path.display()))?;
     fs::write(&path, rendered).map_err(|e| format!("Failed to write '{}': {e}", path.display()))
 }
 
-fn rewrite_prompt_paths_json(value: &mut Value) {
+fn rewrite_prompt_paths_json(value: &mut Value, root: &Path) {
     match value {
         Value::Object(map) => {
             for (key, child) in map.iter_mut() {
@@ -851,21 +980,23 @@ fn rewrite_prompt_paths_json(value: &mut Value) {
                     if let Some(raw) = child.as_str() {
                         *child = Value::String(rewrite_prompt_path(raw));
                     }
+                } else if key == "sharedPromptFile" {
+                    *child = Value::String(shared_prompt_path(root).display().to_string());
                 } else {
-                    rewrite_prompt_paths_json(child);
+                    rewrite_prompt_paths_json(child, root);
                 }
             }
         }
         Value::Array(items) => {
             for child in items {
-                rewrite_prompt_paths_json(child);
+                rewrite_prompt_paths_json(child, root);
             }
         }
         _ => {}
     }
 }
 
-fn rewrite_prompt_paths_yaml(value: &mut serde_yaml::Value) {
+fn rewrite_prompt_paths_yaml(value: &mut serde_yaml::Value, root: &Path) {
     match value {
         serde_yaml::Value::Mapping(map) => {
             for (key, child) in map.iter_mut() {
@@ -874,14 +1005,17 @@ fn rewrite_prompt_paths_yaml(value: &mut serde_yaml::Value) {
                     if let Some(raw) = child.as_str() {
                         *child = serde_yaml::Value::String(rewrite_prompt_path(raw));
                     }
+                } else if key_str == "shared_prompt" {
+                    *child =
+                        serde_yaml::Value::String(shared_prompt_path(root).display().to_string());
                 } else {
-                    rewrite_prompt_paths_yaml(child);
+                    rewrite_prompt_paths_yaml(child, root);
                 }
             }
         }
         serde_yaml::Value::Sequence(items) => {
             for child in items {
-                rewrite_prompt_paths_yaml(child);
+                rewrite_prompt_paths_yaml(child, root);
             }
         }
         _ => {}
@@ -1826,6 +1960,52 @@ mod tests {
         assert!(!root.join("shared_agent_memory").exists());
         assert!(!root.join("role-context").exists());
         assert!(!root.join("agentdesk.yaml").exists());
+    }
+
+    #[test]
+    fn ensure_runtime_layout_strips_dead_agent_channel_token_lines_and_syncs_shared_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = home.join(".adk").join("release");
+        let _home_guard = TestHomeGuard::install(&home, &root);
+
+        write_text(
+            &config_file_path(&root),
+            r#"server:
+  port: 9001
+agents:
+  - id: alpha
+    name: Alpha
+    provider: claude
+    channels:
+      claude: "111"
+      token: "legacy-claude-token"
+      codex: "222"
+      token: "legacy-codex-token"
+"#,
+        );
+        write_text(
+            &home.join(".agentdesk").join("prompts").join("_shared.md"),
+            "# shared prompt",
+        );
+
+        ensure_runtime_layout(&root).unwrap();
+
+        let yaml = fs::read_to_string(config_file_path(&root)).unwrap();
+        assert!(yaml.contains("claude: \"111\""));
+        assert!(yaml.contains("codex: \"222\""));
+        assert!(!yaml.contains("token:"));
+
+        let canonical = shared_prompt_path(&root);
+        assert_eq!(fs::read_to_string(&canonical).unwrap(), "# shared prompt");
+        let legacy_alias = home.join(".agentdesk").join("prompts").join("_shared.md");
+        assert!(
+            fs::symlink_metadata(&legacy_alias)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(same_canonical_path(&legacy_alias, &canonical));
     }
 
     #[test]

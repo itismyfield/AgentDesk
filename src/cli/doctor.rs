@@ -1917,7 +1917,7 @@ mod tests {
             name: "Agent 1".to_string(),
             name_ko: None,
             provider: "codex".to_string(),
-            channels: std::collections::HashMap::new(),
+            channels: crate::config::AgentChannels::default(),
             department: None,
             avatar_emoji: None,
         });
