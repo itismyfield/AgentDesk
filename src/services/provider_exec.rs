@@ -80,6 +80,21 @@ pub async fn execute_structured(
         .map_err(|e| format!("Task join error: {}", e))?
 }
 
+pub async fn execute_structured_with_timeout(
+    provider: ProviderKind,
+    prompt: String,
+    request: StructuredExecRequest,
+    timeout: Duration,
+    label: &str,
+) -> Result<String, String> {
+    await_with_timeout(
+        label,
+        timeout,
+        execute_structured(provider, prompt, request),
+    )
+    .await
+}
+
 fn execute_structured_blocking(
     provider: ProviderKind,
     prompt: String,
