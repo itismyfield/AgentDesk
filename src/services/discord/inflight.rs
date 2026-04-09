@@ -28,6 +28,8 @@ pub(super) struct InflightTurnState {
     pub response_sent_offset: usize,
     #[serde(default)]
     pub current_tool_line: Option<String>,
+    #[serde(default)]
+    pub prev_tool_status: Option<String>,
     pub started_at: String,
     pub updated_at: String,
     /// Restart generation at which this turn was born.
@@ -81,6 +83,7 @@ impl InflightTurnState {
             full_response: String::new(),
             response_sent_offset: 0,
             current_tool_line: None,
+            prev_tool_status: None,
             started_at: now.clone(),
             updated_at: now,
             born_generation: super::runtime_store::load_generation(),

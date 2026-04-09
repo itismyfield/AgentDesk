@@ -311,6 +311,7 @@ pub(super) fn spawn_turn_bridge(
         let mut cancelled = false;
         let mut rx_disconnected = false;
         let mut current_tool_line: Option<String> = bridge.inflight_state.current_tool_line.clone();
+        let mut prev_tool_status: Option<String> = bridge.inflight_state.prev_tool_status.clone();
         let mut last_tool_name: Option<String> = None;
         let mut last_tool_summary: Option<String> = None;
         let mut accumulated_input_tokens: u64 = 0;
@@ -368,6 +369,7 @@ pub(super) fn spawn_turn_bridge(
         let mut inflight_state = bridge.inflight_state.clone();
         let mut last_status_edit = tokio::time::Instant::now();
         let status_interval = super::status_update_interval();
+        let narrate_progress = super::settings::load_narrate_progress(shared_owned.db.as_ref());
         let turn_start = std::time::Instant::now();
 
         let _ = save_inflight_state(&inflight_state);
@@ -395,6 +397,7 @@ pub(super) fn spawn_turn_bridge(
                                 && handle_gemini_retry_boundary(
                                     &mut full_response,
                                     &mut current_tool_line,
+                                    &mut prev_tool_status,
                                     &mut last_tool_name,
                                     &mut last_tool_summary,
                                     &mut any_tool_used,
@@ -419,6 +422,11 @@ pub(super) fn spawn_turn_bridge(
                                 has_post_tool_text = true;
                                 inflight_state.has_post_tool_text = true;
                             }
+                            super::formatting::preserve_previous_tool_status(
+                                &mut prev_tool_status,
+                                current_tool_line.as_deref(),
+                                None,
+                            );
                             current_tool_line = None;
                             last_tool_name = None;
                             last_tool_summary = None;
@@ -431,6 +439,11 @@ pub(super) fn spawn_turn_bridge(
                             } else {
                                 "💭 Thinking...".to_string()
                             };
+                            super::formatting::preserve_previous_tool_status(
+                                &mut prev_tool_status,
+                                current_tool_line.as_deref(),
+                                Some(display.as_str()),
+                            );
                             current_tool_line = Some(display);
                             last_tool_name = None;
                             last_tool_summary = None;
@@ -462,7 +475,13 @@ pub(super) fn spawn_turn_bridge(
                             } else {
                                 truncate_str(&summary, 120).to_string()
                             };
-                            current_tool_line = Some(format!("⚙ {}: {}", name, display_summary));
+                            let display = format!("⚙ {}: {}", name, display_summary);
+                            super::formatting::preserve_previous_tool_status(
+                                &mut prev_tool_status,
+                                current_tool_line.as_deref(),
+                                Some(display.as_str()),
+                            );
+                            current_tool_line = Some(display);
                             last_tool_name = Some(name.clone());
                             last_tool_summary = Some(display_summary);
                             if !restart_followup_pending && is_dcserver_restart_command(&input) {
@@ -530,6 +549,11 @@ pub(super) fn spawn_turn_bridge(
                                     .filter(|s| !s.is_empty() && *s != "…")
                                     .map(|s| format!("{} {}: {}", status, tn, s))
                                     .unwrap_or_else(|| format!("{} {}", status, tn));
+                                super::formatting::preserve_previous_tool_status(
+                                    &mut prev_tool_status,
+                                    current_tool_line.as_deref(),
+                                    Some(detail.as_str()),
+                                );
                                 current_tool_line = Some(detail);
                             }
                             let _ = content;
@@ -745,21 +769,23 @@ pub(super) fn spawn_turn_bridge(
             let indicator = SPINNER[spin_idx % SPINNER.len()];
             spin_idx += 1;
 
-            let raw_tool_status = super::formatting::resolve_raw_tool_status(
-                current_tool_line.as_deref(),
-                &full_response,
-            );
-            let tool_status = super::formatting::humanize_tool_status(raw_tool_status);
             let current_portion = if response_sent_offset < full_response.len() {
                 &full_response[response_sent_offset..]
             } else {
                 ""
             };
-            let footer = format!("\n\n{} {}", indicator, tool_status);
+            let status_block = super::formatting::build_placeholder_status_block(
+                indicator,
+                prev_tool_status.as_deref(),
+                current_tool_line.as_deref(),
+                &full_response,
+                narrate_progress,
+            );
+            let footer = format!("\n\n{status_block}");
             let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10);
             let normalized = normalize_empty_lines(current_portion);
             let stable_display_text = if current_portion.is_empty() {
-                format!("{} {}", indicator, tool_status)
+                status_block.clone()
             } else {
                 let body = tail_with_ellipsis(&normalized, body_budget.max(1));
                 format!("{}{}", body, footer)
@@ -786,8 +812,12 @@ pub(super) fn spawn_turn_bridge(
                 state_dirty = true;
             }
 
-            if state_dirty || inflight_state.current_tool_line != current_tool_line {
+            if state_dirty
+                || inflight_state.current_tool_line != current_tool_line
+                || inflight_state.prev_tool_status != prev_tool_status
+            {
                 inflight_state.current_tool_line = current_tool_line.clone();
+                inflight_state.prev_tool_status = prev_tool_status.clone();
                 let _ = save_inflight_state(&inflight_state);
             }
 

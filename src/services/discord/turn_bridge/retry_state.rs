@@ -30,6 +30,7 @@ pub(super) fn should_reset_gemini_retry_attempt_state(
 pub(super) fn reset_gemini_retry_attempt_state(
     full_response: &mut String,
     current_tool_line: &mut Option<String>,
+    prev_tool_status: &mut Option<String>,
     last_tool_name: &mut Option<String>,
     last_tool_summary: &mut Option<String>,
     any_tool_used: &mut bool,
@@ -39,6 +40,7 @@ pub(super) fn reset_gemini_retry_attempt_state(
 ) {
     full_response.clear();
     *current_tool_line = None;
+    *prev_tool_status = None;
     *last_tool_name = None;
     *last_tool_summary = None;
     *any_tool_used = false;
@@ -46,6 +48,7 @@ pub(super) fn reset_gemini_retry_attempt_state(
     *response_sent_offset = 0;
     inflight_state.full_response.clear();
     inflight_state.current_tool_line = None;
+    inflight_state.prev_tool_status = None;
     inflight_state.any_tool_used = false;
     inflight_state.has_post_tool_text = false;
     inflight_state.response_sent_offset = 0;
@@ -54,6 +57,7 @@ pub(super) fn reset_gemini_retry_attempt_state(
 pub(super) fn handle_gemini_retry_boundary(
     full_response: &mut String,
     current_tool_line: &mut Option<String>,
+    prev_tool_status: &mut Option<String>,
     last_tool_name: &mut Option<String>,
     last_tool_summary: &mut Option<String>,
     any_tool_used: &mut bool,
@@ -79,6 +83,7 @@ pub(super) fn handle_gemini_retry_boundary(
         reset_gemini_retry_attempt_state(
             full_response,
             current_tool_line,
+            prev_tool_status,
             last_tool_name,
             last_tool_summary,
             any_tool_used,

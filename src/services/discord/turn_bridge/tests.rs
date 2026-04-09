@@ -504,6 +504,7 @@ fn gemini_retry_reset_helper_requires_current_turn_partial_state() {
 fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
     let mut full_response = "partial answer".to_string();
     let mut current_tool_line = Some("⚙ Bash: pwd".to_string());
+    let mut prev_tool_status = Some("✓ Read: src/config.rs".to_string());
     let mut last_tool_name = Some("Bash".to_string());
     let mut last_tool_summary = Some("pwd".to_string());
     let mut any_tool_used = true;
@@ -525,6 +526,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
     );
     inflight_state.full_response = full_response.clone();
     inflight_state.current_tool_line = current_tool_line.clone();
+    inflight_state.prev_tool_status = prev_tool_status.clone();
     inflight_state.any_tool_used = true;
     inflight_state.has_post_tool_text = true;
     inflight_state.response_sent_offset = response_sent_offset;
@@ -532,6 +534,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
     reset_gemini_retry_attempt_state(
         &mut full_response,
         &mut current_tool_line,
+        &mut prev_tool_status,
         &mut last_tool_name,
         &mut last_tool_summary,
         &mut any_tool_used,
@@ -542,6 +545,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
 
     assert!(full_response.is_empty());
     assert_eq!(current_tool_line, None);
+    assert_eq!(prev_tool_status, None);
     assert_eq!(last_tool_name, None);
     assert_eq!(last_tool_summary, None);
     assert!(!any_tool_used);
@@ -549,6 +553,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
     assert_eq!(response_sent_offset, 0);
     assert!(inflight_state.full_response.is_empty());
     assert_eq!(inflight_state.current_tool_line, None);
+    assert_eq!(inflight_state.prev_tool_status, None);
     assert!(!inflight_state.any_tool_used);
     assert!(!inflight_state.has_post_tool_text);
     assert_eq!(inflight_state.response_sent_offset, 0);
@@ -558,6 +563,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
 fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() {
     let mut full_response = "partial answer".to_string();
     let mut current_tool_line = Some("⚙ Bash: pwd".to_string());
+    let mut prev_tool_status = Some("✓ Read: src/config.rs".to_string());
     let mut last_tool_name = Some("Bash".to_string());
     let mut last_tool_summary = Some("pwd".to_string());
     let mut any_tool_used = true;
@@ -581,6 +587,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     );
     inflight_state.full_response = full_response.clone();
     inflight_state.current_tool_line = current_tool_line.clone();
+    inflight_state.prev_tool_status = prev_tool_status.clone();
     inflight_state.any_tool_used = true;
     inflight_state.has_post_tool_text = true;
     inflight_state.response_sent_offset = response_sent_offset;
@@ -588,6 +595,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     let changed = handle_gemini_retry_boundary(
         &mut full_response,
         &mut current_tool_line,
+        &mut prev_tool_status,
         &mut last_tool_name,
         &mut last_tool_summary,
         &mut any_tool_used,
@@ -601,6 +609,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     assert!(changed);
     assert!(full_response.is_empty());
     assert_eq!(current_tool_line, None);
+    assert_eq!(prev_tool_status, None);
     assert_eq!(last_tool_name, None);
     assert_eq!(last_tool_summary, None);
     assert!(!any_tool_used);
@@ -611,6 +620,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     assert_eq!(inflight_state.session_id, None);
     assert!(inflight_state.full_response.is_empty());
     assert_eq!(inflight_state.current_tool_line, None);
+    assert_eq!(inflight_state.prev_tool_status, None);
     assert!(!inflight_state.any_tool_used);
     assert!(!inflight_state.has_post_tool_text);
     assert_eq!(inflight_state.response_sent_offset, 0);

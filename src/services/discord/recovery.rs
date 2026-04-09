@@ -1528,6 +1528,7 @@ mod tests {
             full_response: "중간까지 정리했습니다.".to_string(),
             response_sent_offset: 0,
             current_tool_line: None,
+            prev_tool_status: None,
             started_at: "2026-03-29 22:00:34".to_string(),
             updated_at: "2026-03-29 22:03:53".to_string(),
             born_generation: 7,

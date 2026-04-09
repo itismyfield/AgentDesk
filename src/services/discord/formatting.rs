@@ -220,8 +220,9 @@ pub(super) fn format_skills_notice(provider: &ProviderKind, skills: &[(String, S
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_tool_name, convert_markdown_tables, filter_codex_tool_logs, format_skills_notice,
-        normalize_allowed_tools,
+        build_placeholder_status_block, canonical_tool_name, convert_markdown_tables,
+        filter_codex_tool_logs, format_skills_notice, normalize_allowed_tools,
+        preserve_previous_tool_status,
     };
     use crate::services::provider::ProviderKind;
 
@@ -477,6 +478,49 @@ mod tests {
             "TaskList must be filtered"
         );
         assert!(output.contains("Done"));
+    }
+
+    #[test]
+    fn test_preserve_previous_tool_status_promotes_distinct_completed_tool() {
+        let mut prev = None;
+        preserve_previous_tool_status(
+            &mut prev,
+            Some("✓ Read: src/config.rs"),
+            Some("⚙ Bash: cargo build"),
+        );
+        assert_eq!(prev.as_deref(), Some("✓ Read: src/config.rs"));
+    }
+
+    #[test]
+    fn test_preserve_previous_tool_status_ignores_same_tool_transition() {
+        let mut prev = None;
+        preserve_previous_tool_status(
+            &mut prev,
+            Some("⚙ Bash: cargo build"),
+            Some("✓ Bash: cargo build"),
+        );
+        assert_eq!(prev, None);
+    }
+
+    #[test]
+    fn test_build_placeholder_status_block_uses_two_line_trail_only_without_narration() {
+        let two_line = build_placeholder_status_block(
+            "⠋",
+            Some("✓ Read: src/config.rs"),
+            Some("⚙ Bash: cargo build"),
+            "",
+            false,
+        );
+        assert_eq!(two_line, "✓ Read: src/config.rs\n⠋ ⚙ Bash: cargo build");
+
+        let narrated = build_placeholder_status_block(
+            "⠋",
+            Some("✓ Read: src/config.rs"),
+            Some("⚙ Bash: cargo build"),
+            "",
+            true,
+        );
+        assert_eq!(narrated, "⠋ ⚙ Bash: cargo build");
     }
 }
 
@@ -1169,14 +1213,89 @@ pub(super) fn resolve_raw_tool_status<'a>(
         .unwrap_or("Processing...")
 }
 
+fn tool_status_identity(line: &str) -> (&str, &str) {
+    let trimmed = line.trim();
+    if trimmed.starts_with("💭") {
+        return ("thinking", "thinking");
+    }
+    if let Some(stripped) = trimmed
+        .strip_prefix("⚙")
+        .or_else(|| trimmed.strip_prefix("✓"))
+        .or_else(|| trimmed.strip_prefix("✗"))
+    {
+        let stripped = stripped.trim();
+        let subject = stripped
+            .split_once(':')
+            .map(|(head, _)| head.trim())
+            .unwrap_or(stripped);
+        return ("tool", subject);
+    }
+    ("other", trimmed)
+}
+
+/// Preserve the last distinct tool/thinking status so placeholders can show a
+/// short trail instead of only the newest line.
+pub(super) fn preserve_previous_tool_status(
+    prev_tool_status: &mut Option<String>,
+    current_tool_line: Option<&str>,
+    next_tool_line: Option<&str>,
+) {
+    let Some(current) = current_tool_line
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    else {
+        return;
+    };
+
+    if let Some(next) = next_tool_line
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if current == next || tool_status_identity(current) == tool_status_identity(next) {
+            return;
+        }
+    }
+
+    if prev_tool_status.as_deref().map(str::trim) == Some(current) {
+        return;
+    }
+
+    *prev_tool_status = Some(current.to_string());
+}
+
 /// Convert a technical tool status line into a human-friendly label with emoji.
 pub(super) fn humanize_tool_status(tool_line: &str) -> String {
-    // Thinking: show full text, but cap at 500 chars to leave room for message body
+    // Thinking: show full text, cap at 600 chars (must leave room for body+footer within Discord 2000 char limit)
     if tool_line.starts_with("💭") {
-        return truncate_for_status(tool_line, 500);
+        return truncate_for_status(tool_line, 600);
     }
-    // Everything else: show the raw tool line, truncated
-    truncate_for_status(tool_line, 80)
+    // Everything else: show the raw tool line, truncated at 300 chars
+    truncate_for_status(tool_line, 300)
+}
+
+/// Build the spinner/status block shown in Discord placeholders.
+/// When narrate_progress is disabled, include the previous status line as a
+/// compact 2-line trail if both previous and current tool states are available.
+pub(super) fn build_placeholder_status_block(
+    indicator: &str,
+    prev_tool_status: Option<&str>,
+    current_tool_line: Option<&str>,
+    full_response: &str,
+    narrate_progress: bool,
+) -> String {
+    if !narrate_progress {
+        if let (Some(prev), Some(current)) = (prev_tool_status, current_tool_line) {
+            let prev = humanize_tool_status(prev);
+            let current = humanize_tool_status(current);
+            if prev != current {
+                return format!("{prev}\n{indicator} {current}");
+            }
+        }
+    }
+
+    let raw_tool_status = resolve_raw_tool_status(current_tool_line, full_response);
+    let tool_status = humanize_tool_status(raw_tool_status);
+    format!("{indicator} {tool_status}")
 }
 
 fn truncate_for_status(s: &str, max: usize) -> String {
