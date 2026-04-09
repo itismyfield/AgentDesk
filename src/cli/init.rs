@@ -397,40 +397,75 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-// ── Bot settings generation ────────────────────────────────────────
+// ── AgentDesk config generation ────────────────────────────────────
 
-/// Merge new bot entry into existing bot_settings.json content.
-/// Preserves suffix_map, other bot entries, and custom fields.
-fn generate_bot_settings(
-    existing_path: &Path,
+fn init_config_path(root: &Path) -> PathBuf {
+    let canonical = crate::runtime_layout::config_file_path(root);
+    let legacy = crate::runtime_layout::legacy_config_file_path(root);
+    if canonical.is_file() || !legacy.is_file() {
+        canonical
+    } else {
+        legacy
+    }
+}
+
+fn init_has_existing_configuration(root: &Path) -> bool {
+    init_config_path(root).exists() || crate::runtime_layout::org_schema_path(root).exists()
+}
+
+fn parse_owner_id(owner_id: Option<&str>) -> Option<u64> {
+    owner_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn upsert_command_bot(
+    config: &mut crate::config::Config,
+    token: &str,
+    provider: &str,
+    allowed_channel_ids: &[u64],
+) {
+    let mut bot = config
+        .discord
+        .bots
+        .get("command")
+        .cloned()
+        .unwrap_or_default();
+    bot.token = Some(token.trim().to_string());
+    bot.provider = Some(provider.trim().to_string());
+    bot.auth.allowed_channel_ids =
+        (!allowed_channel_ids.is_empty()).then_some(allowed_channel_ids.to_vec());
+    config.discord.bots.insert("command".to_string(), bot);
+}
+
+fn write_agentdesk_discord_config(
+    root: &Path,
+    guild_id: &str,
     token: &str,
     provider: &str,
     owner_id: Option<&str>,
-) -> Result<String, String> {
-    let token_hash = crate::services::discord::settings::discord_token_hash(token);
-    let mut entry = serde_json::json!({
-        "token": token,
-        "provider": provider,
-    });
-    if let Some(oid) = owner_id {
-        entry["owner_user_id"] = serde_json::Value::String(oid.into());
-    }
-
-    // Read existing file and merge, preserving all other keys
-    let mut root: serde_json::Value = if existing_path.exists() {
-        let content = fs::read_to_string(existing_path)
-            .map_err(|e| format!("Failed to read {}: {e}", existing_path.display()))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse {}: {e}", existing_path.display()))?
+    allowed_channel_ids: &[u64],
+    reconfigure: bool,
+) -> Result<PathBuf, String> {
+    let config_path = init_config_path(root);
+    let mut config = if config_path.is_file() {
+        crate::config::load_from_path(&config_path)
+            .map_err(|e| format!("Failed to load config {}: {e}", config_path.display()))?
     } else {
-        serde_json::json!({})
+        crate::config::Config::default()
     };
 
-    if let Some(obj) = root.as_object_mut() {
-        obj.insert(token_hash, entry);
-    }
+    config.discord.guild_id = Some(guild_id.trim().to_string());
+    config.discord.owner_id = parse_owner_id(owner_id);
+    upsert_command_bot(&mut config, token, provider, allowed_channel_ids);
 
-    serde_json::to_string_pretty(&root).map_err(|e| format!("JSON serialization failed: {e}"))
+    let rendered = serde_yaml::to_string(&config)
+        .map_err(|e| format!("Failed to serialize config {}: {e}", config_path.display()))?;
+    write_with_backup(&config_path, &rendered, reconfigure)
+        .map_err(|e| format!("Failed to write config {}: {e}", config_path.display()))?;
+
+    Ok(config_path)
 }
 
 // ── Main init flow ─────────────────────────────────────────────────
@@ -441,7 +476,7 @@ pub fn handle_init(reconfigure: bool) {
         std::process::exit(1);
     });
 
-    if !reconfigure && root.join("config").join("bot_settings.json").exists() {
+    if !reconfigure && init_has_existing_configuration(&root) {
         println!("기존 설정이 발견되었습니다: {}", root.display());
         println!("재설정하려면 reconfigure를 사용하세요.");
         return;
@@ -596,6 +631,11 @@ pub fn handle_init(reconfigure: bool) {
     } else {
         Some(owner_input.as_str())
     };
+    let allowed_channel_ids = selected
+        .iter()
+        .filter_map(|idx| text_channels.get(*idx))
+        .filter_map(|(_, channel_id)| channel_id.parse::<u64>().ok())
+        .collect::<Vec<_>>();
 
     // Generate configs
     println!("\nStep 5/5: 설정 파일 생성\n");
@@ -641,20 +681,29 @@ pub fn handle_init(reconfigure: bool) {
     }
     println!("  [OK] {}", org_path.display());
 
-    // bot_settings.json
-    let bs_path = config_dir.join("bot_settings.json");
-    let bot_settings = match generate_bot_settings(&bs_path, &token, provider, owner_id) {
-        Ok(s) => s,
+    let agentdesk_config_path = match write_agentdesk_discord_config(
+        &root,
+        &guild.id,
+        &token,
+        provider,
+        owner_id,
+        &allowed_channel_ids,
+        reconfigure,
+    ) {
+        Ok(path) => path,
         Err(e) => {
-            eprintln!("bot_settings.json 생성 실패: {}", e);
+            eprintln!("agentdesk.yaml 생성 실패: {}", e);
             return;
         }
     };
-    if let Err(e) = write_with_backup(&bs_path, &bot_settings, reconfigure) {
-        eprintln!("Failed to write {}: {}", bs_path.display(), e);
+    if !agentdesk_config_path.exists() {
+        eprintln!(
+            "Failed to write {}: file was not created",
+            agentdesk_config_path.display()
+        );
         return;
     }
-    println!("  [OK] {}", bs_path.display());
+    println!("  [OK] {}", agentdesk_config_path.display());
 
     // Create prompts
     let agents_root = crate::runtime_layout::managed_agents_root(&root);
@@ -751,10 +800,7 @@ pub fn handle_init(reconfigure: bool) {
         println!("═══════════════════════════════════════");
         println!("\n생성된 파일:");
         println!("  {} (org.yaml)", config_dir.join("org.yaml").display());
-        println!(
-            "  {} (bot_settings.json)",
-            config_dir.join("bot_settings.json").display()
-        );
+        println!("  {} (agentdesk.yaml)", agentdesk_config_path.display());
         println!("  {} (agents)", agents_root.display());
         println!("\n다음 단계:");
         println!("  1. 프롬프트 파일을 편집하여 에이전트 성격을 정의하세요");

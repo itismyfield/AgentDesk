@@ -32,6 +32,26 @@ fn load_agentdesk_config() -> Option<Config> {
     None
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ResolvedDiscordBotConfig {
+    pub name: String,
+    pub token: String,
+    pub provider: Option<ProviderKind>,
+    pub agent: Option<String>,
+    pub auth: crate::config::DiscordBotAuthConfig,
+    pub description: Option<String>,
+    pub owner_id: Option<u64>,
+}
+
+fn resolve_bot_token(bot_name: &str, bot: &crate::config::BotConfig) -> Option<String> {
+    bot.token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| crate::credential::read_bot_token(bot_name))
+}
+
 fn default_prompt_path(role_id: &str) -> Option<String> {
     let root = crate::config::runtime_root()?;
     let agents_root = crate::runtime_layout::managed_agents_root(&root);
@@ -227,6 +247,42 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
     load_agentdesk_config()
         .and_then(|config| config.shared_prompt.as_deref().map(expand_tilde))
         .or_else(shared_prompt_fallback_path)
+}
+
+pub(super) fn load_discord_bot_configs() -> Vec<ResolvedDiscordBotConfig> {
+    let Some(config) = load_agentdesk_config() else {
+        return Vec::new();
+    };
+
+    let owner_id = config.discord.owner_id;
+    let mut bots = config
+        .discord
+        .bots
+        .into_iter()
+        .filter_map(|(name, bot)| {
+            let token = resolve_bot_token(&name, &bot)?;
+            Some(ResolvedDiscordBotConfig {
+                name,
+                token,
+                provider: bot
+                    .provider
+                    .as_deref()
+                    .and_then(crate::services::provider::ProviderKind::from_str),
+                agent: bot.agent,
+                auth: bot.auth,
+                description: bot.description,
+                owner_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    bots.sort_by(|left, right| left.name.cmp(&right.name));
+    bots
+}
+
+pub(super) fn find_discord_bot_by_token(token: &str) -> Option<ResolvedDiscordBotConfig> {
+    load_discord_bot_configs()
+        .into_iter()
+        .find(|bot| bot.token == token)
 }
 
 pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {

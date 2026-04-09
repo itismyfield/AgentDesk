@@ -12,7 +12,7 @@ pub fn print_help() {
     println!("    -h, --help              Print help information");
     println!("    -v, --version           Print version information");
     println!(
-        "    dcserver [TOKEN]        Start Discord bot server(s); without TOKEN uses bot_settings.json"
+        "    dcserver [TOKEN]        Start Discord bot server(s); without TOKEN uses configured Discord bots"
     );
     println!(
         "    restart-dcserver [--report-channel-id <ID> --report-provider <claude|codex|gemini|qwen> [--report-message-id <ID>]]"

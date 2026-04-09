@@ -66,6 +66,281 @@ fn find_bot_settings_entry<'a>(
     })
 }
 
+#[derive(Clone, Debug, Default)]
+struct LegacyBotSettingsEntry {
+    agent: Option<String>,
+    provider: Option<ProviderKind>,
+    allowed_tools: Option<Vec<String>>,
+    allowed_channel_ids: Vec<u64>,
+    channel_model_overrides: std::collections::HashMap<String, String>,
+    owner_user_id: Option<u64>,
+    allowed_user_ids: Vec<u64>,
+    allow_all_users: Option<bool>,
+    allowed_bot_ids: Vec<u64>,
+}
+
+fn load_legacy_bot_settings_json() -> Option<serde_json::Value> {
+    let path = bot_settings_path()?;
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&content).ok()
+}
+
+fn load_legacy_bot_settings_entry(token: &str) -> LegacyBotSettingsEntry {
+    let Some(json) = load_legacy_bot_settings_json() else {
+        return LegacyBotSettingsEntry::default();
+    };
+    let Some(obj) = json.as_object() else {
+        return LegacyBotSettingsEntry::default();
+    };
+    let Some((_, entry)) = find_bot_settings_entry(obj, token) else {
+        return LegacyBotSettingsEntry::default();
+    };
+
+    let agent = entry
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let provider = entry
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(ProviderKind::from_str_or_unsupported);
+    let allowed_channel_ids = entry
+        .get("allowed_channel_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(json_u64).collect())
+        .unwrap_or_default();
+    let channel_model_overrides = entry
+        .get("channel_model_overrides")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(channel_id, model)| {
+                    model
+                        .as_str()
+                        .map(|model| (channel_id.clone(), model.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let owner_user_id = entry.get("owner_user_id").and_then(json_u64);
+    let allowed_user_ids = entry
+        .get("allowed_user_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(json_u64).collect())
+        .unwrap_or_default();
+    let allow_all_users = entry.get("allow_all_users").and_then(|v| v.as_bool());
+    let allowed_bot_ids = entry
+        .get("allowed_bot_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(json_u64).collect())
+        .unwrap_or_default();
+
+    let allowed_tools = match entry.get("allowed_tools") {
+        None => None,
+        Some(value) => value
+            .as_array()
+            .map(|tools_arr| normalize_allowed_tools(tools_arr.iter().filter_map(|v| v.as_str()))),
+    };
+
+    LegacyBotSettingsEntry {
+        agent,
+        provider,
+        allowed_tools,
+        allowed_channel_ids,
+        channel_model_overrides,
+        owner_user_id,
+        allowed_user_ids,
+        allow_all_users,
+        allowed_bot_ids,
+    }
+}
+
+fn config_path_for_write() -> Option<PathBuf> {
+    let root = crate::config::runtime_root()?;
+    let canonical = crate::runtime_layout::config_file_path(&root);
+    let legacy = crate::runtime_layout::legacy_config_file_path(&root);
+    if canonical.is_file() || !legacy.is_file() {
+        Some(canonical)
+    } else {
+        Some(legacy)
+    }
+}
+
+fn resolved_config_bot_name(config: &crate::config::Config, token: &str) -> Option<String> {
+    let mut bot_names = config.discord.bots.keys().cloned().collect::<Vec<_>>();
+    bot_names.sort();
+    bot_names.into_iter().find(|name| {
+        config
+            .discord
+            .bots
+            .get(name)
+            .and_then(|bot| {
+                bot.token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .or_else(|| crate::credential::read_bot_token(name))
+            })
+            .as_deref()
+            == Some(token)
+    })
+}
+
+fn persist_bot_auth_to_yaml(token: &str, settings: &DiscordBotSettings) {
+    let Some(path) = config_path_for_write() else {
+        return;
+    };
+
+    let mut config = if path.is_file() {
+        crate::config::load_from_path(&path).unwrap_or_default()
+    } else {
+        crate::config::Config::default()
+    };
+
+    config.discord.owner_id = settings.owner_user_id;
+
+    let Some(bot_name) = resolved_config_bot_name(&config, token) else {
+        let _ = crate::config::save_to_path(&path, &config);
+        return;
+    };
+
+    if let Some(bot) = config.discord.bots.get_mut(&bot_name) {
+        bot.provider = Some(settings.provider.as_str().to_string());
+        bot.agent = settings.agent.clone();
+        bot.auth.allowed_channel_ids = Some(settings.allowed_channel_ids.clone());
+        bot.auth.allowed_user_ids = Some(settings.allowed_user_ids.clone());
+        bot.auth.allowed_tools = Some(normalize_allowed_tools(&settings.allowed_tools));
+        bot.auth.allow_all_users = Some(settings.allow_all_users);
+        bot.auth.allowed_bot_ids = Some(settings.allowed_bot_ids.clone());
+    }
+
+    let _ = crate::config::save_to_path(&path, &config);
+}
+
+fn save_runtime_bot_settings(token: &str, settings: &DiscordBotSettings) {
+    let Some(path) = bot_settings_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let mut json: serde_json::Value = if let Ok(content) = fs::read_to_string(&path) {
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+
+    let key = discord_token_hash(token);
+    obj.retain(|existing_key, existing_entry| {
+        if existing_key == &key {
+            return false;
+        }
+        existing_entry
+            .get("token")
+            .and_then(|value| value.as_str())
+            .map(|existing_token| existing_token != token)
+            .unwrap_or(true)
+    });
+
+    if !settings.channel_model_overrides.is_empty() {
+        obj.insert(
+            key,
+            serde_json::json!({
+                "channel_model_overrides": settings.channel_model_overrides,
+            }),
+        );
+    }
+
+    if obj.is_empty() {
+        let _ = fs::remove_file(&path);
+        return;
+    }
+
+    if let Ok(rendered) = serde_json::to_string_pretty(&json) {
+        let _ = fs::write(&path, rendered);
+    }
+}
+
+fn last_session_path_key(token_hash: &str, channel_id: u64) -> String {
+    format!("discord:last_session:{token_hash}:{channel_id}")
+}
+
+fn last_remote_profile_key(token_hash: &str, channel_id: u64) -> String {
+    format!("discord:last_remote:{token_hash}:{channel_id}")
+}
+
+fn load_kv_meta_value(db: Option<&crate::db::Db>, key: &str) -> Option<String> {
+    let db = db?;
+    let conn = db.read_conn().ok()?;
+    conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
+        row.get::<_, String>(0)
+    })
+    .ok()
+    .filter(|value| !value.trim().is_empty())
+}
+
+pub(super) fn load_last_session_path(
+    db: Option<&crate::db::Db>,
+    token_hash: &str,
+    channel_id: u64,
+) -> Option<String> {
+    load_kv_meta_value(db, &last_session_path_key(token_hash, channel_id))
+}
+
+pub(super) fn load_last_remote_profile(
+    db: Option<&crate::db::Db>,
+    token_hash: &str,
+    channel_id: u64,
+) -> Option<String> {
+    load_kv_meta_value(db, &last_remote_profile_key(token_hash, channel_id))
+}
+
+pub(super) fn save_last_session_runtime(
+    db: Option<&crate::db::Db>,
+    token_hash: &str,
+    channel_id: u64,
+    current_path: &str,
+    remote_profile_name: Option<&str>,
+) {
+    let Some(db) = db else {
+        return;
+    };
+    let Ok(conn) = db.lock() else {
+        return;
+    };
+
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        [
+            last_session_path_key(token_hash, channel_id),
+            current_path.to_string(),
+        ],
+    );
+
+    let remote_key = last_remote_profile_key(token_hash, channel_id);
+    match remote_profile_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(remote) => {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                [remote_key, remote.to_string()],
+            );
+        }
+        None => {
+            let _ = conn.execute("DELETE FROM kv_meta WHERE key = ?1", [remote_key]);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RoleBinding {
     pub role_id: String,
@@ -908,180 +1183,84 @@ pub(super) fn cleanup_channel_uploads(channel_id: ChannelId) {
     }
 }
 
-/// Load Discord bot settings from bot_settings.json
+/// Load Discord bot settings from agentdesk.yaml plus runtime-only bot_settings.json.
 pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
-    let Some(path) = bot_settings_path() else {
-        return DiscordBotSettings::default();
-    };
-    let Ok(content) = fs::read_to_string(&path) else {
-        return DiscordBotSettings::default();
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return DiscordBotSettings::default();
-    };
-    let Some(obj) = json.as_object() else {
-        return DiscordBotSettings::default();
-    };
-    let Some((_, entry)) = find_bot_settings_entry(obj, token) else {
-        return DiscordBotSettings::default();
-    };
-    let agent = entry
-        .get("agent")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-    let owner_user_id = entry.get("owner_user_id").and_then(json_u64);
-    let provider = entry
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .map(ProviderKind::from_str_or_unsupported)
+    let configured = agentdesk_config::find_discord_bot_by_token(token);
+    let legacy = load_legacy_bot_settings_entry(token);
+    let provider = configured
+        .as_ref()
+        .and_then(|bot| bot.provider.clone())
+        .or(legacy.provider.clone())
         .unwrap_or(ProviderKind::Claude);
-    let last_sessions = entry
-        .get("last_sessions")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
-    let last_remotes = entry
-        .get("last_remotes")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
-    let allowed_channel_ids = entry
-        .get("allowed_channel_ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(json_u64).collect())
-        .unwrap_or_default();
-    let allowed_user_ids = entry
-        .get("allowed_user_ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(json_u64).collect())
-        .unwrap_or_default();
-    let allow_all_users = entry
-        .get("allow_all_users")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let allowed_bot_ids = entry
-        .get("allowed_bot_ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(json_u64).collect())
-        .unwrap_or_default();
-    let channel_model_overrides = entry
-        .get("channel_model_overrides")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(channel_id, model)| {
-                    model
-                        .as_str()
-                        .map(|model| (channel_id.clone(), model.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let allowed_tools = match entry.get("allowed_tools") {
-        None => default_allowed_tools_for_provider(&provider),
-        Some(value) => {
-            let Some(tools_arr) = value.as_array() else {
-                let allowed_tools = default_allowed_tools_for_provider(&provider);
-                return DiscordBotSettings {
-                    agent,
-                    provider,
-                    allowed_tools,
-                    allowed_channel_ids,
-                    owner_user_id,
-                    last_sessions,
-                    last_remotes,
-                    allowed_user_ids,
-                    allow_all_users,
-                    allowed_bot_ids,
-                    ..DiscordBotSettings::default()
-                };
-            };
-            normalize_allowed_tools(tools_arr.iter().filter_map(|v| v.as_str()))
-        }
-    };
+    let allowed_tools = configured
+        .as_ref()
+        .and_then(|bot| bot.auth.allowed_tools.as_ref().cloned())
+        .map(|tools| normalize_allowed_tools(&tools))
+        .or(legacy.allowed_tools.clone())
+        .unwrap_or_else(|| default_allowed_tools_for_provider(&provider));
+
     DiscordBotSettings {
-        agent,
+        agent: configured
+            .as_ref()
+            .and_then(|bot| bot.agent.clone())
+            .or(legacy.agent),
         provider,
         allowed_tools,
-        allowed_channel_ids,
-        last_sessions,
-        last_remotes,
-        channel_model_overrides,
-        owner_user_id,
-        allowed_user_ids,
-        allow_all_users,
-        allowed_bot_ids,
+        allowed_channel_ids: configured
+            .as_ref()
+            .and_then(|bot| bot.auth.allowed_channel_ids.clone())
+            .unwrap_or(legacy.allowed_channel_ids),
+        channel_model_overrides: legacy.channel_model_overrides,
+        owner_user_id: configured
+            .as_ref()
+            .and_then(|bot| bot.owner_id)
+            .or(legacy.owner_user_id),
+        allowed_user_ids: configured
+            .as_ref()
+            .and_then(|bot| bot.auth.allowed_user_ids.clone())
+            .unwrap_or(legacy.allowed_user_ids),
+        allow_all_users: configured
+            .as_ref()
+            .and_then(|bot| bot.auth.allow_all_users)
+            .or(legacy.allow_all_users)
+            .unwrap_or(false),
+        allowed_bot_ids: configured
+            .as_ref()
+            .and_then(|bot| bot.auth.allowed_bot_ids.clone())
+            .unwrap_or(legacy.allowed_bot_ids),
     }
 }
 
-/// Save Discord bot settings to bot_settings.json
+/// Save Discord bot settings.
+/// Auth moves to agentdesk.yaml; runtime-only overrides remain in bot_settings.json.
 pub(super) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
-    let Some(path) = bot_settings_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let mut json: serde_json::Value = if let Ok(content) = fs::read_to_string(&path) {
-        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    let key = discord_token_hash(token);
-    let normalized_tools = normalize_allowed_tools(&settings.allowed_tools);
-    let mut entry = serde_json::json!({
-        "token": token,
-        "agent": settings.agent,
-        "provider": settings.provider.as_str(),
-        "allowed_tools": normalized_tools,
-        "allowed_channel_ids": settings.allowed_channel_ids,
-        "last_sessions": settings.last_sessions,
-        "last_remotes": settings.last_remotes,
-        "channel_model_overrides": settings.channel_model_overrides,
-        "allowed_user_ids": settings.allowed_user_ids,
-        "allow_all_users": settings.allow_all_users,
-        "allowed_bot_ids": settings.allowed_bot_ids,
-    });
-    if let Some(owner_id) = settings.owner_user_id {
-        entry["owner_user_id"] = serde_json::json!(owner_id);
-    }
-    let Some(obj) = json.as_object_mut() else {
-        return;
-    };
-    obj.retain(|existing_key, existing_entry| {
-        if existing_key == &key {
-            return true;
-        }
-        existing_entry
-            .get("token")
-            .and_then(|value| value.as_str())
-            .map(|existing_token| existing_token != token)
-            .unwrap_or(true)
-    });
-    obj.insert(key, entry);
-    if let Ok(s) = serde_json::to_string_pretty(&json) {
-        let _ = fs::write(&path, s);
-    }
+    persist_bot_auth_to_yaml(token, settings);
+    save_runtime_bot_settings(token, settings);
 }
 
 pub fn load_discord_bot_launch_configs() -> Vec<DiscordBotLaunchConfig> {
-    let Some(path) = bot_settings_path() else {
-        return Vec::new();
-    };
-    let Ok(content) = fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+    let configured = agentdesk_config::load_discord_bot_configs();
+    if !configured.is_empty() {
+        let mut configs = configured
+            .into_iter()
+            .map(|bot| {
+                let legacy = load_legacy_bot_settings_entry(&bot.token);
+                DiscordBotLaunchConfig {
+                    hash_key: discord_token_hash(&bot.token),
+                    token: bot.token,
+                    provider: bot
+                        .provider
+                        .or(legacy.provider)
+                        .unwrap_or(ProviderKind::Claude),
+                }
+            })
+            .collect::<Vec<_>>();
+        configs.sort_by(|left, right| left.hash_key.cmp(&right.hash_key));
+        configs.dedup_by(|left, right| left.token == right.token);
+        return configs;
+    }
+
+    let Some(json) = load_legacy_bot_settings_json() else {
         return Vec::new();
     };
     let Some(obj) = json.as_object() else {
@@ -1119,11 +1298,18 @@ pub fn load_discord_bot_launch_configs() -> Vec<DiscordBotLaunchConfig> {
     configs_by_token.into_values().collect()
 }
 
-/// Resolve a Discord bot token from its hash by searching bot_settings.json
+/// Resolve a Discord bot token from its hash by searching agentdesk.yaml first,
+/// then falling back to legacy bot_settings.json entries.
 pub fn resolve_discord_token_by_hash(hash: &str) -> Option<String> {
-    let path = bot_settings_path()?;
-    let content = fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    if let Some(token) = agentdesk_config::load_discord_bot_configs()
+        .into_iter()
+        .find(|bot| discord_token_hash(&bot.token) == hash)
+        .map(|bot| bot.token)
+    {
+        return Some(token);
+    }
+
+    let json = load_legacy_bot_settings_json()?;
     let obj = json.as_object()?;
     let entry = obj.get(hash)?;
     entry
@@ -1881,8 +2067,14 @@ memory:
 
     #[test]
     fn test_save_bot_settings_persists_allowed_channel_ids() {
-        with_temp_home(|_temp_home: &TempDir| {
+        with_temp_home(|temp_home: &TempDir| {
             let token = "test-token";
+            write_agentdesk_yaml(
+                temp_home,
+                &format!(
+                    "server:\n  port: 8791\ndiscord:\n  bots:\n    command:\n      token: \"{token}\"\n"
+                ),
+            );
             let mut settings = super::super::DiscordBotSettings::default();
             settings.allowed_channel_ids = vec![123, 456];
 
@@ -1908,6 +2100,12 @@ memory:
                 other_key.clone(): { "token": other_token, "owner_user_id": 2 }
             });
             fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+            write_agentdesk_yaml(
+                temp_home,
+                &format!(
+                    "server:\n  port: 8791\ndiscord:\n  bots:\n    command:\n      token: \"{token}\"\n"
+                ),
+            );
 
             let mut settings = super::super::DiscordBotSettings::default();
             settings.owner_user_id = Some(42);
@@ -1917,9 +2115,9 @@ memory:
             let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
             let obj = saved.as_object().unwrap();
             assert!(obj.get("claude").is_none());
-            assert!(obj.get(&canonical_key).is_some());
+            assert!(obj.get(&canonical_key).is_none());
             assert!(obj.get(&other_key).is_some());
-            assert_eq!(obj.len(), 2);
+            assert_eq!(obj.len(), 1);
 
             let loaded = load_bot_settings(token);
             assert_eq!(loaded.owner_user_id, Some(42));
@@ -1952,8 +2150,14 @@ memory:
 
     #[test]
     fn test_save_bot_settings_persists_allow_all_users() {
-        with_temp_home(|_temp_home: &TempDir| {
+        with_temp_home(|temp_home: &TempDir| {
             let token = "test-token";
+            write_agentdesk_yaml(
+                temp_home,
+                &format!(
+                    "server:\n  port: 8791\ndiscord:\n  bots:\n    command:\n      token: \"{token}\"\n"
+                ),
+            );
             let mut settings = super::super::DiscordBotSettings::default();
             settings.allow_all_users = true;
 
@@ -1990,8 +2194,14 @@ memory:
 
     #[test]
     fn test_save_bot_settings_persists_agent_identity() {
-        with_temp_home(|_temp_home: &TempDir| {
+        with_temp_home(|temp_home: &TempDir| {
             let token = "test-token";
+            write_agentdesk_yaml(
+                temp_home,
+                &format!(
+                    "server:\n  port: 8791\ndiscord:\n  bots:\n    command:\n      token: \"{token}\"\n"
+                ),
+            );
             let mut settings = super::super::DiscordBotSettings::default();
             settings.agent = Some("codex".to_string());
 

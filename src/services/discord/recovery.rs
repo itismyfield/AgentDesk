@@ -1,5 +1,8 @@
 use super::handoff::{HandoffRecord, save_handoff};
-use super::settings::{resolve_role_binding, validate_bot_channel_routing_with_provider_channel};
+use super::settings::{
+    load_last_remote_profile, load_last_session_path, resolve_role_binding,
+    validate_bot_channel_routing_with_provider_channel,
+};
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 #[cfg(unix)]
@@ -992,9 +995,16 @@ pub(super) async fn restore_inflight_turns(
                 .map(|(_, ch)| ch)
             });
             {
-                let channel_key = channel_id.get().to_string();
-                let last_path = settings_snapshot.last_sessions.get(&channel_key).cloned();
-                let saved_remote = settings_snapshot.last_remotes.get(&channel_key).cloned();
+                let last_path = load_last_session_path(
+                    shared.db.as_ref(),
+                    &shared.token_hash,
+                    channel_id.get(),
+                );
+                let saved_remote = load_last_remote_profile(
+                    shared.db.as_ref(),
+                    &shared.token_hash,
+                    channel_id.get(),
+                );
                 let mut data = shared.core.lock().await;
                 let session = data
                     .sessions
@@ -1095,9 +1105,10 @@ pub(super) async fn restore_inflight_turns(
             .recovering_channels
             .insert(channel_id, std::time::Instant::now());
 
-        let channel_key = channel_id.get().to_string();
-        let last_path = settings_snapshot.last_sessions.get(&channel_key).cloned();
-        let saved_remote = settings_snapshot.last_remotes.get(&channel_key).cloned();
+        let last_path =
+            load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get());
+        let saved_remote =
+            load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
 
         let cancel_token = Arc::new(CancelToken::new());
         if let Ok(mut guard) = cancel_token.tmux_session.lock() {

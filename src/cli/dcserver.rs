@@ -282,8 +282,16 @@ pub fn dcserver_instance_pids() -> Vec<u32> {
     Vec::new()
 }
 
-pub fn instance_bot_settings_path() -> Option<PathBuf> {
-    agentdesk_runtime_root().map(|root| root.join("config").join("bot_settings.json"))
+pub fn instance_agentdesk_config_path() -> Option<PathBuf> {
+    agentdesk_runtime_root().map(|root| {
+        let canonical = crate::runtime_layout::config_file_path(&root);
+        let legacy = crate::runtime_layout::legacy_config_file_path(&root);
+        if canonical.is_file() || !legacy.is_file() {
+            canonical
+        } else {
+            legacy
+        }
+    })
 }
 
 pub fn dcserver_stdout_log_path() -> Option<PathBuf> {
@@ -538,28 +546,16 @@ pub fn handle_restart_dcserver(
         }
     };
 
-    // Read bot_settings.json to find stored token(s)
-    let settings_path = match instance_bot_settings_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: Cannot determine runtime root for bot_settings.json");
-            write_restart_report(
-                "failed",
-                "runtime root를 결정할 수 없어서 dcserver restart를 시작하지 못했습니다."
-                    .to_string(),
-            );
-            return;
-        }
-    };
-
-    let has_settings_file = std::fs::read_to_string(&settings_path).is_ok();
+    let settings_display = instance_agentdesk_config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "agentdesk.yaml".to_string());
     let configs = load_discord_bot_launch_configs();
-    let onboarding_mode = !has_settings_file || configs.is_empty();
+    let onboarding_mode = configs.is_empty();
 
     if onboarding_mode {
         eprintln!(
-            "  ⚠ No bot tokens found in {} — dcserver will start in onboarding mode",
-            settings_path.display()
+            "  ⚠ No configured Discord bots found in {} — dcserver will start in onboarding mode",
+            settings_display
         );
     }
 
@@ -1061,7 +1057,7 @@ pub fn handle_dcserver(token: Option<String>) {
             std::process::exit(1);
         }
     };
-    let settings_path = instance_bot_settings_path();
+    let settings_path = instance_agentdesk_config_path();
 
     let title = format!("  AgentDesk v{}  |  Discord Bot Server  ", VERSION);
     let width = title.chars().count();
@@ -1269,9 +1265,9 @@ pub fn handle_dcserver(token: Option<String>) {
                     let settings_display = settings_path
                         .as_deref()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "bot_settings.json".to_string());
+                        .unwrap_or_else(|| "agentdesk.yaml".to_string());
                     eprintln!(
-                        "  ⚠ No bot tokens found in {} — waiting for HTTP server...",
+                        "  ⚠ No configured Discord bots found in {} — waiting for HTTP server...",
                         settings_display
                     );
                     // Gate onboarding-ready signal on actual /api/health success.

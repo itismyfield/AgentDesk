@@ -8,7 +8,7 @@ use super::super::model_catalog::{
     SOURCE_DISPATCH_ROLE, SOURCE_PROVIDER_DEFAULT, SOURCE_ROLE_MAP, SOURCE_RUNTIME_OVERRIDE,
     is_default_picker_value,
 };
-use super::super::settings::{resolve_role_binding, save_bot_settings};
+use super::super::settings::{load_last_session_path, resolve_role_binding, save_bot_settings};
 use super::super::{Context, Error, SharedData, check_auth, check_owner};
 use super::model_ui::{
     build_model_picker_options, build_model_picker_summary_lines, has_pending_model_change,
@@ -164,11 +164,7 @@ pub(in crate::services::discord) async fn current_working_dir(
         return Some(path);
     }
 
-    let settings = shared.settings.read().await;
-    settings
-        .last_sessions
-        .get(&channel_id.get().to_string())
-        .cloned()
+    load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get())
 }
 
 fn runtime_model_for_turn(

@@ -15,8 +15,8 @@ use super::formatting::{
     format_tool_input, normalize_empty_lines, send_long_message_raw, truncate_str,
 };
 use super::settings::{
-    channel_supports_provider, resolve_role_binding,
-    validate_bot_channel_routing_with_provider_channel,
+    channel_supports_provider, load_last_remote_profile, load_last_session_path,
+    resolve_role_binding, validate_bot_channel_routing_with_provider_channel,
 };
 use super::{DISCORD_MSG_LIMIT, SharedData, TmuxWatcherHandle, rate_limit_wait};
 
@@ -2161,12 +2161,12 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
     // Register sessions in CoreState so cleanup_orphan_tmux_sessions recognizes them
     // and message handlers find an active session with current_path
     if !owned_sessions.is_empty() {
-        let settings = shared.settings.read().await;
         let mut data = shared.core.lock().await;
         for (channel_id, channel_name) in &owned_sessions {
-            let channel_key = channel_id.get().to_string();
-            let yaml_path = settings.last_sessions.get(&channel_key).cloned();
-            let remote_profile = settings.last_remotes.get(&channel_key).cloned();
+            let persisted_path =
+                load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get());
+            let remote_profile =
+                load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
             let configured_path =
                 super::settings::resolve_workspace(*channel_id, Some(channel_name.as_str()));
 
@@ -2228,7 +2228,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 let effective_path = super::select_restored_session_path(
                     configured_path,
                     db_cwd,
-                    yaml_path,
+                    persisted_path,
                     remote_profile.as_deref(),
                 );
                 if let Some(path) = effective_path {
