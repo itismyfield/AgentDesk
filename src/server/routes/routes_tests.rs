@@ -44,7 +44,14 @@ fn test_api_router(
 ) -> axum::Router {
     let tx = crate::server::ws::new_broadcast();
     let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-    api_router(db, engine, tx, buf, health_registry)
+    api_router(
+        db,
+        engine,
+        crate::config::Config::default(),
+        tx,
+        buf,
+        health_registry,
+    )
 }
 
 fn env_lock() -> MutexGuard<'static, ()> {

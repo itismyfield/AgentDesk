@@ -393,25 +393,25 @@ pub async fn api_docs() -> (StatusCode, Json<Value>) {
             "GET",
             "/api/settings/config",
             "settings",
-            "Get whitelisted individual kv_meta policy/config keys",
+            "Get whitelisted policy/config keys with YAML startup defaults plus kv_meta runtime values",
         ),
         ep(
             "PATCH",
             "/api/settings/config",
             "settings",
-            "Patch whitelisted individual kv_meta policy/config keys",
+            "Patch whitelisted policy/config keys by writing kv_meta runtime overrides",
         ),
         ep(
             "GET",
             "/api/settings/runtime-config",
             "settings",
-            "Get runtime config",
+            "Get runtime config with agentdesk.yaml defaults merged with kv_meta overrides",
         ),
         ep(
             "PUT",
             "/api/settings/runtime-config",
             "settings",
-            "Update runtime config",
+            "Update runtime config overrides in kv_meta",
         ),
         // Dispatched sessions
         ep(

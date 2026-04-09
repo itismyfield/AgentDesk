@@ -20,6 +20,14 @@ pub struct Config {
     pub policies: PoliciesConfig,
     #[serde(default)]
     pub data: DataConfig,
+    #[serde(default, skip_serializing_if = "KanbanConfig::is_empty")]
+    pub kanban: KanbanConfig,
+    #[serde(default, skip_serializing_if = "ReviewConfig::is_empty")]
+    pub review: ReviewConfig,
+    #[serde(default, skip_serializing_if = "RuntimeSettingsConfig::is_empty")]
+    pub runtime: RuntimeSettingsConfig,
+    #[serde(default, skip_serializing_if = "AutomationConfig::is_empty")]
+    pub automation: AutomationConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
 }
@@ -347,6 +355,129 @@ pub struct DataConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct KanbanConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadlock_manager_channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pm_decision_gate_enabled: Option<bool>,
+}
+
+impl KanbanConfig {
+    pub fn is_empty(&self) -> bool {
+        self.manager_channel_id.is_none()
+            && self.deadlock_manager_channel_id.is_none()
+            && self.pm_decision_gate_enabled.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReviewConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_model_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
+}
+
+impl ReviewConfig {
+    pub fn is_empty(&self) -> bool {
+        self.enabled.is_none() && self.counter_model_enabled.is_none() && self.max_rounds.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RuntimeSettingsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_timeout_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_progress_stale_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact_percent: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact_percent_codex: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact_percent_claude: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrate_progress: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_poll_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_sync_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_issue_sync_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_rate_limit_poll_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_rate_limit_poll_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_triage_poll_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceo_warn_depth: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_reminder_min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_warning_pct: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_danger_pct: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_repo_cache_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_stale_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reset_overrides_on_restart: bool,
+}
+
+impl RuntimeSettingsConfig {
+    pub fn is_empty(&self) -> bool {
+        self.requested_timeout_min.is_none()
+            && self.in_progress_stale_min.is_none()
+            && self.context_compact_percent.is_none()
+            && self.context_compact_percent_codex.is_none()
+            && self.context_compact_percent_claude.is_none()
+            && self.narrate_progress.is_none()
+            && self.dispatch_poll_sec.is_none()
+            && self.agent_sync_sec.is_none()
+            && self.github_issue_sync_sec.is_none()
+            && self.claude_rate_limit_poll_sec.is_none()
+            && self.codex_rate_limit_poll_sec.is_none()
+            && self.issue_triage_poll_sec.is_none()
+            && self.ceo_warn_depth.is_none()
+            && self.max_retries.is_none()
+            && self.review_reminder_min.is_none()
+            && self.rate_limit_warning_pct.is_none()
+            && self.rate_limit_danger_pct.is_none()
+            && self.github_repo_cache_sec.is_none()
+            && self.rate_limit_stale_sec.is_none()
+            && !self.reset_overrides_on_restart
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AutomationConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_authors: Option<String>,
+}
+
+impl AutomationConfig {
+    pub fn is_empty(&self) -> bool {
+        self.enabled.is_none() && self.strategy.is_none() && self.allowed_authors.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct MemoryConfig {
     #[serde(default = "default_memory_backend")]
     pub backend: String,
@@ -431,6 +562,9 @@ fn default_policies_dir() -> PathBuf {
 }
 fn default_true() -> bool {
     true
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 fn default_data_dir() -> PathBuf {
     dirs::data_local_dir()
@@ -532,6 +666,10 @@ impl Default for Config {
             github: GitHubConfig::default(),
             policies: PoliciesConfig::default(),
             data: DataConfig::default(),
+            kanban: KanbanConfig::default(),
+            review: ReviewConfig::default(),
+            runtime: RuntimeSettingsConfig::default(),
+            automation: AutomationConfig::default(),
             memory: None,
         }
     }
@@ -712,8 +850,9 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentChannel, AgentChannels, AgentDef, BotConfig, Config, FileMemoryConfig,
-        McpMemoryConfig, MemoryConfig, load_from_path, resolve_graceful_config_path, runtime_root,
+        AgentChannel, AgentChannels, AgentDef, AutomationConfig, BotConfig, Config,
+        FileMemoryConfig, KanbanConfig, McpMemoryConfig, MemoryConfig, ReviewConfig,
+        RuntimeSettingsConfig, load_from_path, resolve_graceful_config_path, runtime_root,
         save_to_path,
     };
     use std::path::PathBuf;
@@ -910,6 +1049,43 @@ mod tests {
             department: Some("platform".to_string()),
             avatar_emoji: Some(":robot:".to_string()),
         });
+        config.kanban = KanbanConfig {
+            manager_channel_id: Some("123456789012345678".to_string()),
+            deadlock_manager_channel_id: Some("223456789012345678".to_string()),
+            pm_decision_gate_enabled: Some(true),
+        };
+        config.review = ReviewConfig {
+            enabled: Some(true),
+            counter_model_enabled: Some(false),
+            max_rounds: Some(4),
+        };
+        config.runtime = RuntimeSettingsConfig {
+            requested_timeout_min: Some(55),
+            in_progress_stale_min: Some(180),
+            context_compact_percent: Some(70),
+            context_compact_percent_codex: Some(82),
+            context_compact_percent_claude: Some(74),
+            narrate_progress: Some(false),
+            dispatch_poll_sec: Some(45),
+            agent_sync_sec: Some(420),
+            github_issue_sync_sec: Some(1200),
+            claude_rate_limit_poll_sec: Some(90),
+            codex_rate_limit_poll_sec: Some(105),
+            issue_triage_poll_sec: Some(360),
+            ceo_warn_depth: Some(4),
+            max_retries: Some(5),
+            review_reminder_min: Some(25),
+            rate_limit_warning_pct: Some(78),
+            rate_limit_danger_pct: Some(93),
+            github_repo_cache_sec: Some(480),
+            rate_limit_stale_sec: Some(750),
+            reset_overrides_on_restart: true,
+        };
+        config.automation = AutomationConfig {
+            enabled: Some(true),
+            strategy: Some("rebase".to_string()),
+            allowed_authors: Some("itismyfield,octocat".to_string()),
+        };
         config.memory = Some(MemoryConfig {
             backend: "memento".to_string(),
             file: FileMemoryConfig {
@@ -944,6 +1120,44 @@ mod tests {
         assert_eq!(loaded.agents[0].provider, "codex");
         assert_eq!(loaded.agents[0].department.as_deref(), Some("platform"));
         assert_eq!(loaded.agents[0].avatar_emoji.as_deref(), Some(":robot:"));
+        assert_eq!(
+            loaded.kanban.manager_channel_id.as_deref(),
+            Some("123456789012345678")
+        );
+        assert_eq!(
+            loaded.kanban.deadlock_manager_channel_id.as_deref(),
+            Some("223456789012345678")
+        );
+        assert_eq!(loaded.kanban.pm_decision_gate_enabled, Some(true));
+        assert_eq!(loaded.review.enabled, Some(true));
+        assert_eq!(loaded.review.counter_model_enabled, Some(false));
+        assert_eq!(loaded.review.max_rounds, Some(4));
+        assert_eq!(loaded.runtime.requested_timeout_min, Some(55));
+        assert_eq!(loaded.runtime.in_progress_stale_min, Some(180));
+        assert_eq!(loaded.runtime.context_compact_percent, Some(70));
+        assert_eq!(loaded.runtime.context_compact_percent_codex, Some(82));
+        assert_eq!(loaded.runtime.context_compact_percent_claude, Some(74));
+        assert_eq!(loaded.runtime.narrate_progress, Some(false));
+        assert_eq!(loaded.runtime.dispatch_poll_sec, Some(45));
+        assert_eq!(loaded.runtime.agent_sync_sec, Some(420));
+        assert_eq!(loaded.runtime.github_issue_sync_sec, Some(1200));
+        assert_eq!(loaded.runtime.claude_rate_limit_poll_sec, Some(90));
+        assert_eq!(loaded.runtime.codex_rate_limit_poll_sec, Some(105));
+        assert_eq!(loaded.runtime.issue_triage_poll_sec, Some(360));
+        assert_eq!(loaded.runtime.ceo_warn_depth, Some(4));
+        assert_eq!(loaded.runtime.max_retries, Some(5));
+        assert_eq!(loaded.runtime.review_reminder_min, Some(25));
+        assert_eq!(loaded.runtime.rate_limit_warning_pct, Some(78));
+        assert_eq!(loaded.runtime.rate_limit_danger_pct, Some(93));
+        assert_eq!(loaded.runtime.github_repo_cache_sec, Some(480));
+        assert_eq!(loaded.runtime.rate_limit_stale_sec, Some(750));
+        assert!(loaded.runtime.reset_overrides_on_restart);
+        assert_eq!(loaded.automation.enabled, Some(true));
+        assert_eq!(loaded.automation.strategy.as_deref(), Some("rebase"));
+        assert_eq!(
+            loaded.automation.allowed_authors.as_deref(),
+            Some("itismyfield,octocat")
+        );
         assert_eq!(
             loaded.agents[0]
                 .channels

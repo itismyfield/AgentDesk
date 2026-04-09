@@ -1,5 +1,5 @@
 use axum::{Json, extract::State, http::StatusCode};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use super::AppState;
 
@@ -199,6 +199,235 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
     ),
 ];
 
+const RUNTIME_CONFIG_KEYS: &[&str] = &[
+    "dispatchPollSec",
+    "agentSyncSec",
+    "githubIssueSyncSec",
+    "claudeRateLimitPollSec",
+    "codexRateLimitPollSec",
+    "issueTriagePollSec",
+    "ceoWarnDepth",
+    "maxRetries",
+    "reviewReminderMin",
+    "rateLimitWarningPct",
+    "rateLimitDangerPct",
+    "githubRepoCacheSec",
+    "rateLimitStaleSec",
+];
+
+fn stringified_bool(value: Option<bool>) -> Option<String> {
+    value.map(|flag| flag.to_string())
+}
+
+fn stringified_number<T: ToString>(value: Option<T>) -> Option<String> {
+    value.map(|number| number.to_string())
+}
+
+fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<String> {
+    match key {
+        "kanban_manager_channel_id" => config.kanban.manager_channel_id.clone(),
+        "deadlock_manager_channel_id" => config.kanban.deadlock_manager_channel_id.clone(),
+        "review_enabled" => stringified_bool(config.review.enabled),
+        "counter_model_review_enabled" => stringified_bool(config.review.counter_model_enabled),
+        "max_review_rounds" => stringified_number(config.review.max_rounds),
+        "pm_decision_gate_enabled" => stringified_bool(config.kanban.pm_decision_gate_enabled),
+        "merge_automation_enabled" => stringified_bool(config.automation.enabled),
+        "merge_strategy" => config.automation.strategy.clone(),
+        "merge_allowed_authors" => config.automation.allowed_authors.clone(),
+        "requested_timeout_min" => stringified_number(config.runtime.requested_timeout_min),
+        "in_progress_stale_min" => stringified_number(config.runtime.in_progress_stale_min),
+        "context_compact_percent" => stringified_number(config.runtime.context_compact_percent),
+        "context_compact_percent_codex" => {
+            stringified_number(config.runtime.context_compact_percent_codex)
+        }
+        "context_compact_percent_claude" => {
+            stringified_number(config.runtime.context_compact_percent_claude)
+        }
+        "narrate_progress" => stringified_bool(config.runtime.narrate_progress),
+        _ => None,
+    }
+}
+
+fn config_entry_default(
+    config: &crate::config::Config,
+    key: &str,
+    hardcoded_default: Option<&str>,
+) -> Option<String> {
+    match key {
+        "server_port" => Some(config.server.port.to_string()),
+        _ => yaml_section_value(config, key).or_else(|| hardcoded_default.map(str::to_string)),
+    }
+}
+
+fn insert_runtime_number(map: &mut Map<String, Value>, key: &str, value: Option<u64>) {
+    if let Some(number) = value {
+        map.insert(key.to_string(), json!(number));
+    }
+}
+
+fn runtime_config_yaml_overrides(config: &crate::config::Config) -> Map<String, Value> {
+    let mut overrides = Map::new();
+    insert_runtime_number(
+        &mut overrides,
+        "dispatchPollSec",
+        config.runtime.dispatch_poll_sec,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "agentSyncSec",
+        config.runtime.agent_sync_sec,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "githubIssueSyncSec",
+        config.runtime.github_issue_sync_sec,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "claudeRateLimitPollSec",
+        config.runtime.claude_rate_limit_poll_sec,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "codexRateLimitPollSec",
+        config.runtime.codex_rate_limit_poll_sec,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "issueTriagePollSec",
+        config.runtime.issue_triage_poll_sec,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "ceoWarnDepth",
+        config.runtime.ceo_warn_depth,
+    );
+    insert_runtime_number(&mut overrides, "maxRetries", config.runtime.max_retries);
+    insert_runtime_number(
+        &mut overrides,
+        "reviewReminderMin",
+        config.runtime.review_reminder_min,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "rateLimitWarningPct",
+        config.runtime.rate_limit_warning_pct,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "rateLimitDangerPct",
+        config.runtime.rate_limit_danger_pct,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "githubRepoCacheSec",
+        config.runtime.github_repo_cache_sec,
+    );
+    insert_runtime_number(
+        &mut overrides,
+        "rateLimitStaleSec",
+        config.runtime.rate_limit_stale_sec,
+    );
+    overrides
+}
+
+fn runtime_config_defaults_map(config: &crate::config::Config) -> Map<String, Value> {
+    let mut defaults = json!({
+        "dispatchPollSec": 30,
+        "agentSyncSec": 300,
+        "githubIssueSyncSec": 900,
+        "claudeRateLimitPollSec": 120,
+        "codexRateLimitPollSec": 120,
+        "issueTriagePollSec": 300,
+        "ceoWarnDepth": 3,
+        "maxRetries": 3,
+        "reviewReminderMin": 30,
+        "rateLimitWarningPct": 80,
+        "rateLimitDangerPct": 95,
+        "githubRepoCacheSec": 300,
+        "rateLimitStaleSec": 600,
+    })
+    .as_object()
+    .cloned()
+    .unwrap_or_default();
+    for (key, value) in runtime_config_yaml_overrides(config) {
+        defaults.insert(key, value);
+    }
+    defaults
+}
+
+/// Default runtime config values.
+/// Only polling intervals and Rust-only settings live here.
+/// Kanban/timeout/review/context settings are in CONFIG_KEYS (individual kv_meta keys).
+fn runtime_config_defaults(config: &crate::config::Config) -> serde_json::Value {
+    Value::Object(runtime_config_defaults_map(config))
+}
+
+fn runtime_scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+fn write_runtime_config(conn: &rusqlite::Connection, values: &Map<String, Value>) {
+    let value_str =
+        serde_json::to_string(&Value::Object(values.clone())).unwrap_or_else(|_| "{}".to_string());
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', ?1)",
+        [&value_str],
+    )
+    .ok();
+
+    for key in RUNTIME_CONFIG_KEYS {
+        conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
+            .ok();
+    }
+    for (key, value) in values {
+        if let Some(text) = runtime_scalar_to_string(value) {
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, text],
+            )
+            .ok();
+        }
+    }
+}
+
+fn seed_runtime_config_defaults(conn: &rusqlite::Connection, config: &crate::config::Config) {
+    let defaults = runtime_config_defaults_map(config);
+    let yaml_overrides = runtime_config_yaml_overrides(config);
+    let saved_obj = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.as_object().cloned());
+
+    let mut current = if config.runtime.reset_overrides_on_restart {
+        defaults.clone()
+    } else {
+        saved_obj.clone().unwrap_or_else(|| defaults.clone())
+    };
+
+    if !config.runtime.reset_overrides_on_restart {
+        for (key, value) in yaml_overrides {
+            current.insert(key, value);
+        }
+    }
+
+    if config.runtime.reset_overrides_on_restart || saved_obj.is_none() || current != defaults {
+        write_runtime_config(conn, &current);
+    } else if let Some(saved) = saved_obj {
+        write_runtime_config(conn, &saved);
+    }
+}
+
 /// GET /api/settings/config
 pub async fn get_config_entries(
     State(state): State<AppState>,
@@ -222,7 +451,7 @@ pub async fn get_config_entries(
         entries.push(json!({
             "key": key, "value": value, "category": category,
             "label_ko": label_ko, "label_en": label_en,
-            "default": default_val,
+            "default": config_entry_default(state.config.as_ref(), key, *default_val),
         }));
     }
     // Only return whitelisted CONFIG_KEYS — unknown kv_meta keys are not exposed.
@@ -284,40 +513,56 @@ pub async fn patch_config_entries(
     )
 }
 
-/// Default runtime config values.
-/// Only polling intervals and Rust-only settings live here.
-/// Kanban/timeout/review/context settings are in CONFIG_KEYS (individual kv_meta keys).
-fn runtime_config_defaults() -> serde_json::Value {
-    json!({
-        "dispatchPollSec": 30,
-        "agentSyncSec": 300,
-        "githubIssueSyncSec": 900,
-        "claudeRateLimitPollSec": 120,
-        "codexRateLimitPollSec": 120,
-        "issueTriagePollSec": 300,
-        "ceoWarnDepth": 3,
-        "maxRetries": 3,
-        "reviewReminderMin": 30,
-        "rateLimitWarningPct": 80,
-        "rateLimitDangerPct": 95,
-        "githubRepoCacheSec": 300,
-        "rateLimitStaleSec": 600,
-    })
-}
-
 /// Seed default values for CONFIG_KEYS into kv_meta on startup.
-/// Only inserts if the key doesn't already exist (INSERT OR IGNORE).
-/// Also removes retired legacy keys that are no longer part of the settings surface.
-pub fn seed_config_defaults(conn: &rusqlite::Connection) {
+/// YAML values are treated as startup baseline and overwrite runtime overrides on reboot.
+/// When `runtime.reset_overrides_on_restart` is enabled, the entire managed surface resets
+/// back to YAML-or-hardcoded defaults.
+pub fn seed_config_defaults(conn: &rusqlite::Connection, config: &crate::config::Config) {
     for (key, _, _, _, default_val) in CONFIG_KEYS {
-        if let Some(val) = default_val {
-            conn.execute(
-                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![key, val],
-            )
-            .ok();
+        if *key == "server_port" {
+            continue;
+        }
+
+        let yaml_value = yaml_section_value(config, key);
+        let baseline = config_entry_default(config, key, *default_val);
+
+        if config.runtime.reset_overrides_on_restart {
+            match baseline {
+                Some(val) => {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                        rusqlite::params![key, val],
+                    )
+                    .ok();
+                }
+                None => {
+                    conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
+                        .ok();
+                }
+            }
+            continue;
+        }
+
+        match (yaml_value, baseline) {
+            (Some(val), _) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![key, val],
+                )
+                .ok();
+            }
+            (None, Some(val)) => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![key, val],
+                )
+                .ok();
+            }
+            (None, None) => {}
         }
     }
+
+    seed_runtime_config_defaults(conn, config);
 
     for key in RETIRED_CONFIG_KEYS {
         conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
@@ -348,7 +593,7 @@ pub async fn get_runtime_config(
         .unwrap_or_else(|_| "{}".to_string());
 
     let saved: serde_json::Value = serde_json::from_str(&value).unwrap_or(json!({}));
-    let defaults = runtime_config_defaults();
+    let defaults = runtime_config_defaults(state.config.as_ref());
 
     let mut current = defaults.as_object().cloned().unwrap_or_default();
     if let Some(saved_obj) = saved.as_object() {
@@ -381,16 +626,19 @@ pub async fn put_runtime_config(
         }
     };
 
-    let value_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
-
-    if let Err(e) = conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', ?1)",
-        [&value_str],
-    ) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        );
+    if let Some(obj) = body.as_object() {
+        write_runtime_config(&conn, obj);
+    } else {
+        let value_str = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', ?1)",
+            [&value_str],
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
     }
 
     (StatusCode::OK, Json(json!({"ok": true})))
@@ -496,7 +744,7 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         db::schema::migrate(&conn).unwrap();
 
-        seed_config_defaults(&conn);
+        seed_config_defaults(&conn, &crate::config::Config::default());
 
         let value: String = conn
             .query_row(
@@ -525,7 +773,7 @@ mod tests {
         )
         .unwrap();
 
-        seed_config_defaults(&conn);
+        seed_config_defaults(&conn, &crate::config::Config::default());
 
         let retired_count: i64 = conn
             .query_row(
@@ -535,6 +783,163 @@ mod tests {
             )
             .unwrap();
         assert_eq!(retired_count, 0);
+    }
+
+    #[test]
+    fn seed_config_defaults_prefers_yaml_values_and_preserves_other_runtime_overrides() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        db::schema::migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_strategy', 'merge')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('requested_timeout_min', '15')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', '{\"dispatchPollSec\":10,\"maxRetries\":7}')",
+            [],
+        )
+        .unwrap();
+
+        let mut config = crate::config::Config::default();
+        config.automation.strategy = Some("rebase".to_string());
+        config.runtime.requested_timeout_min = Some(55);
+        config.runtime.dispatch_poll_sec = Some(45);
+
+        seed_config_defaults(&conn, &config);
+
+        let merge_strategy: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'merge_strategy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(merge_strategy, "rebase");
+
+        let timeout_min: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'requested_timeout_min'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(timeout_min, "55");
+
+        let runtime_config: Value = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_else(|| json!({}));
+        assert_eq!(runtime_config["dispatchPollSec"], json!(45));
+        assert_eq!(runtime_config["maxRetries"], json!(7));
+    }
+
+    #[test]
+    fn seed_config_defaults_can_reset_runtime_overrides_on_restart() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        db::schema::migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_allowed_authors', 'legacy-user')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', '{\"dispatchPollSec\":10,\"maxRetries\":7}')",
+            [],
+        )
+        .unwrap();
+
+        let mut config = crate::config::Config::default();
+        config.runtime.reset_overrides_on_restart = true;
+        config.automation.enabled = Some(true);
+
+        seed_config_defaults(&conn, &config);
+
+        let merge_allowed_authors_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kv_meta WHERE key = 'merge_allowed_authors'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(merge_allowed_authors_count, 0);
+
+        let merge_automation_enabled: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'merge_automation_enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(merge_automation_enabled, "true");
+
+        let runtime_config: Value = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_else(|| json!({}));
+        assert_eq!(runtime_config["dispatchPollSec"], json!(30));
+        assert_eq!(runtime_config["maxRetries"], json!(3));
+    }
+
+    #[tokio::test]
+    async fn get_runtime_config_uses_yaml_baseline_from_app_state() {
+        let db = test_db();
+        let mut config = crate::config::Config::default();
+        config.runtime.dispatch_poll_sec = Some(45);
+        config.runtime.max_retries = Some(5);
+        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+
+        let (status, Json(body)) = get_runtime_config(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["current"]["dispatchPollSec"], json!(45));
+        assert_eq!(body["defaults"]["dispatchPollSec"], json!(45));
+        assert_eq!(body["current"]["maxRetries"], json!(5));
+        assert_eq!(body["defaults"]["maxRetries"], json!(5));
+    }
+
+    #[tokio::test]
+    async fn put_runtime_config_mirrors_scalar_keys_for_runtime_consumers() {
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+
+        let (status, _) = put_runtime_config(
+            State(state),
+            Json(json!({
+                "dispatchPollSec": 15,
+                "maxRetries": 7,
+                "rateLimitStaleSec": 900
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let stale_sec: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'rateLimitStaleSec'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_sec, "900");
     }
 
     #[tokio::test]
