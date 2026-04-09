@@ -1918,6 +1918,7 @@ mod tests {
             name_ko: None,
             provider: "codex".to_string(),
             channels: crate::config::AgentChannels::default(),
+            keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
         });

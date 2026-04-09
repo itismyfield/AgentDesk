@@ -8,8 +8,12 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_prompt: Option<String>,
     #[serde(default)]
     pub agents: Vec<AgentDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting: Option<MeetingSettings>,
     #[serde(default)]
     pub github: GitHubConfig,
     #[serde(default)]
@@ -56,6 +60,8 @@ pub struct AgentDef {
     pub provider: String,
     #[serde(default, skip_serializing_if = "AgentChannels::is_empty")]
     pub channels: AgentChannels,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
     #[serde(default)]
     pub department: Option<String>,
     #[serde(default)]
@@ -65,16 +71,254 @@ pub struct AgentDef {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AgentChannels {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude: Option<String>,
+    pub claude: Option<AgentChannel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex: Option<String>,
+    pub codex: Option<AgentChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini: Option<AgentChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qwen: Option<AgentChannel>,
 }
 
 impl AgentChannels {
     pub fn is_empty(&self) -> bool {
-        normalized_channel_value(self.claude.clone()).is_none()
-            && normalized_channel_value(self.codex.clone()).is_none()
+        self.claude
+            .as_ref()
+            .and_then(AgentChannel::target)
+            .is_none()
+            && self.codex.as_ref().and_then(AgentChannel::target).is_none()
+            && self
+                .gemini
+                .as_ref()
+                .and_then(AgentChannel::target)
+                .is_none()
+            && self.qwen.as_ref().and_then(AgentChannel::target).is_none()
     }
+
+    pub fn channel_for_provider(&self, provider: &str) -> Option<&AgentChannel> {
+        match provider.trim().to_ascii_lowercase().as_str() {
+            "claude" => self.claude.as_ref(),
+            "codex" => self.codex.as_ref(),
+            "gemini" => self.gemini.as_ref(),
+            "qwen" => self.qwen.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 4] {
+        [
+            ("claude", self.claude.as_ref()),
+            ("codex", self.codex.as_ref()),
+            ("gemini", self.gemini.as_ref()),
+            ("qwen", self.qwen.as_ref()),
+        ]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum AgentChannel {
+    Legacy(String),
+    Detailed(AgentChannelConfig),
+}
+
+impl From<String> for AgentChannel {
+    fn from(value: String) -> Self {
+        Self::Legacy(value)
+    }
+}
+
+impl From<&str> for AgentChannel {
+    fn from(value: &str) -> Self {
+        Self::Legacy(value.to_string())
+    }
+}
+
+impl AgentChannel {
+    pub fn target(&self) -> Option<String> {
+        match self {
+            Self::Legacy(raw) => normalized_channel_value(Some(raw.clone())),
+            Self::Detailed(config) => config.target(),
+        }
+    }
+
+    pub fn channel_id(&self) -> Option<String> {
+        match self {
+            Self::Legacy(raw) => normalized_channel_value(Some(raw.clone()))
+                .filter(|value| value.parse::<u64>().is_ok()),
+            Self::Detailed(config) => config.channel_id(),
+        }
+    }
+
+    pub fn channel_name(&self) -> Option<String> {
+        match self {
+            Self::Legacy(raw) => {
+                let value = normalized_channel_value(Some(raw.clone()))?;
+                (value.parse::<u64>().is_err()).then_some(value)
+            }
+            Self::Detailed(config) => config.channel_name(),
+        }
+    }
+
+    pub fn aliases(&self) -> Vec<String> {
+        match self {
+            Self::Legacy(raw) => normalized_channel_value(Some(raw.clone()))
+                .into_iter()
+                .filter(|value| value.parse::<u64>().is_err())
+                .collect(),
+            Self::Detailed(config) => config.all_names(),
+        }
+    }
+
+    pub fn prompt_file(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.prompt_file.clone()),
+        }
+    }
+
+    pub fn workspace(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.workspace.clone()),
+        }
+    }
+
+    pub fn provider(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.provider.clone()),
+        }
+    }
+
+    pub fn model(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.model.clone()),
+        }
+    }
+
+    pub fn reasoning_effort(&self) -> Option<String> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => normalized_channel_value(config.reasoning_effort.clone()),
+        }
+    }
+
+    pub fn peer_agents(&self) -> Option<bool> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Detailed(config) => config.peer_agents,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AgentChannelConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(
+        default,
+        alias = "channel_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_agents: Option<bool>,
+}
+
+impl AgentChannelConfig {
+    pub fn target(&self) -> Option<String> {
+        self.channel_id()
+            .or_else(|| self.channel_name())
+            .or_else(|| {
+                self.aliases
+                    .iter()
+                    .find_map(|alias| normalized_channel_value(Some(alias.clone())))
+            })
+    }
+
+    pub fn channel_id(&self) -> Option<String> {
+        normalized_channel_value(self.id.clone()).filter(|value| value.parse::<u64>().is_ok())
+    }
+
+    pub fn channel_name(&self) -> Option<String> {
+        normalized_channel_value(self.name.clone())
+    }
+
+    pub fn all_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Some(name) = self.channel_name() {
+            names.push(name);
+        }
+        for alias in &self.aliases {
+            if let Some(alias) = normalized_channel_value(Some(alias.clone())) {
+                if !names.contains(&alias) {
+                    names.push(alias);
+                }
+            }
+        }
+        names
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingSettings {
+    pub channel_name: String,
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_agent: Option<MeetingSummaryAgentDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_agents: Vec<MeetingAgentEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MeetingSummaryAgentDef {
+    Static(String),
+    Dynamic {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rules: Vec<MeetingSummaryRuleDef>,
+        default: String,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeetingSummaryRuleDef {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    pub agent: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MeetingAgentEntry {
+    RoleId(String),
+    Detailed(MeetingAgentDef),
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MeetingAgentDef {
+    pub role_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -282,7 +526,9 @@ impl Default for Config {
         Self {
             server: ServerConfig::default(),
             discord: DiscordConfig::default(),
+            shared_prompt: None,
             agents: Vec::new(),
+            meeting: None,
             github: GitHubConfig::default(),
             policies: PoliciesConfig::default(),
             data: DataConfig::default(),
@@ -466,8 +712,9 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentChannels, AgentDef, BotConfig, Config, FileMemoryConfig, McpMemoryConfig,
-        MemoryConfig, load_from_path, resolve_graceful_config_path, runtime_root, save_to_path,
+        AgentChannel, AgentChannels, AgentDef, BotConfig, Config, FileMemoryConfig,
+        McpMemoryConfig, MemoryConfig, load_from_path, resolve_graceful_config_path, runtime_root,
+        save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
@@ -654,9 +901,12 @@ mod tests {
             name_ko: Some("에이전트 원".to_string()),
             provider: "codex".to_string(),
             channels: AgentChannels {
-                claude: Some("123456789012345678".to_string()),
+                claude: Some("123456789012345678".into()),
                 codex: None,
+                gemini: None,
+                qwen: None,
             },
+            keywords: Vec::new(),
             department: Some("platform".to_string()),
             avatar_emoji: Some(":robot:".to_string()),
         });
@@ -695,7 +945,12 @@ mod tests {
         assert_eq!(loaded.agents[0].department.as_deref(), Some("platform"));
         assert_eq!(loaded.agents[0].avatar_emoji.as_deref(), Some(":robot:"));
         assert_eq!(
-            loaded.agents[0].channels.claude.as_deref(),
+            loaded.agents[0]
+                .channels
+                .claude
+                .as_ref()
+                .and_then(AgentChannel::target)
+                .as_deref(),
             Some("123456789012345678")
         );
         assert_eq!(

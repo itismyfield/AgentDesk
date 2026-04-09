@@ -1,4 +1,5 @@
 mod adk_session;
+pub(crate) mod agentdesk_config;
 mod channel_mailbox;
 mod commands;
 mod formatting;
