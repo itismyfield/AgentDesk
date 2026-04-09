@@ -1,1 +1,0 @@
-../../../../../../.agentdesk/skills/adk-release/SKILL.md

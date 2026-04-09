@@ -16,3 +16,9 @@ output/
 reports/
 __pycache__/
 *.pyc
+
+# Generated provider skill links in workspace roots
+/.claude/commands/
+/.codex/skills/
+/.gemini/skills/
+/.qwen/skills/
