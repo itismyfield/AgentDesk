@@ -15,6 +15,7 @@ pub fn run(
     codex_bin: &str,
     codex_model: Option<&str>,
     reasoning_effort: Option<&str>,
+    resume_session_id: Option<&str>,
     input_mode: InputMode,
     compact_token_limit: Option<u64>,
 ) {
@@ -133,7 +134,7 @@ pub fn run(
         }
     };
 
-    let mut thread_id: Option<String> = None;
+    let mut thread_id = normalize_resume_session_id(resume_session_id);
     if let Err(err) = run_turn(
         &mut output,
         codex_bin,
@@ -186,6 +187,13 @@ pub fn run(
     };
     eprintln!();
     eprintln!("\x1b[90m--- Session ended ({exit_reason}) ---\x1b[0m");
+}
+
+fn normalize_resume_session_id(resume_session_id: Option<&str>) -> Option<String> {
+    resume_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn decode_external_prompt(line: &str) -> Result<String, String> {
@@ -381,7 +389,7 @@ fn run_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::decode_external_prompt;
+    use super::{decode_external_prompt, normalize_resume_session_id};
 
     #[test]
     fn test_decode_external_prompt_keeps_plain_line() {
@@ -392,6 +400,16 @@ mod tests {
     fn test_decode_external_prompt_decodes_base64_payload() {
         let line = "__AGENTDESK_B64__:bGluZTEKbGluZTI=";
         assert_eq!(decode_external_prompt(line).unwrap(), "line1\nline2");
+    }
+
+    #[test]
+    fn test_normalize_resume_session_id_trims_blank_values() {
+        assert_eq!(
+            normalize_resume_session_id(Some("  thread-1  ")),
+            Some("thread-1".to_string())
+        );
+        assert_eq!(normalize_resume_session_id(Some("   ")), None);
+        assert_eq!(normalize_resume_session_id(None), None);
     }
 }
 

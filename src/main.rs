@@ -138,6 +138,9 @@ enum Commands {
         /// Optional reasoning effort (low, normal, high, xhigh)
         #[arg(long)]
         reasoning_effort: Option<String>,
+        /// Optional resume session id for the first turn
+        #[arg(long)]
+        resume_session_id: Option<String>,
         /// Working directory (defaults to ".")
         #[arg(long, default_value = ".")]
         cwd: String,
@@ -420,6 +423,7 @@ fn main() -> Result<()> {
                 codex_bin,
                 codex_model,
                 reasoning_effort,
+                resume_session_id,
                 cwd,
                 input_mode,
                 compact_token_limit,
@@ -436,6 +440,7 @@ fn main() -> Result<()> {
                     &codex_bin,
                     codex_model.as_deref(),
                     reasoning_effort.as_deref(),
+                    resume_session_id.as_deref(),
                     mode,
                     compact_token_limit,
                 );
