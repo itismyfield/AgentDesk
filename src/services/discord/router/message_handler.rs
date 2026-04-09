@@ -688,6 +688,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         channel_id,
         cancel_token.clone(),
         request_owner,
+        user_msg_id,
     )
     .await;
     if !started {

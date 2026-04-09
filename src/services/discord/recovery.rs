@@ -1149,6 +1149,7 @@ pub(super) async fn restore_inflight_turns(
             channel_id,
             cancel_token.clone(),
             UserId::new(state.request_owner_user_id),
+            MessageId::new(state.user_msg_id),
         )
         .await;
 

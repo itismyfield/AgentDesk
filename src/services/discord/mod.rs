@@ -571,10 +571,11 @@ async fn mailbox_try_start_turn(
     channel_id: ChannelId,
     cancel_token: Arc<CancelToken>,
     request_owner: UserId,
+    user_message_id: MessageId,
 ) -> bool {
     shared
         .mailbox(channel_id)
-        .try_start_turn(cancel_token, request_owner)
+        .try_start_turn(cancel_token, request_owner, user_message_id)
         .await
 }
 
@@ -583,10 +584,11 @@ async fn mailbox_restore_active_turn(
     channel_id: ChannelId,
     cancel_token: Arc<CancelToken>,
     request_owner: UserId,
+    user_message_id: MessageId,
 ) {
     shared
         .mailbox(channel_id)
-        .restore_active_turn(cancel_token, request_owner)
+        .restore_active_turn(cancel_token, request_owner, user_message_id)
         .await;
 }
 
@@ -640,6 +642,21 @@ async fn mailbox_requeue_intervention_front(
             queue_persistence_context(shared, provider, channel_id),
         )
         .await;
+}
+
+async fn mailbox_cancel_soft_intervention(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) -> Option<Intervention> {
+    shared
+        .mailbox(channel_id)
+        .cancel_queued_message(
+            message_id,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await
 }
 
 async fn mailbox_finish_turn(
@@ -773,6 +790,17 @@ pub(super) fn dequeue_next_soft_intervention(
     let index = queue
         .iter()
         .position(|item| item.mode == InterventionMode::Soft)?;
+    Some(queue.remove(index))
+}
+
+pub(super) fn cancel_soft_intervention_by_message_id(
+    queue: &mut Vec<Intervention>,
+    message_id: MessageId,
+) -> Option<Intervention> {
+    prune_interventions(queue);
+    let index = queue
+        .iter()
+        .position(|item| item.mode == InterventionMode::Soft && item.message_id == message_id)?;
     Some(queue.remove(index))
 }
 

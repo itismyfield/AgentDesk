@@ -30,6 +30,7 @@ impl QueuePersistenceContext {
 pub(super) struct ChannelMailboxSnapshot {
     pub(super) cancel_token: Option<Arc<CancelToken>>,
     pub(super) active_request_owner: Option<serenity::UserId>,
+    pub(super) active_user_message_id: Option<serenity::MessageId>,
     pub(super) intervention_queue: Vec<Intervention>,
 }
 
@@ -86,11 +87,13 @@ impl ChannelMailboxHandle {
         &self,
         cancel_token: Arc<CancelToken>,
         request_owner: serenity::UserId,
+        user_message_id: serenity::MessageId,
     ) -> bool {
         self.request(
             |reply| ChannelMailboxMsg::TryStartTurn {
                 cancel_token,
                 request_owner,
+                user_message_id,
                 reply,
             },
             false,
@@ -102,12 +105,14 @@ impl ChannelMailboxHandle {
         &self,
         cancel_token: Arc<CancelToken>,
         request_owner: serenity::UserId,
+        user_message_id: serenity::MessageId,
     ) {
         let _ = self
             .request(
                 |reply| ChannelMailboxMsg::RestoreActiveTurn {
                     cancel_token,
                     request_owner,
+                    user_message_id,
                     reply,
                 },
                 (),
@@ -168,6 +173,22 @@ impl ChannelMailboxHandle {
                 (),
             )
             .await;
+    }
+
+    pub(super) async fn cancel_queued_message(
+        &self,
+        message_id: serenity::MessageId,
+        persistence: QueuePersistenceContext,
+    ) -> Option<Intervention> {
+        self.request(
+            |reply| ChannelMailboxMsg::CancelQueuedMessage {
+                message_id,
+                persistence,
+                reply,
+            },
+            None,
+        )
+        .await
     }
 
     pub(super) async fn finish_turn(
@@ -262,11 +283,13 @@ enum ChannelMailboxMsg {
     TryStartTurn {
         cancel_token: Arc<CancelToken>,
         request_owner: serenity::UserId,
+        user_message_id: serenity::MessageId,
         reply: oneshot::Sender<bool>,
     },
     RestoreActiveTurn {
         cancel_token: Arc<CancelToken>,
         request_owner: serenity::UserId,
+        user_message_id: serenity::MessageId,
         reply: oneshot::Sender<()>,
     },
     Enqueue {
@@ -287,6 +310,11 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<()>,
     },
+    CancelQueuedMessage {
+        message_id: serenity::MessageId,
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<Option<Intervention>>,
+    },
     FinishTurn {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
@@ -306,6 +334,7 @@ enum ChannelMailboxMsg {
 struct ChannelMailboxState {
     cancel_token: Option<Arc<CancelToken>>,
     active_request_owner: Option<serenity::UserId>,
+    active_user_message_id: Option<serenity::MessageId>,
     intervention_queue: Vec<Intervention>,
 }
 
@@ -333,6 +362,7 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
                     let _ = reply.send(ChannelMailboxSnapshot {
                         cancel_token: state.cancel_token.clone(),
                         active_request_owner: state.active_request_owner,
+                        active_user_message_id: state.active_user_message_id,
                         intervention_queue: state.intervention_queue.clone(),
                     });
                 }
@@ -345,6 +375,7 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
                 ChannelMailboxMsg::TryStartTurn {
                     cancel_token,
                     request_owner,
+                    user_message_id,
                     reply,
                 } => {
                     let started = if state.cancel_token.is_some() {
@@ -352,6 +383,7 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
                     } else {
                         state.cancel_token = Some(cancel_token);
                         state.active_request_owner = Some(request_owner);
+                        state.active_user_message_id = Some(user_message_id);
                         true
                     };
                     let _ = reply.send(started);
@@ -359,10 +391,12 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
                 ChannelMailboxMsg::RestoreActiveTurn {
                     cancel_token,
                     request_owner,
+                    user_message_id,
                     reply,
                 } => {
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
+                    state.active_user_message_id = Some(user_message_id);
                     let _ = reply.send(());
                 }
                 ChannelMailboxMsg::Enqueue {
@@ -398,9 +432,24 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(());
                 }
+                ChannelMailboxMsg::CancelQueuedMessage {
+                    message_id,
+                    persistence,
+                    reply,
+                } => {
+                    let removed = super::cancel_soft_intervention_by_message_id(
+                        &mut state.intervention_queue,
+                        message_id,
+                    );
+                    if removed.is_some() {
+                        persist_queue(channel_id, &state.intervention_queue, &persistence);
+                    }
+                    let _ = reply.send(removed);
+                }
                 ChannelMailboxMsg::FinishTurn { persistence, reply } => {
                     let removed_token = state.cancel_token.take();
                     state.active_request_owner = None;
+                    state.active_user_message_id = None;
                     let previous_len = state.intervention_queue.len();
                     let has_pending = super::has_soft_intervention(&mut state.intervention_queue);
                     if state.intervention_queue.len() != previous_len {
@@ -414,6 +463,7 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
                 ChannelMailboxMsg::Clear { persistence, reply } => {
                     let removed_token = state.cancel_token.take();
                     state.active_request_owner = None;
+                    state.active_user_message_id = None;
                     state.intervention_queue.clear();
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(ClearChannelResult { removed_token });
@@ -547,8 +597,13 @@ mod tests {
                 persistence.clone(),
             )
             .await;
+        let active_msg_id = serenity::MessageId::new(77);
         handle
-            .restore_active_turn(Arc::new(CancelToken::new()), serenity::UserId::new(7))
+            .restore_active_turn(
+                Arc::new(CancelToken::new()),
+                serenity::UserId::new(7),
+                active_msg_id,
+            )
             .await;
 
         let result = handle.finish_turn(persistence).await;
@@ -557,11 +612,56 @@ mod tests {
 
         let snapshot = handle.snapshot().await;
         assert!(snapshot.cancel_token.is_none());
+        assert_eq!(snapshot.active_user_message_id, None);
         assert_eq!(snapshot.intervention_queue.len(), 1);
 
         let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].text, "fresh");
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    #[tokio::test]
+    async fn cancel_queued_message_removes_matching_entry_and_persists() {
+        let _lock = test_env_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-cancel-queued";
+        let channel_id = serenity::ChannelId::new(43);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+        let now = Instant::now();
+
+        handle
+            .replace_queue(
+                vec![
+                    make_intervention(10, "first", now),
+                    make_intervention(11, "second", now),
+                ],
+                persistence.clone(),
+            )
+            .await;
+
+        let removed = handle
+            .cancel_queued_message(serenity::MessageId::new(10), persistence)
+            .await;
+        assert_eq!(
+            removed.as_ref().map(|item| item.text.as_str()),
+            Some("first")
+        );
+
+        let snapshot = handle.snapshot().await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id.get(), 11);
+
+        let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].message_id, 11);
+        assert_eq!(items[0].text, "second");
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
