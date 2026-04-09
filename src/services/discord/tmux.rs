@@ -204,25 +204,19 @@ pub(super) async fn start_restart_handoff_from_state(
     }
 
     if !started_immediately {
-        let mut data = shared.core.lock().await;
-        let queue = data.intervention_queue.entry(channel_id).or_default();
-        queue.push(super::Intervention {
-            author_id,
-            message_id: placeholder_id,
-            text: handoff_prompt,
-            mode: super::InterventionMode::Soft,
-            created_at: std::time::Instant::now(),
-        });
-        super::save_channel_queue(
+        super::mailbox_enqueue_intervention(
+            shared,
             provider_kind,
-            &shared.token_hash,
             channel_id,
-            queue,
-            shared
-                .dispatch_role_overrides
-                .get(&channel_id)
-                .map(|r| r.value().get()),
-        );
+            super::Intervention {
+                author_id,
+                message_id: placeholder_id,
+                text: handoff_prompt,
+                mode: super::InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+            },
+        )
+        .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!(
             "  [{ts}] ↻ watcher death recovery: queued fallback handoff for channel {}",
@@ -459,6 +453,7 @@ pub(super) async fn tmux_output_watcher(
         let mut state = StreamLineState::new();
         let mut full_response = String::new();
         let mut tool_state = WatcherToolState::new();
+        let narrate_progress = super::settings::load_narrate_progress(shared.db.as_ref());
 
         // Create a placeholder message for real-time status display
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -557,15 +552,17 @@ pub(super) async fn tmux_output_watcher(
                     let indicator = SPINNER[spin_idx % SPINNER.len()];
                     spin_idx += 1;
 
-                    let raw_tool_status = super::formatting::resolve_raw_tool_status(
+                    let status_block = super::formatting::build_placeholder_status_block(
+                        indicator,
+                        tool_state.prev_tool_status.as_deref(),
                         tool_state.current_tool_line.as_deref(),
                         &full_response,
+                        narrate_progress,
                     );
-                    let tool_status = super::formatting::humanize_tool_status(raw_tool_status);
-                    let footer = format!("\n\n{} {}", indicator, tool_status);
+                    let footer = format!("\n\n{status_block}");
                     let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10);
                     let display_text = if full_response.is_empty() {
-                        format!("{} {}", indicator, tool_status)
+                        status_block.clone()
                     } else {
                         let normalized = normalize_empty_lines(&full_response);
                         let body = tail_with_ellipsis(&normalized, body_budget.max(1));
@@ -743,7 +740,7 @@ pub(super) async fn tmux_output_watcher(
                     .get(&channel_id)
                     .and_then(|s| s.session_id.clone());
                 if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.session_id = None;
+                    session.clear_provider_session();
                 }
                 old
             };
@@ -1039,6 +1036,28 @@ pub(super) async fn tmux_output_watcher(
                     if dispatch_ok {
                         super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
                     }
+                    let mailbox = shared.mailbox(channel_id);
+                    let has_active_turn = mailbox.has_active_turn().await;
+                    let should_kickoff_queue = if has_active_turn {
+                        false
+                    } else {
+                        mailbox
+                            .has_pending_soft_queue(super::queue_persistence_context(
+                                &shared,
+                                &provider_kind,
+                                channel_id,
+                            ))
+                            .await
+                            .has_pending
+                    };
+                    if dispatch_ok && should_kickoff_queue {
+                        super::schedule_deferred_idle_queue_kickoff(
+                            shared.clone(),
+                            provider_kind.clone(),
+                            channel_id,
+                            "watcher completed with queued backlog",
+                        );
+                    }
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     eprintln!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
@@ -1225,6 +1244,8 @@ pub(super) async fn tmux_output_watcher(
 pub(super) struct WatcherToolState {
     /// Current tool status line (e.g. "⚙ Bash: `ls`")
     pub current_tool_line: Option<String>,
+    /// Previous distinct tool/thinking status for 2-line trail rendering.
+    pub prev_tool_status: Option<String>,
     /// Accumulated thinking text from streaming deltas
     pub thinking_buffer: String,
     /// Whether we are currently inside a thinking block
@@ -1239,11 +1260,32 @@ impl WatcherToolState {
     pub fn new() -> Self {
         Self {
             current_tool_line: None,
+            prev_tool_status: None,
             thinking_buffer: String::new(),
             in_thinking: false,
             any_tool_used: false,
             has_post_tool_text: false,
         }
+    }
+
+    fn set_current_tool_line(&mut self, next_tool_line: Option<String>) {
+        let current_tool_line = self.current_tool_line.clone();
+        super::formatting::preserve_previous_tool_status(
+            &mut self.prev_tool_status,
+            current_tool_line.as_deref(),
+            next_tool_line.as_deref(),
+        );
+        self.current_tool_line = next_tool_line;
+    }
+
+    fn clear_current_tool_line(&mut self) {
+        let current_tool_line = self.current_tool_line.clone();
+        super::formatting::preserve_previous_tool_status(
+            &mut self.prev_tool_status,
+            current_tool_line.as_deref(),
+            None,
+        );
+        self.current_tool_line = None;
     }
 }
 
@@ -1290,7 +1332,7 @@ pub(super) fn process_watcher_lines(
                                             if tool_state.any_tool_used {
                                                 tool_state.has_post_tool_text = true;
                                             }
-                                            tool_state.current_tool_line = None;
+                                            tool_state.clear_current_tool_line();
                                         }
                                     } else if block_type == Some("tool_use") {
                                         tool_state.any_tool_used = true;
@@ -1311,7 +1353,7 @@ pub(super) fn process_watcher_lines(
                                                 summary.chars().take(120).collect();
                                             format!("⚙ {}: {}", name, truncated)
                                         };
-                                        tool_state.current_tool_line = Some(display);
+                                        tool_state.set_current_tool_line(Some(display));
                                     }
                                 }
                             }
@@ -1324,12 +1366,12 @@ pub(super) fn process_watcher_lines(
                         if cb_type == Some("thinking") {
                             tool_state.in_thinking = true;
                             tool_state.thinking_buffer.clear();
-                            tool_state.current_tool_line = Some("💭 Thinking...".to_string());
+                            tool_state.set_current_tool_line(Some("💭 Thinking...".to_string()));
                         } else if cb_type == Some("tool_use") {
                             tool_state.any_tool_used = true;
                             tool_state.has_post_tool_text = false;
                             let name = cb.get("name").and_then(|n| n.as_str()).unwrap_or("Tool");
-                            tool_state.current_tool_line = Some(format!("⚙ {}", name));
+                            tool_state.set_current_tool_line(Some(format!("⚙ {}", name)));
                         }
                     }
                 }
@@ -1340,14 +1382,14 @@ pub(super) fn process_watcher_lines(
                             tool_state.thinking_buffer.push_str(thinking);
                             let display = tool_state.thinking_buffer.trim().to_string();
                             if !display.is_empty() {
-                                tool_state.current_tool_line = Some(format!("💭 {display}"));
+                                tool_state.set_current_tool_line(Some(format!("💭 {display}")));
                             }
                         } else if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                             full_response.push_str(text);
                             if tool_state.any_tool_used {
                                 tool_state.has_post_tool_text = true;
                             }
-                            tool_state.current_tool_line = None;
+                            tool_state.clear_current_tool_line();
                         }
                     }
                 }
@@ -1357,12 +1399,12 @@ pub(super) fn process_watcher_lines(
                         tool_state.in_thinking = false;
                         let display = tool_state.thinking_buffer.trim().to_string();
                         if !display.is_empty() {
-                            tool_state.current_tool_line = Some(format!("💭 {display}"));
+                            tool_state.set_current_tool_line(Some(format!("💭 {display}")));
                         }
-                    } else if let Some(ref line) = tool_state.current_tool_line {
+                    } else if let Some(line) = tool_state.current_tool_line.clone() {
                         // Tool completed — mark with checkmark
                         if line.starts_with("⚙") {
-                            tool_state.current_tool_line = Some(line.replacen("⚙", "✓", 1));
+                            tool_state.set_current_tool_line(Some(line.replacen("⚙", "✓", 1)));
                         }
                     }
                 }
@@ -1733,6 +1775,8 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                     .entry(*channel_id)
                     .or_insert_with(|| super::DiscordSession {
                         session_id: None,
+                        memento_context_loaded: false,
+                        memento_reflected: false,
                         current_path: None,
                         history: Vec::new(),
                         pending_uploads: Vec::new(),

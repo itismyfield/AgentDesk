@@ -1006,7 +1006,7 @@ async fn build_meeting_expert_runtime(
         .unwrap_or_else(|| fallback_provider.clone());
 
     let role_context = load_role_prompt(&participant.binding).unwrap_or_default();
-    let memory_backend = build_memory_backend(&participant.binding.memory);
+    let (_, memory_backend) = build_memory_backend(Some(&participant.binding));
     let memory_recall = memory_backend
         .recall(RecallRequest {
             provider: provider.clone(),

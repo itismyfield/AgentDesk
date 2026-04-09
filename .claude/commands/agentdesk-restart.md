@@ -1,1 +1,0 @@
-../../../../../../.agentdesk/skills/agentdesk-restart/SKILL.md

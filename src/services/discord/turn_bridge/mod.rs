@@ -12,7 +12,8 @@ use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::services::memory::{
-    CaptureRequest, build_memory_backend, resolve_memory_role_id, resolve_memory_session_id,
+    CaptureRequest, ReflectRequest, SessionEndReason, TokenUsage, build_resolved_memory_backend,
+    resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
@@ -46,11 +47,11 @@ pub(super) fn spawn_memory_capture_task(
     channel_id: ChannelId,
     capture_memory_settings: settings::ResolvedMemorySettings,
     capture_request: CaptureRequest,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
     tokio::spawn(async move {
-        let backend = build_memory_backend(&capture_memory_settings);
+        let backend = build_resolved_memory_backend(&capture_memory_settings);
         let result = backend.capture(capture_request).await;
-        for warning in result.warnings {
+        for warning in &result.warnings {
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
                 "  [{ts}] [memory] capture warning for channel {}: {}",
@@ -58,6 +59,126 @@ pub(super) fn spawn_memory_capture_task(
                 warning
             );
         }
+        result
+    })
+}
+
+pub(super) fn spawn_memory_reflect_task(
+    channel_id: ChannelId,
+    reflect_memory_settings: settings::ResolvedMemorySettings,
+    reflect_request: ReflectRequest,
+) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
+    tokio::spawn(async move {
+        let backend = build_resolved_memory_backend(&reflect_memory_settings);
+        let reason = reflect_request.reason.as_str().to_string();
+        let result = backend.reflect(reflect_request).await;
+        for warning in &result.warnings {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!(
+                "  [{ts}] [memory] reflect warning for channel {} ({}): {}",
+                channel_id.get(),
+                reason,
+                warning
+            );
+        }
+        result
+    })
+}
+
+fn build_memento_transcript(history: &[HistoryItem]) -> String {
+    history
+        .iter()
+        .filter_map(|item| {
+            let content = item.content.trim();
+            if content.is_empty() {
+                return None;
+            }
+
+            let label = match item.item_type {
+                HistoryType::User => "User",
+                HistoryType::Assistant => "Assistant",
+                HistoryType::Error => "Error",
+                HistoryType::System => "System",
+                HistoryType::ToolUse => "ToolUse",
+                HistoryType::ToolResult => "ToolResult",
+            };
+
+            Some(format!("[{label}]: {content}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn take_memento_reflect_request(
+    session: &mut DiscordSession,
+    memory_settings: &settings::ResolvedMemorySettings,
+    provider: &ProviderKind,
+    role_binding: Option<&RoleBinding>,
+    channel_id: u64,
+    reason: SessionEndReason,
+) -> Option<ReflectRequest> {
+    if memory_settings.backend != settings::MemoryBackendKind::Memento
+        || !session.memento_context_loaded
+        || session.memento_reflected
+    {
+        return None;
+    }
+
+    let session_id = session
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let transcript = build_memento_transcript(&session.history);
+    if transcript.trim().is_empty() {
+        return None;
+    }
+
+    session.memento_reflected = true;
+    Some(ReflectRequest {
+        provider: provider.clone(),
+        role_id: resolve_memory_role_id(role_binding),
+        channel_id,
+        session_id,
+        reason,
+        transcript,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TurnEndMemoryPlan {
+    pub(super) reflect_reason: Option<SessionEndReason>,
+    pub(super) clear_provider_session: bool,
+    pub(super) persist_transcript: bool,
+    pub(super) spawn_capture: bool,
+}
+
+pub(super) fn plan_turn_end_memory(
+    session: &DiscordSession,
+    backend: settings::MemoryBackendKind,
+    is_prompt_too_long: bool,
+    resume_failure_detected: bool,
+    terminal_session_reset_required: bool,
+    should_record_final_turn: bool,
+) -> Option<TurnEndMemoryPlan> {
+    if session.cleared || is_prompt_too_long {
+        return None;
+    }
+
+    let persist_transcript = should_record_final_turn;
+    let reflect_reason = if terminal_session_reset_required {
+        Some(SessionEndReason::LocalSessionReset)
+    } else {
+        None
+    };
+    let clear_provider_session = resume_failure_detected || terminal_session_reset_required;
+
+    Some(TurnEndMemoryPlan {
+        reflect_reason,
+        clear_provider_session,
+        persist_transcript,
+        spawn_capture: persist_transcript && backend != settings::MemoryBackendKind::Memento,
     })
 }
 
@@ -76,6 +197,7 @@ pub(super) struct TurnBridgeContext {
     pub(super) adk_session_info: Option<String>,
     pub(super) adk_cwd: Option<String>,
     pub(super) dispatch_id: Option<String>,
+    pub(super) memory_recall_usage: TokenUsage,
     pub(super) current_msg_id: MessageId,
     pub(super) response_sent_offset: usize,
     pub(super) full_response: String,
@@ -84,6 +206,24 @@ pub(super) struct TurnBridgeContext {
     pub(super) defer_watcher_resume: bool,
     pub(super) completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(super) inflight_state: InflightTurnState,
+}
+
+pub(super) fn optional_metric_token_fields(usage: TokenUsage) -> (Option<u64>, Option<u64>) {
+    if usage.is_zero() {
+        return (None, None);
+    }
+    (
+        if usage.input_tokens > 0 {
+            Some(usage.input_tokens)
+        } else {
+            None
+        },
+        if usage.output_tokens > 0 {
+            Some(usage.output_tokens)
+        } else {
+            None
+        },
+    )
 }
 
 fn extract_skill_id_from_tool_use(name: &str, input: &str) -> Option<String> {
@@ -171,10 +311,13 @@ pub(super) fn spawn_turn_bridge(
         let mut cancelled = false;
         let mut rx_disconnected = false;
         let mut current_tool_line: Option<String> = bridge.inflight_state.current_tool_line.clone();
+        let mut prev_tool_status: Option<String> = bridge.inflight_state.prev_tool_status.clone();
         let mut last_tool_name: Option<String> = None;
         let mut last_tool_summary: Option<String> = None;
         let mut accumulated_input_tokens: u64 = 0;
         let mut accumulated_output_tokens: u64 = 0;
+        let mut accumulated_memory_input_tokens: u64 = bridge.memory_recall_usage.input_tokens;
+        let mut accumulated_memory_output_tokens: u64 = bridge.memory_recall_usage.output_tokens;
         let mut spin_idx: usize = 0;
         let mut restart_followup_pending = false;
         let mut any_tool_used = bridge.inflight_state.any_tool_used;
@@ -226,6 +369,7 @@ pub(super) fn spawn_turn_bridge(
         let mut inflight_state = bridge.inflight_state.clone();
         let mut last_status_edit = tokio::time::Instant::now();
         let status_interval = super::status_update_interval();
+        let narrate_progress = super::settings::load_narrate_progress(shared_owned.db.as_ref());
         let turn_start = std::time::Instant::now();
 
         let _ = save_inflight_state(&inflight_state);
@@ -253,6 +397,7 @@ pub(super) fn spawn_turn_bridge(
                                 && handle_gemini_retry_boundary(
                                     &mut full_response,
                                     &mut current_tool_line,
+                                    &mut prev_tool_status,
                                     &mut last_tool_name,
                                     &mut last_tool_summary,
                                     &mut any_tool_used,
@@ -277,6 +422,11 @@ pub(super) fn spawn_turn_bridge(
                                 has_post_tool_text = true;
                                 inflight_state.has_post_tool_text = true;
                             }
+                            super::formatting::preserve_previous_tool_status(
+                                &mut prev_tool_status,
+                                current_tool_line.as_deref(),
+                                None,
+                            );
                             current_tool_line = None;
                             last_tool_name = None;
                             last_tool_summary = None;
@@ -289,6 +439,11 @@ pub(super) fn spawn_turn_bridge(
                             } else {
                                 "💭 Thinking...".to_string()
                             };
+                            super::formatting::preserve_previous_tool_status(
+                                &mut prev_tool_status,
+                                current_tool_line.as_deref(),
+                                Some(display.as_str()),
+                            );
                             current_tool_line = Some(display);
                             last_tool_name = None;
                             last_tool_summary = None;
@@ -320,7 +475,13 @@ pub(super) fn spawn_turn_bridge(
                             } else {
                                 truncate_str(&summary, 120).to_string()
                             };
-                            current_tool_line = Some(format!("⚙ {}: {}", name, display_summary));
+                            let display = format!("⚙ {}: {}", name, display_summary);
+                            super::formatting::preserve_previous_tool_status(
+                                &mut prev_tool_status,
+                                current_tool_line.as_deref(),
+                                Some(display.as_str()),
+                            );
+                            current_tool_line = Some(display);
                             last_tool_name = Some(name.clone());
                             last_tool_summary = Some(display_summary);
                             if !restart_followup_pending && is_dcserver_restart_command(&input) {
@@ -388,6 +549,11 @@ pub(super) fn spawn_turn_bridge(
                                     .filter(|s| !s.is_empty() && *s != "…")
                                     .map(|s| format!("{} {}: {}", status, tn, s))
                                     .unwrap_or_else(|| format!("{} {}", status, tn));
+                                super::formatting::preserve_previous_tool_status(
+                                    &mut prev_tool_status,
+                                    current_tool_line.as_deref(),
+                                    Some(detail.as_str()),
+                                );
                                 current_tool_line = Some(detail);
                             }
                             let _ = content;
@@ -603,21 +769,23 @@ pub(super) fn spawn_turn_bridge(
             let indicator = SPINNER[spin_idx % SPINNER.len()];
             spin_idx += 1;
 
-            let raw_tool_status = super::formatting::resolve_raw_tool_status(
-                current_tool_line.as_deref(),
-                &full_response,
-            );
-            let tool_status = super::formatting::humanize_tool_status(raw_tool_status);
             let current_portion = if response_sent_offset < full_response.len() {
                 &full_response[response_sent_offset..]
             } else {
                 ""
             };
-            let footer = format!("\n\n{} {}", indicator, tool_status);
+            let status_block = super::formatting::build_placeholder_status_block(
+                indicator,
+                prev_tool_status.as_deref(),
+                current_tool_line.as_deref(),
+                &full_response,
+                narrate_progress,
+            );
+            let footer = format!("\n\n{status_block}");
             let body_budget = DISCORD_MSG_LIMIT.saturating_sub(footer.len() + 10);
             let normalized = normalize_empty_lines(current_portion);
             let stable_display_text = if current_portion.is_empty() {
-                format!("{} {}", indicator, tool_status)
+                status_block.clone()
             } else {
                 let body = tail_with_ellipsis(&normalized, body_budget.max(1));
                 format!("{}{}", body, footer)
@@ -644,8 +812,12 @@ pub(super) fn spawn_turn_bridge(
                 state_dirty = true;
             }
 
-            if state_dirty || inflight_state.current_tool_line != current_tool_line {
+            if state_dirty
+                || inflight_state.current_tool_line != current_tool_line
+                || inflight_state.prev_tool_status != prev_tool_status
+            {
                 inflight_state.current_tool_line = current_tool_line.clone();
+                inflight_state.prev_tool_status = prev_tool_status.clone();
                 let _ = save_inflight_state(&inflight_state);
             }
 
@@ -729,45 +901,30 @@ pub(super) fn spawn_turn_bridge(
         shared_owned
             .global_finalizing
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let has_queued_turns = {
-            let mut data = shared_owned.core.lock().await;
-            if let Some(removed_token) = data.cancel_tokens.remove(&channel_id) {
-                // Mark the token as cancelled so any lingering watchdog timer exits cleanly
-                // instead of mistakenly firing on a newer turn's token.
-                removed_token
-                    .cancelled
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                shared_owned
-                    .global_active
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            // Clean up any pending watchdog deadline override for this channel
-            super::clear_watchdog_deadline_override(channel_id.get());
-            data.active_request_owner.remove(&channel_id);
-            // Clean up dispatch-thread parent mapping when the thread turn ends.
-            // Iterate and remove entries whose thread matches this channel_id.
+        let finish = super::mailbox_finish_turn(&shared_owned, &provider, channel_id).await;
+        if let Some(removed_token) = finish.removed_token {
+            // Mark the token as cancelled so any lingering watchdog timer exits cleanly
+            // instead of mistakenly firing on a newer turn's token.
+            removed_token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             shared_owned
-                .dispatch_thread_parents
-                .retain(|_, thread| *thread != channel_id);
-            let mut remove_queue = false;
-            let has_pending = if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
-                let has_pending = super::has_soft_intervention(queue);
-                remove_queue = queue.is_empty();
-                has_pending
-            } else {
-                false
-            };
-            // Keep the override while queued turns remain so review/reused-thread routing
-            // survives restart-preserve and same-runtime dequeue paths.
-            if !has_pending {
-                shared_owned.dispatch_role_overrides.remove(&channel_id);
-            }
-            if remove_queue {
-                data.intervention_queue.remove(&channel_id);
-            }
-            drop(data);
-            has_pending
-        };
+                .global_active
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Clean up any pending watchdog deadline override for this channel
+        super::clear_watchdog_deadline_override(channel_id.get());
+        // Clean up dispatch-thread parent mapping when the thread turn ends.
+        // Iterate and remove entries whose thread matches this channel_id.
+        shared_owned
+            .dispatch_thread_parents
+            .retain(|_, thread| *thread != channel_id);
+        // Keep the override while queued turns remain so review/reused-thread routing
+        // survives restart-preserve and same-runtime dequeue paths.
+        if !finish.has_pending {
+            shared_owned.dispatch_role_overrides.remove(&channel_id);
+        }
+        let has_queued_turns = finish.has_pending;
 
         // Remove ⏳ only if NOT handing off to tmux watcher.
         // When tmux watcher is handling the response, it will do ⏳→✅ after delivery.
@@ -1184,36 +1341,6 @@ pub(super) fn spawn_turn_bridge(
                     .send()
                     .await;
             }
-
-            // Record turn metrics
-            {
-                let duration = shared_owned
-                    .turn_start_times
-                    .remove(&channel_id)
-                    .map(|(_, start)| start.elapsed().as_secs_f64())
-                    .unwrap_or(0.0);
-                let provider_name = {
-                    let settings = shared_owned.settings.read().await;
-                    settings.provider.as_str().to_string()
-                };
-                super::metrics::record_turn(&super::metrics::TurnMetric {
-                    channel_id: channel_id.get(),
-                    provider: provider_name,
-                    timestamp: chrono::Local::now().to_rfc3339(),
-                    duration_secs: duration,
-                    model: None, // model info from StatusUpdate not yet accumulated in turn_bridge
-                    input_tokens: if accumulated_input_tokens > 0 {
-                        Some(accumulated_input_tokens)
-                    } else {
-                        None
-                    },
-                    output_tokens: if accumulated_output_tokens > 0 {
-                        Some(accumulated_output_tokens)
-                    } else {
-                        None
-                    },
-                });
-            }
         }
 
         if should_resume_watcher_after_turn(
@@ -1243,16 +1370,36 @@ pub(super) fn spawn_turn_bridge(
 
         // Update in-memory session under lock.
         let mut should_persist_transcript = false;
+        let mut should_spawn_memory_capture = false;
+        let mut reflect_request = None;
+        let capture_memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
         let session_id_to_persist = {
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
-                if !session.cleared && !is_prompt_too_long {
-                    if resume_failure_detected || terminal_session_reset_required {
-                        session.session_id = None;
-                    } else if let Some(sid) = new_session_id {
-                        session.session_id = Some(sid);
+                if let Some(memory_plan) = plan_turn_end_memory(
+                    session,
+                    capture_memory_settings.backend,
+                    is_prompt_too_long,
+                    resume_failure_detected,
+                    terminal_session_reset_required,
+                    should_record_final_turn,
+                ) {
+                    if let Some(reason) = memory_plan.reflect_reason {
+                        reflect_request = take_memento_reflect_request(
+                            session,
+                            &capture_memory_settings,
+                            &provider,
+                            role_binding.as_ref(),
+                            channel_id.get(),
+                            reason,
+                        );
                     }
-                    if should_record_final_turn {
+                    if memory_plan.clear_provider_session {
+                        session.clear_provider_session();
+                    } else if let Some(sid) = new_session_id.as_ref() {
+                        session.restore_provider_session(Some(sid.clone()));
+                    }
+                    if memory_plan.persist_transcript {
                         session.history.push(HistoryItem {
                             item_type: HistoryType::User,
                             content: user_text_owned.clone(),
@@ -1263,6 +1410,7 @@ pub(super) fn spawn_turn_bridge(
                         });
                         should_persist_transcript = true;
                     }
+                    should_spawn_memory_capture = memory_plan.spawn_capture;
                     session.session_id.clone()
                 } else {
                     None
@@ -1315,9 +1463,15 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
-        if should_persist_transcript {
-            let capture_memory_settings =
-                settings::memory_settings_for_binding(role_binding.as_ref());
+        let mut background_memory_task = None;
+        if let Some(reflect_request) = reflect_request {
+            background_memory_task = Some(spawn_memory_reflect_task(
+                channel_id,
+                capture_memory_settings.clone(),
+                reflect_request,
+            ));
+        }
+        if should_spawn_memory_capture {
             let capture_request = CaptureRequest {
                 provider: provider.clone(),
                 role_id: resolve_memory_role_id(role_binding.as_ref()),
@@ -1330,8 +1484,67 @@ pub(super) fn spawn_turn_bridge(
                 user_text: user_text_owned.clone(),
                 assistant_text: full_response.clone(),
             };
-            let _capture_task =
-                spawn_memory_capture_task(channel_id, capture_memory_settings, capture_request);
+            background_memory_task = Some(spawn_memory_capture_task(
+                channel_id,
+                capture_memory_settings,
+                capture_request,
+            ));
+        }
+
+        if let Some(memory_task) = background_memory_task {
+            match memory_task.await {
+                Ok(result) => {
+                    accumulated_memory_input_tokens = accumulated_memory_input_tokens
+                        .saturating_add(result.token_usage.input_tokens);
+                    accumulated_memory_output_tokens = accumulated_memory_output_tokens
+                        .saturating_add(result.token_usage.output_tokens);
+                }
+                Err(err) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] [memory] background task join failed for channel {}: {}",
+                        channel_id.get(),
+                        err
+                    );
+                }
+            }
+        }
+
+        {
+            let duration = shared_owned
+                .turn_start_times
+                .remove(&channel_id)
+                .map(|(_, start)| start.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
+            let memory_usage = TokenUsage {
+                input_tokens: accumulated_memory_input_tokens,
+                output_tokens: accumulated_memory_output_tokens,
+            };
+            let (memory_input_tokens, memory_output_tokens) =
+                optional_metric_token_fields(memory_usage);
+            let provider_name = {
+                let settings = shared_owned.settings.read().await;
+                settings.provider.as_str().to_string()
+            };
+            super::metrics::record_turn(&super::metrics::TurnMetric {
+                channel_id: channel_id.get(),
+                provider: provider_name,
+                timestamp: chrono::Local::now().to_rfc3339(),
+                duration_secs: duration,
+                model: None, // model info from StatusUpdate not yet accumulated in turn_bridge
+                input_tokens: if accumulated_input_tokens > 0 {
+                    Some(accumulated_input_tokens)
+                } else {
+                    None
+                },
+                output_tokens: if accumulated_output_tokens > 0 {
+                    Some(accumulated_output_tokens)
+                } else {
+                    None
+                },
+                memory_input_tokens,
+                memory_output_tokens,
+            });
         }
 
         // Clear restart report BEFORE clearing inflight state (which removes
@@ -1474,16 +1687,12 @@ pub(super) fn spawn_turn_bridge(
                         channel_id, reason
                     );
                 } else {
-                    let next_intervention = {
-                        let mut data = shared_owned.core.lock().await;
-                        super::take_next_soft_intervention_persisted(
-                            &bot_owner_provider,
-                            &shared_owned.token_hash,
-                            channel_id,
-                            &mut data.intervention_queue,
-                            &shared_owned.dispatch_role_overrides,
-                        )
-                    };
+                    let next_intervention = super::mailbox_take_next_soft_intervention(
+                        &shared_owned,
+                        &bot_owner_provider,
+                        channel_id,
+                    )
+                    .await;
 
                     if let Some((intervention, has_more_queued_turns)) = next_intervention {
                         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1508,15 +1717,13 @@ pub(super) fn spawn_turn_bridge(
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             println!("  [{ts}]   ⚠ queued command failed: {e}");
-                            let mut data = shared_owned.core.lock().await;
-                            super::requeue_intervention_front_persisted(
+                            super::mailbox_requeue_intervention_front(
+                                &shared_owned,
                                 &bot_owner_provider,
-                                &shared_owned.token_hash,
                                 channel_id,
-                                &mut data.intervention_queue,
-                                &shared_owned.dispatch_role_overrides,
                                 intervention,
-                            );
+                            )
+                            .await;
                         }
                     }
                 }

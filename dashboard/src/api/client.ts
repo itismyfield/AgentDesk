@@ -349,6 +349,9 @@ export interface HealthResponse {
   watcher_count?: number;
 }
 
+export async function getHealth(): Promise<HealthResponse> {
+  return request("/api/health");
+}
 export async function getRuntimeConfig(): Promise<RuntimeConfigResponse> {
   return request("/api/settings/runtime-config");
 }
@@ -381,10 +384,6 @@ export async function createDispatch(body: {
 export async function getStats(officeId?: string): Promise<DashboardStats> {
   const q = officeId ? `?officeId=${officeId}` : "";
   return request(`/api/stats${q}`);
-}
-
-export async function getHealth(): Promise<HealthResponse> {
-  return request("/api/health");
 }
 
 // ── Kanban & Dispatches ──

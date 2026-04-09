@@ -4,6 +4,8 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct DiscordSession {
     pub(super) session_id: Option<String>,
+    pub(super) memento_context_loaded: bool,
+    pub(super) memento_reflected: bool,
     pub(super) current_path: Option<String>,
     pub(super) history: Vec<HistoryItem>,
     pub(super) pending_uploads: Vec<String>,
@@ -34,6 +36,23 @@ pub(super) fn session_path_is_usable(
 }
 
 impl DiscordSession {
+    pub(super) fn clear_provider_session(&mut self) {
+        self.session_id = None;
+        self.memento_context_loaded = false;
+        self.memento_reflected = false;
+    }
+
+    pub(super) fn restore_provider_session(&mut self, session_id: Option<String>) {
+        self.session_id = session_id;
+        self.memento_context_loaded = self.session_id.is_some();
+        self.memento_reflected = false;
+    }
+
+    pub(super) fn note_memento_context_loaded(&mut self) {
+        self.memento_context_loaded = true;
+        self.memento_reflected = false;
+    }
+
     /// Validate `current_path` and return it if it exists on disk.
     /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
     pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
@@ -291,3 +310,61 @@ pub(super) struct Data {
 
 pub(super) type Error = Box<dyn std::error::Error + Send + Sync>;
 pub(super) type Context<'a> = poise::Context<'a, Data, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_session() -> DiscordSession {
+        DiscordSession {
+            session_id: Some("session-1".to_string()),
+            memento_context_loaded: false,
+            memento_reflected: true,
+            current_path: None,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: Some(1),
+            channel_name: Some("adk-cdx".to_string()),
+            category_name: Some("AgentDesk".to_string()),
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 1,
+        }
+    }
+
+    #[test]
+    fn clear_provider_session_resets_all_provider_state() {
+        let mut session = sample_session();
+        session.memento_context_loaded = true;
+
+        session.clear_provider_session();
+
+        assert_eq!(session.session_id, None);
+        assert!(!session.memento_context_loaded);
+        assert!(!session.memento_reflected);
+    }
+
+    #[test]
+    fn restore_provider_session_marks_memento_context_for_resumed_sessions() {
+        let mut session = sample_session();
+
+        session.restore_provider_session(Some("restored-1".to_string()));
+
+        assert_eq!(session.session_id.as_deref(), Some("restored-1"));
+        assert!(session.memento_context_loaded);
+        assert!(!session.memento_reflected);
+    }
+
+    #[test]
+    fn note_memento_context_loaded_preserves_session_id_and_clears_reflect_flag() {
+        let mut session = sample_session();
+
+        session.note_memento_context_loaded();
+
+        assert_eq!(session.session_id.as_deref(), Some("session-1"));
+        assert!(session.memento_context_loaded);
+        assert!(!session.memento_reflected);
+    }
+}

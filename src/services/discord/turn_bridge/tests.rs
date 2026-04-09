@@ -9,17 +9,22 @@ use super::retry_state::{
     clear_local_session_state, handle_gemini_retry_boundary, reset_gemini_retry_attempt_state,
     should_reset_gemini_retry_attempt_state,
 };
-use super::spawn_memory_capture_task;
 use super::stale_resume::{
     contains_stale_resume_error_text, output_file_has_stale_resume_error_after_offset,
     result_event_has_stale_resume_error, stream_error_requires_terminal_session_reset,
 };
 use super::tmux_runtime::should_resume_watcher_after_turn;
+use super::{
+    TurnEndMemoryPlan, optional_metric_token_fields, plan_turn_end_memory,
+    spawn_memory_capture_task, take_memento_reflect_request,
+};
 use crate::services::discord::ChannelId;
+use crate::services::discord::DiscordSession;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings};
-use crate::services::memory::CaptureRequest;
+use crate::services::memory::{CaptureRequest, SessionEndReason, TokenUsage};
 use crate::services::provider::ProviderKind;
+use crate::ui::ai_screen::{HistoryItem, HistoryType};
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -95,6 +100,153 @@ fn total_context_tokens_saturates_on_overflow() {
     assert_eq!(total_context_tokens(u64::MAX, 1), u64::MAX);
 }
 
+#[test]
+fn optional_metric_token_fields_omit_all_zero_usage() {
+    assert_eq!(
+        optional_metric_token_fields(TokenUsage::default()),
+        (None, None)
+    );
+}
+
+#[test]
+fn optional_metric_token_fields_preserve_partial_usage() {
+    assert_eq!(
+        optional_metric_token_fields(TokenUsage {
+            input_tokens: 13,
+            output_tokens: 0,
+        }),
+        (Some(13), None)
+    );
+    assert_eq!(
+        optional_metric_token_fields(TokenUsage {
+            input_tokens: 0,
+            output_tokens: 5,
+        }),
+        (None, Some(5))
+    );
+}
+
+fn sample_session() -> DiscordSession {
+    DiscordSession {
+        session_id: Some("session-1".to_string()),
+        memento_context_loaded: true,
+        memento_reflected: false,
+        current_path: Some("/tmp/project".to_string()),
+        history: vec![
+            HistoryItem {
+                item_type: HistoryType::User,
+                content: "hello".to_string(),
+            },
+            HistoryItem {
+                item_type: HistoryType::Assistant,
+                content: "world".to_string(),
+            },
+        ],
+        pending_uploads: Vec::new(),
+        cleared: false,
+        channel_name: Some("adk-cdx".to_string()),
+        category_name: None,
+        remote_profile_name: None,
+        channel_id: Some(42),
+        last_active: tokio::time::Instant::now(),
+        worktree: None,
+        born_generation: 0,
+    }
+}
+
+#[test]
+fn turn_end_memory_plan_skips_cleared_and_prompt_too_long_surfaces() {
+    let mut cleared = sample_session();
+    cleared.cleared = true;
+    assert_eq!(
+        plan_turn_end_memory(&cleared, MemoryBackendKind::File, false, false, false, true),
+        None
+    );
+
+    let prompt_too_long = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(
+            &prompt_too_long,
+            MemoryBackendKind::Mem0,
+            true,
+            false,
+            false,
+            true,
+        ),
+        None
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_uses_background_capture_for_non_memento_turns() {
+    let session = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(&session, MemoryBackendKind::File, false, false, false, true),
+        Some(TurnEndMemoryPlan {
+            reflect_reason: None,
+            clear_provider_session: false,
+            persist_transcript: true,
+            spawn_capture: true,
+        })
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_uses_reflect_for_memento_local_session_reset() {
+    let session = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(
+            &session,
+            MemoryBackendKind::Memento,
+            false,
+            false,
+            true,
+            true
+        ),
+        Some(TurnEndMemoryPlan {
+            reflect_reason: Some(SessionEndReason::LocalSessionReset),
+            clear_provider_session: true,
+            persist_transcript: true,
+            spawn_capture: false,
+        })
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_clears_provider_session_on_resume_failure_without_capture() {
+    let session = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(&session, MemoryBackendKind::Mem0, false, true, false, false),
+        Some(TurnEndMemoryPlan {
+            reflect_reason: None,
+            clear_provider_session: true,
+            persist_transcript: false,
+            spawn_capture: false,
+        })
+    );
+}
+
+#[test]
+fn turn_end_memory_plan_skips_background_capture_for_normal_memento_turns() {
+    let session = sample_session();
+    assert_eq!(
+        plan_turn_end_memory(
+            &session,
+            MemoryBackendKind::Memento,
+            false,
+            false,
+            false,
+            true
+        ),
+        Some(TurnEndMemoryPlan {
+            reflect_reason: None,
+            clear_provider_session: false,
+            persist_transcript: true,
+            spawn_capture: false,
+        })
+    );
+}
+
 #[tokio::test]
 async fn memory_capture_task_is_backgrounded_and_timeout_isolated() {
     let (base_url, server_handle) = spawn_hanging_http_server().await;
@@ -131,6 +283,143 @@ async fn memory_capture_task_is_backgrounded_and_timeout_isolated() {
 
     server_handle.abort();
     restore_mem0_env(prev_api_key, prev_base_url);
+}
+
+#[test]
+fn memento_reflect_request_requires_loaded_unreflected_session() {
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        ..ResolvedMemorySettings::default()
+    };
+    let mut session = sample_session();
+
+    let request = take_memento_reflect_request(
+        &mut session,
+        &settings,
+        &ProviderKind::Codex,
+        None,
+        42,
+        SessionEndReason::IdleExpiry,
+    )
+    .expect("memento reflect should be prepared");
+
+    assert_eq!(request.session_id, "session-1");
+    assert_eq!(request.channel_id, 42);
+    assert_eq!(request.reason, SessionEndReason::IdleExpiry);
+    assert_eq!(request.transcript, "[User]: hello\n[Assistant]: world");
+    assert!(session.memento_reflected);
+
+    let duplicate = take_memento_reflect_request(
+        &mut session,
+        &settings,
+        &ProviderKind::Codex,
+        None,
+        42,
+        SessionEndReason::IdleExpiry,
+    );
+    assert!(duplicate.is_none(), "reflect must be one-shot per session");
+}
+
+#[test]
+fn memento_reflect_request_handles_local_session_reset_once() {
+    let settings = ResolvedMemorySettings {
+        backend: MemoryBackendKind::Memento,
+        ..ResolvedMemorySettings::default()
+    };
+    let mut session = sample_session();
+
+    let request = take_memento_reflect_request(
+        &mut session,
+        &settings,
+        &ProviderKind::Codex,
+        None,
+        42,
+        SessionEndReason::LocalSessionReset,
+    )
+    .expect("local session reset should trigger one reflect");
+
+    assert_eq!(request.reason, SessionEndReason::LocalSessionReset);
+    assert!(session.memento_reflected);
+
+    let duplicate = take_memento_reflect_request(
+        &mut session,
+        &settings,
+        &ProviderKind::Codex,
+        None,
+        42,
+        SessionEndReason::LocalSessionReset,
+    );
+    assert!(
+        duplicate.is_none(),
+        "reflect must stay one-shot after reset"
+    );
+}
+
+#[test]
+fn memento_reflect_request_skips_other_backends_or_missing_state() {
+    let mut unloaded = sample_session();
+    unloaded.memento_context_loaded = false;
+    assert!(
+        take_memento_reflect_request(
+            &mut unloaded,
+            &ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            },
+            &ProviderKind::Codex,
+            None,
+            42,
+            SessionEndReason::LocalSessionReset,
+        )
+        .is_none()
+    );
+
+    let mut non_memento = sample_session();
+    assert!(
+        take_memento_reflect_request(
+            &mut non_memento,
+            &ResolvedMemorySettings::default(),
+            &ProviderKind::Codex,
+            None,
+            42,
+            SessionEndReason::LocalSessionReset,
+        )
+        .is_none()
+    );
+
+    let mut missing_session_id = sample_session();
+    missing_session_id.session_id = None;
+    assert!(
+        take_memento_reflect_request(
+            &mut missing_session_id,
+            &ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            },
+            &ProviderKind::Codex,
+            None,
+            42,
+            SessionEndReason::LocalSessionReset,
+        )
+        .is_none()
+    );
+
+    let mut missing_history = sample_session();
+    missing_history.history.clear();
+    assert!(
+        take_memento_reflect_request(
+            &mut missing_history,
+            &ResolvedMemorySettings {
+                backend: MemoryBackendKind::Memento,
+                ..ResolvedMemorySettings::default()
+            },
+            &ProviderKind::Codex,
+            None,
+            42,
+            SessionEndReason::LocalSessionReset,
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -215,6 +504,7 @@ fn gemini_retry_reset_helper_requires_current_turn_partial_state() {
 fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
     let mut full_response = "partial answer".to_string();
     let mut current_tool_line = Some("⚙ Bash: pwd".to_string());
+    let mut prev_tool_status = Some("✓ Read: src/config.rs".to_string());
     let mut last_tool_name = Some("Bash".to_string());
     let mut last_tool_summary = Some("pwd".to_string());
     let mut any_tool_used = true;
@@ -236,6 +526,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
     );
     inflight_state.full_response = full_response.clone();
     inflight_state.current_tool_line = current_tool_line.clone();
+    inflight_state.prev_tool_status = prev_tool_status.clone();
     inflight_state.any_tool_used = true;
     inflight_state.has_post_tool_text = true;
     inflight_state.response_sent_offset = response_sent_offset;
@@ -243,6 +534,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
     reset_gemini_retry_attempt_state(
         &mut full_response,
         &mut current_tool_line,
+        &mut prev_tool_status,
         &mut last_tool_name,
         &mut last_tool_summary,
         &mut any_tool_used,
@@ -253,6 +545,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
 
     assert!(full_response.is_empty());
     assert_eq!(current_tool_line, None);
+    assert_eq!(prev_tool_status, None);
     assert_eq!(last_tool_name, None);
     assert_eq!(last_tool_summary, None);
     assert!(!any_tool_used);
@@ -260,6 +553,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
     assert_eq!(response_sent_offset, 0);
     assert!(inflight_state.full_response.is_empty());
     assert_eq!(inflight_state.current_tool_line, None);
+    assert_eq!(inflight_state.prev_tool_status, None);
     assert!(!inflight_state.any_tool_used);
     assert!(!inflight_state.has_post_tool_text);
     assert_eq!(inflight_state.response_sent_offset, 0);
@@ -269,6 +563,7 @@ fn reset_gemini_retry_attempt_state_clears_partial_output_and_tool_flags() {
 fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() {
     let mut full_response = "partial answer".to_string();
     let mut current_tool_line = Some("⚙ Bash: pwd".to_string());
+    let mut prev_tool_status = Some("✓ Read: src/config.rs".to_string());
     let mut last_tool_name = Some("Bash".to_string());
     let mut last_tool_summary = Some("pwd".to_string());
     let mut any_tool_used = true;
@@ -292,6 +587,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     );
     inflight_state.full_response = full_response.clone();
     inflight_state.current_tool_line = current_tool_line.clone();
+    inflight_state.prev_tool_status = prev_tool_status.clone();
     inflight_state.any_tool_used = true;
     inflight_state.has_post_tool_text = true;
     inflight_state.response_sent_offset = response_sent_offset;
@@ -299,6 +595,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     let changed = handle_gemini_retry_boundary(
         &mut full_response,
         &mut current_tool_line,
+        &mut prev_tool_status,
         &mut last_tool_name,
         &mut last_tool_summary,
         &mut any_tool_used,
@@ -312,6 +609,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     assert!(changed);
     assert!(full_response.is_empty());
     assert_eq!(current_tool_line, None);
+    assert_eq!(prev_tool_status, None);
     assert_eq!(last_tool_name, None);
     assert_eq!(last_tool_summary, None);
     assert!(!any_tool_used);
@@ -322,6 +620,7 @@ fn handle_gemini_retry_boundary_clears_partial_output_and_local_session_state() 
     assert_eq!(inflight_state.session_id, None);
     assert!(inflight_state.full_response.is_empty());
     assert_eq!(inflight_state.current_tool_line, None);
+    assert_eq!(inflight_state.prev_tool_status, None);
     assert!(!inflight_state.any_tool_used);
     assert!(!inflight_state.has_post_tool_text);
     assert_eq!(inflight_state.response_sent_offset, 0);
