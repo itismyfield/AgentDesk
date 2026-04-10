@@ -1177,6 +1177,21 @@ async fn catch_up_missed_messages(
         let channel_id = ChannelId::new(channel_id_raw);
         let after_msg = MessageId::new(last_id);
 
+        match resolve_runtime_channel_binding_status(http, channel_id).await {
+            RuntimeChannelBindingStatus::Owned => {}
+            RuntimeChannelBindingStatus::Unowned => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⏭ catch-up: dropping stale checkpoint for unowned channel {} ({})",
+                    channel_id,
+                    path.display()
+                );
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            RuntimeChannelBindingStatus::Unknown => continue,
+        }
+
         // Fetch messages after last_id (Discord returns oldest first with after=)
         let messages = match channel_id
             .messages(
@@ -3586,6 +3601,13 @@ pub(super) async fn auto_restore_session(
     channel_id: ChannelId,
     serenity_ctx: &serenity::prelude::Context,
 ) {
+    if matches!(
+        resolve_runtime_channel_binding_status(&serenity_ctx.http, channel_id).await,
+        RuntimeChannelBindingStatus::Unowned
+    ) {
+        return;
+    }
+
     // Resolve channel/category before taking the lock for mutation
     let (live_ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
     let existing_channel_name = {
@@ -3893,6 +3915,60 @@ pub(super) async fn provider_handles_channel(
     validate_live_channel_routing(ctx, provider, settings, channel_id)
         .await
         .is_ok()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RuntimeChannelBindingStatus {
+    Owned,
+    Unowned,
+    Unknown,
+}
+
+pub(super) async fn resolve_runtime_channel_binding_status(
+    http: &Arc<serenity::Http>,
+    channel_id: serenity::model::id::ChannelId,
+) -> RuntimeChannelBindingStatus {
+    if settings::has_configured_channel_binding(channel_id, None) {
+        return RuntimeChannelBindingStatus::Owned;
+    }
+
+    let Ok(channel) = channel_id.to_channel(http).await else {
+        return RuntimeChannelBindingStatus::Unknown;
+    };
+
+    match channel {
+        serenity::model::channel::Channel::Private(_) => RuntimeChannelBindingStatus::Owned,
+        serenity::model::channel::Channel::Guild(gc) => {
+            use serenity::model::channel::ChannelType;
+            match gc.kind {
+                ChannelType::PublicThread | ChannelType::PrivateThread => {
+                    let Some(parent_id) = gc.parent_id else {
+                        return RuntimeChannelBindingStatus::Unowned;
+                    };
+                    let parent_name = match parent_id.to_channel(http).await {
+                        Ok(serenity::model::channel::Channel::Guild(parent)) => {
+                            Some(parent.name.clone())
+                        }
+                        Ok(_) => None,
+                        Err(_) => None,
+                    };
+                    if settings::has_configured_channel_binding(parent_id, parent_name.as_deref()) {
+                        RuntimeChannelBindingStatus::Owned
+                    } else {
+                        RuntimeChannelBindingStatus::Unowned
+                    }
+                }
+                _ => {
+                    if settings::has_configured_channel_binding(channel_id, Some(&gc.name)) {
+                        RuntimeChannelBindingStatus::Owned
+                    } else {
+                        RuntimeChannelBindingStatus::Unowned
+                    }
+                }
+            }
+        }
+        _ => RuntimeChannelBindingStatus::Unowned,
+    }
 }
 
 /// If `channel_id` is a Discord thread, return the parent channel ID and name.

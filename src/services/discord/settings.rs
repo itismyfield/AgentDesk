@@ -867,6 +867,17 @@ pub(super) fn resolve_workspace(
     resolve_workspace_from_role_map(channel_id, channel_name)
 }
 
+/// Returns true only when this runtime has an explicit or resolved binding for
+/// the concrete Discord channel ID. This deliberately avoids channel-name-only
+/// fallback for unrelated runtimes that happen to share a channel name.
+pub(super) fn has_configured_channel_binding(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> bool {
+    resolve_role_binding(channel_id, channel_name).is_some()
+        || resolve_workspace(channel_id, channel_name).is_some()
+}
+
 pub(super) fn load_role_prompt(binding: &RoleBinding) -> Option<String> {
     let prompt_path = Path::new(&binding.prompt_file);
     let raw = fs::read_to_string(prompt_path)
@@ -2482,6 +2493,37 @@ agents:
         ));
         assert!(!bot_settings_allow_agent(&settings, None, false));
         assert!(bot_settings_allow_agent(&settings, None, true));
+    }
+
+    #[test]
+    fn test_has_configured_channel_binding_requires_matching_explicit_channel_id() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home,
+                r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      claude:
+        id: "1484070499783803081"
+        name: "adk-cc"
+        aliases: ["agentdesk-cc"]
+"#,
+            );
+
+            assert!(super::has_configured_channel_binding(
+                ChannelId::new(1484070499783803081),
+                Some("adk-cc"),
+            ));
+            assert!(!super::has_configured_channel_binding(
+                ChannelId::new(1479671298497183835),
+                Some("adk-cc"),
+            ));
+        });
     }
 
     #[test]
