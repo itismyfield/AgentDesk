@@ -342,12 +342,19 @@ fn build_slot_thread_name(
                  JOIN kanban_cards kc ON kc.id = e.kanban_card_id
                  WHERE e.run_id = ?1
                    AND COALESCE(e.thread_group, 0) = ?2
+                   AND COALESCE(e.batch_phase, 0) = (
+                       SELECT COALESCE(e2.batch_phase, 0)
+                       FROM auto_queue_entries e2
+                       WHERE e2.kanban_card_id = ?3
+                         AND e2.run_id = ?1
+                       LIMIT 1
+                   )
                    AND kc.github_issue_number IS NOT NULL
                  ORDER BY e.priority_rank ASC",
             )
             .ok()?;
         let issues: Vec<(i64, String)> = stmt
-            .query_map(rusqlite::params![run_id, thread_group], |row| {
+            .query_map(rusqlite::params![run_id, thread_group, card_id], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
             .ok()?
