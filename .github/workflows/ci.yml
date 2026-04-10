@@ -8,6 +8,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  dashboard:
+    name: Dashboard (Node 22)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: dashboard build/test
+        run: ./scripts/verify-dashboard.sh
+
   check:
     name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -136,12 +152,6 @@ jobs:
               FAIL=1
             fi
           done
-
-          echo "=== Checking dashboard source exists ==="
-          if [ ! -f "dashboard/package.json" ]; then
-            echo "ERROR: dashboard/package.json missing"
-            FAIL=1
-          fi
 
           exit $FAIL
 

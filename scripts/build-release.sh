@@ -52,24 +52,13 @@ if [ ! -f "$BINARY" ]; then
 fi
 echo "  Binary: $(ls -lh "$BINARY" | awk '{print $5}')"
 
-# ── 2. Build dashboard ───────────────────────────────────────────────────────
+# ── 2. Verify + build dashboard ──────────────────────────────────────────────
 if [ "$SKIP_DASHBOARD" = true ]; then
   echo "[2/3] Dashboard skipped (--skip-dashboard)"
 else
-  echo "[2/3] Building dashboard..."
+  echo "[2/3] Verifying dashboard (install + build + test)..."
   if [ -d "dashboard" ] && [ -f "dashboard/package.json" ]; then
-    cd dashboard
-    if command -v pnpm &>/dev/null; then
-      pnpm install --frozen-lockfile 2>/dev/null || pnpm install
-      pnpm build
-    elif command -v npm &>/dev/null; then
-      npm ci --silent 2>/dev/null || npm install --silent
-      npm run build
-    else
-      echo "  Error: No package manager (npm or pnpm)"
-      exit 1
-    fi
-    cd "$PROJECT_DIR"
+    "$PROJECT_DIR/scripts/verify-dashboard.sh"
     echo "  Dashboard: $(du -sh dashboard/dist/ | cut -f1)"
   else
     echo "  [SKIP] No dashboard directory"
