@@ -406,12 +406,9 @@ pub(in crate::services::discord) async fn handle_event(
             {
                 return Ok(());
             }
-            if matches!(
-                super::super::resolve_runtime_channel_binding_status(&ctx.http, channel_id).await,
-                super::super::RuntimeChannelBindingStatus::Unowned
-            ) {
-                return Ok(());
-            }
+            // Allow unbound channels for the owner (direct Claude Code usage).
+            // Only skip channels that are explicitly bound to a different provider.
+            // Unowned channels fall through to normal handling.
 
             // #189: Generic DM reply tracking — consume pending entry if present.
             // The message always falls through to normal handling so the agent
