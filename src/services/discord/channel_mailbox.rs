@@ -230,22 +230,6 @@ impl ChannelMailboxHandle {
             .await;
     }
 
-    pub(super) async fn cancel_queued_message(
-        &self,
-        message_id: serenity::MessageId,
-        persistence: QueuePersistenceContext,
-    ) -> Option<Intervention> {
-        self.request(
-            |reply| ChannelMailboxMsg::CancelQueuedMessage {
-                message_id,
-                persistence,
-                reply,
-            },
-            None,
-        )
-        .await
-    }
-
     pub(super) async fn finish_turn(
         &self,
         persistence: QueuePersistenceContext,
@@ -449,11 +433,6 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<()>,
     },
-    CancelQueuedMessage {
-        message_id: serenity::MessageId,
-        persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<Option<Intervention>>,
-    },
     FinishTurn {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
@@ -625,20 +604,6 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
                     super::requeue_intervention_front(&mut state.intervention_queue, intervention);
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(());
-                }
-                ChannelMailboxMsg::CancelQueuedMessage {
-                    message_id,
-                    persistence,
-                    reply,
-                } => {
-                    let removed = super::cancel_soft_intervention_by_message_id(
-                        &mut state.intervention_queue,
-                        message_id,
-                    );
-                    if removed.is_some() {
-                        persist_queue(channel_id, &state.intervention_queue, &persistence);
-                    }
-                    let _ = reply.send(removed);
                 }
                 ChannelMailboxMsg::FinishTurn { persistence, reply } => {
                     let removed_token = state.cancel_token.take();
@@ -840,50 +805,6 @@ mod tests {
         let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].text, "fresh");
-
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
-    }
-
-    #[tokio::test]
-    async fn cancel_queued_message_removes_matching_entry_and_persists() {
-        let _lock = test_env_lock().lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "mailbox-cancel-queued";
-        let channel_id = serenity::ChannelId::new(43);
-        let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(channel_id);
-        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-        let now = Instant::now();
-
-        handle
-            .replace_queue(
-                vec![
-                    make_intervention(10, "first", now),
-                    make_intervention(11, "second", now),
-                ],
-                persistence.clone(),
-            )
-            .await;
-
-        let removed = handle
-            .cancel_queued_message(serenity::MessageId::new(10), persistence)
-            .await;
-        assert_eq!(
-            removed.as_ref().map(|item| item.text.as_str()),
-            Some("first")
-        );
-
-        let snapshot = handle.snapshot().await;
-        assert_eq!(snapshot.intervention_queue.len(), 1);
-        assert_eq!(snapshot.intervention_queue[0].message_id.get(), 11);
-
-        let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].message_id, 11);
-        assert_eq!(items[0].text, "second");
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
