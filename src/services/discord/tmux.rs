@@ -1319,13 +1319,30 @@ pub(super) async fn tmux_output_watcher(
                 // Finalize implementation/rework dispatches only — review
                 // dispatches require the verdict flow (review_verdict.rs).
                 // #225 P1-4: Use DB lookup for dispatch ID (text parsing fails in unified threads)
-                let resolved_did = super::adk_session::parse_dispatch_id(&state.user_text).or(
-                    super::adk_session::lookup_pending_dispatch_for_thread(
+                // #431: Add DB session fallback for slot thread reuse where user_text
+                // may not contain the current DISPATCH: message.
+                let resolved_did = super::adk_session::parse_dispatch_id(&state.user_text)
+                    .or(super::adk_session::lookup_pending_dispatch_for_thread(
                         shared.api_port,
                         channel_id.get(),
                     )
-                    .await,
-                );
+                    .await)
+                    .or_else(|| {
+                        // Fallback: resolve from DB session's last active dispatch
+                        shared.db.as_ref().and_then(|db| {
+                            db.separate_conn().ok().and_then(|conn| {
+                                conn.query_row(
+                                    "SELECT td.id FROM task_dispatches td \
+                                     WHERE td.status = 'dispatched' \
+                                     AND td.thread_id = ?1 \
+                                     ORDER BY td.created_at DESC LIMIT 1",
+                                    [&channel_id.get().to_string()],
+                                    |row| row.get::<_, String>(0),
+                                )
+                                .ok()
+                            })
+                        })
+                    });
                 let dispatch_ok = if let Some(did) = resolved_did {
                     let dispatch_type = shared.db.as_ref().and_then(|db| {
                         db.separate_conn().ok().and_then(|conn| {
