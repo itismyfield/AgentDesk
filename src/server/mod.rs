@@ -222,6 +222,11 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
             fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min");
             drain_transitions(&engine, &db);
             refresh_memory_health_for_five_min_tick().await;
+            if let Err(error) =
+                crate::services::api_friction::process_api_friction_patterns(&db, None, None).await
+            {
+                tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
+            }
             // Also fire legacy OnTick for backward compat
             fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy");
             drain_transitions(&engine, &db);

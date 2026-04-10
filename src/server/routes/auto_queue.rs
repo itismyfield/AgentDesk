@@ -1739,6 +1739,7 @@ fn queue_status_json(
     run_id: &str,
     repo: Option<&str>,
     agent_id: Option<&str>,
+    guild_id: Option<&str>,
 ) -> Value {
     let run = run_to_json(conn, run_id);
 
@@ -1781,7 +1782,7 @@ fn queue_status_json(
 
     let entries: Vec<Value> = entry_ids
         .iter()
-        .map(|entry_id| entry_to_json(conn, entry_id))
+        .map(|entry_id| entry_to_json_with_guild(conn, entry_id, guild_id))
         .collect();
 
     let mut agents: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
@@ -3239,6 +3240,7 @@ pub async fn dispatch(
         &run_id,
         body.repo.as_deref(),
         body.agent_id.as_deref(),
+        None,
     );
     if let Some(obj) = snapshot.as_object_mut() {
         obj.insert("activated".to_string(), json!(activate_now));
@@ -3315,6 +3317,7 @@ pub async fn status(
             &run_id,
             query.repo.as_deref(),
             query.agent_id.as_deref(),
+            guild_id,
         )),
     )
 }

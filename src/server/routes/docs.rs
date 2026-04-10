@@ -128,6 +128,9 @@ fn body_param(kind: &'static str, required: bool, description: &'static str) -> 
 
 fn category_description(category: &str) -> &'static str {
     match category {
+        "api-friction" => {
+            "Structured API-friction events, repeated-pattern aggregation, and auto issue creation."
+        }
         "agents" => "Agent registry, channel bindings, turn control, and timelines.",
         "analytics" => "Operational analytics, receipts, machine status, and rate-limit views.",
         "auth" => "Current authentication session state.",
@@ -184,6 +187,64 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ep("GET", "/api/health", "health", "Health check"),
         ep("POST", "/api/send", "discord", "Send a Discord channel message"),
         ep("POST", "/api/senddm", "discord", "Send a Discord direct message"),
+        ep(
+            "GET",
+            "/api/api-friction/events",
+            "api-friction",
+            "List recent API-friction events",
+        )
+        .with_params([(
+            "limit",
+            query_param("number", false, "Maximum number of events to return").with_default(20),
+        )])
+        .with_example(
+            json!({"query": {"limit": 10}}),
+            json!({"events": [{"fingerprint": "api-docs-kanban::docs-bypass", "endpoint": "/api/docs/kanban", "friction_type": "docs-bypass"}]}),
+        ),
+        ep(
+            "GET",
+            "/api/api-friction/patterns",
+            "api-friction",
+            "List repeated API-friction patterns",
+        )
+        .with_params([
+            (
+                "min_events",
+                query_param("number", false, "Minimum repeated count before returning a pattern")
+                    .with_default(2),
+            ),
+            (
+                "limit",
+                query_param("number", false, "Maximum number of patterns to return")
+                    .with_default(20),
+            ),
+        ])
+        .with_example(
+            json!({"query": {"min_events": 2, "limit": 20}}),
+            json!({"patterns": [{"fingerprint": "api-docs-kanban::docs-bypass", "event_count": 2, "issue_url": null}]}),
+        ),
+        ep(
+            "POST",
+            "/api/api-friction/process",
+            "api-friction",
+            "Aggregate repeated API-friction patterns and create GitHub issues",
+        )
+        .with_params([
+            (
+                "min_events",
+                body_param("number", false, "Minimum repeated count before issue creation")
+                    .with_default(2),
+            ),
+            (
+                "limit",
+                body_param("number", false, "Maximum number of patterns to process")
+                    .with_default(20),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"min_events": 2, "limit": 10}}),
+            json!({"ok": true, "summary": {"processed_patterns": 1, "created_issues": [{"fingerprint": "api-docs-kanban::docs-bypass", "issue_number": 999}]}}),
+        ),
         ep(
             "POST",
             "/api/session/start",

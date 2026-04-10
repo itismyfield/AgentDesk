@@ -116,6 +116,7 @@ pub(super) fn spawn_turn_bridge(
         let mut has_post_tool_text = bridge.inflight_state.has_post_tool_text;
         let mut tmux_handed_off = false;
         let mut transport_error = false;
+        let mut api_friction_reports = Vec::new();
         let mut resume_failure_detected = false;
         let mut terminal_session_reset_required = false;
         let mut restart_recovery_handoff = false;
@@ -635,6 +636,18 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
+        let extracted_api_friction =
+            crate::services::api_friction::extract_api_friction_reports(&full_response);
+        if !extracted_api_friction.reports.is_empty() {
+            api_friction_reports.extend(extracted_api_friction.reports);
+            full_response = extracted_api_friction.cleaned_response;
+            inflight_state.full_response = full_response.clone();
+        }
+        for error in extracted_api_friction.parse_errors {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
+        }
+
         let is_prompt_too_long = full_response.contains("__prompt too long__");
         let review_dispatch_warning = if !cancelled && !is_prompt_too_long {
             guard_review_dispatch_completion(
@@ -1064,6 +1077,18 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
+            let late_api_friction =
+                crate::services::api_friction::extract_api_friction_reports(&full_response);
+            if !late_api_friction.reports.is_empty() {
+                api_friction_reports.extend(late_api_friction.reports);
+                full_response = late_api_friction.cleaned_response;
+                inflight_state.full_response = full_response.clone();
+            }
+            for error in late_api_friction.parse_errors {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
+            }
+
             let mut delivery_response = full_response.clone();
             if let Some(warning) = review_dispatch_warning.as_deref() {
                 let warning = warning.trim();
@@ -1222,6 +1247,37 @@ pub(super) fn spawn_turn_bridge(
             ) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 eprintln!("  [{ts}] ⚠ failed to persist session transcript: {e}");
+            }
+
+            if !api_friction_reports.is_empty() {
+                match crate::services::api_friction::record_api_friction_reports(
+                    db,
+                    &capture_memory_settings,
+                    crate::services::api_friction::ApiFrictionRecordContext {
+                        channel_id: channel_id.get(),
+                        session_key: adk_session_key.as_deref(),
+                        dispatch_id: dispatch_id.as_deref(),
+                        provider: provider.as_str(),
+                    },
+                    &api_friction_reports,
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        accumulated_memory_input_tokens = accumulated_memory_input_tokens
+                            .saturating_add(summary.token_usage.input_tokens);
+                        accumulated_memory_output_tokens = accumulated_memory_output_tokens
+                            .saturating_add(summary.token_usage.output_tokens);
+                        for error in summary.memory_errors {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!("  [{ts}] ⚠ failed to store API friction memory: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!("  [{ts}] ⚠ failed to record API friction: {error}");
+                    }
+                }
             }
         }
 

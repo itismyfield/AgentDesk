@@ -99,6 +99,18 @@ fn proactive_memory_guidance(
          - 트리거: 에러 원인 확정, 아키텍처 결정, 설정 변경, \"이전에\" 언급 시{extra_note}"
     ))
 }
+
+fn api_friction_guidance(profile: DispatchProfile) -> Option<String> {
+    (profile == DispatchProfile::Full).then_some(
+        "\n\n[ADK API Usage]\n\
+         - ADK API 작업 전에는 먼저 `GET /api/docs` 또는 `GET /api/docs/{category}`로 관련 엔드포인트를 확인한다.\n\
+         - API 호출이 실패하면 `sqlite3`나 `agentdesk.db.query`로 우회하지 말고 `/api/docs`에서 대안 엔드포인트를 다시 찾는다.\n\
+         - 같은 엔드포인트 재시도, DB 직접 우회, 과도한 다단계 API 호출, `/api/docs` 없이 시행착오 탐색은 `API friction`으로 본다.\n\
+         - API friction이 발생하면 응답 마지막 줄에 단일 행 JSON marker를 남긴다: `API_FRICTION: {\"endpoint\":\"/api/docs/kanban\",\"friction_type\":\"docs-bypass\",\"summary\":\"...\",\"workaround\":\"sqlite3\",\"suggested_fix\":\"...\",\"docs_category\":\"kanban\",\"keywords\":[\"/api/docs/kanban\",\"sqlite3\"]}`\n\
+         - 서버가 이 marker를 사용자 응답에서 제거하고 `topic=api-friction`, `type=error`로 구조화 저장한다."
+            .to_string(),
+    )
+}
 /// Dispatch prompt profile — controls which system prompt sections are injected.
 /// `Full` includes everything (used for implementation dispatches and normal turns).
 /// `ReviewLite` strips peer agents, long-term memory, and skills to reduce token cost.
@@ -287,6 +299,9 @@ pub(super) fn build_system_prompt(
     ) {
         system_prompt_owned.push_str(&memory_guidance);
     }
+    if let Some(api_friction_guidance) = api_friction_guidance(profile) {
+        system_prompt_owned.push_str(&api_friction_guidance);
+    }
 
     if queued_turn {
         system_prompt_owned.push_str(
@@ -394,6 +409,15 @@ mod tests {
         assert!(output.contains("[Context Compression]"));
         assert!(output.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
         assert!(output.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
+    }
+
+    #[test]
+    fn test_build_system_prompt_includes_api_friction_guidance() {
+        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        assert!(output.contains("[ADK API Usage]"));
+        assert!(output.contains("GET /api/docs/{category}"));
+        assert!(output.contains("API_FRICTION:"));
+        assert!(output.contains("topic=api-friction"));
     }
 
     #[test]

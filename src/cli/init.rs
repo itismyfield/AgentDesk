@@ -273,6 +273,8 @@ fn default_shared_prompt() -> &'static str {
 - Plan before implementing.
 - Verify your work before reporting done.
 - Fix bugs autonomously without asking "how should I fix this?"
+- Check `GET /api/docs` or `GET /api/docs/{category}` before guessing ADK API calls.
+- When ADK API usage causes repeated trial-and-error, record it as `api-friction` instead of bypassing with direct DB access.
 "#
 }
 

@@ -146,6 +146,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          UPDATE kanban_cards SET awaiting_dod_at = updated_at WHERE status = 'review' AND review_status = 'awaiting_dod' AND awaiting_dod_at IS NULL;",
     );
     ensure_auto_queue_schema(conn)?;
+    ensure_api_friction_schema(conn)?;
 
     // Unique constraint: one kanban card per GitHub issue per repo.
     // Deduplicate existing rows first so CREATE UNIQUE INDEX succeeds.
@@ -848,6 +849,61 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             conn.execute_batch("ALTER TABLE auto_queue_runs DROP COLUMN max_concurrent_per_agent;");
     }
 
+    Ok(())
+}
+
+fn ensure_api_friction_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_friction_events (
+            id                  TEXT PRIMARY KEY,
+            fingerprint         TEXT NOT NULL,
+            endpoint            TEXT NOT NULL,
+            friction_type       TEXT NOT NULL,
+            summary             TEXT NOT NULL,
+            workaround          TEXT,
+            suggested_fix       TEXT,
+            docs_category       TEXT,
+            keywords_json       TEXT NOT NULL DEFAULT '[]',
+            payload_json        TEXT NOT NULL,
+            session_key         TEXT,
+            channel_id          TEXT,
+            provider            TEXT,
+            dispatch_id         TEXT,
+            card_id             TEXT,
+            repo_id             TEXT,
+            github_issue_number INTEGER,
+            task_summary        TEXT,
+            agent_id            TEXT,
+            memory_backend      TEXT,
+            memory_status       TEXT NOT NULL DEFAULT 'pending',
+            memory_error        TEXT,
+            created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_friction_events_fingerprint
+            ON api_friction_events (fingerprint);
+        CREATE INDEX IF NOT EXISTS idx_api_friction_events_dispatch_id
+            ON api_friction_events (dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_api_friction_events_created_at
+            ON api_friction_events (created_at DESC);
+        CREATE TABLE IF NOT EXISTS api_friction_issues (
+            fingerprint   TEXT PRIMARY KEY,
+            repo_id       TEXT NOT NULL,
+            endpoint      TEXT NOT NULL,
+            friction_type TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            body          TEXT NOT NULL,
+            issue_number  INTEGER,
+            issue_url     TEXT,
+            event_count   INTEGER NOT NULL DEFAULT 0,
+            first_event_at DATETIME,
+            last_event_at DATETIME,
+            last_error    TEXT,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_friction_issues_repo
+            ON api_friction_issues (repo_id, updated_at DESC);",
+    )?;
     Ok(())
 }
 

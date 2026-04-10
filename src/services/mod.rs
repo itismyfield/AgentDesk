@@ -1,4 +1,5 @@
 pub mod agent_protocol;
+pub mod api_friction;
 pub mod auto_queue;
 pub mod claude;
 pub mod codex;

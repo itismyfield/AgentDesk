@@ -1,6 +1,7 @@
 pub mod agents;
 mod agents_crud;
 pub mod analytics;
+pub mod api_friction;
 pub mod auth;
 pub mod auto_queue;
 pub mod cron_api;
@@ -497,6 +498,13 @@ pub fn api_router(
         .route("/rate-limits", get(analytics::rate_limits))
         .route("/receipt", get(receipt::get_receipt))
         .route("/skills-trend", get(analytics::skills_trend))
+        // API friction
+        .route("/api-friction/events", get(api_friction::list_events))
+        .route("/api-friction/patterns", get(api_friction::list_patterns))
+        .route(
+            "/api-friction/process",
+            post(api_friction::process_patterns),
+        )
         // Docs
         .route("/help", get(docs::api_help))
         .route("/docs", get(docs::api_docs))
