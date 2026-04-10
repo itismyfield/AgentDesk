@@ -119,7 +119,7 @@ interface BootstrapData {
 export default function App() {
   const [data, setData] = useState<BootstrapData | null>(null);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
-  const { notifications, pushNotification, dismissNotification } = useNotifications();
+  const { notifications, pushNotification, updateNotification, dismissNotification } = useNotifications();
 
   // Wire up API error → toast notifications (throttled: max 1 per 3s per endpoint)
   useEffect(() => {
@@ -243,6 +243,7 @@ export default function App() {
             wsConnected={wsConnected}
             notifications={notifications}
             pushNotification={pushNotification}
+            updateNotification={updateNotification}
             dismissNotification={dismissNotification}
           />
         </KanbanProvider>
@@ -254,11 +255,12 @@ export default function App() {
 interface AppShellProps {
   wsConnected: boolean;
   notifications: Notification[];
-  pushNotification: (message: string, type?: Notification["type"]) => void;
+  pushNotification: (message: string, type?: Notification["type"]) => string;
+  updateNotification: (id: string, message: string, type?: Notification["type"]) => void;
   dismissNotification: (id: string) => void;
 }
 
-function AppShell({ wsConnected, notifications, pushNotification, dismissNotification }: AppShellProps) {
+function AppShell({ wsConnected, notifications, pushNotification, updateNotification, dismissNotification }: AppShellProps) {
   const [view, setView] = useState<ViewMode>("office");
   const [controlTab, setControlTab] = useState<ControlTab>("agents");
   const [agentsPane, setAgentsPane] = useState<AgentsPane>("directory");
@@ -579,6 +581,7 @@ function AppShell({ wsConnected, notifications, pushNotification, dismissNotific
                 }}
                 notifications={notifications}
                 onNotify={pushNotification}
+                onUpdateNotification={updateNotification}
                 onDismissNotification={dismissNotification}
               />
             )}

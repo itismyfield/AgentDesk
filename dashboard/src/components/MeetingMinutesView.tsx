@@ -53,8 +53,14 @@ function ownerProviderBadgeStyle(provider: string) {
 interface Props {
   meetings: RoundTableMeeting[];
   onRefresh: () => void;
-  onNotify?: (message: string, type?: "info" | "success" | "warning" | "error") => void;
+  onNotify?: (message: string, type?: "info" | "success" | "warning" | "error") => string | void;
+  onUpdateNotification?: (id: string, message: string, type?: "info" | "success" | "warning" | "error") => void;
 }
+
+type MeetingNotificationType = "info" | "success" | "warning" | "error";
+type MeetingNotifier = (message: string, type?: MeetingNotificationType) => string | void;
+type MeetingNotificationUpdater = (id: string, message: string, type?: MeetingNotificationType) => void;
+type MeetingTranslator = (messages: { ko: string; en: string }) => string;
 
 function getDefaultIssueRepo(repos: GitHubRepoOption[], viewerLogin: string): string {
   return (
@@ -122,7 +128,90 @@ export function pruneFixedParticipantRoleIdsForLoadedChannel(
   return next;
 }
 
-export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Props) {
+export function getMeetingReferenceHashes(
+  meeting: Pick<RoundTableMeeting, "meeting_hash" | "thread_hash">,
+): string[] {
+  return [meeting.meeting_hash, meeting.thread_hash].filter(
+    (hash): hash is string => Boolean(hash),
+  );
+}
+
+export async function openMeetingDetailWithFallback(
+  meeting: RoundTableMeeting,
+  fetchMeeting: (meetingId: string) => Promise<RoundTableMeeting>,
+  logError: (message: string, error: unknown) => void = console.error,
+): Promise<RoundTableMeeting> {
+  try {
+    return await fetchMeeting(meeting.id);
+  } catch (error) {
+    logError(`Meeting detail load failed for ${meeting.id}`, error);
+    return meeting;
+  }
+}
+
+export async function submitMeetingStartRequest(options: {
+  agenda: string;
+  channelId: string;
+  primaryProvider: string;
+  reviewerProvider: string;
+  fixedParticipants: string[];
+  startMeeting: (
+    agenda: string,
+    channelId: string,
+    primaryProvider: string,
+    reviewerProvider: string,
+    fixedParticipants?: string[],
+  ) => Promise<{ ok: boolean; message?: string }>;
+  notify?: MeetingNotifier;
+  updateNotification?: MeetingNotificationUpdater;
+  t: MeetingTranslator;
+}): Promise<{ ok: boolean; message: string }> {
+  const { agenda, channelId, primaryProvider, reviewerProvider, fixedParticipants, startMeeting, notify, updateNotification, t } = options;
+  const acceptedMessage = t({
+    ko: "회의 시작 요청이 접수되었습니다",
+    en: "Meeting start request accepted",
+  });
+  const pendingNotificationId = notify?.(acceptedMessage, "info");
+
+  try {
+    const result = await startMeeting(
+      agenda,
+      channelId,
+      primaryProvider,
+      reviewerProvider,
+      fixedParticipants,
+    );
+    const successMessage = result.message || t({
+      ko: "회의 시작 요청을 보냈습니다",
+      en: "Meeting start requested",
+    });
+
+    if (typeof pendingNotificationId === "string" && updateNotification) {
+      updateNotification(pendingNotificationId, successMessage, "success");
+    } else if (successMessage !== acceptedMessage) {
+      notify?.(successMessage, "success");
+    }
+
+    return {
+      ok: result.ok,
+      message: successMessage,
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error
+      ? error.message
+      : t({ ko: "회의 시작 실패", en: "Failed to start meeting" });
+
+    if (typeof pendingNotificationId === "string" && updateNotification) {
+      updateNotification(pendingNotificationId, errorMessage, "error");
+    } else {
+      notify?.(errorMessage, "error");
+    }
+
+    throw (error instanceof Error ? error : new Error(errorMessage));
+  }
+}
+
+export default function MeetingMinutesView({ meetings, onRefresh, onNotify, onUpdateNotification }: Props) {
   const { t, locale } = useI18n();
   const [detailMeeting, setDetailMeeting] = useState<RoundTableMeeting | null>(null);
   const [creatingIssue, setCreatingIssue] = useState<string | null>(null);
@@ -264,12 +353,12 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
   }, [primaryProvider, reviewerProvider, reviewerOptions.join(","), selectedChannel?.owner_provider]);
 
   const handleOpenDetail = async (m: RoundTableMeeting) => {
-    try {
-      const full = await getRoundTableMeeting(m.id);
-      setDetailMeeting(full);
-    } catch {
-      setDetailMeeting(m);
-    }
+    const full = await openMeetingDetailWithFallback(
+      m,
+      getRoundTableMeeting,
+      (message, error) => console.error(message, error),
+    );
+    setDetailMeeting(full);
   };
 
   const getSelectedRepo = (meeting: RoundTableMeeting) => {
@@ -413,17 +502,17 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
     setStarting(true);
     setStartError(null);
     try {
-      const result = await startRoundTableMeeting(
-        agenda.trim(),
-        channelId.trim(),
+      await submitMeetingStartRequest({
+        agenda: agenda.trim(),
+        channelId: channelId.trim(),
         primaryProvider,
         reviewerProvider,
         fixedParticipants,
-      );
-      onNotify?.(
-        result.message || t({ ko: "회의 시작 요청을 보냈습니다", en: "Meeting start requested" }),
-        "success",
-      );
+        startMeeting: startRoundTableMeeting,
+        notify: onNotify,
+        updateNotification: onUpdateNotification,
+        t,
+      });
       setAgenda("");
       setShowStartForm(false);
       onRefresh();
@@ -735,7 +824,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
             <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "고정 전문가", en: "Fixed Experts" })}
+              {t({ ko: "고정 전문 에이전트", en: "Fixed Expert Agents" })}
             </label>
             <div className="flex-1 min-w-0">
               {!selectedChannel ? (
@@ -778,8 +867,8 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
               {fixedParticipants.length > 0 && (
                 <div className="mt-1 text-xs break-all [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
                   {t({
-                    ko: `고정됨: ${fixedParticipants.join(", ")}`,
-                    en: `Pinned: ${fixedParticipants.join(", ")}`,
+                    ko: `고정 전문 에이전트: ${fixedParticipants.join(", ")}`,
+                    en: `Pinned expert agents: ${fixedParticipants.join(", ")}`,
                   })}
                 </div>
               )}
@@ -860,9 +949,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                         {m.total_rounds}R
                       </span>
                     )}
-                    {[m.meeting_hash, m.thread_hash]
-                      .filter((hash): hash is string => Boolean(hash))
-                      .map((hash) => (
+                    {getMeetingReferenceHashes(m).map((hash) => (
                         <span
                           key={hash}
                           className="max-w-full break-all rounded-full px-2 py-0.5 font-mono text-[11px]"

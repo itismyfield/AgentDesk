@@ -38,7 +38,8 @@ interface ControlCenterViewProps {
   settings: CompanySettings;
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>;
   notifications: Notification[];
-  onNotify: (message: string, type?: Notification["type"]) => void;
+  onNotify: (message: string, type?: Notification["type"]) => string | void;
+  onUpdateNotification: (id: string, message: string, type?: Notification["type"]) => void;
   onDismissNotification: (id: string) => void;
 }
 
@@ -83,6 +84,7 @@ export default function ControlCenterView({
   onSaveSettings,
   notifications,
   onNotify,
+  onUpdateNotification,
   onDismissNotification,
 }: ControlCenterViewProps) {
   const t = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
@@ -327,6 +329,7 @@ export default function ControlCenterView({
             meetings={meetings}
             onRefresh={onRefreshMeetings}
             onNotify={onNotify}
+            onUpdateNotification={onUpdateNotification}
           />
         )}
       </div>

@@ -140,10 +140,10 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
               })}
             />
             {meeting.meeting_hash && (
-              <MetaCard label={t({ ko: "회의 해시", en: "Meeting Hash" })} value={meeting.meeting_hash} />
+              <MetaCard label={t({ ko: "회의 #해시", en: "Meeting #Hash" })} value={meeting.meeting_hash} />
             )}
             {meeting.thread_hash && (
-              <MetaCard label={t({ ko: "스레드 해시", en: "Thread Hash" })} value={meeting.thread_hash} />
+              <MetaCard label={t({ ko: "스레드 #해시", en: "Thread #Hash" })} value={meeting.thread_hash} />
             )}
           </div>
 

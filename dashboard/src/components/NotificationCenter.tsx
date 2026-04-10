@@ -16,6 +16,22 @@ export function useNotifications(maxItems = 50) {
     (message: string, type: Notification["type"] = "info") => {
       const id = `n-${++idRef.current}`;
       setNotifications((prev) => [{ id, message, type, ts: Date.now() }, ...prev].slice(0, maxItems));
+      return id;
+    },
+    [maxItems],
+  );
+
+  const updateNotification = useCallback(
+    (id: string, message: string, type: Notification["type"] = "info") => {
+      setNotifications((prev) => {
+        const index = prev.findIndex((notification) => notification.id === id);
+        if (index === -1) {
+          return [{ id, message, type, ts: Date.now() }, ...prev].slice(0, maxItems);
+        }
+        const next = [...prev];
+        next[index] = { ...next[index], message, type, ts: Date.now() };
+        return next;
+      });
     },
     [maxItems],
   );
@@ -24,7 +40,7 @@ export function useNotifications(maxItems = 50) {
     setNotifications((prev) => prev.filter((notification) => notification.id !== id));
   }, []);
 
-  return { notifications, pushNotification, dismissNotification } as const;
+  return { notifications, pushNotification, updateNotification, dismissNotification } as const;
 }
 
 const TOAST_TTL_MS = 5000;
