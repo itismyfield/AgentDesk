@@ -5174,9 +5174,9 @@ async fn auto_queue_enqueue_rejects_card_with_active_dispatch() {
     );
 }
 
-/// #162 DoD: unified_thread continuity — dispatches entry correctly within unified run.
+/// #430: legacy unified_thread runs still dispatch, but via slot pooling.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_queue_activate_unified_thread_run_dispatches_to_same_run() {
+async fn auto_queue_activate_legacy_unified_thread_run_dispatches_via_slot_pool() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -5599,8 +5599,6 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        // #392: Session persistence — slot release preserves claude_session_id
-        // and tokens so the next dispatch can resume the conversation.
         assert_eq!(
             first_slot_session.0, "idle",
             "slot session status must be idle after release"
@@ -5609,9 +5607,13 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
             first_slot_session.1, None,
             "active_dispatch_id must be cleared on slot release"
         );
+        assert_eq!(
+            first_slot_session.2, 0,
+            "tokens must be cleared so the slot starts from a fresh session"
+        );
         assert!(
-            first_slot_session.3.is_some(),
-            "claude_session_id must be preserved for session reuse (#392)"
+            first_slot_session.3.is_none(),
+            "claude_session_id must be cleared on slot release"
         );
         assert_eq!(
             second_slot_session.0, "idle",
@@ -5620,6 +5622,14 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
         assert_eq!(
             second_slot_session.1, None,
             "active_dispatch_id must be cleared on slot release"
+        );
+        assert_eq!(
+            second_slot_session.2, 0,
+            "tokens must be cleared so the slot starts from a fresh session"
+        );
+        assert!(
+            second_slot_session.3.is_none(),
+            "claude_session_id must be cleared on slot release"
         );
         let first_slot: Option<i64> = conn
             .query_row(
@@ -5742,7 +5752,6 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    // #392: Session persistence — slot release preserves session context for reuse
     assert_eq!(
         recycled_slot_session.0, "idle",
         "status must be idle after slot release"
@@ -5750,6 +5759,14 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
     assert_eq!(
         recycled_slot_session.1, None,
         "active_dispatch_id must be cleared"
+    );
+    assert_eq!(
+        recycled_slot_session.2, 0,
+        "recycled slot must clear prior token counts before the next dispatch"
+    );
+    assert!(
+        recycled_slot_session.3.is_none(),
+        "recycled slot must clear claude_session_id before the next dispatch"
     );
     assert_eq!(
         untouched_slot_session,
@@ -5764,7 +5781,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_queue_activate_keeps_same_group_slot_context_between_entries() {
+async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -5850,16 +5867,11 @@ async fn auto_queue_activate_keeps_same_group_slot_context_between_entries() {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        // #392: Session persistence — slot release preserves session context
         assert_eq!(
-            cleared_session.0, "idle",
-            "status must be idle after slot release"
+            cleared_session,
+            ("idle".to_string(), None, 0, None),
+            "slot release must clear provider session continuity before dispatch"
         );
-        assert_eq!(
-            cleared_session.1, None,
-            "active_dispatch_id must be cleared"
-        );
-        // claude_session_id and tokens are preserved for session reuse (#392)
         conn.execute(
             "UPDATE sessions
              SET status = 'working',
@@ -5920,13 +5932,8 @@ async fn auto_queue_activate_keeps_same_group_slot_context_between_entries() {
         .unwrap();
     assert_eq!(
         continued_session,
-        (
-            "working".to_string(),
-            Some("dispatch-same-group-hot".to_string()),
-            77,
-            Some("claude-same-group-hot".to_string())
-        ),
-        "entries from the same group must keep reusing the slot context without an extra clear"
+        ("idle".to_string(), None, 0, None),
+        "same-group continuation must keep the slot assignment but start from a fresh session"
     );
     assert_eq!(
         slot_group,
@@ -6673,7 +6680,7 @@ async fn auto_queue_generate_issue_numbers_filters_cards_and_promotes_backlog() 
 }
 
 #[tokio::test]
-async fn auto_queue_generate_persists_unified_thread_flag() {
+async fn auto_queue_generate_accepts_but_ignores_unified_thread_flag() {
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-generate-unified");
@@ -6711,7 +6718,7 @@ async fn auto_queue_generate_persists_unified_thread_flag() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["run"]["unified_thread"], serde_json::json!(true));
+    assert_eq!(json["run"]["unified_thread"], serde_json::json!(false));
 
     let run_id = json["run"]["id"]
         .as_str()
@@ -6725,8 +6732,8 @@ async fn auto_queue_generate_persists_unified_thread_flag() {
         )
         .unwrap();
     assert_eq!(
-        stored_unified_thread, 1,
-        "generate must persist unified_thread to the run"
+        stored_unified_thread, 0,
+        "generate must ignore unified_thread and keep slot pooling enabled"
     );
 }
 

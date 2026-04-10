@@ -365,7 +365,7 @@ pub(super) async fn try_reuse_thread(
     token: &str,
     thread_id: &str,
     expected_parent: u64,
-    dispatch_type: &str,
+    desired_thread_name: &str,
     message: &str,
     dispatch_id: &str,
     card_id: &str,
@@ -458,56 +458,15 @@ pub(super) async fn try_reuse_thread(
         }
     }
 
-    // 2a. Update thread name — for unified threads, move ▸ marker to current issue
+    // Keep slot thread names in sync with the currently assigned issue set.
     let current_thread_name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let has_marker = current_thread_name.contains('▸');
-    let new_name: Option<String> = if has_marker {
-        // Unified thread — update ▸ marker position
-        let current_issue: Option<i64> = db.lock().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
-                [card_id],
-                |row| row.get(0),
-            )
-            .ok()
-        });
-        current_issue.map(|cur| {
-            // Replace all ▸N with #N, then set ▸ on current
-            let mut name = current_thread_name.replace('▸', "#");
-            let target = format!("#{}", cur);
-            let replacement = format!("▸{}", cur);
-            name = name.replacen(&target, &replacement, 1);
-            name
-        })
-    } else {
-        // Single-card thread — update to current issue
-        db.lock().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT kc.github_issue_number, kc.title FROM kanban_cards kc WHERE kc.id = ?1",
-                [card_id],
-                |row| {
-                    let num: Option<i64> = row.get(0)?;
-                    let title: String = row.get(1)?;
-                    Ok(num.map(|n| {
-                        let short: String = title.chars().take(85).collect();
-                        format!("#{} {}", n, short)
-                    }))
-                },
-            )
-            .ok()
-            .flatten()
-        })
-    };
-    {
-        let _ = dispatch_type; // suppress unused warning — dispatch_type used in caller context
-        if let Some(ref name) = new_name {
-            let _ = client
-                .patch(&thread_info_url)
-                .header("Authorization", format!("Bot {}", token))
-                .json(&serde_json::json!({"name": name}))
-                .send()
-                .await;
-        }
+    if !desired_thread_name.is_empty() && current_thread_name != desired_thread_name {
+        let _ = client
+            .patch(&thread_info_url)
+            .header("Authorization", format!("Bot {}", token))
+            .json(&serde_json::json!({"name": desired_thread_name}))
+            .send()
+            .await;
     }
 
     let msg_url = format!(
@@ -851,28 +810,6 @@ pub async fn get_pending_dispatch_for_thread(
             |row| row.get(0),
         )
         .ok();
-
-    // Fallback: check unified_thread_id / unified_thread_channel_id in
-    // auto_queue_runs. These runs only own work dispatches, so keep the
-    // explicit implementation/rework filter here.
-    let dispatch_id = dispatch_id.or_else(|| {
-        conn.query_row(
-            "SELECT td.id FROM task_dispatches td \
-             JOIN auto_queue_entries e ON e.kanban_card_id = td.kanban_card_id \
-             JOIN auto_queue_runs r ON r.id = e.run_id \
-             WHERE td.status IN ('pending', 'dispatched') \
-             AND td.dispatch_type IN ('implementation', 'rework') \
-             AND r.unified_thread = 1 AND r.status = 'active' \
-             AND (td.thread_id = ?1 \
-                  OR r.unified_thread_channel_id = ?1 \
-                  OR EXISTS(SELECT 1 FROM json_each(r.unified_thread_id) \
-                            WHERE json_each.value = ?1)) \
-             ORDER BY td.created_at DESC LIMIT 1",
-            [thread_id],
-            |row| row.get(0),
-        )
-        .ok()
-    });
 
     match dispatch_id {
         Some(id) => (StatusCode::OK, Json(json!({"dispatch_id": id}))),
