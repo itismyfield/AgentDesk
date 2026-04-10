@@ -224,6 +224,21 @@ var rules = {
     // Require dispatch_id — sessions without an active dispatch cannot drive card transitions
     if (!payload.dispatch_id) return;
 
+    // Boot grace period: 서버 부팅 후 10분간 세션 상태 변경으로 인한 카드 전환 유예.
+    // 재시작 직후 세션이 disconnected/idle로 보고되면서 진행 중인 카드가 오판되는 것을 방지.
+    if (payload.status !== "working") {
+      var bootRows = agentdesk.db.query(
+        "SELECT value FROM kv_meta WHERE key = 'server_boot_at'"
+      );
+      if (bootRows.length > 0) {
+        var bootAt = new Date(bootRows[0].value + "Z");
+        var bootElapsedMin = (Date.now() - bootAt.getTime()) / 60000;
+        if (bootElapsedMin < 10) {
+          return;
+        }
+      }
+    }
+
     var cards = agentdesk.db.query(
       "SELECT id, status FROM kanban_cards WHERE latest_dispatch_id = ?",
       [payload.dispatch_id]
