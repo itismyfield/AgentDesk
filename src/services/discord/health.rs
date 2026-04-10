@@ -788,6 +788,7 @@ pub async fn start_direct_meeting(
     primary_provider: ProviderKind,
     reviewer_provider: ProviderKind,
     agenda: String,
+    fixed_participants: Vec<String>,
 ) -> Result<(), String> {
     let http = resolve_bot_http(registry, owner_provider.as_str())
         .await
@@ -813,6 +814,7 @@ pub async fn start_direct_meeting(
         agenda,
         primary_provider,
         reviewer_provider,
+        fixed_participants,
         shared,
     )
     .await

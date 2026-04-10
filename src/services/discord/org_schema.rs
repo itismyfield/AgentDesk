@@ -342,6 +342,12 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                 task_types: def.task_types.clone().unwrap_or_default(),
                 anti_signals: def.anti_signals.clone().unwrap_or_default(),
                 provider_hint: def.provider_hint.clone().or_else(|| def.provider.clone()),
+                provider: def.provider.as_deref().and_then(ProviderKind::from_str),
+                model: def.model.clone(),
+                reasoning_effort: None,
+                workspace: def.workspace.as_deref().map(expand_tilde),
+                peer_agents_enabled: def.peer_agents.unwrap_or(true),
+                memory: resolve_memory_settings(def.memory.as_ref(), None),
             }
         })
         .collect();

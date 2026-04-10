@@ -1145,6 +1145,7 @@ export async function startRoundTableMeeting(
   channelId: string,
   primaryProvider: string,
   reviewerProvider: string,
+  fixedParticipants: string[] = [],
 ): Promise<{ ok: boolean; message?: string }> {
   return request("/api/round-table-meetings/start", {
     method: "POST",
@@ -1153,6 +1154,7 @@ export async function startRoundTableMeeting(
       channel_id: channelId,
       primary_provider: primaryProvider,
       reviewer_provider: reviewerProvider,
+      fixed_participants: fixedParticipants,
     }),
   });
 }

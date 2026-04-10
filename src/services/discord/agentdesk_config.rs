@@ -194,6 +194,12 @@ fn meeting_agent_from_entry(
                 task_types: Vec::new(),
                 anti_signals: Vec::new(),
                 provider_hint: agent.map(|agent| agent.provider.clone()),
+                provider: agent.and_then(|agent| ProviderKind::from_str(&agent.provider)),
+                model: None,
+                reasoning_effort: None,
+                workspace: default_workspace(role_id),
+                peer_agents_enabled: true,
+                memory: resolve_memory_settings(None, None),
             })
         }
         MeetingAgentEntry::Detailed(def) => {
@@ -227,6 +233,12 @@ fn meeting_agent_from_entry(
                     .provider_hint
                     .clone()
                     .or_else(|| agent.map(|agent| agent.provider.clone())),
+                provider: agent.and_then(|agent| ProviderKind::from_str(&agent.provider)),
+                model: None,
+                reasoning_effort: None,
+                workspace: default_workspace(&def.role_id),
+                peer_agents_enabled: true,
+                memory: resolve_memory_settings(None, None),
             })
         }
     }
@@ -396,6 +408,12 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                 task_types: Vec::new(),
                 anti_signals: Vec::new(),
                 provider_hint: Some(agent.provider.clone()),
+                provider: ProviderKind::from_str(&agent.provider),
+                model: None,
+                reasoning_effort: None,
+                workspace: default_workspace(&agent.id),
+                peer_agents_enabled: true,
+                memory: resolve_memory_settings(None, None),
             })
             .collect()
     } else {

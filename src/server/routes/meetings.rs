@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
-use crate::services::discord::{health, settings};
+use crate::services::discord::{health, meeting, settings};
 use crate::services::provider::ProviderKind;
 
 // ── Body types ─────────────────────────────────────────────────
@@ -24,6 +24,7 @@ pub struct StartMeetingBody {
     pub channel_id: Option<String>,
     pub primary_provider: Option<String>,
     pub reviewer_provider: Option<String>,
+    pub fixed_participants: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +40,7 @@ pub struct MeetingEntryBody {
 #[derive(Debug, Deserialize)]
 pub struct UpsertMeetingBody {
     pub id: String,
+    pub channel_id: Option<String>,
     pub agenda: Option<String>,
     pub summary: Option<String>,
     pub status: Option<String>,
@@ -67,7 +69,7 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
     };
 
     let mut stmt = match conn.prepare(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
                 primary_provider, reviewer_provider, participant_names, created_at
          FROM meetings
          ORDER BY started_at DESC",
@@ -112,6 +114,7 @@ pub async fn list_meeting_channels(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let bindings = settings::list_registered_channel_bindings();
     let registry = state.health_registry.as_ref();
+    let available_experts = meeting::list_available_agent_options();
 
     let mut channels = Vec::new();
     for binding in bindings {
@@ -133,6 +136,7 @@ pub async fn list_meeting_channels(
             "channel_id": binding.channel_id.to_string(),
             "channel_name": channel_name,
             "owner_provider": binding.owner_provider.as_str(),
+            "available_experts": available_experts.clone(),
         }));
     }
 
@@ -177,7 +181,7 @@ pub async fn get_meeting(
     };
 
     match conn.query_row(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
                 primary_provider, reviewer_provider, participant_names, created_at
          FROM meetings WHERE id = ?1",
         [&id],
@@ -285,7 +289,7 @@ pub async fn update_issue_repo(
 
     // Read back meeting
     match conn.query_row(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
                 primary_provider, reviewer_provider, participant_names, created_at
          FROM meetings WHERE id = ?1",
         [&id],
@@ -540,7 +544,7 @@ pub async fn discard_issue(
     // Return meeting + summary for UI refresh
     let meeting = conn
         .query_row(
-            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+            "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
                     primary_provider, reviewer_provider, participant_names, created_at
              FROM meetings WHERE id = ?1",
             [&id],
@@ -590,7 +594,7 @@ pub async fn discard_all_issues(
 
     let meeting = conn
         .query_row(
-            "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+            "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
                     primary_provider, reviewer_provider, participant_names, created_at
              FROM meetings WHERE id = ?1",
             [&id],
@@ -678,6 +682,7 @@ pub async fn start_meeting(
         primary_provider,
         reviewer_provider,
         agenda.to_string(),
+        body.fixed_participants.unwrap_or_default(),
     )
     .await
     {
@@ -759,23 +764,25 @@ pub async fn upsert_meeting(
 
     if let Err(e) = conn.execute(
         "INSERT INTO meetings (
-            id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+            id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
             primary_provider, reviewer_provider, participant_names, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
         ON CONFLICT(id) DO UPDATE SET
             channel_id = COALESCE(excluded.channel_id, meetings.channel_id),
-            title = COALESCE(?13, meetings.title),
-            status = COALESCE(?14, meetings.status),
-            effective_rounds = COALESCE(?15, meetings.effective_rounds),
+            thread_id = COALESCE(excluded.thread_id, meetings.thread_id),
+            title = COALESCE(?14, meetings.title),
+            status = COALESCE(?15, meetings.status),
+            effective_rounds = COALESCE(?16, meetings.effective_rounds),
             started_at = COALESCE(meetings.started_at, excluded.started_at),
-            completed_at = COALESCE(?16, meetings.completed_at),
-            summary = COALESCE(?17, meetings.summary),
-            primary_provider = COALESCE(?18, meetings.primary_provider),
-            reviewer_provider = COALESCE(?19, meetings.reviewer_provider),
-            participant_names = COALESCE(?20, meetings.participant_names),
+            completed_at = COALESCE(?17, meetings.completed_at),
+            summary = COALESCE(?18, meetings.summary),
+            primary_provider = COALESCE(?19, meetings.primary_provider),
+            reviewer_provider = COALESCE(?20, meetings.reviewer_provider),
+            participant_names = COALESCE(?21, meetings.participant_names),
             created_at = COALESCE(meetings.created_at, excluded.created_at)",
         rusqlite::params![
             body.id,
+            body.channel_id,
             body.thread_id,
             agenda,
             status,
@@ -805,7 +812,7 @@ pub async fn upsert_meeting(
 
     let saved_thread_id: Option<String> = conn
         .query_row(
-            "SELECT channel_id FROM meetings WHERE id = ?1",
+            "SELECT thread_id FROM meetings WHERE id = ?1",
             [&body.id],
             |row| row.get(0),
         )
@@ -926,7 +933,7 @@ pub async fn upsert_meeting(
     }
 
     match conn.query_row(
-        "SELECT id, channel_id, title, status, effective_rounds, started_at, completed_at, summary,
+        "SELECT id, channel_id, thread_id, title, status, effective_rounds, started_at, completed_at, summary,
                 primary_provider, reviewer_provider, participant_names, created_at
          FROM meetings WHERE id = ?1",
         [&body.id],
@@ -1100,32 +1107,34 @@ fn row_optional_timestamp(row: &rusqlite::Row, idx: usize) -> Option<i64> {
 fn meeting_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
     let meeting_id = row.get::<_, String>(0)?;
     let channel_id = row.get::<_, Option<String>>(1)?;
-    let title = row.get::<_, Option<String>>(2)?;
-    let effective_rounds = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
+    let thread_id = row.get::<_, Option<String>>(2)?;
+    let title = row.get::<_, Option<String>>(3)?;
+    let effective_rounds = row.get::<_, Option<i64>>(5)?.unwrap_or(0);
     let participant_names = row
-        .get::<_, Option<String>>(10)?
+        .get::<_, Option<String>>(11)?
         .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
         .unwrap_or_default();
-    let started_at = row_optional_timestamp(row, 5).unwrap_or(0);
-    let completed_at = row_optional_timestamp(row, 6);
-    let created_at = row_optional_timestamp(row, 11).unwrap_or(started_at);
-    let thread_hash = channel_id.as_deref().map(thread_query_hash);
+    let started_at = row_optional_timestamp(row, 6).unwrap_or(0);
+    let completed_at = row_optional_timestamp(row, 7);
+    let created_at = row_optional_timestamp(row, 12).unwrap_or(started_at);
+    let thread_hash = thread_id.as_deref().map(thread_query_hash);
     Ok(json!({
         "id": meeting_id.clone(),
         "channel_id": channel_id,
+        "thread_id": thread_id,
         "meeting_hash": meeting_query_hash(&meeting_id),
         "thread_hash": thread_hash,
         "title": title,
-        "status": row.get::<_, Option<String>>(3)?,
+        "status": row.get::<_, Option<String>>(4)?,
         "effective_rounds": effective_rounds,
         "started_at": started_at,
         "completed_at": completed_at,
-        "summary": row.get::<_, Option<String>>(7)?,
+        "summary": row.get::<_, Option<String>>(8)?,
         // alias fields for frontend compatibility
         "agenda": title,
         "total_rounds": effective_rounds,
-        "primary_provider": row.get::<_, Option<String>>(8)?,
-        "reviewer_provider": row.get::<_, Option<String>>(9)?,
+        "primary_provider": row.get::<_, Option<String>>(9)?,
+        "reviewer_provider": row.get::<_, Option<String>>(10)?,
         "participant_names": participant_names,
         "issues_created": 0,
         "proposed_issues": null,
@@ -1385,6 +1394,7 @@ mod tests {
                 channel_id: Some("999999999999".to_string()),
                 primary_provider: None,
                 reviewer_provider: Some("codex".to_string()),
+                fixed_participants: None,
             }),
         )
         .await;
@@ -1408,6 +1418,7 @@ mod tests {
                 channel_id: Some("999999999999".to_string()),
                 primary_provider: Some("qwen".to_string()),
                 reviewer_provider: Some("codex".to_string()),
+                fixed_participants: None,
             }),
         )
         .await;
@@ -1428,6 +1439,7 @@ mod tests {
             State(state.clone()),
             Json(UpsertMeetingBody {
                 id: "meeting-meta".to_string(),
+                channel_id: None,
                 agenda: Some("기존 안건".to_string()),
                 summary: None,
                 status: Some("in_progress".to_string()),
@@ -1448,6 +1460,7 @@ mod tests {
             State(state),
             Json(UpsertMeetingBody {
                 id: "meeting-meta".to_string(),
+                channel_id: None,
                 agenda: None,
                 summary: Some("요약 갱신".to_string()),
                 status: None,
@@ -1500,6 +1513,7 @@ mod tests {
             State(state.clone()),
             Json(UpsertMeetingBody {
                 id: "meeting-hash".to_string(),
+                channel_id: None,
                 agenda: Some("해시 안건".to_string()),
                 summary: None,
                 status: Some("in_progress".to_string()),
@@ -1561,6 +1575,7 @@ mod tests {
             State(state.clone()),
             Json(UpsertMeetingBody {
                 id: "meeting-transcript".to_string(),
+                channel_id: None,
                 agenda: Some("안건".to_string()),
                 summary: Some("기존 요약".to_string()),
                 status: Some("completed".to_string()),
@@ -1584,6 +1599,7 @@ mod tests {
             State(state),
             Json(UpsertMeetingBody {
                 id: "meeting-transcript".to_string(),
+                channel_id: None,
                 agenda: None,
                 summary: Some("새 요약".to_string()),
                 status: Some("completed".to_string()),

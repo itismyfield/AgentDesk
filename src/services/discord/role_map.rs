@@ -108,6 +108,27 @@ fn meeting_agent_from_json(agent: &serde_json::Value) -> Option<MeetingAgentConf
             .and_then(|v| v.as_str())
             .unwrap_or(""),
     );
+    let provider_raw = json_string_field(agent, &["provider"]);
+    let provider_hint = json_string_field(agent, &["provider_hint", "providerHint", "provider"]);
+    let provider = provider_raw.as_deref().and_then(ProviderKind::from_str);
+    let model = json_string_field(agent, &["model"]);
+    let reasoning_effort = json_string_field(agent, &["reasoning_effort", "reasoningEffort"]);
+    let workspace = json_string_field(agent, &["workspace"]).map(|value| expand_tilde(&value));
+    let peer_agents_enabled = agent
+        .get("peerAgents")
+        .or_else(|| agent.get("peer_agents"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let memory_override = agent.get("memory").and_then(|raw| {
+        serde_json::from_value::<MemoryConfigOverride>(raw.clone())
+            .map_err(|err| {
+                eprintln!(
+                    "  [memory] Warning: invalid meeting.available_agents memory block: {err}"
+                );
+                err
+            })
+            .ok()
+    });
 
     Some(MeetingAgentConfig {
         role_id: role_id.to_string(),
@@ -124,7 +145,13 @@ fn meeting_agent_from_json(agent: &serde_json::Value) -> Option<MeetingAgentConf
             .into_iter()
             .chain(json_string_vec(agent, "antiSignals"))
             .collect(),
-        provider_hint: json_string_field(agent, &["provider_hint", "providerHint", "provider"]),
+        provider_hint,
+        provider,
+        model,
+        reasoning_effort,
+        workspace,
+        peer_agents_enabled,
+        memory: resolve_memory_settings(None, memory_override.as_ref()),
     })
 }
 

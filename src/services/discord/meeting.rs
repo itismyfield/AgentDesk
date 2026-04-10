@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::Arc;
 
@@ -7,6 +8,7 @@ use serenity::{
     builder::{CreateThread, EditThread},
 };
 
+use crate::services::memory::{RecallRequest, RecallResponse, build_resolved_memory_backend};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_exec;
 
@@ -14,8 +16,8 @@ use super::agentdesk_config;
 use super::formatting::send_long_message_raw;
 use super::org_schema;
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
-use super::settings::{RoleBinding, load_role_prompt};
-use super::{SharedData, rate_limit_wait};
+use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
+use super::{DispatchProfile, SharedData, rate_limit_wait};
 
 // ─── Data Structures ─────────────────────────────────────────────────────────
 
@@ -24,6 +26,12 @@ pub(super) struct MeetingParticipant {
     pub role_id: String,
     pub prompt_file: String,
     pub display_name: String,
+    pub provider: Option<ProviderKind>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub workspace: Option<String>,
+    pub peer_agents_enabled: bool,
+    pub memory: ResolvedMemorySettings,
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +53,7 @@ pub(super) enum MeetingStatus {
 
 pub(super) struct Meeting {
     pub id: String,
+    pub channel_id: u64,
     pub agenda: String,
     pub primary_provider: ProviderKind,
     pub reviewer_provider: ProviderKind,
@@ -123,6 +132,42 @@ pub(super) struct MeetingAgentConfig {
     pub task_types: Vec<String>,
     pub anti_signals: Vec<String>,
     pub provider_hint: Option<String>,
+    pub provider: Option<ProviderKind>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub workspace: Option<String>,
+    pub peer_agents_enabled: bool,
+    pub memory: ResolvedMemorySettings,
+}
+
+impl MeetingAgentConfig {
+    fn to_participant(&self) -> MeetingParticipant {
+        MeetingParticipant {
+            role_id: self.role_id.clone(),
+            prompt_file: self.prompt_file.clone(),
+            display_name: self.display_name.clone(),
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            workspace: self.workspace.clone(),
+            peer_agents_enabled: self.peer_agents_enabled,
+            memory: self.memory.clone(),
+        }
+    }
+}
+
+impl MeetingParticipant {
+    fn role_binding(&self) -> RoleBinding {
+        RoleBinding {
+            role_id: self.role_id.clone(),
+            prompt_file: self.prompt_file.clone(),
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            peer_agents_enabled: self.peer_agents_enabled,
+            memory: self.memory.clone(),
+        }
+    }
 }
 
 const DEFAULT_MAX_PARTICIPANTS: usize = 5;
@@ -277,11 +322,11 @@ fn summary_agent_context(config: &MeetingConfig, resolved_summary_agent: &str) -
     load_role_prompt(&RoleBinding {
         role_id: resolved_summary_agent.to_string(),
         prompt_file: agent.prompt_file.clone(),
-        provider: None,
-        model: None,
-        reasoning_effort: None,
-        peer_agents_enabled: true,
-        memory: Default::default(),
+        provider: agent.provider.clone(),
+        model: agent.model.clone(),
+        reasoning_effort: agent.reasoning_effort.clone(),
+        peer_agents_enabled: agent.peer_agents_enabled,
+        memory: agent.memory.clone(),
     })
     .unwrap_or_else(|| {
         format!(
@@ -289,6 +334,29 @@ fn summary_agent_context(config: &MeetingConfig, resolved_summary_agent: &str) -
             resolved_summary_agent
         )
     })
+}
+
+pub(crate) fn list_available_agent_options() -> Vec<serde_json::Value> {
+    load_meeting_config()
+        .map(|config| {
+            config
+                .available_agents
+                .iter()
+                .map(|agent| {
+                    serde_json::json!({
+                        "role_id": agent.role_id.clone(),
+                        "display_name": agent.display_name.clone(),
+                        "keywords": agent.keywords.clone(),
+                        "domain_summary": agent.domain_summary.clone(),
+                        "strengths": agent.strengths.clone(),
+                        "task_types": agent.task_types.clone(),
+                        "anti_signals": agent.anti_signals.clone(),
+                        "provider_hint": agent.provider_hint.clone(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn execute_provider_stage(
@@ -358,6 +426,85 @@ fn parse_json_array_fragment(text: &str) -> Result<Vec<String>, String> {
     };
 
     serde_json::from_str(json_str).map_err(|e| format!("Failed to parse JSON array: {}", e))
+}
+
+fn normalize_role_ids(role_ids: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    role_ids
+        .iter()
+        .map(|role_id| role_id.trim())
+        .filter(|role_id| !role_id.is_empty())
+        .filter_map(|role_id| {
+            let normalized = role_id.to_string();
+            seen.insert(normalized.clone()).then_some(normalized)
+        })
+        .collect()
+}
+
+fn fixed_participant_prompt_lines(fixed_role_ids: &[String]) -> String {
+    if fixed_role_ids.is_empty() {
+        "고정 전문 에이전트: 없음".to_string()
+    } else {
+        format!(
+            "고정 전문 에이전트: {}\n- 이 role_id들은 최종 참가자에 반드시 포함한다.\n- 진행자는 남은 슬롯만 자동 선정한다.",
+            fixed_role_ids.join(", ")
+        )
+    }
+}
+
+fn merge_selected_participants(
+    config: &MeetingConfig,
+    selected_role_ids: &[String],
+    fixed_role_ids: &[String],
+    max_participants: usize,
+) -> Result<Vec<MeetingParticipant>, String> {
+    let agents_by_id: HashMap<&str, &MeetingAgentConfig> = config
+        .available_agents
+        .iter()
+        .map(|agent| (agent.role_id.as_str(), agent))
+        .collect();
+    let fixed_role_ids = normalize_role_ids(fixed_role_ids);
+    if fixed_role_ids.len() > max_participants {
+        return Err(format!(
+            "Too many fixed participants: {} (max {})",
+            fixed_role_ids.len(),
+            max_participants
+        ));
+    }
+
+    let mut participants = Vec::new();
+    let mut seen = HashSet::new();
+    for role_id in &fixed_role_ids {
+        let agent = agents_by_id
+            .get(role_id.as_str())
+            .ok_or_else(|| format!("Unknown fixed meeting participant role_id: {role_id}"))?;
+        participants.push(agent.to_participant());
+        seen.insert(role_id.clone());
+    }
+
+    for role_id in normalize_role_ids(selected_role_ids) {
+        if participants.len() >= max_participants {
+            break;
+        }
+        if seen.contains(&role_id) {
+            continue;
+        }
+        if let Some(agent) = agents_by_id.get(role_id.as_str()) {
+            participants.push(agent.to_participant());
+            seen.insert(role_id);
+        }
+    }
+
+    if participants.len() < MIN_MEETING_PARTICIPANTS || participants.len() > max_participants {
+        return Err(format!(
+            "Invalid participant count after cross-check: {} (expected {}..={})",
+            participants.len(),
+            MIN_MEETING_PARTICIPANTS,
+            max_participants
+        ));
+    }
+
+    Ok(participants)
 }
 
 fn truncate_for_meeting(text: &str, max_chars: usize) -> String {
@@ -524,6 +671,7 @@ pub(super) async fn start_meeting(
         agenda,
         primary_provider,
         reviewer_provider,
+        Vec::new(),
         shared,
     )
     .await
@@ -535,6 +683,7 @@ pub(crate) async fn start_meeting_with_reviewer(
     agenda: &str,
     primary_provider: ProviderKind,
     reviewer_provider: ProviderKind,
+    fixed_participants: Vec<String>,
     shared: &Arc<SharedData>,
 ) -> Result<Option<String>, Error> {
     let config =
@@ -552,6 +701,7 @@ pub(crate) async fn start_meeting_with_reviewer(
             channel_id,
             Meeting {
                 id: meeting_id.clone(),
+                channel_id: channel_id.get(),
                 agenda: agenda.to_string(),
                 primary_provider: primary_provider.clone(),
                 reviewer_provider: reviewer_provider.clone(),
@@ -614,18 +764,25 @@ pub(crate) async fn start_meeting_with_reviewer(
         .await;
 
     // Select participants via primary provider + reviewer cross-check
-    let participants =
-        match select_participants(&config, agenda, primary_provider, reviewer_provider).await {
-            Ok(p) if !p.is_empty() => p,
-            Ok(_) => {
-                cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
-                return Err("참여자를 선정하지 못했어.".into());
-            }
-            Err(e) => {
-                cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
-                return Err(format!("참여자 선정 실패: {}", e).into());
-            }
-        };
+    let participants = match select_participants(
+        &config,
+        agenda,
+        primary_provider,
+        reviewer_provider,
+        fixed_participants,
+    )
+    .await
+    {
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => {
+            cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+            return Err("참여자를 선정하지 못했어.".into());
+        }
+        Err(e) => {
+            cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+            return Err(format!("참여자 선정 실패: {}", e).into());
+        }
+    };
 
     // Check if cancelled or replaced during participant selection
     if active_meeting_state(shared, channel_id, &meeting_id).await != ActiveMeetingSlot::Active {
@@ -760,6 +917,7 @@ pub(crate) async fn spawn_direct_start(
     agenda: String,
     primary_provider: ProviderKind,
     reviewer_provider: ProviderKind,
+    fixed_participants: Vec<String>,
     shared: Arc<SharedData>,
 ) -> Result<(), String> {
     if primary_provider == reviewer_provider {
@@ -784,6 +942,7 @@ pub(crate) async fn spawn_direct_start(
             &agenda,
             primary_provider,
             reviewer_provider,
+            fixed_participants,
             &shared,
         )
         .await
@@ -915,18 +1074,23 @@ async fn select_participants(
     agenda: &str,
     primary_provider: ProviderKind,
     reviewer_provider: ProviderKind,
+    fixed_participants: Vec<String>,
 ) -> Result<Vec<MeetingParticipant>, String> {
     let max_participants = clamp_max_participants(config.max_participants);
+    let fixed_participants = normalize_role_ids(&fixed_participants);
     let agents_desc: Vec<String> = config
         .available_agents
         .iter()
         .map(agent_metadata_card)
         .collect();
+    let fixed_prompt = fixed_participant_prompt_lines(&fixed_participants);
 
     let selection_prompt = format!(
         r#"다음 안건에 대한 라운드 테이블 회의에 참여할 전문 에이전트를 선정해줘.
 
 안건: {}
+
+{}
 
 후보 메타데이터 카드:
 {}
@@ -939,12 +1103,14 @@ async fn select_participants(
 
 규칙:
 - {}~{}명 선정
+- 고정 전문 에이전트가 있으면 반드시 포함하고, 남은 슬롯만 추가 선정한다
 - keywords 단순 일치만으로 선정하지 말고 domain_summary/strengths/task_types를 우선한다
 - anti_signals에 걸리는 후보는 강한 이유가 없으면 제외한다
 - metadata_missing이 많은 후보는 필요한 경우에만 보조적으로 선정한다
 - JSON 배열로만 응답 (다른 텍스트 없이)
 - 형식: ["role_id1", "role_id2", ...]"#,
         agenda,
+        fixed_prompt,
         agents_desc.join("\n"),
         MIN_MEETING_PARTICIPANTS,
         max_participants,
@@ -970,8 +1136,12 @@ async fn select_participants(
 현재 선정안:
 {current}
 
+고정 전문 에이전트:
+{fixed}
+
 검토 규칙:
 - 빠진 역할, 중복 역할, 안건과의 부적합만 짚어라
+- 고정 전문 에이전트가 누락되면 반드시 지적하라
 - 4개 이하 bullet만 사용하라
 - metadata_missing, anti_signals, task_types mismatch가 있으면 명시하라
 - 전체를 다시 쓰지 말고, 비판적으로만 검토하라
@@ -979,6 +1149,7 @@ async fn select_participants(
         agenda = agenda,
         agents = agents_desc.join("\n"),
         current = serde_json::to_string(&initial_selected).unwrap_or_else(|_| "[]".to_string()),
+        fixed = fixed_participants.join(", "),
     );
 
     let review_notes = match execute_provider_stage(
@@ -1004,18 +1175,23 @@ async fn select_participants(
 초기 선정안:
 {initial}
 
+고정 전문 에이전트:
+{fixed}
+
 교차검증 리뷰:
 {review}
 
 규칙:
 - 리뷰가 타당하면 반영하고, 타당하지 않으면 유지하라
 - 최종 결과는 {min_participants}~{max_participants}명이어야 한다
+- 고정 전문 에이전트는 최종 JSON에 반드시 포함한다
 - 후보 메타데이터에서 metadata_missing이 많은 후보는 필요한 경우에만 유지하라
 - JSON 배열로만 응답하라
 - 형식: ["role_id1", "role_id2", ...]"#,
         agenda = agenda,
         agents = agents_desc.join("\n"),
         initial = serde_json::to_string(&initial_selected).unwrap_or_else(|_| "[]".to_string()),
+        fixed = fixed_participants.join(", "),
         review = review_notes.trim(),
         min_participants = MIN_MEETING_PARTICIPANTS,
         max_participants = max_participants,
@@ -1033,31 +1209,7 @@ async fn select_participants(
         Err(_) => initial_selected,
     };
 
-    let participants: Vec<MeetingParticipant> = selected
-        .iter()
-        .filter_map(|role_id| {
-            config
-                .available_agents
-                .iter()
-                .find(|a| &a.role_id == role_id)
-                .map(|a| MeetingParticipant {
-                    role_id: a.role_id.clone(),
-                    prompt_file: a.prompt_file.clone(),
-                    display_name: a.display_name.clone(),
-                })
-        })
-        .collect();
-
-    if participants.len() < MIN_MEETING_PARTICIPANTS || participants.len() > max_participants {
-        return Err(format!(
-            "Invalid participant count after cross-check: {} (expected {}..={})",
-            participants.len(),
-            MIN_MEETING_PARTICIPANTS,
-            max_participants
-        ));
-    }
-
-    Ok(participants)
+    merge_selected_participants(config, &selected, &fixed_participants, max_participants)
 }
 
 /// Run one round: each participant speaks in order
@@ -1109,6 +1261,8 @@ async fn run_meeting_round(
         match execute_agent_turn(
             participant,
             &agenda,
+            channel_id.get(),
+            meeting_id,
             round,
             &transcript_text,
             primary_provider.clone(),
@@ -1176,30 +1330,140 @@ async fn run_meeting_round(
     Ok(Some(consensus))
 }
 
-/// Execute a single agent turn using primary draft -> reviewer critique -> primary final.
+fn meeting_readonly_allowed_tools() -> Vec<String> {
+    vec!["Read".to_string()]
+}
+
+fn participant_working_dir(participant: &MeetingParticipant) -> String {
+    participant
+        .workspace
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "/".to_string())
+        })
+}
+
+fn format_memory_recall_context(recall: &RecallResponse) -> String {
+    let mut chunks = Vec::new();
+    if let Some(shared) = recall.shared_knowledge.as_deref() {
+        if !shared.trim().is_empty() {
+            chunks.push(format!("## Shared Knowledge\n{}", shared.trim()));
+        }
+    }
+    if let Some(catalog) = recall.longterm_catalog.as_deref() {
+        if !catalog.trim().is_empty() {
+            chunks.push(format!("## Long-term Memory Catalog\n{}", catalog.trim()));
+        }
+    }
+    if let Some(external) = recall.external_recall.as_deref() {
+        if !external.trim().is_empty() {
+            chunks.push(format!("## External Recall\n{}", external.trim()));
+        }
+    }
+    chunks.join("\n\n")
+}
+
+async fn participant_memory_recall(
+    participant: &MeetingParticipant,
+    provider: ProviderKind,
+    channel_id: u64,
+    meeting_id: &str,
+    round: u32,
+    agenda: &str,
+    transcript: &str,
+) -> String {
+    let backend = build_resolved_memory_backend(&participant.memory);
+    let recall = backend
+        .recall(RecallRequest {
+            provider,
+            role_id: participant.role_id.clone(),
+            channel_id,
+            session_id: format!("meeting:{meeting_id}:round:{round}:{}", participant.role_id),
+            dispatch_profile: DispatchProfile::Full,
+            user_text: format!("{agenda}\n\n{transcript}"),
+        })
+        .await;
+
+    for warning in &recall.warnings {
+        tracing::warn!(
+            "[meeting] memory recall warning meeting_id={} role_id={}: {}",
+            meeting_id,
+            participant.role_id,
+            warning
+        );
+    }
+    format_memory_recall_context(&recall)
+}
+
+fn meeting_readonly_system_prompt(
+    participant: &MeetingParticipant,
+    role_context: &str,
+    memory_context: &str,
+) -> String {
+    format!(
+        r#"You are the specialist meeting participant `{role_id}` ({display_name}).
+
+Authoritative execution mode: `meeting_readonly`.
+- You may use only read-only file/context inspection capabilities exposed by the runtime.
+- You must not write files, run shell commands, capture memory, write memory, mutate repo state, call external network tools, or ask for interactive confirmation.
+- Use your role prompt, identity context, and injected memory/recall context to answer from your specialist viewpoint.
+
+## Role / IDENTITY Context
+{role_context}
+
+## Memory / Recall Context
+{memory_context}"#,
+        role_id = participant.role_id,
+        display_name = participant.display_name,
+        role_context = if role_context.trim().is_empty() {
+            "(none)"
+        } else {
+            role_context.trim()
+        },
+        memory_context = if memory_context.trim().is_empty() {
+            "(none)"
+        } else {
+            memory_context.trim()
+        },
+    )
+}
+
+/// Execute a single agent turn using specialist draft/final -> reviewer critique.
 async fn execute_agent_turn(
     participant: &MeetingParticipant,
     agenda: &str,
+    channel_id: u64,
+    meeting_id: &str,
     round: u32,
     transcript: &str,
     primary_provider: ProviderKind,
     reviewer_provider: ProviderKind,
 ) -> Result<String, String> {
-    // Load role prompt if available
+    let specialist_provider = participant.provider.clone().unwrap_or(primary_provider);
+    let role_binding = participant.role_binding();
     let role_context = if !participant.prompt_file.is_empty() {
-        load_role_prompt(&RoleBinding {
-            role_id: participant.role_id.clone(),
-            prompt_file: participant.prompt_file.clone(),
-            provider: None,
-            model: None,
-            reasoning_effort: None,
-            peer_agents_enabled: true,
-            memory: Default::default(),
-        })
-        .unwrap_or_default()
+        load_role_prompt(&role_binding).unwrap_or_default()
     } else {
         String::new()
     };
+    let memory_context = participant_memory_recall(
+        participant,
+        specialist_provider.clone(),
+        channel_id,
+        meeting_id,
+        round,
+        agenda,
+        transcript,
+    )
+    .await;
+    let system_prompt = meeting_readonly_system_prompt(participant, &role_context, &memory_context);
+    let allowed_tools = meeting_readonly_allowed_tools();
+    let working_dir = participant_working_dir(participant);
 
     let draft_prompt = format!(
         r#"당신은 라운드 테이블 회의에 참여한 {name}입니다.
@@ -1220,7 +1484,7 @@ async fn execute_agent_turn(
 - 답변은 300자 이내로 간결하게 작성하세요
 - 합의에 도달했다고 판단되면, 반드시 "CONSENSUS:" 로 시작하는 한 줄 요약을 마지막에 추가하세요
 - 아직 논의가 더 필요하면 CONSENSUS: 키워드를 사용하지 마세요
-- 도구나 명령 실행 없이 답변만 작성하세요"#,
+- meeting_readonly 정책을 지키고, 쓰기/변경 작업은 절대 하지 마세요"#,
         name = participant.display_name,
         role_context = if role_context.is_empty() {
             String::new()
@@ -1236,11 +1500,15 @@ async fn execute_agent_turn(
         },
     );
 
-    let draft = execute_provider_stage(
-        primary_provider.clone(),
-        "meeting turn draft",
+    let draft = provider_exec::execute_structured(
+        specialist_provider.clone(),
         draft_prompt,
+        working_dir.clone(),
+        Some(system_prompt.clone()),
+        allowed_tools.clone(),
+        participant.model.clone(),
         MEETING_TURN_STAGE_TIMEOUT_SECS,
+        "meeting turn draft",
     )
     .await?;
 
@@ -1337,11 +1605,15 @@ async fn execute_agent_turn(
         critique = critique.trim(),
     );
 
-    match execute_provider_stage(
-        primary_provider,
-        "meeting turn final",
+    match provider_exec::execute_structured(
+        specialist_provider,
         final_prompt,
+        working_dir,
+        Some(system_prompt),
+        allowed_tools,
+        participant.model.clone(),
         MEETING_TURN_STAGE_TIMEOUT_SECS,
+        "meeting turn final",
     )
     .await
     {
@@ -1692,6 +1964,7 @@ fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
 
     Some(serde_json::json!({
         "id": m.id,
+        "channel_id": m.channel_id.to_string(),
         "meeting_hash": meeting_hash,
         "agenda": m.agenda,
         "summary": m.summary,
@@ -1917,10 +2190,10 @@ pub(super) async fn handle_meeting_command(
 mod tests {
     use super::{
         ActiveMeetingSlot, Meeting, MeetingAgentConfig, MeetingConfig, MeetingStatus,
-        MeetingUtterance, ProviderKind, SummaryAgentConfig, agent_metadata_card,
-        build_meeting_markdown, build_meeting_status_payload, effective_round_count,
-        meeting_query_hash, meeting_slot_state, parse_meeting_start_text, summary_agent_context,
-        thread_query_hash,
+        MeetingUtterance, ProviderKind, ResolvedMemorySettings, SummaryAgentConfig,
+        agent_metadata_card, build_meeting_markdown, build_meeting_status_payload,
+        effective_round_count, meeting_query_hash, meeting_slot_state, parse_meeting_start_text,
+        summary_agent_context, thread_query_hash,
     };
     use serde_json::json;
 
@@ -1972,6 +2245,7 @@ mod tests {
     fn fixture_meeting(id: &str, status: MeetingStatus) -> Meeting {
         Meeting {
             id: id.to_string(),
+            channel_id: 42,
             agenda: "test".to_string(),
             primary_provider: ProviderKind::Claude,
             reviewer_provider: ProviderKind::Codex,
@@ -2015,6 +2289,12 @@ mod tests {
             task_types: Vec::new(),
             anti_signals: Vec::new(),
             provider_hint: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            workspace: None,
+            peer_agents_enabled: true,
+            memory: ResolvedMemorySettings::default(),
         };
         let rich = MeetingAgentConfig {
             role_id: "qwen".to_string(),
@@ -2026,6 +2306,12 @@ mod tests {
             task_types: vec!["analysis".to_string()],
             anti_signals: vec!["short notification".to_string()],
             provider_hint: Some("qwen".to_string()),
+            provider: Some(ProviderKind::Qwen),
+            model: None,
+            reasoning_effort: None,
+            workspace: None,
+            peer_agents_enabled: true,
+            memory: ResolvedMemorySettings::default(),
         };
 
         let legacy_card = agent_metadata_card(&legacy);
