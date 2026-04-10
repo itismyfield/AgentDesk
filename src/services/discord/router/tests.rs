@@ -66,18 +66,20 @@ fn unregistered_human_slash_messages_fall_through() {
 }
 
 #[test]
-fn allowed_bot_turn_text_only_accepts_work_dispatches() {
+fn allowed_bot_turn_text_accepts_all_messages() {
     assert!(should_process_allowed_bot_turn_text(
         "DISPATCH:550e8400-e29b-41d4-a716-446655440000 [implementation] - Fix login bug"
     ));
     assert!(should_process_allowed_bot_turn_text(
         "DISPATCH:550e8400-e29b-41d4-a716-446655440000 [review-decision] - Feedback follow-up\n⛔ 코드 리뷰 금지"
     ));
-    assert!(!should_process_allowed_bot_turn_text(
+    // Review dispatches must also trigger turns — the agent reads and judges
+    assert!(should_process_allowed_bot_turn_text(
         "DISPATCH:550e8400-e29b-41d4-a716-446655440000 [review] - Review this\n⚠️ 검토 전용 — 작업 착수 금지"
     ));
-    assert!(!should_process_allowed_bot_turn_text(
-        "⚠️ 검토 전용 — 작업 착수 금지"
+    // Agent-to-agent messages without DISPATCH: also trigger turns
+    assert!(should_process_allowed_bot_turn_text(
+        "completion_guard 수정에 OUTCOME: noop 처리도 포함해줘."
     ));
 }
 

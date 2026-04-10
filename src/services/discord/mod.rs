@@ -99,14 +99,11 @@ const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minut
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
-pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
-    let trimmed = text.trim();
-    // Announce bot messages always trigger turns — they carry dispatch
-    // instructions OR agent-to-agent communication, both of which need
-    // processing.  The only messages to suppress are review-only markers.
-    if trimmed.contains("검토 전용") || trimmed.contains("작업 착수 금지") {
-        return false;
-    }
+pub(super) fn should_process_allowed_bot_turn_text(_text: &str) -> bool {
+    // All announce bot messages trigger turns — dispatches, agent-to-agent
+    // communication, review instructions, and deadlock alerts all need
+    // processing.  "검토 전용" / "작업 착수 금지" are instructions for the
+    // agent's behavior during the turn, not reasons to skip the turn.
     true
 }
 
@@ -4335,13 +4332,17 @@ mod tests {
     }
 
     #[test]
-    fn allowed_bot_review_only_text_is_rejected_even_without_bot_flag() {
+    fn allowed_bot_all_messages_accepted() {
         let allowed_bot_ids = vec![123];
         let review_only = "⚠️ 검토 전용 — 작업 착수 금지";
         let dispatch = "DISPATCH: abc123\n작업 시작";
+        let agent_msg = "completion_guard 수정해줘";
 
-        assert!(!should_process_allowed_bot_turn_text(review_only));
-        assert!(!is_allowed_turn_sender(
+        // All announce bot messages trigger turns
+        assert!(should_process_allowed_bot_turn_text(review_only));
+        assert!(should_process_allowed_bot_turn_text(dispatch));
+        assert!(should_process_allowed_bot_turn_text(agent_msg));
+        assert!(is_allowed_turn_sender(
             &allowed_bot_ids,
             123,
             false,
@@ -4352,6 +4353,12 @@ mod tests {
             123,
             false,
             dispatch
+        ));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            123,
+            false,
+            agent_msg
         ));
     }
 
