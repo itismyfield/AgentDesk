@@ -101,9 +101,13 @@ const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
     let trimmed = text.trim();
-    parse_dispatch_id(trimmed).is_some()
-        && !trimmed.contains("검토 전용")
-        && !trimmed.contains("작업 착수 금지")
+    // Announce bot messages always trigger turns — they carry dispatch
+    // instructions OR agent-to-agent communication, both of which need
+    // processing.  The only messages to suppress are review-only markers.
+    if trimmed.contains("검토 전용") || trimmed.contains("작업 착수 금지") {
+        return false;
+    }
+    true
 }
 
 pub(in crate::services::discord) fn is_allowed_turn_sender(
