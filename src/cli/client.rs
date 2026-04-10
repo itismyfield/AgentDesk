@@ -99,6 +99,68 @@ fn post_json(path: &str, body: Option<Value>) -> Result<Value, String> {
     request_json("POST", path, body_string.as_deref())
 }
 
+fn parse_github_repo_from_remote(remote: &str) -> Option<String> {
+    let trimmed = remote.trim().trim_end_matches(".git");
+    let path = trimmed
+        .strip_prefix("git@github.com:")
+        .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| trimmed.strip_prefix("https://github.com/"))
+        .or_else(|| trimmed.strip_prefix("http://github.com/"))?
+        .trim_matches('/');
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn infer_dispatch_repo(repo: Option<&str>) -> Option<String> {
+    if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(repo.to_string());
+    }
+
+    let repo_dir = crate::services::platform::resolve_repo_dir()?;
+    let output = std::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let remote = String::from_utf8_lossy(&output.stdout);
+    parse_github_repo_from_remote(&remote)
+}
+
+fn parse_dispatch_groups(issue_groups: &[String]) -> Result<Vec<Value>, String> {
+    if issue_groups.is_empty() {
+        return Err("provide one or more issue groups or use a dispatch subcommand".to_string());
+    }
+
+    let mut groups = Vec::with_capacity(issue_groups.len());
+    for raw_group in issue_groups {
+        let issues: Vec<i64> = raw_group
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid issue number in group '{raw_group}': {value}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if issues.is_empty() {
+            return Err(format!("issue group '{raw_group}' is empty"));
+        }
+        groups.push(serde_json::json!({
+            "issues": issues,
+            "sequential": raw_group.contains(','),
+        }));
+    }
+
+    Ok(groups)
+}
+
 fn find_card_for_issue(issue_number: &str) -> Result<Value, String> {
     let cards = get_json("/api/kanban-cards")?;
     let issue_number: i64 = issue_number
@@ -524,6 +586,45 @@ pub fn cmd_dispatch_list() -> Result<(), String> {
     Ok(())
 }
 
+/// `agentdesk dispatch 423,405 407 --unified --concurrent 2`
+pub fn cmd_dispatch(
+    issue_groups: &[String],
+    repo: Option<&str>,
+    agent_id: Option<&str>,
+    unified: bool,
+    concurrent: Option<i64>,
+    activate: bool,
+) -> Result<(), String> {
+    if let Some(value) = concurrent {
+        if value < 1 {
+            return Err("--concurrent must be >= 1".to_string());
+        }
+    }
+
+    let groups = parse_dispatch_groups(issue_groups)?;
+    let mut body = serde_json::json!({
+        "groups": groups,
+        "activate": activate,
+    });
+    if unified {
+        body["unified_thread"] = serde_json::json!(true);
+    }
+    if let Some(concurrent) = concurrent {
+        body["max_concurrent_threads"] = serde_json::json!(concurrent);
+    }
+    if let Some(agent_id) = agent_id.map(str::trim).filter(|value| !value.is_empty()) {
+        body["agent_id"] = serde_json::json!(agent_id);
+        body["auto_assign_agent"] = serde_json::json!(true);
+    }
+    if let Some(repo) = infer_dispatch_repo(repo) {
+        body["repo"] = serde_json::json!(repo);
+    }
+
+    let value = post_json("/api/auto-queue/dispatch", Some(body))?;
+    print_json(&value);
+    Ok(())
+}
+
 /// `agentdesk dispatch retry <card_id>`
 pub fn cmd_dispatch_retry(card_id: &str) -> Result<(), String> {
     let value = post_json(
@@ -848,10 +949,10 @@ pub fn cmd_terminations(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_advance_completion_result, render_cards_table, render_queue_thread_links,
+        build_cli_advance_completion_result, cmd_advance, cmd_dispatch,
+        parse_github_repo_from_remote, render_cards_table, render_queue_thread_links,
         runtime_config_payload,
     };
-    use crate::cli::client::cmd_advance;
     use axum::extract::{Path, Query, State};
     use axum::routing::{get, patch, post};
     use axum::{Json, Router};
@@ -1063,6 +1164,19 @@ mod tests {
         })
     }
 
+    async fn dispatch_handler(
+        State(state): State<Arc<Mutex<Option<serde_json::Value>>>>,
+        Json(body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        *state.lock().unwrap() = Some(body);
+        Json(json!({
+            "run": {"id": "run-dispatch", "status": "active"},
+            "entries": [],
+            "thread_groups": {},
+            "activated": true
+        }))
+    }
+
     #[test]
     fn runtime_config_payload_uses_current_envelope() {
         let payload = runtime_config_payload(json!({
@@ -1123,6 +1237,82 @@ mod tests {
         }));
 
         assert_eq!(rendered, "active:thread:1485506232256168011");
+    }
+
+    #[test]
+    fn parse_github_repo_from_remote_supports_common_formats() {
+        assert_eq!(
+            parse_github_repo_from_remote("git@github.com:itismyfield/AgentDesk.git"),
+            Some("itismyfield/AgentDesk".to_string())
+        );
+        assert_eq!(
+            parse_github_repo_from_remote("https://github.com/itismyfield/AgentDesk.git"),
+            Some("itismyfield/AgentDesk".to_string())
+        );
+        assert_eq!(parse_github_repo_from_remote("/tmp/local-origin.git"), None);
+    }
+
+    #[test]
+    fn cmd_dispatch_posts_declarative_auto_queue_payload() {
+        let _lock = env_lock();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let repo = tempfile::tempdir().unwrap();
+            run_git(repo.path(), &["init", "-b", "main"]);
+            run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+            run_git(repo.path(), &["config", "user.name", "Test"]);
+            run_git(
+                repo.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/itismyfield/AgentDesk.git",
+                ],
+            );
+
+            let captured = Arc::new(Mutex::new(None));
+            let app = Router::new()
+                .route("/api/auto-queue/dispatch", post(dispatch_handler))
+                .with_state(captured.clone());
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+
+            let _api_url = EnvVarGuard::set("AGENTDESK_API_URL", &format!("http://{addr}"));
+            let _repo_env = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
+
+            let result = cmd_dispatch(
+                &["423,405".to_string(), "407".to_string()],
+                None,
+                Some("project-agentdesk"),
+                true,
+                Some(2),
+                true,
+            );
+
+            server.abort();
+            assert!(result.is_ok(), "cmd_dispatch failed: {result:?}");
+
+            let payload = captured
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("dispatch payload must be captured");
+            assert_eq!(payload["repo"], "itismyfield/AgentDesk");
+            assert_eq!(payload["agent_id"], "project-agentdesk");
+            assert_eq!(payload["auto_assign_agent"], true);
+            assert_eq!(payload["activate"], true);
+            assert_eq!(payload["unified_thread"], true);
+            assert_eq!(payload["max_concurrent_threads"], 2);
+            assert_eq!(payload["groups"][0]["issues"], json!([423, 405]));
+            assert_eq!(payload["groups"][0]["sequential"], true);
+            assert_eq!(payload["groups"][1]["issues"], json!([407]));
+            assert_eq!(payload["groups"][1]["sequential"], false);
+        });
     }
 
     #[test]

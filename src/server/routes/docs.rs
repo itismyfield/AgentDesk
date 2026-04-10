@@ -1362,6 +1362,65 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
+            "/api/auto-queue/dispatch",
+            "auto-queue",
+            "Declaratively generate and optionally activate grouped auto-queue work",
+        )
+        .with_params([
+            (
+                "repo",
+                body_param("string", false, "Restrict issues to one repository"),
+            ),
+            (
+                "agent_id",
+                body_param(
+                    "string",
+                    false,
+                    "Target agent; also used for auto-assignment when requested",
+                ),
+            ),
+            (
+                "groups",
+                body_param(
+                    "object[]",
+                    true,
+                    "Ordered issue groups. Each item accepts issues, sequential, batch_phase, and thread_group",
+                ),
+            ),
+            (
+                "unified_thread",
+                body_param(
+                    "boolean",
+                    false,
+                    "Accepted for compatibility but ignored; slot pooling stays enabled",
+                )
+                .with_default(false),
+            ),
+            (
+                "activate",
+                body_param("boolean", false, "Immediately promote and dispatch the generated run")
+                    .with_default(true),
+            ),
+            (
+                "auto_assign_agent",
+                body_param(
+                    "boolean",
+                    false,
+                    "Assign unowned cards to agent_id before queue generation",
+                )
+                .with_default(true),
+            ),
+            (
+                "max_concurrent_threads",
+                body_param("number", false, "Upper bound for simultaneously active groups"),
+            ),
+        ])
+        .with_example(
+            json!({"body": {"repo": "test-repo", "agent_id": "project-agentdesk", "groups": [{"issues": [423, 405], "sequential": true}, {"issues": [407]}], "unified_thread": true, "activate": true, "auto_assign_agent": true, "max_concurrent_threads": 2}}),
+            json!({"run": {"id": "run-1", "status": "active", "thread_group_count": 2, "max_concurrent_threads": 2}, "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "dispatched"}], "thread_groups": {"0": {"status": "active"}, "1": {"status": "pending"}}, "activated": true, "dispatch": {"count": 1}}),
+        ),
+        ep(
+            "POST",
             "/api/auto-queue/activate",
             "auto-queue",
             "Dispatch the next pending auto-queue entries",
@@ -1425,6 +1484,27 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({"query": {"repo": "test-repo"}}),
             json!({"run": {"id": "run-1", "status": "active"}, "entries": [{"id": "entry-1", "status": "pending", "github_issue_number": 423}], "agents": {"agent-1": {"pending": 1, "dispatched": 0, "done": 0, "skipped": 0}}, "thread_groups": {"0": {"status": "pending", "pending": 1, "dispatched": 0, "done": 0, "skipped": 0, "entries": [{"id": "entry-1", "card_id": "card-423", "status": "pending", "github_issue_number": 423, "batch_phase": 0}]}}}),
+        ),
+        ep(
+            "PATCH",
+            "/api/auto-queue/entries/{id}",
+            "auto-queue",
+            "Update one pending auto-queue entry",
+        )
+        .with_params([
+            ("id", path_param("Auto-queue entry ID")),
+            (
+                "thread_group",
+                body_param("number", false, "Move the entry to another thread group"),
+            ),
+            (
+                "priority_rank",
+                body_param("number", false, "Set the entry's rank within its group"),
+            ),
+        ])
+        .with_example(
+            json!({"path": {"id": "entry-1"}, "body": {"thread_group": 1, "priority_rank": 0}}),
+            json!({"ok": true, "entry": {"id": "entry-1", "thread_group": 1, "priority_rank": 0, "status": "pending"}}),
         ),
         ep(
             "PATCH",
@@ -1660,6 +1740,16 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "GET",
+            "/api/help",
+            "docs",
+            "Agent-friendly API inventory with categories, params, and examples",
+        )
+        .with_example(
+            json!({}),
+            json!({"categories": [{"name": "auto-queue", "count": 15}], "endpoints": [{"method": "POST", "path": "/api/auto-queue/dispatch", "category": "auto-queue"}]}),
+        ),
+        ep(
+            "GET",
             "/api/docs",
             "docs",
             "List documentation categories or return the legacy flat endpoint list",
@@ -1670,7 +1760,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )])
         .with_example(
             json!({}),
-            json!({"categories": [{"name": "auto-queue", "count": 13, "description": "Auto-queue generation, activation, slot repair, and queue execution control."}]}),
+            json!({"categories": [{"name": "auto-queue", "count": 15, "description": "Auto-queue generation, activation, slot repair, and queue execution control."}]}),
         ),
         ep(
             "GET",
@@ -1727,6 +1817,18 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"ok": true, "card_id": "card-1", "decision": "requeue", "message": "Card moved back to ready for reprioritization"}),
         ),
     ]
+}
+
+/// GET /api/help — combined category summary plus detailed endpoint inventory.
+pub async fn api_help() -> (StatusCode, Json<Value>) {
+    let endpoints = all_endpoints();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "categories": category_summaries(&endpoints),
+            "endpoints": endpoints,
+        })),
+    )
 }
 
 /// GET /api/docs — summary by category, or legacy flat format when `?format=flat`.

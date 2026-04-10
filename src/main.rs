@@ -26,7 +26,7 @@ mod integration_tests;
 pub(crate) use cli::agentdesk_runtime_root;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 // ── Clap CLI definition ──────────────────────────────────────
@@ -206,10 +206,7 @@ enum Commands {
         status: Option<String>,
     },
     /// Dispatch operations
-    Dispatch {
-        #[command(subcommand)]
-        action: DispatchAction,
-    },
+    Dispatch(DispatchArgs),
     /// Resume a stuck kanban card from its current state
     Resume {
         /// Card ID or GitHub issue number
@@ -291,6 +288,30 @@ enum DispatchAction {
         /// Kanban card ID
         card_id: String,
     },
+}
+
+#[derive(Args)]
+struct DispatchArgs {
+    #[command(subcommand)]
+    action: Option<DispatchAction>,
+    /// Issue groups such as `423,405` or `407`
+    #[arg(value_name = "ISSUE_GROUP")]
+    issue_groups: Vec<String>,
+    /// Repository full name. Defaults to git remote inference when possible.
+    #[arg(long)]
+    repo: Option<String>,
+    /// Target agent id for auto-assignment and activation filtering.
+    #[arg(long = "agent")]
+    agent_id: Option<String>,
+    /// Legacy compatibility flag forwarded to the API.
+    #[arg(long)]
+    unified: bool,
+    /// Max number of concurrently active thread groups.
+    #[arg(long)]
+    concurrent: Option<i64>,
+    /// Generate the run but do not activate it.
+    #[arg(long)]
+    no_activate: bool,
 }
 
 #[derive(Subcommand)]
@@ -495,13 +516,23 @@ fn main() -> Result<()> {
             Some(Commands::Cards { status }) => {
                 return exit_for_cli(cli::client::cmd_cards(status.as_deref()));
             }
-            Some(Commands::Dispatch { action }) => {
-                return exit_for_cli(match action {
-                    DispatchAction::List => cli::client::cmd_dispatch_list(),
-                    DispatchAction::Retry { card_id } => cli::client::cmd_dispatch_retry(&card_id),
-                    DispatchAction::Redispatch { card_id } => {
+            Some(Commands::Dispatch(args)) => {
+                return exit_for_cli(match args.action {
+                    Some(DispatchAction::List) => cli::client::cmd_dispatch_list(),
+                    Some(DispatchAction::Retry { card_id }) => {
+                        cli::client::cmd_dispatch_retry(&card_id)
+                    }
+                    Some(DispatchAction::Redispatch { card_id }) => {
                         cli::client::cmd_dispatch_redispatch(&card_id)
                     }
+                    None => cli::client::cmd_dispatch(
+                        &args.issue_groups,
+                        args.repo.as_deref(),
+                        args.agent_id.as_deref(),
+                        args.unified,
+                        args.concurrent,
+                        !args.no_activate,
+                    ),
                 });
             }
             Some(Commands::Resume {

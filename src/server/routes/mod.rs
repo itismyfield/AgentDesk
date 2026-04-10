@@ -441,8 +441,10 @@ pub fn api_router(
         .route("/cron-jobs", get(cron_api::list_cron_jobs))
         // Auto-queue
         .route("/auto-queue/generate", post(auto_queue::generate))
+        .route("/auto-queue/dispatch", post(auto_queue::dispatch))
         .route("/auto-queue/activate", post(auto_queue::activate))
         .route("/auto-queue/status", get(auto_queue::status))
+        .route("/auto-queue/entries/{id}", patch(auto_queue::update_entry))
         .route(
             "/auto-queue/entries/{id}/skip",
             patch(auto_queue::skip_entry),
@@ -488,6 +490,7 @@ pub fn api_router(
         .route("/receipt", get(receipt::get_receipt))
         .route("/skills-trend", get(analytics::skills_trend))
         // Docs
+        .route("/help", get(docs::api_help))
         .route("/docs", get(docs::api_docs))
         .route("/docs/{category}", get(docs::api_docs_category))
         // Review verdict

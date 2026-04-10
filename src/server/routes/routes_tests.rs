@@ -1647,6 +1647,15 @@ async fn api_docs_category_exposes_auto_queue_params_and_examples() {
         generate["example"]["response"]["run"]["unified_thread"],
         serde_json::json!(false)
     );
+
+    let dispatch = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/auto-queue/dispatch")
+        .expect("auto-queue dispatch endpoint must be present");
+    assert_eq!(dispatch["params"]["groups"]["required"], true);
+    assert_eq!(dispatch["params"]["activate"]["default"], true);
+    assert_eq!(dispatch["params"]["auto_assign_agent"]["default"], true);
+    assert_eq!(dispatch["example"]["response"]["dispatch"]["count"], 1);
 }
 
 #[tokio::test]
@@ -1721,7 +1730,10 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
     for path in [
         "/api/kanban-cards/{id}/reopen",
         "/api/review-decision",
+        "/api/auto-queue/dispatch",
+        "/api/auto-queue/entries/{id}",
         "/api/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
+        "/api/help",
         "/api/docs/{category}",
     ] {
         assert!(
@@ -1729,6 +1741,39 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
             "flat docs must include {path}"
         );
     }
+}
+
+#[tokio::test]
+async fn api_help_exposes_detailed_endpoint_inventory() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(Request::builder().uri("/help").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|category| category["name"] == "auto-queue"),
+        "/help must expose category summaries"
+    );
+    let dispatch = json["endpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|ep| ep["path"] == "/api/auto-queue/dispatch")
+        .expect("/help must include the declarative dispatch endpoint");
+    assert_eq!(dispatch["params"]["groups"]["required"], true);
 }
 
 #[tokio::test]
@@ -4845,6 +4890,212 @@ async fn redispatch_preserves_review_dispatch_type() {
         review_status.is_none(),
         "redispatch should clear stale review_status before creating the new review dispatch"
     );
+}
+
+#[tokio::test]
+async fn auto_queue_dispatch_prepares_backlog_cards_and_auto_assigns_agent() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "project-agentdesk");
+    ensure_auto_queue_tables(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, created_at, updated_at
+            ) VALUES (
+                'card-dq-423', 'Issue #423', 'backlog', 'high', NULL, 'test-repo', 423,
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, created_at, updated_at
+            ) VALUES (
+                'card-dq-405', 'Issue #405', 'ready', 'medium', NULL, 'test-repo', 405,
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, created_at, updated_at
+            ) VALUES (
+                'card-dq-407', 'Issue #407', 'requested', 'medium', NULL, 'test-repo', 407,
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/dispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "project-agentdesk",
+                        "groups": [
+                            {"issues": [423, 405], "sequential": true},
+                            {"issues": [407]}
+                        ],
+                        "activate": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["activated"], false);
+    assert_eq!(json["requested"]["auto_assign_agent"], true);
+    assert_eq!(json["run"]["status"], "generated");
+
+    let run_id = json["run"]["id"]
+        .as_str()
+        .expect("dispatch run id must be present");
+    let entries = json["entries"]
+        .as_array()
+        .expect("dispatch snapshot must include entries");
+    assert_eq!(entries.len(), 3);
+
+    let conn = db.lock().unwrap();
+    let assigned_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kanban_cards
+             WHERE id IN ('card-dq-423', 'card-dq-405', 'card-dq-407')
+               AND assigned_agent_id = 'project-agentdesk'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(assigned_count, 3);
+
+    let backlog_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-dq-423'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(backlog_status, "ready");
+
+    let entry_layout: Vec<(i64, i64, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT kc.github_issue_number, e.thread_group, e.priority_rank
+                 FROM auto_queue_entries e
+                 JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+                 WHERE e.run_id = ?1
+                 ORDER BY kc.github_issue_number ASC",
+            )
+            .unwrap();
+        stmt.query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    };
+    assert_eq!(entry_layout, vec![(405, 0, 1), (407, 1, 0), (423, 0, 0)]);
+}
+
+#[tokio::test]
+async fn auto_queue_update_entry_moves_pending_entry_and_syncs_run_groups() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_agent(&db, "agent-update");
+    seed_auto_queue_card(&db, "card-update-1", 1801, "ready", "agent-update");
+    seed_auto_queue_card(&db, "card-update-2", 1802, "ready", "agent-update");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-update-entry', 'test-repo', 'agent-update', 'generated', 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-update-1', 'run-update-entry', 'card-update-1', 'agent-update', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-update-2', 'run-update-entry', 'card-update-2', 'agent-update', 'pending', 1, 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/auto-queue/entries/entry-update-2")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "thread_group": 3,
+                        "priority_rank": 0
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["entry"]["thread_group"], 3);
+    assert_eq!(json["entry"]["priority_rank"], 0);
+
+    let conn = db.lock().unwrap();
+    let run_meta: (i64, i64) = conn
+        .query_row(
+            "SELECT max_concurrent_threads, thread_group_count
+             FROM auto_queue_runs
+             WHERE id = 'run-update-entry'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(run_meta, (2, 2));
 }
 
 #[tokio::test]

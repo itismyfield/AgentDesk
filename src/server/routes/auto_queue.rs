@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::AppState;
@@ -13,7 +13,7 @@ use crate::services::provider::ProviderKind;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GenerateEntryBody {
     pub issue_number: i64,
     pub batch_phase: Option<i64>,
@@ -64,6 +64,31 @@ pub struct ReorderBody {
 pub struct UpdateRunBody {
     pub status: Option<String>,
     pub unified_thread: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DispatchGroupBody {
+    pub issues: Vec<i64>,
+    pub sequential: Option<bool>,
+    pub batch_phase: Option<i64>,
+    pub thread_group: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DispatchBody {
+    pub repo: Option<String>,
+    pub agent_id: Option<String>,
+    pub groups: Vec<DispatchGroupBody>,
+    pub unified_thread: Option<bool>,
+    pub activate: Option<bool>,
+    pub auto_assign_agent: Option<bool>,
+    pub max_concurrent_threads: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateEntryBody {
+    pub thread_group: Option<i64>,
+    pub priority_rank: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,6 +432,15 @@ struct RequestedGenerateEntry {
     thread_group: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedDispatchCard {
+    issue_number: i64,
+    card_id: String,
+    repo_id: Option<String>,
+    status: String,
+    assigned_agent_id: Option<String>,
+}
+
 fn normalize_generate_entries(
     body: &GenerateBody,
 ) -> Result<Option<Vec<RequestedGenerateEntry>>, String> {
@@ -447,6 +481,230 @@ fn normalize_generate_entries(
     }
 
     Ok(Some(normalized))
+}
+
+fn normalize_dispatch_entries(body: &DispatchBody) -> Result<Vec<GenerateEntryBody>, String> {
+    if body.groups.is_empty() {
+        return Err("groups must contain at least one issue group".to_string());
+    }
+
+    let mut entries = Vec::new();
+    let mut seen_issues = HashSet::new();
+    let mut seen_groups = HashSet::new();
+
+    for (index, group) in body.groups.iter().enumerate() {
+        if group.issues.is_empty() {
+            return Err(format!("groups[{index}] must contain at least one issue"));
+        }
+
+        let thread_group = group.thread_group.unwrap_or(index as i64);
+        if thread_group < 0 {
+            return Err(format!("groups[{index}].thread_group must be >= 0"));
+        }
+        if !seen_groups.insert(thread_group) {
+            return Err(format!(
+                "duplicate thread_group in dispatch payload: {thread_group}"
+            ));
+        }
+
+        let batch_phase = group.batch_phase.unwrap_or(0);
+        if batch_phase < 0 {
+            return Err(format!("groups[{index}].batch_phase must be >= 0"));
+        }
+
+        if group.sequential == Some(false) && group.issues.len() > 1 {
+            return Err(format!(
+                "groups[{index}] sets sequential=false, but multi-issue groups are always sequential"
+            ));
+        }
+
+        for issue_number in &group.issues {
+            if !seen_issues.insert(*issue_number) {
+                return Err(format!(
+                    "duplicate issue_number in dispatch payload: {issue_number}"
+                ));
+            }
+            entries.push(GenerateEntryBody {
+                issue_number: *issue_number,
+                batch_phase: Some(batch_phase),
+                thread_group: Some(thread_group),
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
+fn resolve_dispatch_cards(
+    conn: &rusqlite::Connection,
+    repo: Option<&String>,
+    issue_numbers: &[i64],
+) -> Result<HashMap<i64, ResolvedDispatchCard>, String> {
+    if issue_numbers.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut conditions = Vec::new();
+
+    if let Some(repo) = repo {
+        conditions.push(format!("repo_id = ?{}", params.len() + 1));
+        params.push(Box::new(repo.clone()));
+    }
+
+    let placeholders = issue_numbers
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", params.len() + index + 1))
+        .collect::<Vec<_>>()
+        .join(",");
+    conditions.push(format!("github_issue_number IN ({placeholders})"));
+    for issue_number in issue_numbers {
+        params.push(Box::new(*issue_number));
+    }
+
+    let sql = format!(
+        "SELECT id, repo_id, status, assigned_agent_id, github_issue_number
+         FROM kanban_cards
+         WHERE {}",
+        conditions.join(" AND ")
+    );
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(|err| format!("{err}"))?;
+    let rows: Vec<ResolvedDispatchCard> = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok(ResolvedDispatchCard {
+                card_id: row.get(0)?,
+                repo_id: row.get(1)?,
+                status: row.get(2)?,
+                assigned_agent_id: row.get(3)?,
+                issue_number: row.get(4)?,
+            })
+        })
+        .map_err(|err| format!("{err}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+    drop(stmt);
+
+    let mut cards_by_issue = HashMap::new();
+    for card in rows {
+        if cards_by_issue
+            .insert(card.issue_number, card.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "multiple kanban cards matched issue #{}; specify repo to disambiguate",
+                card.issue_number
+            ));
+        }
+    }
+
+    for issue_number in issue_numbers {
+        if !cards_by_issue.contains_key(issue_number) {
+            let suffix = repo
+                .map(|repo| format!(" in repo {repo}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "kanban card not found for issue #{issue_number}{suffix}"
+            ));
+        }
+    }
+
+    Ok(cards_by_issue)
+}
+
+fn apply_dispatch_agent_assignments(
+    conn: &rusqlite::Connection,
+    cards_by_issue: &mut HashMap<i64, ResolvedDispatchCard>,
+    agent_id: Option<&str>,
+    auto_assign_agent: bool,
+) -> Result<(), String> {
+    let target_agent = agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    for issue_number in cards_by_issue.keys().copied().collect::<Vec<_>>() {
+        let Some(card) = cards_by_issue.get_mut(&issue_number) else {
+            continue;
+        };
+        let current_agent = card
+            .assigned_agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        match (target_agent.as_deref(), current_agent.as_deref()) {
+            (Some(target), Some(current)) if current != target => {
+                let repo_hint = card
+                    .repo_id
+                    .as_deref()
+                    .map(|repo| format!(" in repo {repo}"))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "issue #{issue_number}{repo_hint} is assigned to {current}, not {target}"
+                ));
+            }
+            (Some(target), None) if auto_assign_agent => {
+                conn.execute(
+                    "UPDATE kanban_cards
+                     SET assigned_agent_id = ?1,
+                         updated_at = datetime('now')
+                     WHERE id = ?2
+                       AND (assigned_agent_id IS NULL OR TRIM(assigned_agent_id) = '')",
+                    rusqlite::params![target, card.card_id],
+                )
+                .map_err(|err| format!("{err}"))?;
+                card.assigned_agent_id = Some(target.to_string());
+            }
+            (Some(_), None) => {
+                return Err(format!(
+                    "issue #{issue_number} has no assigned agent; provide auto_assign_agent=true or assign it first"
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "issue #{issue_number} has no assigned agent; provide agent_id or assign it first"
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_dispatchable_cards(
+    conn: &rusqlite::Connection,
+    cards_by_issue: &HashMap<i64, ResolvedDispatchCard>,
+) -> Result<(), String> {
+    crate::pipeline::ensure_loaded();
+
+    for card in cards_by_issue.values() {
+        if card.status == "backlog" {
+            continue;
+        }
+
+        let effective = crate::pipeline::resolve_for_card(
+            conn,
+            card.repo_id.as_deref(),
+            card.assigned_agent_id.as_deref(),
+        );
+        let enqueueable_states = enqueueable_states_for(&effective);
+        if enqueueable_states.iter().any(|state| state == &card.status) {
+            continue;
+        }
+
+        return Err(format!(
+            "issue #{} is in status '{}' and cannot be auto-queued; allowed states are backlog or {}",
+            card.issue_number,
+            card.status,
+            enqueueable_states.join(", ")
+        ));
+    }
+
+    Ok(())
 }
 
 fn allocate_slot_for_group_agent(
@@ -1494,6 +1752,159 @@ fn run_to_json(conn: &rusqlite::Connection, run_id: &str) -> serde_json::Value {
         },
     )
     .unwrap_or(json!(null))
+}
+
+fn sync_run_group_metadata(conn: &rusqlite::Connection, run_id: &str) -> rusqlite::Result<()> {
+    let thread_group_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT COALESCE(thread_group, 0))
+             FROM auto_queue_entries
+             WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+        .max(1);
+
+    conn.execute(
+        "UPDATE auto_queue_runs
+         SET thread_group_count = ?1,
+             max_concurrent_threads = ?1
+         WHERE id = ?2",
+        rusqlite::params![thread_group_count, run_id],
+    )?;
+    Ok(())
+}
+
+fn queue_status_json(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    repo: Option<&str>,
+    agent_id: Option<&str>,
+) -> Value {
+    let run = run_to_json(conn, run_id);
+
+    let entry_ids: Vec<String> = {
+        let mut entry_sql = String::from(
+            "SELECT e.id FROM auto_queue_entries e \
+             LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
+             WHERE e.run_id = ?1",
+        );
+        let mut entry_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(run_id.to_string())];
+        if let Some(agent_id) = agent_id.filter(|value| !value.is_empty()) {
+            entry_sql.push_str(&format!(" AND e.agent_id = ?{}", entry_params.len() + 1));
+            entry_params.push(Box::new(agent_id.to_string()));
+        }
+        if let Some(repo) = repo.filter(|value| !value.is_empty()) {
+            entry_sql.push_str(&format!(" AND kc.repo_id = ?{}", entry_params.len() + 1));
+            entry_params.push(Box::new(repo.to_string()));
+        }
+        entry_sql.push_str(" ORDER BY e.priority_rank ASC");
+
+        let entry_refs: Vec<&dyn rusqlite::types::ToSql> =
+            entry_params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = match conn.prepare(&entry_sql) {
+            Ok(stmt) => stmt,
+            Err(_) => {
+                return json!({
+                    "run": run,
+                    "entries": [],
+                    "agents": {},
+                    "thread_groups": {},
+                });
+            }
+        };
+        stmt.query_map(entry_refs.as_slice(), |row| row.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect())
+            .unwrap_or_default()
+    };
+
+    let entries: Vec<Value> = entry_ids
+        .iter()
+        .map(|entry_id| entry_to_json(conn, entry_id))
+        .collect();
+
+    let mut agents: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    for entry in &entries {
+        let agent = entry["agent_id"].as_str().unwrap_or("unknown").to_string();
+        let entry_status = entry["status"].as_str().unwrap_or("pending");
+        let counter = agents
+            .entry(agent)
+            .or_insert_with(|| json!({"pending": 0, "dispatched": 0, "done": 0, "skipped": 0}));
+        if let Some(obj) = counter.as_object_mut() {
+            if let Some(val) = obj.get_mut(entry_status) {
+                *val = json!(val.as_i64().unwrap_or(0) + 1);
+            }
+        }
+    }
+
+    let mut thread_groups: std::collections::HashMap<i64, Value> = std::collections::HashMap::new();
+    for entry in &entries {
+        let group = entry["thread_group"].as_i64().unwrap_or(0);
+        let entry_status = entry["status"].as_str().unwrap_or("pending");
+        let counter = thread_groups.entry(group).or_insert_with(|| {
+            json!({
+                "pending": 0,
+                "dispatched": 0,
+                "done": 0,
+                "skipped": 0,
+                "entries": [],
+                "reason": Value::Null,
+            })
+        });
+        if let Some(obj) = counter.as_object_mut() {
+            if let Some(val) = obj.get_mut(entry_status) {
+                *val = json!(val.as_i64().unwrap_or(0) + 1);
+            }
+            if obj
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .map(|value| value.is_empty())
+                .unwrap_or(true)
+            {
+                if let Some(reason) = entry["reason"].as_str() {
+                    obj.insert("reason".to_string(), json!(reason));
+                }
+            }
+            if let Some(arr) = obj
+                .get_mut("entries")
+                .and_then(|value| value.as_array_mut())
+            {
+                arr.push(json!({
+                    "id": entry["id"],
+                    "card_id": entry["card_id"],
+                    "status": entry_status,
+                    "github_issue_number": entry["github_issue_number"],
+                    "batch_phase": entry["batch_phase"],
+                }));
+            }
+        }
+    }
+
+    let mut group_statuses = serde_json::Map::new();
+    for (group_num, summary) in &thread_groups {
+        let dispatched_count = summary["dispatched"].as_i64().unwrap_or(0);
+        let pending_count = summary["pending"].as_i64().unwrap_or(0);
+        let group_status = if dispatched_count > 0 {
+            "active"
+        } else if pending_count > 0 {
+            "pending"
+        } else {
+            "done"
+        };
+        let mut group_obj = summary.clone();
+        group_obj["status"] = json!(group_status);
+        group_statuses.insert(group_num.to_string(), group_obj);
+    }
+
+    json!({
+        "run": run,
+        "entries": entries,
+        "agents": agents,
+        "thread_groups": group_statuses,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2866,6 +3277,187 @@ pub async fn activate(
     )
 }
 
+/// POST /api/auto-queue/dispatch
+/// Declaratively generate and optionally activate an auto-queue run.
+pub async fn dispatch(
+    State(state): State<AppState>,
+    Json(body): Json<DispatchBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let requested_entries = match normalize_dispatch_entries(&body) {
+        Ok(entries) => entries,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
+        }
+    };
+    let issue_numbers: Vec<i64> = requested_entries
+        .iter()
+        .map(|entry| entry.issue_number)
+        .collect();
+    let auto_assign_agent = body.auto_assign_agent.unwrap_or(body.agent_id.is_some());
+
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    let mut cards_by_issue = match resolve_dispatch_cards(&conn, body.repo.as_ref(), &issue_numbers)
+    {
+        Ok(cards) => cards,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
+        }
+    };
+
+    if let Err(err) = apply_dispatch_agent_assignments(
+        &conn,
+        &mut cards_by_issue,
+        body.agent_id.as_deref(),
+        auto_assign_agent,
+    ) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
+    }
+
+    if let Err(err) = validate_dispatchable_cards(&conn, &cards_by_issue) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
+    }
+    drop(conn);
+
+    let distinct_groups = requested_entries
+        .iter()
+        .filter_map(|entry| entry.thread_group)
+        .collect::<HashSet<_>>()
+        .len()
+        .max(1) as i64;
+    let generate_body = GenerateBody {
+        repo: body.repo.clone(),
+        agent_id: body.agent_id.clone(),
+        issue_numbers: None,
+        entries: Some(requested_entries.clone()),
+        mode: Some("priority-sort".to_string()),
+        unified_thread: body.unified_thread,
+        parallel: Some(distinct_groups > 1),
+        max_concurrent_threads: Some(
+            body.max_concurrent_threads
+                .unwrap_or(distinct_groups)
+                .clamp(1, 10),
+        ),
+        max_concurrent_per_agent: None,
+    };
+
+    let (generate_status, generated_body) =
+        generate(State(state.clone()), Json(generate_body)).await;
+    if generate_status != StatusCode::OK {
+        return (generate_status, generated_body);
+    }
+
+    let run_id = match generated_body
+        .0
+        .get("run")
+        .and_then(|run| run.get("id"))
+        .and_then(Value::as_str)
+    {
+        Some(run_id) => run_id.to_string(),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "dispatch generation did not produce a run"})),
+            );
+        }
+    };
+
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+    let mut rank_per_group = HashMap::<i64, i64>::new();
+    for entry in &requested_entries {
+        let thread_group = entry.thread_group.unwrap_or(0);
+        let priority_rank = rank_per_group.entry(thread_group).or_insert(0);
+        let Some(card) = cards_by_issue.get(&entry.issue_number) else {
+            continue;
+        };
+        if let Err(err) = conn.execute(
+            "UPDATE auto_queue_entries
+             SET thread_group = ?1,
+                 priority_rank = ?2
+             WHERE run_id = ?3
+               AND kanban_card_id = ?4",
+            rusqlite::params![thread_group, *priority_rank, run_id, card.card_id],
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{err}")})),
+            );
+        }
+        *priority_rank += 1;
+    }
+    drop(conn);
+
+    let activate_now = body.activate.unwrap_or(true);
+    let activation = if activate_now {
+        let (activate_status, activate_body) = activate(
+            State(state.clone()),
+            Json(ActivateBody {
+                run_id: Some(run_id.clone()),
+                repo: body.repo.clone(),
+                agent_id: body.agent_id.clone(),
+                thread_group: None,
+                unified_thread: body.unified_thread,
+                active_only: Some(false),
+            }),
+        )
+        .await;
+        if activate_status != StatusCode::OK {
+            return (activate_status, activate_body);
+        }
+        Some(activate_body.0)
+    } else {
+        None
+    };
+
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+    let mut snapshot = queue_status_json(
+        &conn,
+        &run_id,
+        body.repo.as_deref(),
+        body.agent_id.as_deref(),
+    );
+    if let Some(obj) = snapshot.as_object_mut() {
+        obj.insert("activated".to_string(), json!(activate_now));
+        obj.insert(
+            "requested".to_string(),
+            json!({
+                "groups": body.groups.len(),
+                "issues": issue_numbers,
+                "auto_assign_agent": auto_assign_agent,
+            }),
+        );
+        if let Some(activation) = activation {
+            obj.insert("dispatch".to_string(), activation);
+        }
+    }
+
+    (StatusCode::OK, Json(snapshot))
+}
+
 /// GET /api/auto-queue/status
 pub async fn status(
     State(state): State<AppState>,
@@ -2917,122 +3509,109 @@ pub async fn status(
         );
     };
 
-    let run = run_to_json(&conn, &run_id);
+    (
+        StatusCode::OK,
+        Json(queue_status_json(
+            &conn,
+            &run_id,
+            query.repo.as_deref(),
+            query.agent_id.as_deref(),
+        )),
+    )
+}
 
-    // Get entries (filtered by agent_id and repo if specified)
-    let entry_ids: Vec<String> = {
-        let mut entry_sql = String::from(
-            "SELECT e.id FROM auto_queue_entries e \
-             LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
-             WHERE e.run_id = ?1",
+/// PATCH /api/auto-queue/entries/{id}
+pub async fn update_entry(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateEntryBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if body.thread_group.is_none() && body.priority_rank.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no fields to update"})),
         );
-        let mut entry_params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(run_id.clone())];
-        if let Some(ref agent_id) = query.agent_id {
-            entry_sql.push_str(&format!(" AND e.agent_id = ?{}", entry_params.len() + 1));
-            entry_params.push(Box::new(agent_id.clone()));
+    }
+    if let Some(thread_group) = body.thread_group {
+        if thread_group < 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "thread_group must be >= 0"})),
+            );
         }
-        if let Some(ref repo) = query.repo {
-            entry_sql.push_str(&format!(" AND kc.repo_id = ?{}", entry_params.len() + 1));
-            entry_params.push(Box::new(repo.clone()));
+    }
+    if let Some(priority_rank) = body.priority_rank {
+        if priority_rank < 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "priority_rank must be >= 0"})),
+            );
         }
-        entry_sql.push_str(" ORDER BY e.priority_rank ASC");
+    }
 
-        let entry_refs: Vec<&dyn rusqlite::types::ToSql> =
-            entry_params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn.prepare(&entry_sql).unwrap();
-        stmt.query_map(entry_refs.as_slice(), |row| row.get::<_, String>(0))
-            .ok()
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
+    let conn = match state.db.separate_conn() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
     };
+    let entry_info: Option<(String, String)> = conn
+        .query_row(
+            "SELECT run_id, status
+             FROM auto_queue_entries
+             WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
 
-    let entries: Vec<serde_json::Value> = entry_ids
-        .iter()
-        .map(|id| entry_to_json_with_guild(&conn, id, guild_id))
-        .collect();
-
-    // Agent summary
-    let mut agents: std::collections::HashMap<String, serde_json::Value> =
-        std::collections::HashMap::new();
-    for entry in &entries {
-        let agent = entry["agent_id"].as_str().unwrap_or("unknown").to_string();
-        let entry_status = entry["status"].as_str().unwrap_or("pending");
-        let counter = agents
-            .entry(agent)
-            .or_insert_with(|| json!({"pending": 0, "dispatched": 0, "done": 0, "skipped": 0}));
-        if let Some(obj) = counter.as_object_mut() {
-            if let Some(val) = obj.get_mut(entry_status) {
-                *val = json!(val.as_i64().unwrap_or(0) + 1);
-            }
-        }
+    let Some((run_id, status)) = entry_info else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "entry not found"})),
+        );
+    };
+    if status != "pending" {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "only pending entries can be updated"})),
+        );
     }
 
-    // #140: Thread group summary
-    let mut thread_groups: std::collections::HashMap<i64, serde_json::Value> =
-        std::collections::HashMap::new();
-    for entry in &entries {
-        let group = entry["thread_group"].as_i64().unwrap_or(0);
-        let entry_status = entry["status"].as_str().unwrap_or("pending");
-        let counter = thread_groups.entry(group).or_insert_with(|| {
-            json!({
-                "pending": 0,
-                "dispatched": 0,
-                "done": 0,
-                "skipped": 0,
-                "entries": [],
-                "reason": serde_json::Value::Null,
-            })
-        });
-        if let Some(obj) = counter.as_object_mut() {
-            if let Some(val) = obj.get_mut(entry_status) {
-                *val = json!(val.as_i64().unwrap_or(0) + 1);
-            }
-            if obj
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .map(|value| value.is_empty())
-                .unwrap_or(true)
-            {
-                if let Some(reason) = entry["reason"].as_str() {
-                    obj.insert("reason".to_string(), json!(reason));
-                }
-            }
-            if let Some(arr) = obj.get_mut("entries").and_then(|v| v.as_array_mut()) {
-                arr.push(json!({
-                    "id": entry["id"],
-                    "card_id": entry["card_id"],
-                    "status": entry_status,
-                    "github_issue_number": entry["github_issue_number"],
-                    "batch_phase": entry["batch_phase"],
-                }));
-            }
-        }
+    let changed = conn
+        .execute(
+            "UPDATE auto_queue_entries
+             SET thread_group = COALESCE(?1, thread_group),
+                 priority_rank = COALESCE(?2, priority_rank)
+             WHERE id = ?3
+               AND status = 'pending'",
+            rusqlite::params![body.thread_group, body.priority_rank, id],
+        )
+        .unwrap_or(0);
+    if changed == 0 {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "entry not found or not pending"})),
+        );
     }
 
-    // Determine group-level statuses
-    let mut group_statuses: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    for (group_num, summary) in &thread_groups {
-        let dispatched_count = summary["dispatched"].as_i64().unwrap_or(0);
-        let pending_count = summary["pending"].as_i64().unwrap_or(0);
-        let group_status = if dispatched_count > 0 {
-            "active"
-        } else if pending_count > 0 {
-            "pending"
-        } else {
-            "done"
-        };
-        let mut group_obj = summary.clone();
-        group_obj["status"] = json!(group_status);
-        group_statuses.insert(group_num.to_string(), group_obj);
+    if body.thread_group.is_some() {
+        if let Err(err) = sync_run_group_metadata(&conn, &run_id) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{err}")})),
+            );
+        }
     }
 
     (
         StatusCode::OK,
         Json(json!({
-            "run": run,
-            "entries": entries,
-            "agents": agents,
-            "thread_groups": group_statuses,
+            "ok": true,
+            "entry": entry_to_json(&conn, &id),
         })),
     )
 }
