@@ -2489,6 +2489,14 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                 let provider_for_restore = provider.clone();
                 tokio::spawn(async move {
                     gc_stale_fixed_working_sessions(&shared_for_tmux2).await;
+
+                    // #429: catch-up FIRST to minimize message loss window.
+                    catch_up_missed_messages(
+                        &http_for_tmux,
+                        &shared_for_tmux2,
+                        &provider_for_restore,
+                    ).await;
+
                     restore_inflight_turns(&http_for_tmux, &shared_for_tmux2, &provider_for_restore).await;
 
                     // Restore pending intervention queues saved during previous SIGTERM
@@ -2556,27 +2564,25 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                     // P1-2: Warn about legacy queue files that cannot be restored
                     warn_legacy_pending_queue_files(&provider_for_restore);
 
+                    // #429: thread-map validation in background — non-blocking
                     if let Some(ref db) = shared_for_tmux2.db {
-                        let (checked, cleared) =
-                            crate::server::routes::dispatches::validate_channel_thread_maps_on_startup(
-                                db,
-                                &token_for_kickoff,
-                            )
-                            .await;
-                        if checked > 0 || cleared > 0 {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!(
-                                "  [{ts}] 🧹 THREAD-MAP: validated {checked} mapping(s), cleared {cleared} stale binding(s)"
-                            );
-                        }
+                        let db_bg = db.clone();
+                        let token_bg = token_for_kickoff.clone();
+                        tokio::spawn(async move {
+                            let (checked, cleared) =
+                                crate::server::routes::dispatches::validate_channel_thread_maps_on_startup(
+                                    &db_bg,
+                                    &token_bg,
+                                )
+                                .await;
+                            if checked > 0 || cleared > 0 {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!(
+                                    "  [{ts}] 🧹 THREAD-MAP: validated {checked} mapping(s), cleared {cleared} stale binding(s)"
+                                );
+                            }
+                        });
                     }
-
-                    // Startup catch-up polling: recover messages lost during restart gap
-                    catch_up_missed_messages(
-                        &http_for_tmux,
-                        &shared_for_tmux2,
-                        &provider_for_restore,
-                    ).await;
 
                     // #226: Collect channels that recovery already handled (spawned + ended watchers).
                     // restore_tmux_watchers must skip these to prevent duplicate watcher creation.

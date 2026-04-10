@@ -2430,7 +2430,9 @@ mod tests {
             !managed_agents_root(root).join("alpha.memory").exists(),
             "role-context/*.memory should not be copied into config/agents"
         );
-        let role_map = fs::read_to_string(role_map_path(root)).unwrap();
+        // After merge_role_map_into_agentdesk_yaml, role_map.json is retired to .migrated
+        let migrated = role_map_path(root).with_extension("json.migrated");
+        let role_map = fs::read_to_string(&migrated).unwrap();
         assert!(role_map.contains("/tmp/config/agents/alpha/IDENTITY.md"));
         let backend = load_memory_backend(root);
         assert_eq!(backend.version, 2);
