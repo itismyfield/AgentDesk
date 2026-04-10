@@ -50,90 +50,41 @@
 
 ## 모듈 상세
 
-### 1. Discord Gateway (`src/discord/`)
+드리프트가 잦은 사실값은 generated docs를 source of truth로 관리한다. 아래 파일들은 `python3 scripts/generate_inventory_docs.py`로 갱신되며, CI가 stale 상태를 실패로 처리한다.
 
-RCC의 serenity 기반 Discord 봇을 그대로 이관.
+- [Module inventory](generated/module-inventory.md)
+- [Route inventory](generated/route-inventory.md)
+- [Bootstrap worker inventory](generated/worker-inventory.md)
 
-| 파일 | 역할 | 출처 |
-|------|------|------|
-| `gateway.rs` | Discord 연결, 이벤트 수신 | RCC `services/discord/mod.rs` |
-| `router.rs` | 메시지 라우팅, intake dedup | RCC `services/discord/router.rs` |
-| `turn_bridge.rs` | 에이전트 턴 관리, 하트비트 | RCC `services/discord/turn_bridge.rs` |
-| `meeting.rs` | 라운드테이블 회의 진행 | RCC `services/discord/meeting.rs` |
-| `multi_bot.rs` | 명령봇/알림봇/프로바이더봇 관리 | RCC 봇 관리 로직 |
+### 1. Discord Runtime (`src/services/discord/`)
 
-**변경점:**
-- `post_pcd_session_status()` HTTP 호출 → 내부 함수 `session::report_status()` 직접 호출
-- `post_meeting_to_pcd()` HTTP 호출 → 내부 함수 `db::save_meeting()` 직접 호출
-- 세션 상태 변경 시 Policy Engine에 이벤트 전파 (칸반 승격 등)
+Serenity/Poise 기반 Discord gateway, message router, turn bridge, tmux watcher, recovery, meeting orchestration이 이 트리에 모여 있다. 세부 파일 목록과 giant-file 현황은 generated module inventory를 참고한다.
 
-### 2. Session Manager (`src/session/`)
+핵심 역할:
+- Discord 이벤트 수신과 명령 처리
+- provider turn lifecycle과 tmux/process backend handoff
+- restart recovery, inflight restore, watcher cleanup
+- round-table meeting orchestration과 Discord side-effect delivery
 
-| 파일 | 역할 | 출처 |
-|------|------|------|
-| `tmux.rs` | tmux 세션 생성/파괴/모니터링 | RCC tmux 관리 |
-| `tracker.rs` | 세션 상태 DB 기록, 하트비트 | PCD `dispatched-sync.ts` |
-| `agent_link.rs` | 세션 ↔ 에이전트 매핑 | PCD `agentdesk-session.ts` + `role-map.ts` |
+### 2. Session + Provider Runtime (`src/services/`, `src/dispatch/`)
 
-**변경점:**
-- `role_map.json` 파일 의존 제거 → DB `agents` 테이블에서 직접 조회
-- 세션 상태 변경 → Core Event Bus를 통해 Policy Engine에 전파
+세션 실행 백엔드, provider adapter, dispatch lifecycle, runtime/platform abstraction이 여기에 있다. 이 영역은 "어떤 provider 프로세스를 어떻게 띄우고, 결과를 어떻게 회수하는가"를 담당한다.
+
+핵심 역할:
+- Claude/Codex/Gemini/Qwen provider 실행과 stderr/stdout 처리
+- tmux/process backend wrapper와 세션 진단
+- dispatch 생성, chaining, 상태 반영
+- OS/runtime path, binary, shell abstraction
 
 ### 3. HTTP Server (`src/server/`)
 
-| 파일 | 역할 | 출처 |
-|------|------|------|
-| `http.rs` | axum 기반 HTTP 서버 + 정적 파일 서빙 | PCD express 서버 |
-| `ws.rs` | WebSocket 브로드캐스트 | PCD `ws.ts` |
-| `auth.rs` | 인증 미들웨어 | PCD `auth.ts` |
-| `routes/` | REST API 엔드포인트 | PCD `routes/` |
+Axum router, WebSocket broadcast, auth middleware, REST API, bootstrap worker 시작점이 여기에 있다. 정확한 endpoint 목록은 generated route inventory를, `server::run`에서 시작되는 background task/thread 목록은 generated worker inventory를 참고한다.
 
-**API 목록:**
-```
-# 에이전트
-GET    /api/agents
-GET    /api/agents/:id
-PATCH  /api/agents/:id
-
-# 칸반
-GET    /api/kanban-cards
-POST   /api/kanban-cards
-PATCH  /api/kanban-cards/:id
-POST   /api/kanban-cards/:id/assign
-POST   /api/kanban-cards/:id/retry
-
-# 디스패치
-GET    /api/dispatches
-GET    /api/dispatches/:id
-POST   /api/dispatches            ← 새로 추가 (직접 dispatch 생성)
-
-# 세션
-GET    /api/sessions
-
-# GitHub
-GET    /api/github/repos
-POST   /api/github/repos          ← repo 등록
-GET    /api/github/repos/:id/issues
-
-# 회의
-GET    /api/meetings
-GET    /api/meetings/:id
-
-# 설정
-GET    /api/settings
-PUT    /api/settings
-GET    /api/settings/config
-PATCH  /api/settings/config
-GET    /api/settings/runtime-config
-PUT    /api/settings/runtime-config
-
-# 상태
-GET    /api/health
-GET    /api/rate-limits
-
-# Discord 프록시
-POST   /api/discord/send-target   ← 대시보드에서 Discord 메시지 전송
-```
+핵심 역할:
+- `/ws` WebSocket endpoint와 `/api/*` REST surface 제공
+- AppState 조립과 route handler wiring
+- startup reconcile, outbox loop, policy tick, background sync bootstrap
+- dashboard 정적 파일 서빙
 
 ### 4. Policy Engine (`src/engine/`)
 
