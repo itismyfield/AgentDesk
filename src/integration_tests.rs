@@ -2575,6 +2575,11 @@ mod tests {
 
         // Verify outbox entry transitioned to done
         assert_eq!(outbox_status(&db, "d-160-1"), vec!["done"]);
+        assert_eq!(
+            get_dispatch_status(&db, "d-160-1"),
+            "dispatched",
+            "successful notify must transition pending dispatch to dispatched"
+        );
 
         // Second batch should find nothing pending
         let processed2 = process_outbox_batch(&db, &mock).await;
@@ -2694,6 +2699,9 @@ mod tests {
         assert_eq!(outbox_status(&db, "d-160o-a"), vec!["done"]);
         assert_eq!(outbox_status(&db, "d-160o-b"), vec!["done"]);
         assert_eq!(outbox_status(&db, "d-160o-c"), vec!["done"]);
+        assert_eq!(get_dispatch_status(&db, "d-160o-a"), "dispatched");
+        assert_eq!(get_dispatch_status(&db, "d-160o-b"), "dispatched");
+        assert_eq!(get_dispatch_status(&db, "d-160o-c"), "dispatched");
     }
 
     /// Scenario 160-4: Duplicate outbox entries for the same dispatch.
@@ -2767,6 +2775,31 @@ mod tests {
                     dispatch_id: "d-160m-f".into(),
                 },
             ]
+        );
+    }
+
+    /// Scenario 160-6: Notify success must not rewrite terminal dispatch states.
+    ///
+    /// Verifies the `status = 'pending'` guard keeps completed dispatches
+    /// terminal while still draining the outbox entry successfully.
+    #[tokio::test]
+    async fn scenario_160_6_notify_success_keeps_completed_dispatch_terminal() {
+        let db = test_db();
+        seed_agent(&db);
+        seed_card(&db, "card-160c", "done");
+        seed_dispatch(&db, "d-160c", "card-160c", "implementation", "completed");
+        seed_outbox(&db, "d-160c", "notify");
+
+        let mock = MockNotifier::new();
+        let processed = process_outbox_batch(&db, &mock).await;
+
+        assert_eq!(processed, 1);
+        assert_eq!(mock.notify_count(), 1);
+        assert_eq!(outbox_status(&db, "d-160c"), vec!["done"]);
+        assert_eq!(
+            get_dispatch_status(&db, "d-160c"),
+            "completed",
+            "terminal dispatch status must not be rewritten by notify success"
         );
     }
 
