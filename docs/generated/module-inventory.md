@@ -161,7 +161,7 @@
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
 | `services::discord::model_catalog` | `src/services/discord/model_catalog.rs` | 1081 | giant-file |
 | `services::discord::model_picker_interaction` | `src/services/discord/model_picker_interaction.rs` | 294 |  |
-| `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 992 |  |
+| `services::discord::org_schema` | `src/services/discord/org_schema.rs` | 994 |  |
 | `services::discord::org_writer` | `src/services/discord/org_writer.rs` | 239 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder.rs` | 766 |  |
 | `services::discord::queue_io` | `src/services/discord/queue_io.rs` | 100 |  |
