@@ -3434,10 +3434,10 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         conn.execute(
             "INSERT INTO card_review_state (
                 card_id, state, pending_dispatch_id, review_round, last_verdict, last_decision,
-                approach_change_round, review_entered_at, updated_at
+                approach_change_round, session_reset_round, review_entered_at, updated_at
             ) VALUES (
                 'card-ft-clean', 'suggestion_pending', 'old-review-dispatch', 4, 'pass', 'approved',
-                3, datetime('now', '-11 minutes'), datetime('now')
+                3, 4, datetime('now', '-11 minutes'), datetime('now')
             )",
             [],
         )
@@ -3513,6 +3513,7 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         review_state_verdict,
         review_state_decision,
         review_state_approach_change_round,
+        review_state_session_reset_round,
         review_state_entered_at,
     ): (
         i64,
@@ -3521,11 +3522,12 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
         Option<String>,
         Option<String>,
         Option<i64>,
+        Option<i64>,
         Option<String>,
     ) = conn
         .query_row(
             "SELECT review_round, state, pending_dispatch_id, last_verdict, last_decision,
-                    approach_change_round, review_entered_at
+                    approach_change_round, session_reset_round, review_entered_at
              FROM card_review_state WHERE card_id = 'card-ft-clean'",
             [],
             |row| {
@@ -3537,6 +3539,7 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             },
         )
@@ -3612,6 +3615,10 @@ async fn force_transition_to_ready_cancels_live_dispatches_and_skips_auto_queue_
     assert!(
         review_state_approach_change_round.is_none(),
         "force-transition cleanup must clear card_review_state.approach_change_round"
+    );
+    assert!(
+        review_state_session_reset_round.is_none(),
+        "force-transition cleanup must clear card_review_state.session_reset_round"
     );
     assert!(
         review_state_entered_at.is_none(),
@@ -4201,10 +4208,10 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
         conn.execute(
             "INSERT INTO card_review_state (
                 card_id, state, pending_dispatch_id, review_round, last_verdict, last_decision,
-                approach_change_round, review_entered_at, updated_at
+                approach_change_round, session_reset_round, review_entered_at, updated_at
             ) VALUES (
                 'card-reopen-reset', 'suggestion_pending', 'dispatch-reopen-reset', 4, 'pass', 'approved',
-                3, datetime('now', '-11 minutes'), datetime('now')
+                3, 4, datetime('now', '-11 minutes'), datetime('now')
             )",
             [],
         )
@@ -4332,6 +4339,7 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
         review_state_verdict,
         review_state_decision,
         review_state_approach_change_round,
+        review_state_session_reset_round,
         review_state_entered_at,
     ): (
         i64,
@@ -4340,11 +4348,12 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
         Option<String>,
         Option<String>,
         Option<i64>,
+        Option<i64>,
         Option<String>,
     ) = conn
         .query_row(
             "SELECT review_round, state, pending_dispatch_id, last_verdict, last_decision,
-                    approach_change_round, review_entered_at
+                    approach_change_round, session_reset_round, review_entered_at
              FROM card_review_state WHERE card_id = 'card-reopen-reset'",
             [],
             |row| {
@@ -4356,6 +4365,7 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             },
         )
@@ -4366,6 +4376,7 @@ async fn reopen_reset_full_clears_review_thread_and_preflight_state() {
     assert!(review_state_verdict.is_none());
     assert!(review_state_decision.is_none());
     assert!(review_state_approach_change_round.is_none());
+    assert!(review_state_session_reset_round.is_none());
     assert!(review_state_entered_at.is_none());
 
     let dispatch_status: String = conn
@@ -8003,7 +8014,7 @@ async fn rereview_clears_stale_review_fields() {
 }
 
 #[tokio::test]
-async fn rereview_resets_approach_change_round() {
+async fn rereview_resets_repeated_finding_round_markers() {
     crate::pipeline::ensure_loaded();
     let db = test_db();
     let engine = test_engine(&db);
@@ -8035,29 +8046,36 @@ async fn rereview_resets_approach_change_round() {
             [],
         )
         .unwrap();
-        // Seed card_review_state with a non-null approach_change_round from a previous cycle
+        // Seed card_review_state with non-null repeated-finding markers from a previous cycle
         conn.execute(
-            "INSERT INTO card_review_state (card_id, state, review_round, approach_change_round, updated_at)
-             VALUES ('card-acr', 'reviewing', 3, 2, datetime('now'))",
+            "INSERT INTO card_review_state (
+                card_id, state, review_round, approach_change_round, session_reset_round, updated_at
+             ) VALUES ('card-acr', 'reviewing', 3, 2, 3, datetime('now'))",
             [],
         )
         .unwrap();
     }
 
-    // Verify approach_change_round is set before rereview
+    // Verify repeated-finding markers are set before rereview
     {
         let conn = db.lock().unwrap();
-        let acr: Option<i64> = conn
+        let (acr, reset_round): (Option<i64>, Option<i64>) = conn
             .query_row(
-                "SELECT approach_change_round FROM card_review_state WHERE card_id = 'card-acr'",
+                "SELECT approach_change_round, session_reset_round
+                 FROM card_review_state WHERE card_id = 'card-acr'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         assert_eq!(
             acr,
             Some(2),
             "approach_change_round should be 2 before rereview"
+        );
+        assert_eq!(
+            reset_round,
+            Some(3),
+            "session_reset_round should be 3 before rereview"
         );
     }
 
@@ -8070,7 +8088,7 @@ async fn rereview_resets_approach_change_round() {
                 .header("content-type", "application/json")
                 .header("x-channel-id", "pmd-chan-123")
                 .body(Body::from(
-                    r#"{"reason":"approach_change_round reset test"}"#,
+                    r#"{"reason":"repeated-finding marker reset test"}"#,
                 ))
                 .unwrap(),
         )
@@ -8079,13 +8097,14 @@ async fn rereview_resets_approach_change_round() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    // approach_change_round should be NULL after rereview
+    // repeated-finding markers should be NULL after rereview
     let conn = db.lock().unwrap();
-    let acr: Option<i64> = conn
+    let (acr, reset_round): (Option<i64>, Option<i64>) = conn
         .query_row(
-            "SELECT approach_change_round FROM card_review_state WHERE card_id = 'card-acr'",
+            "SELECT approach_change_round, session_reset_round
+             FROM card_review_state WHERE card_id = 'card-acr'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
     assert!(
@@ -8093,12 +8112,17 @@ async fn rereview_resets_approach_change_round() {
         "approach_change_round should be NULL after rereview, got {:?}",
         acr
     );
+    assert!(
+        reset_round.is_none(),
+        "session_reset_round should be NULL after rereview, got {:?}",
+        reset_round
+    );
 }
 
 #[tokio::test]
-async fn idle_sync_preserves_approach_change_round() {
-    // Regression test for #272: generic idle sync (timeout, gate-failure, pass)
-    // must NOT clear approach_change_round — only the explicit rereview path does.
+async fn idle_sync_preserves_repeated_finding_round_markers() {
+    // Regression test for #272/#420: generic idle sync (timeout, gate-failure, pass)
+    // must NOT clear repeated-finding markers — only the explicit rereview path does.
     let db = test_db();
     {
         let conn = db.lock().unwrap();
@@ -8109,8 +8133,9 @@ async fn idle_sync_preserves_approach_change_round() {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO card_review_state (card_id, state, review_round, approach_change_round, updated_at)
-             VALUES ('card-preserve', 'reviewing', 3, 2, datetime('now'))",
+            "INSERT INTO card_review_state (
+                card_id, state, review_round, approach_change_round, session_reset_round, updated_at
+             ) VALUES ('card-preserve', 'reviewing', 3, 2, 3, datetime('now'))",
             [],
         )
         .unwrap();
@@ -8125,11 +8150,12 @@ async fn idle_sync_preserves_approach_change_round() {
         let result = crate::engine::ops::review_state_sync_on_conn(&conn, &payload);
         assert!(result.contains("\"ok\""), "sync should succeed: {result}");
 
-        let acr: Option<i64> = conn
+        let (acr, reset_round): (Option<i64>, Option<i64>) = conn
             .query_row(
-                "SELECT approach_change_round FROM card_review_state WHERE card_id = 'card-preserve'",
+                "SELECT approach_change_round, session_reset_round
+                 FROM card_review_state WHERE card_id = 'card-preserve'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         assert_eq!(
@@ -8137,6 +8163,12 @@ async fn idle_sync_preserves_approach_change_round() {
             Some(2),
             "approach_change_round must be preserved on generic idle sync, got {:?}",
             acr
+        );
+        assert_eq!(
+            reset_round,
+            Some(3),
+            "session_reset_round must be preserved on generic idle sync, got {:?}",
+            reset_round
         );
     }
 }

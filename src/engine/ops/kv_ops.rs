@@ -122,6 +122,7 @@ pub(super) fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                             last_decision: opts.last_decision || null,
                             pending_dispatch_id: opts.pending_dispatch_id || null,
                             approach_change_round: opts.approach_change_round || null,
+                            session_reset_round: opts.session_reset_round || null,
                             review_entered_at: opts.review_entered_at || null
                         });
                         var result = JSON.parse(agentdesk.reviewState.__syncRaw(payload));

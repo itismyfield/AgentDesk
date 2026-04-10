@@ -192,6 +192,184 @@ async fn review_verdict_allows_same_agent_submission() {
 }
 
 #[tokio::test]
+async fn repeated_findings_after_approach_change_creates_session_reset_rework_dispatch() {
+    let db = test_db();
+    seed_review_card(&db, "dispatch-reset");
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET title = 'Reset Test',
+                 review_round = 3,
+                 review_notes = 'same validation failure',
+                 github_issue_number = 420,
+                 updated_at = datetime('now')
+             WHERE id = 'card-1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (
+                card_id, state, review_round, approach_change_round, updated_at
+             ) VALUES (
+                'card-1', 'reviewing', 3, 2, datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let (status, _) = submit_verdict(
+        State(state),
+        Json(SubmitVerdictBody {
+            dispatch_id: "dispatch-reset".to_string(),
+            overall: "improve".to_string(),
+            items: None,
+            notes: Some("same validation failure".to_string()),
+            feedback: None,
+            commit: None,
+            provider: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let conn = db.lock().unwrap();
+    let (card_status, review_status, latest_dispatch_id): (String, Option<String>, String) = conn
+        .query_row(
+            "SELECT status, review_status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let rework_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches
+             WHERE kanban_card_id = 'card-1' AND dispatch_type = 'rework'
+             AND status IN ('pending', 'dispatched')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(card_status, "in_progress");
+    assert_eq!(review_status.as_deref(), Some("rework_pending"));
+    assert_eq!(rework_count, 1);
+
+    let (dispatch_type, dispatch_status, title, context): (String, String, String, Option<String>) =
+        conn.query_row(
+            "SELECT dispatch_type, status, title, context FROM task_dispatches WHERE id = ?1",
+            [&latest_dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(dispatch_type, "rework");
+    assert_eq!(dispatch_status, "pending");
+    assert!(title.contains("[Session Reset R3]"));
+    assert!(title.contains("직전 리뷰 피드백"));
+    assert!(title.contains("현재 리뷰 피드백"));
+    let context_json: serde_json::Value =
+        serde_json::from_str(context.as_deref().expect("rework context should exist")).unwrap();
+    assert_eq!(context_json["force_new_session"], true);
+
+    let (review_state, session_reset_round): (String, Option<i64>) = conn
+        .query_row(
+            "SELECT state, session_reset_round FROM card_review_state WHERE card_id = 'card-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(review_state, "rework_pending");
+    assert_eq!(session_reset_round, Some(3));
+}
+
+#[tokio::test]
+async fn repeated_findings_after_session_reset_escalates_to_dilemma_pending() {
+    let db = test_db();
+    seed_review_card(&db, "dispatch-reset-escalate");
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET title = 'Reset Escalation Test',
+                 review_round = 4,
+                 review_notes = 'same validation failure',
+                 github_issue_number = 420,
+                 updated_at = datetime('now')
+             WHERE id = 'card-1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (
+                card_id, state, review_round, approach_change_round, session_reset_round, updated_at
+             ) VALUES (
+                'card-1', 'reviewing', 4, 2, 3, datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let state = AppState::test_state(db.clone(), test_engine(&db));
+    let (status, _) = submit_verdict(
+        State(state),
+        Json(SubmitVerdictBody {
+            dispatch_id: "dispatch-reset-escalate".to_string(),
+            overall: "improve".to_string(),
+            items: None,
+            notes: Some("same validation failure".to_string()),
+            feedback: None,
+            commit: None,
+            provider: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let conn = db.lock().unwrap();
+    let (card_status, review_status, blocked_reason): (String, Option<String>, Option<String>) =
+        conn.query_row(
+            "SELECT status, review_status, blocked_reason FROM kanban_cards WHERE id = 'card-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let rework_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches
+             WHERE kanban_card_id = 'card-1' AND dispatch_type = 'rework'
+             AND status IN ('pending', 'dispatched')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(review_status.as_deref(), Some("dilemma_pending"));
+    assert!(
+        blocked_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("세션 리셋 후에도 동일 finding 반복")
+    );
+    assert_ne!(card_status, "review");
+    assert_eq!(rework_count, 0);
+
+    let (review_state, session_reset_round): (String, Option<i64>) = conn
+        .query_row(
+            "SELECT state, session_reset_round FROM card_review_state WHERE card_id = 'card-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(review_state, "dilemma_pending");
+    assert_eq!(session_reset_round, Some(3));
+}
+
+#[tokio::test]
 async fn implementation_dispatch_verdict_rejected() {
     let db = test_db();
     let conn = db.lock().unwrap();

@@ -3,7 +3,7 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 
 // ── Dispatch ops ────────────────────────────────────────────────
 //
-// agentdesk.dispatch.create(cardId, agentId, dispatchType, title) → dispatchId
+// agentdesk.dispatch.create(cardId, agentId, dispatchType, title, context?) → dispatchId
 // Creates a task_dispatch row + updates kanban card to "requested".
 // Discord notification is handled by posting to the local /api/send endpoint.
 
@@ -11,7 +11,7 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dispatch_obj = Object::new(ctx.clone())?;
 
-    // #248: __dispatch_create_sync(card_id, agent_id, dispatch_type, title) → json_string
+    // #248: __dispatch_create_sync(card_id, agent_id, dispatch_type, title, context_json) → json_string
     // Synchronous DB INSERT — no deferred intent.
     let db_d = db.clone();
     dispatch_obj.set(
@@ -22,9 +22,17 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                 move |card_id: String,
                       agent_id: String,
                       dispatch_type: String,
-                      title: String|
+                      title: String,
+                      context_json: String|
                       -> String {
-                    dispatch_create_sync(&db_d, &card_id, &agent_id, &dispatch_type, &title)
+                    dispatch_create_sync(
+                        &db_d,
+                        &card_id,
+                        &agent_id,
+                        &dispatch_type,
+                        &title,
+                        &context_json,
+                    )
                 },
             ),
         )?,
@@ -102,12 +110,13 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
         r#"
         (function() {
             var sync = agentdesk.dispatch.__create_sync;
-            agentdesk.dispatch.create = function(cardId, agentId, dispatchType, title) {
+            agentdesk.dispatch.create = function(cardId, agentId, dispatchType, title, context) {
                 var dt = dispatchType || "implementation";
                 var t = title || "Dispatch";
+                var ctxJson = JSON.stringify(context || {});
                 // #248: Synchronous DB INSERT — no deferred intent.
                 // Validation + INSERT happen atomically in Rust.
-                var result = JSON.parse(sync(cardId, agentId, dt, t));
+                var result = JSON.parse(sync(cardId, agentId, dt, t, ctxJson));
                 if (result.error) throw new Error(result.error);
                 var dispatchId = result.dispatch_id;
                 return dispatchId;
@@ -155,8 +164,17 @@ fn dispatch_create_sync(
     agent_id: &str,
     dispatch_type: &str,
     title: &str,
+    context_json: &str,
 ) -> String {
-    let context = serde_json::json!({});
+    let context: serde_json::Value = match serde_json::from_str(context_json) {
+        Ok(value) => value,
+        Err(e) => {
+            return format!(
+                r#"{{"error":"invalid dispatch context JSON: {}"}}"#,
+                e.to_string().replace('"', "'")
+            );
+        }
+    };
     match crate::dispatch::create_dispatch_core(
         db,
         card_id,

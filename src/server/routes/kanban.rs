@@ -2240,16 +2240,19 @@ pub async fn rereview_card(
             tracing::warn!("[kanban] rereview review_state_sync cleanup failed: {sync_result}");
         }
 
-        // #272: Explicitly clear approach_change_round so a new re-review cycle
-        // starts with clean state.  The generic sync uses COALESCE (preserves old
+        // #272/#420: Explicitly clear repeated-finding escalation markers so a
+        // new re-review cycle starts with clean state. The generic sync uses COALESCE (preserves old
         // value when NULL is passed), so we do a targeted UPDATE here instead of
         // widening the idle-sync semantics which would affect timeout / gate-failure
         // paths that also sync to "idle".
         if let Err(e) = conn.execute(
-            "UPDATE card_review_state SET approach_change_round = NULL WHERE card_id = ?1",
+            "UPDATE card_review_state
+             SET approach_change_round = NULL,
+                 session_reset_round = NULL
+             WHERE card_id = ?1",
             [&id],
         ) {
-            tracing::warn!("[kanban] rereview approach_change_round reset failed: {e}");
+            tracing::warn!("[kanban] rereview repeated-finding reset failed: {e}");
         }
     }
 
@@ -3078,10 +3081,10 @@ fn cleanup_force_transition_revert_on_conn(
     conn.execute(
         "INSERT INTO card_review_state (
             card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
-            decided_by, decided_at, approach_change_round, review_entered_at, updated_at
+            decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
          ) VALUES (
             ?1, 0, 'idle', NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL, datetime('now')
+            NULL, NULL, NULL, NULL, NULL, datetime('now')
          )
          ON CONFLICT(card_id) DO UPDATE SET
             review_round = 0,
@@ -3092,6 +3095,7 @@ fn cleanup_force_transition_revert_on_conn(
             decided_by = NULL,
             decided_at = NULL,
             approach_change_round = NULL,
+            session_reset_round = NULL,
             review_entered_at = NULL,
             updated_at = datetime('now')",
         [card_id],

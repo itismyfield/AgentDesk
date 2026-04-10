@@ -375,6 +375,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             last_decision       TEXT,
             decided_by          TEXT,
             decided_at          TEXT,
+            approach_change_round INTEGER,
+            session_reset_round INTEGER,
             review_entered_at   TEXT,
             updated_at          TEXT DEFAULT (datetime('now'))
         );",
@@ -425,6 +427,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     // #118: Track approach-change round for repeated-finding detection
     let _ = conn.execute(
         "ALTER TABLE card_review_state ADD COLUMN approach_change_round INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE card_review_state ADD COLUMN session_reset_round INTEGER",
         [],
     );
 

@@ -547,12 +547,13 @@ pub(super) fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &
     let last_decision = params["last_decision"].as_str();
     let pending_dispatch_id = params["pending_dispatch_id"].as_str();
     let approach_change_round = params["approach_change_round"].as_i64();
+    let session_reset_round = params["session_reset_round"].as_i64();
     let review_entered_at = params["review_entered_at"].as_str();
 
     // UPSERT: INSERT OR REPLACE with all fields
     let result = conn.execute(
-        "INSERT INTO card_review_state (card_id, state, review_round, last_verdict, last_decision, pending_dispatch_id, approach_change_round, review_entered_at, updated_at) \
-         VALUES (?1, ?2, COALESCE(?3, 0), ?4, ?5, ?6, ?7, COALESCE(?8, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
+        "INSERT INTO card_review_state (card_id, state, review_round, last_verdict, last_decision, pending_dispatch_id, approach_change_round, session_reset_round, review_entered_at, updated_at) \
+         VALUES (?1, ?2, COALESCE(?3, 0), ?4, ?5, ?6, ?7, ?8, COALESCE(?9, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE NULL END), datetime('now')) \
          ON CONFLICT(card_id) DO UPDATE SET \
          state = ?2, \
          review_round = COALESCE(?3, review_round), \
@@ -564,7 +565,8 @@ pub(super) fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &
              ELSE NULL \
          END, \
          approach_change_round = COALESCE(?7, approach_change_round), \
-         review_entered_at = COALESCE(?8, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END), \
+         session_reset_round = COALESCE(?8, session_reset_round), \
+         review_entered_at = COALESCE(?9, CASE WHEN ?2 = 'reviewing' THEN datetime('now') ELSE review_entered_at END), \
          updated_at = datetime('now')",
         rusqlite::params![
             card_id,
@@ -574,6 +576,7 @@ pub(super) fn review_state_sync_on_conn(conn: &rusqlite::Connection, json_str: &
             last_decision,
             pending_dispatch_id,
             approach_change_round,
+            session_reset_round,
             review_entered_at,
         ],
     );

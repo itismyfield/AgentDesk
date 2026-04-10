@@ -169,6 +169,32 @@ fn should_skip_memento_recall(
     memory_settings.backend == settings::MemoryBackendKind::Memento && memento_context_loaded
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DispatchContextHints {
+    worktree_path: Option<String>,
+    force_new_session: bool,
+}
+
+fn parse_dispatch_context_hints(dispatch_context: Option<&str>) -> DispatchContextHints {
+    let Some(raw) = dispatch_context else {
+        return DispatchContextHints::default();
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok();
+    DispatchContextHints {
+        worktree_path: parsed
+            .as_ref()
+            .and_then(|v| v.get("worktree_path"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .filter(|p| std::path::Path::new(p).exists()),
+        force_new_session: parsed
+            .as_ref()
+            .and_then(|v| v.get("force_new_session"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -391,15 +417,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
     // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
     // All dispatch types now inject worktree_path into context via resolve_card_worktree().
-    let dispatch_worktree_path = dispatch_info_cached
-        .as_ref()
-        .and_then(|info| {
-            info.context
-                .as_ref()
-                .and_then(|ctx_str| serde_json::from_str::<serde_json::Value>(ctx_str).ok())
-                .and_then(|v| v.get("worktree_path")?.as_str().map(String::from))
-        })
-        .filter(|p| std::path::Path::new(p).exists());
+    let dispatch_context_hints = parse_dispatch_context_hints(
+        dispatch_info_cached
+            .as_ref()
+            .and_then(|info| info.context.as_deref()),
+    );
+    let dispatch_worktree_path = dispatch_context_hints.worktree_path.clone();
+    let dispatch_force_new_session = dispatch_context_hints.force_new_session;
     if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
@@ -580,6 +604,22 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         current_path
     };
+    let (mut session_id, mut memento_context_loaded) = (session_id, memento_context_loaded);
+    if dispatch_force_new_session {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+        }
+        drop(data);
+        session_id = None;
+        memento_context_loaded = false;
+        if let Some(ref did) = dispatch_id_for_thread {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] ♻️ Dispatch {did}: force_new_session=true, skipping provider session reuse"
+            );
+        }
+    }
 
     // Send placeholder message
     rate_limit_wait(shared, channel_id).await;
@@ -653,10 +693,13 @@ pub(in crate::services::discord) async fn handle_text_message(
         (channel_name, tmux_session_name)
     };
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
-    let mut session_id = session_id;
-    let mut memento_context_loaded = memento_context_loaded;
     if session_id.is_none() {
-        if let Some(ref key) = adk_session_key {
+        if dispatch_force_new_session {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] ↻ Skipping DB provider session restore for forced fresh dispatch turn"
+            );
+        } else if let Some(ref key) = adk_session_key {
             let restored = super::super::adk_session::fetch_provider_session_id(
                 key,
                 &provider,
@@ -2789,5 +2832,30 @@ mod tests {
             &memento,
             session.memento_context_loaded
         ));
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_extracts_force_new_session_and_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = serde_json::json!({
+            "worktree_path": temp.path(),
+            "force_new_session": true
+        })
+        .to_string();
+
+        let hints = parse_dispatch_context_hints(Some(&raw));
+
+        assert_eq!(hints.worktree_path.as_deref(), temp.path().to_str());
+        assert!(hints.force_new_session);
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_ignores_missing_path_but_keeps_reset_flag() {
+        let hints = parse_dispatch_context_hints(Some(
+            r#"{"worktree_path":"/definitely/missing","force_new_session":true}"#,
+        ));
+
+        assert!(hints.worktree_path.is_none());
+        assert!(hints.force_new_session);
     }
 }

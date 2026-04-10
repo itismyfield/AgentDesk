@@ -1205,4 +1205,78 @@ mod tests {
             "dynamic hook dispatch must enqueue exactly one notify outbox row"
         );
     }
+
+    #[test]
+    fn test_dynamic_hook_dispatch_create_persists_context_object() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("dispatch-hook-context.js"),
+            r#"
+            var policy = {
+                name: "dispatch-hook-context",
+                priority: 1,
+                onCustomEnter: function(payload) {
+                    var id = agentdesk.dispatch.create(
+                        payload.card_id,
+                        payload.agent_id,
+                        "rework",
+                        "Contextful dispatch",
+                        { force_new_session: true, reset_reason: "repeated_findings" }
+                    );
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('dyn_dispatch_ctx_id', '" + id + "')",
+                        []
+                    );
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, status, xp, discord_channel_id, discord_channel_alt) \
+                 VALUES ('bot2', 'Bot 2', 'claude', 'idle', 0, '2234567890', '2234567891')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, priority) VALUES ('card2', 'Test 2', 'ready', 'medium')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+
+        engine
+            .try_fire_hook_by_name(
+                "onCustomEnter",
+                serde_json::json!({"card_id": "card2", "agent_id": "bot2"}),
+            )
+            .unwrap();
+
+        let conn = db.lock().unwrap();
+        let dispatch_id: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'dyn_dispatch_ctx_id'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("hook should have written dispatch_id to kv_meta");
+        let context: String = conn
+            .query_row(
+                "SELECT context FROM task_dispatches WHERE id = ?1",
+                [&dispatch_id],
+                |r| r.get(0),
+            )
+            .expect("dispatch row should persist context");
+        let context_json: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(context_json["force_new_session"], true);
+        assert_eq!(context_json["reset_reason"], "repeated_findings");
+    }
 }
