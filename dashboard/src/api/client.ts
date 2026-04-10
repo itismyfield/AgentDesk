@@ -1165,7 +1165,7 @@ export interface DispatchQueueEntry {
   card_id: string;
   priority_rank: number;
   reason: string | null;
-  status: "pending" | "dispatched" | "done" | "skipped";
+  status: "pending" | "dispatched" | "done" | "completed" | "skipped";
   created_at: number;
   dispatched_at: number | null;
   completed_at: number | null;
