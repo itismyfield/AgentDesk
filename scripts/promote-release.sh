@@ -333,6 +333,28 @@ rm -rf "$SKILLS_STAGED"
 mkdir -p "$SKILLS_STAGED"
 rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
 
+# Wait for active turns to finish before stopping the server.
+# Without this, the SIGTERM interrupts mid-response, cutting off output.
+REL_PORT="${AGENTDESK_REL_PORT:-8791}"
+TURN_WAIT_MAX=120
+TURN_WAIT=0
+ACTIVE=$(curl -sf "http://127.0.0.1:${REL_PORT}/api/health" 2>/dev/null \
+    | grep -o '"global_active":[0-9]*' | cut -d: -f2 || echo "0")
+if [ "${ACTIVE:-0}" -gt 0 ]; then
+    echo "▸ Waiting for ${ACTIVE} active turn(s) to finish..."
+    while [ "${ACTIVE:-0}" -gt 0 ] && [ "$TURN_WAIT" -lt "$TURN_WAIT_MAX" ]; do
+        sleep 2
+        TURN_WAIT=$((TURN_WAIT + 2))
+        ACTIVE=$(curl -sf "http://127.0.0.1:${REL_PORT}/api/health" 2>/dev/null \
+            | grep -o '"global_active":[0-9]*' | cut -d: -f2 || echo "0")
+    done
+    if [ "${ACTIVE:-0}" -gt 0 ]; then
+        echo "  ⚠ ${ACTIVE} turn(s) still active after ${TURN_WAIT_MAX}s — proceeding anyway"
+    else
+        echo "  ✓ All turns finished (${TURN_WAIT}s)"
+    fi
+fi
+
 # Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
