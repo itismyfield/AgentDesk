@@ -480,6 +480,7 @@ pub fn api_router(
         .route("/skills-trend", get(analytics::skills_trend))
         // Docs
         .route("/docs", get(docs::api_docs))
+        .route("/docs/{category}", get(docs::api_docs_category))
         // Review verdict
         .route("/review-verdict", post(review_verdict::submit_verdict))
         .route(

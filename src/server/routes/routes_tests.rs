@@ -1476,7 +1476,7 @@ async fn dispatch_create_with_skip_outbox_omits_notify_row() {
 }
 
 #[tokio::test]
-async fn api_docs_mentions_skip_outbox_for_dispatch_create() {
+async fn api_docs_returns_category_summaries_by_default() {
     let db = test_db();
     let engine = test_engine(&db);
     let app = test_api_router(db, engine, None);
@@ -1491,16 +1491,58 @@ async fn api_docs_mentions_skip_outbox_for_dispatch_create() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let categories = json["categories"]
+        .as_array()
+        .expect("docs must return category array");
+
+    let dispatches = categories
+        .iter()
+        .find(|category| category["name"] == "dispatches")
+        .expect("dispatches category must be present");
+    assert!(
+        dispatches["count"].as_u64().unwrap_or(0) >= 4,
+        "dispatches category count must reflect documented endpoints"
+    );
+    assert!(
+        dispatches["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Dispatch"),
+        "dispatches category description must be informative: {dispatches}"
+    );
+    assert!(
+        json.get("endpoints").is_none(),
+        "default docs response must return grouped categories, not flat endpoints"
+    );
+}
+
+#[tokio::test]
+async fn api_docs_flat_format_mentions_skip_outbox_for_dispatch_create() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs?format=flat")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let endpoints = json["endpoints"]
         .as_array()
-        .expect("docs must return endpoint array");
+        .expect("docs?format=flat must return endpoint array");
     let dispatch_post = endpoints
         .iter()
-        .find(|ep| {
-            ep["method"] == "POST"
-                && ep["path"] == "/api/dispatches"
-                && ep["category"] == "dispatches"
-        })
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/dispatches")
         .expect("dispatch create endpoint must be documented");
 
     let description = dispatch_post["description"]
@@ -1510,6 +1552,202 @@ async fn api_docs_mentions_skip_outbox_for_dispatch_create() {
         description.contains("skip_outbox"),
         "dispatch create docs must mention skip_outbox option: {description}"
     );
+    assert_eq!(dispatch_post["params"]["skip_outbox"]["type"], "boolean");
+}
+
+#[tokio::test]
+async fn api_docs_category_exposes_dispatch_params_and_examples() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/dispatches")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["category"], "dispatches");
+    assert!(
+        json["count"].as_u64().unwrap_or(0) >= 4,
+        "dispatches detail should include documented endpoints"
+    );
+
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("category detail must include endpoint array");
+    let dispatch_post = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/dispatches")
+        .expect("dispatch create endpoint must be present in detail view");
+    assert_eq!(
+        dispatch_post["params"]["kanban_card_id"]["location"],
+        "body"
+    );
+    assert_eq!(dispatch_post["params"]["skip_outbox"]["type"], "boolean");
+    assert_eq!(
+        dispatch_post["example"]["request"]["body"]["skip_outbox"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        dispatch_post["example"]["response"]["dispatch"]["status"],
+        "pending"
+    );
+}
+
+#[tokio::test]
+async fn api_docs_category_exposes_auto_queue_params_and_examples() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/auto-queue")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["category"], "auto-queue");
+
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("category detail must include endpoint array");
+    let generate = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/auto-queue/generate")
+        .expect("auto-queue generate endpoint must be present");
+    assert_eq!(generate["params"]["mode"]["type"], "string");
+    assert!(
+        generate["params"]["mode"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "similarity-aware"),
+        "generate docs must expose supported mode enum"
+    );
+    assert_eq!(
+        generate["example"]["response"]["run"]["unified_thread"],
+        serde_json::json!(false)
+    );
+}
+
+#[tokio::test]
+async fn api_docs_category_exposes_kanban_params_and_examples() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/kanban")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["category"], "kanban");
+
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("category detail must include endpoint array");
+    let create = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards")
+        .expect("kanban create endpoint must be present");
+    assert_eq!(create["params"]["title"]["type"], "string");
+    assert_eq!(create["example"]["response"]["card"]["status"], "backlog");
+
+    let resume = endpoints
+        .iter()
+        .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/kanban-cards/{id}/resume")
+        .expect("kanban resume endpoint must be present");
+    assert_eq!(resume["params"]["force"]["type"], "boolean");
+    assert_eq!(
+        resume["example"]["response"]["action"]["type"],
+        "new_implementation_dispatch"
+    );
+}
+
+#[tokio::test]
+async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs?format=flat")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("docs?format=flat must return endpoint array");
+
+    for path in [
+        "/api/kanban-cards/{id}/reopen",
+        "/api/review-decision",
+        "/api/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
+        "/api/docs/{category}",
+    ] {
+        assert!(
+            endpoints.iter().any(|ep| ep["path"] == path),
+            "flat docs must include {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn api_docs_unknown_category_returns_not_found() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs/not-a-real-category")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
