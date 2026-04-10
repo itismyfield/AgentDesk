@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::AppState;
 use crate::services::provider::ProviderKind;
@@ -1228,7 +1228,189 @@ fn build_group_plan(cards: &[GenerateCandidate], enable_similarity: bool) -> Gro
     }
 }
 
-fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Value {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThreadLinkCandidate {
+    label: String,
+    channel_id: u64,
+}
+
+fn normalized_guild_id(guild_id: Option<&str>) -> Option<&str> {
+    guild_id.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn load_card_thread_bindings(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> (BTreeMap<u64, String>, Option<String>) {
+    let (channel_thread_map, active_thread_id): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT channel_thread_map, active_thread_id
+             FROM kanban_cards
+             WHERE id = ?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((None, None));
+
+    let thread_map = channel_thread_map
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .map(|map| {
+            map.into_iter()
+                .filter_map(|(channel_id_raw, thread_value)| {
+                    let channel_id = channel_id_raw.parse::<u64>().ok()?;
+                    let thread_id = thread_value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                        .or_else(|| thread_value.as_u64().map(|value| value.to_string()))?;
+                    Some((channel_id, thread_id))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let active_thread_id = active_thread_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    (thread_map, active_thread_id)
+}
+
+fn build_thread_link_candidates(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+) -> Vec<ThreadLinkCandidate> {
+    let Some(bindings) = crate::db::agents::load_agent_channel_bindings(conn, agent_id)
+        .ok()
+        .flatten()
+    else {
+        return Vec::new();
+    };
+
+    let work_channel = bindings
+        .primary_channel()
+        .as_deref()
+        .and_then(super::dispatches::parse_channel_id);
+    let review_channel = bindings
+        .counter_model_channel()
+        .as_deref()
+        .and_then(super::dispatches::parse_channel_id);
+
+    match (work_channel, review_channel) {
+        (Some(work_channel), Some(review_channel)) if work_channel == review_channel => {
+            vec![ThreadLinkCandidate {
+                label: "shared".to_string(),
+                channel_id: work_channel,
+            }]
+        }
+        (Some(work_channel), Some(review_channel)) => vec![
+            ThreadLinkCandidate {
+                label: "work".to_string(),
+                channel_id: work_channel,
+            },
+            ThreadLinkCandidate {
+                label: "review".to_string(),
+                channel_id: review_channel,
+            },
+        ],
+        (Some(work_channel), None) => vec![ThreadLinkCandidate {
+            label: "work".to_string(),
+            channel_id: work_channel,
+        }],
+        (None, Some(review_channel)) => vec![ThreadLinkCandidate {
+            label: "review".to_string(),
+            channel_id: review_channel,
+        }],
+        (None, None) => Vec::new(),
+    }
+}
+
+fn thread_link_json(
+    role: &str,
+    label: String,
+    channel_id: Option<u64>,
+    thread_id: &str,
+    guild_id: Option<&str>,
+) -> serde_json::Value {
+    let thread_id = thread_id.trim().to_string();
+    json!({
+        "role": role,
+        "label": label,
+        "channel_id": channel_id.map(|value| value.to_string()),
+        "thread_id": thread_id,
+        "url": normalized_guild_id(guild_id)
+            .map(|guild_id| format!("https://discord.com/channels/{guild_id}/{thread_id}")),
+    })
+}
+
+/// Fallback policy:
+/// - Use channel-thread bindings plus configured work/review channels whenever possible.
+/// - If only legacy `active_thread_id` exists, expose a single `active` link instead of
+///   guessing whether it was a work or review thread.
+/// - If guild_id is unavailable, return the thread id without synthesizing a Discord URL.
+fn build_entry_thread_links(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    agent_id: &str,
+    guild_id: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let (thread_map, active_thread_id) = load_card_thread_bindings(conn, card_id);
+    let candidates = build_thread_link_candidates(conn, agent_id);
+
+    if !thread_map.is_empty() {
+        let mut links = Vec::new();
+        let mut used_channels = HashSet::new();
+
+        for candidate in &candidates {
+            let Some(thread_id) = thread_map.get(&candidate.channel_id) else {
+                continue;
+            };
+            used_channels.insert(candidate.channel_id);
+            links.push(thread_link_json(
+                candidate.label.as_str(),
+                candidate.label.clone(),
+                Some(candidate.channel_id),
+                thread_id,
+                guild_id,
+            ));
+        }
+
+        for (channel_id, thread_id) in &thread_map {
+            if used_channels.insert(*channel_id) {
+                links.push(thread_link_json(
+                    "channel",
+                    format!("channel:{channel_id}"),
+                    Some(*channel_id),
+                    thread_id,
+                    guild_id,
+                ));
+            }
+        }
+
+        return links;
+    }
+
+    active_thread_id
+        .map(|thread_id| {
+            vec![thread_link_json(
+                "active",
+                "active".to_string(),
+                None,
+                &thread_id,
+                guild_id,
+            )]
+        })
+        .unwrap_or_default()
+}
+
+fn entry_to_json_with_guild(
+    conn: &rusqlite::Connection,
+    entry_id: &str,
+    guild_id: Option<&str>,
+) -> serde_json::Value {
     conn.query_row(
         "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
                 CAST(strftime('%s', e.created_at) AS INTEGER) * 1000,
@@ -1243,22 +1425,39 @@ fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Val
          WHERE e.id = ?1",
         [entry_id],
         |row| {
+            let entry_id = row.get::<_, String>(0)?;
+            let agent_id = row.get::<_, String>(1)?;
+            let card_id = row.get::<_, String>(2)?;
+            let priority_rank = row.get::<_, i64>(3)?;
+            let reason = row.get::<_, Option<String>>(4)?;
+            let status = row.get::<_, String>(5)?;
+            let created_at = row.get::<_, Option<i64>>(6)?.unwrap_or(0);
+            let dispatched_at = row.get::<_, Option<i64>>(7)?;
+            let completed_at = row.get::<_, Option<i64>>(8)?;
+            let card_title = row.get::<_, Option<String>>(9)?;
+            let github_issue_number = row.get::<_, Option<i64>>(10)?;
+            let github_repo = row.get::<_, Option<String>>(11)?;
+            let thread_group = row.get::<_, i64>(12)?;
+            let slot_index = row.get::<_, Option<i64>>(13)?;
+            let batch_phase = row.get::<_, i64>(14)?;
+
             Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "agent_id": row.get::<_, String>(1)?,
-                "card_id": row.get::<_, String>(2)?,
-                "priority_rank": row.get::<_, i64>(3)?,
-                "reason": row.get::<_, Option<String>>(4)?,
-                "status": row.get::<_, String>(5)?,
-                "created_at": row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                "dispatched_at": row.get::<_, Option<i64>>(7)?,
-                "completed_at": row.get::<_, Option<i64>>(8)?,
-                "card_title": row.get::<_, Option<String>>(9)?,
-                "github_issue_number": row.get::<_, Option<i64>>(10)?,
-                "github_repo": row.get::<_, Option<String>>(11)?,
-                "thread_group": row.get::<_, i64>(12)?,
-                "slot_index": row.get::<_, Option<i64>>(13)?,
-                "batch_phase": row.get::<_, i64>(14)?,
+                "id": entry_id,
+                "agent_id": agent_id,
+                "card_id": card_id,
+                "priority_rank": priority_rank,
+                "reason": reason,
+                "status": status,
+                "created_at": created_at,
+                "dispatched_at": dispatched_at,
+                "completed_at": completed_at,
+                "card_title": card_title,
+                "github_issue_number": github_issue_number,
+                "github_repo": github_repo,
+                "thread_group": thread_group,
+                "slot_index": slot_index,
+                "batch_phase": batch_phase,
+                "thread_links": build_entry_thread_links(conn, &card_id, &agent_id, guild_id),
             }))
         },
     )
@@ -1378,6 +1577,7 @@ pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let guild_id = state.config.discord.guild_id.as_deref();
     let _ignored_unified_thread = body.unified_thread.is_some();
     let requested_entries = match normalize_generate_entries(&body) {
         Ok(entries) => entries,
@@ -1987,7 +2187,7 @@ pub async fn generate(
             ],
         )
         .ok();
-        entries.push(entry_to_json(&conn, &entry_id));
+        entries.push(entry_to_json_with_guild(&conn, &entry_id, guild_id));
     }
 
     let run = run_to_json(&conn, &run_id);
@@ -2004,6 +2204,7 @@ pub async fn activate(
     State(state): State<AppState>,
     Json(body): Json<ActivateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let guild_id = state.config.discord.guild_id.as_deref();
     let _ignored_unified_thread = body.unified_thread.is_some();
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
@@ -2502,7 +2703,7 @@ pub async fn activate(
                                 rusqlite::params![dispatch_id, entry_id],
                             )
                             .ok();
-                            dispatched.push(entry_to_json(&conn, &entry_id));
+                            dispatched.push(entry_to_json_with_guild(&conn, &entry_id, guild_id));
                             drop(conn);
                             continue;
                         }
@@ -2600,7 +2801,7 @@ pub async fn activate(
         drop(conn);
 
         let conn = state.db.separate_conn().unwrap();
-        dispatched.push(entry_to_json(&conn, &entry_id));
+        dispatched.push(entry_to_json_with_guild(&conn, &entry_id, guild_id));
         drop(conn);
     }
 
@@ -2670,6 +2871,7 @@ pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let guild_id = state.config.discord.guild_id.as_deref();
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -2746,7 +2948,7 @@ pub async fn status(
 
     let entries: Vec<serde_json::Value> = entry_ids
         .iter()
-        .map(|id| entry_to_json(&conn, id))
+        .map(|id| entry_to_json_with_guild(&conn, id, guild_id))
         .collect();
 
     // Agent summary

@@ -35,16 +35,23 @@ fn test_api_router(
     engine: PolicyEngine,
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
 ) -> axum::Router {
-    let tx = crate::server::ws::new_broadcast();
-    let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-    api_router(
+    test_api_router_with_config(
         db,
         engine,
         crate::config::Config::default(),
-        tx,
-        buf,
         health_registry,
     )
+}
+
+fn test_api_router_with_config(
+    db: Db,
+    engine: PolicyEngine,
+    config: crate::config::Config,
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+) -> axum::Router {
+    let tx = crate::server::ws::new_broadcast();
+    let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
+    api_router(db, engine, config, tx, buf, health_registry)
 }
 
 fn env_lock() -> MutexGuard<'static, ()> {
@@ -6696,6 +6703,169 @@ async fn parallel_generate_creates_correct_thread_groups() {
     // #6 depends on #5, #7 depends on #5 and #6 — so #6 before #7
     assert_eq!(chain_issues[2], 6, "#6 depends on #5, must be third");
     assert_eq!(chain_issues[3], 7, "#7 depends on #5 and #6, must be last");
+}
+
+#[tokio::test]
+async fn auto_queue_status_exposes_explicit_thread_links_from_configured_channels() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "agent-thread-links");
+    seed_auto_queue_card(
+        &db,
+        "card-thread-links",
+        4131,
+        "review",
+        "agent-thread-links",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET channel_thread_map = ?1
+             WHERE id = 'card-thread-links'",
+            [json!({
+                "111": "222000000000000001",
+                "222": "222000000000000002"
+            })
+            .to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-thread-links', 'test-repo', 'agent-thread-links', 'active', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'entry-thread-links', 'run-thread-links', 'card-thread-links',
+                'agent-thread-links', 'dispatched', 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let mut config = crate::config::Config::default();
+    config.discord.guild_id = Some("guild-123".to_string());
+    let app = test_api_router_with_config(db.clone(), engine, config, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auto-queue/status?agent_id=agent-thread-links")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let thread_links = json["entries"][0]["thread_links"]
+        .as_array()
+        .expect("thread_links must be an array");
+
+    assert_eq!(thread_links.len(), 2);
+    assert_eq!(thread_links[0]["label"], "work");
+    assert_eq!(thread_links[0]["channel_id"], "111");
+    assert_eq!(thread_links[0]["thread_id"], "222000000000000001");
+    assert_eq!(
+        thread_links[0]["url"],
+        "https://discord.com/channels/guild-123/222000000000000001"
+    );
+    assert_eq!(thread_links[1]["label"], "review");
+    assert_eq!(thread_links[1]["channel_id"], "222");
+    assert_eq!(thread_links[1]["thread_id"], "222000000000000002");
+    assert_eq!(
+        thread_links[1]["url"],
+        "https://discord.com/channels/guild-123/222000000000000002"
+    );
+}
+
+#[tokio::test]
+async fn auto_queue_status_legacy_thread_falls_back_to_active_label_without_url_guessing() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "agent-thread-links-legacy");
+    seed_auto_queue_card(
+        &db,
+        "card-thread-links-legacy",
+        4132,
+        "in_progress",
+        "agent-thread-links-legacy",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET active_thread_id = '333000000000000009'
+             WHERE id = 'card-thread-links-legacy'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, created_at
+            ) VALUES (
+                'run-thread-links-legacy', 'test-repo', 'agent-thread-links-legacy',
+                'active', datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'entry-thread-links-legacy', 'run-thread-links-legacy',
+                'card-thread-links-legacy', 'agent-thread-links-legacy', 'pending', 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/auto-queue/status?agent_id=agent-thread-links-legacy")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let thread_links = json["entries"][0]["thread_links"]
+        .as_array()
+        .expect("thread_links must be an array");
+
+    assert_eq!(thread_links.len(), 1);
+    assert_eq!(thread_links[0]["label"], "active");
+    assert_eq!(thread_links[0]["role"], "active");
+    assert_eq!(thread_links[0]["thread_id"], "333000000000000009");
+    assert_eq!(thread_links[0]["url"], serde_json::Value::Null);
 }
 
 #[tokio::test]
