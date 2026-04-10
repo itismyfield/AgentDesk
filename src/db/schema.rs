@@ -542,6 +542,37 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS card_retrospectives (
+            id               TEXT PRIMARY KEY,
+            card_id          TEXT NOT NULL REFERENCES kanban_cards(id) ON DELETE CASCADE,
+            dispatch_id      TEXT NOT NULL REFERENCES task_dispatches(id) ON DELETE CASCADE,
+            terminal_status  TEXT NOT NULL,
+            repo_id          TEXT,
+            issue_number     INTEGER,
+            title            TEXT NOT NULL,
+            topic            TEXT NOT NULL,
+            content          TEXT NOT NULL,
+            review_round     INTEGER NOT NULL DEFAULT 0,
+            review_notes     TEXT,
+            duration_seconds INTEGER,
+            success          INTEGER NOT NULL DEFAULT 0,
+            result_json      TEXT NOT NULL,
+            memory_payload   TEXT NOT NULL,
+            sync_backend     TEXT,
+            sync_status      TEXT NOT NULL DEFAULT 'skipped',
+            sync_error       TEXT,
+            created_at       DATETIME DEFAULT (datetime('now')),
+            updated_at       DATETIME DEFAULT (datetime('now')),
+            UNIQUE(card_id, dispatch_id, terminal_status)
+        );
+        CREATE INDEX IF NOT EXISTS idx_card_retrospectives_card_created
+            ON card_retrospectives(card_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_card_retrospectives_issue_created
+            ON card_retrospectives(issue_number, created_at DESC)
+            WHERE issue_number IS NOT NULL;",
+    )?;
+
     // #126: Add expires_at column to kv_meta for TTL support
     {
         let has_expires: bool = conn

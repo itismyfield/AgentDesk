@@ -640,6 +640,19 @@ var rules = {
 
       // #401: Auto-merge worktree branch on done transition
       _autoMergeWorktreeBranch(payload.card_id);
+
+      var retrospectiveResult = agentdesk.runtime.recordCardRetrospective(
+        payload.card_id,
+        payload.status
+      );
+      if (retrospectiveResult && retrospectiveResult.error) {
+        agentdesk.log.warn(
+          "[kanban] retrospective record failed for " +
+          payload.card_id +
+          ": " +
+          retrospectiveResult.error
+        );
+      }
     }
   }
 };

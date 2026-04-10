@@ -16,6 +16,7 @@ pub mod qwen;
 #[cfg(unix)]
 pub mod qwen_tmux_wrapper;
 pub mod remote_stub;
+pub mod retrospectives;
 pub mod service_error;
 pub mod session_backend;
 pub mod settings;

@@ -42,6 +42,24 @@ struct ContextFetchResult {
     token_usage: TokenUsage,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MementoRememberRequest {
+    pub content: String,
+    pub topic: String,
+    pub kind: String,
+    pub keywords: Vec<String>,
+    pub source: Option<String>,
+    pub workspace: Option<String>,
+    pub agent_id: Option<String>,
+    pub case_id: Option<String>,
+    pub goal: Option<String>,
+    pub outcome: Option<String>,
+    pub phase: Option<String>,
+    pub resolution_status: Option<String>,
+    pub assertion_status: Option<String>,
+    pub context_summary: Option<String>,
+}
+
 #[derive(Clone)]
 pub(crate) struct MementoBackend {
     client: reqwest::Client,
@@ -327,6 +345,58 @@ impl MementoBackend {
             .await
             .map(|result| result.token_usage)
     }
+
+    pub(crate) async fn remember(
+        &self,
+        request: MementoRememberRequest,
+    ) -> Result<TokenUsage, String> {
+        if request.content.trim().is_empty() {
+            return Err("memento remember requires non-empty content".to_string());
+        }
+        if request.topic.trim().is_empty() {
+            return Err("memento remember requires non-empty topic".to_string());
+        }
+        if request.kind.trim().is_empty() {
+            return Err("memento remember requires non-empty type".to_string());
+        }
+
+        let config = self.runtime_config()?;
+        let mut args = Map::new();
+        args.insert("content".to_string(), json!(request.content.trim()));
+        args.insert("topic".to_string(), json!(request.topic.trim()));
+        args.insert("type".to_string(), json!(request.kind.trim()));
+
+        let keywords = request
+            .keywords
+            .into_iter()
+            .map(|value| normalize_whitespace(&value))
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if !keywords.is_empty() {
+            args.insert("keywords".to_string(), json!(keywords));
+        }
+
+        insert_optional_arg(&mut args, "source", request.source);
+        insert_optional_arg(
+            &mut args,
+            "workspace",
+            request
+                .workspace
+                .or_else(|| config.workspace_override.clone()),
+        );
+        insert_optional_arg(&mut args, "agentId", request.agent_id);
+        insert_optional_arg(&mut args, "caseId", request.case_id);
+        insert_optional_arg(&mut args, "goal", request.goal);
+        insert_optional_arg(&mut args, "outcome", request.outcome);
+        insert_optional_arg(&mut args, "phase", request.phase);
+        insert_optional_arg(&mut args, "resolutionStatus", request.resolution_status);
+        insert_optional_arg(&mut args, "assertionStatus", request.assertion_status);
+        insert_optional_arg(&mut args, "contextSummary", request.context_summary);
+
+        self.call_tool(&config, "remember", Value::Object(args))
+            .await
+            .map(|result| result.token_usage)
+    }
 }
 
 fn env_var_value(name: &str) -> Option<String> {
@@ -469,6 +539,16 @@ pub(crate) fn sanitize_memento_workspace_segment(value: &str) -> String {
 
 fn normalize_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn insert_optional_arg(args: &mut Map<String, Value>, key: &str, value: Option<String>) {
+    let Some(value) = value
+        .map(|value| normalize_whitespace(&value))
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    args.insert(key.to_string(), json!(value));
 }
 
 fn truncate_text(value: &str, max_chars: usize) -> String {
@@ -1400,6 +1480,106 @@ mod tests {
                     input_tokens: 33,
                     output_tokens: 4,
                 },
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memento_remember_calls_remember_tool_over_mcp() {
+        let remember_content = serde_json::to_string(&json!({
+            "success": true,
+            "id": "memory-episode-1",
+            "usage": {
+                "inputTokens": 21,
+                "outputTokens": 3
+            }
+        }))
+        .unwrap();
+        let initialize_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": MEMENTO_PROTOCOL_VERSION
+            }
+        }))
+        .unwrap();
+        let tool_response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": remember_content
+                    }
+                ],
+                "isError": false
+            }
+        }))
+        .unwrap();
+        let (base_url, request_rx, handle) = spawn_response_sequence_server(vec![
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-789")],
+                body: initialize_response,
+            },
+            MockHttpResponse {
+                status_line: "200 OK",
+                headers: vec![("MCP-Session-Id", "session-789")],
+                body: tool_response,
+            },
+        ])
+        .await;
+        let (_guard, _temp, previous_root, previous_key, previous_workspace) =
+            install_memento_runtime(&base_url, None);
+        let backend = MementoBackend::new(memento_settings());
+
+        let usage = backend
+            .remember(MementoRememberRequest {
+                content: "Issue #418 retrospective".to_string(),
+                topic: "issue-418".to_string(),
+                kind: "episode".to_string(),
+                keywords: vec!["issue-418".to_string(), "success".to_string()],
+                source: Some("card:card-418/dispatch:dispatch-418".to_string()),
+                workspace: Some("agentdesk".to_string()),
+                agent_id: Some("default".to_string()),
+                case_id: Some("issue-418".to_string()),
+                goal: Some("Record terminal card retrospective".to_string()),
+                outcome: Some("resolved".to_string()),
+                phase: Some("retrospective".to_string()),
+                resolution_status: Some("resolved".to_string()),
+                assertion_status: Some("verified".to_string()),
+                context_summary: Some("Completed implementation card summary".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let requests = request_rx.await.unwrap();
+        handle.abort();
+        restore_memento_runtime(previous_root, previous_key, previous_workspace);
+
+        assert_eq!(requests.len(), 2);
+        let tool_request_lower = requests[1].to_lowercase();
+        assert!(tool_request_lower.contains("post /mcp"));
+        assert!(tool_request_lower.contains("mcp-session-id: session-789"));
+        assert!(requests[1].contains("\"method\":\"tools/call\""));
+        assert!(requests[1].contains("\"name\":\"remember\""));
+        assert!(requests[1].contains("\"content\":\"Issue #418 retrospective\""));
+        assert!(requests[1].contains("\"topic\":\"issue-418\""));
+        assert!(requests[1].contains("\"type\":\"episode\""));
+        assert!(requests[1].contains("\"workspace\":\"agentdesk\""));
+        assert!(requests[1].contains("\"agentId\":\"default\""));
+        assert!(requests[1].contains("\"caseId\":\"issue-418\""));
+        assert!(requests[1].contains("\"resolutionStatus\":\"resolved\""));
+        assert!(requests[1].contains("\"assertionStatus\":\"verified\""));
+        assert!(
+            requests[1].contains("\"contextSummary\":\"Completed implementation card summary\"")
+        );
+        assert_eq!(
+            usage,
+            crate::services::memory::TokenUsage {
+                input_tokens: 21,
+                output_tokens: 3,
             }
         );
     }

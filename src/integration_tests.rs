@@ -1177,6 +1177,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminal_transition_records_card_retrospective_from_latest_completed_dispatch() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-retro-e2e", "review", "test/repo", 418, None);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards
+                 SET review_round = 2,
+                     review_notes = 'canonical thread_links only'
+                 WHERE id = 'card-retro-e2e'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                    created_at, updated_at, completed_at
+                 ) VALUES (
+                    'dispatch-retro-e2e', 'card-retro-e2e', 'agent-1', 'implementation', 'completed', 'Done', ?1,
+                    datetime('now', '-37 minutes'), datetime('now'), datetime('now')
+                 )",
+                [json!({
+                    "summary": "Discord 링크 생성은 canonical thread_links만 사용하도록 정리"
+                })
+                .to_string()],
+            )
+            .unwrap();
+        }
+
+        assert!(
+            kanban::transition_status_with_opts(
+                &db,
+                &engine,
+                "card-retro-e2e",
+                "done",
+                "test",
+                true,
+            )
+            .is_ok()
+        );
+        assert_eq!(get_card_status(&db, "card-retro-e2e"), "done");
+
+        let conn = db.lock().unwrap();
+        let stored: (String, String, i64, String, String) = conn
+            .query_row(
+                "SELECT topic, content, review_round, terminal_status, sync_status
+                 FROM card_retrospectives
+                 WHERE card_id = 'card-retro-e2e'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, "issue-418");
+        assert!(stored.1.contains("AgentDesk 이슈 #418"));
+        assert!(stored.1.contains("canonical thread_links"));
+        assert!(stored.1.contains("review 2라운드"));
+        assert_eq!(stored.2, 2);
+        assert_eq!(stored.3, "done");
+        assert!(
+            stored.4 == "skipped_backend"
+                || stored.4 == "skipped_no_runtime"
+                || stored.4 == "queued",
+            "unexpected sync status: {}",
+            stored.4
+        );
+    }
+
     // ── Scenario 5: Timeout recovery ────────────────────────────────
 
     #[test]
