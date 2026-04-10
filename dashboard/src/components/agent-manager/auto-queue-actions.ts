@@ -16,7 +16,6 @@ interface AutoQueueGenerateApi {
     repo: string | null,
     agentId?: string | null,
     mode?: AutoQueueGenerateMode,
-    unifiedThread?: boolean | null,
   ): Promise<Record<string, unknown>>;
 }
 
@@ -29,10 +28,9 @@ export async function generateAutoQueueForSelection(
   repo: string | null,
   agentId: string | null | undefined,
   mode: AutoQueueGenerateMode,
-  unifiedThread?: boolean | null,
 ): Promise<Record<string, unknown>> {
   await api.resetAutoQueue({ repo, agentId: agentId ?? null });
-  return api.generateAutoQueue(repo, agentId, mode, unifiedThread);
+  return api.generateAutoQueue(repo, agentId, mode);
 }
 
 export async function resetAutoQueueForSelection(

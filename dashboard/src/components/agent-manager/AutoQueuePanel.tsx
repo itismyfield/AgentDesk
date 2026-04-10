@@ -470,7 +470,6 @@ export default function AutoQueuePanel({
   const [expanded, setExpanded] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [activating, setActivating] = useState(false);
-  const [unifiedThread, setUnifiedThread] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [noReadyCards, setNoReadyCards] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("thread");
@@ -482,7 +481,6 @@ export default function AutoQueuePanel({
     setStatus(createEmptyAutoQueueStatus());
     setError(null);
     setNoReadyCards(false);
-    setUnifiedThread(false);
     setViewMode("thread");
     setGenerating(false);
     setActivating(false);
@@ -496,12 +494,6 @@ export default function AutoQueuePanel({
         suppressedRunIdRef.current = null;
       }
       setStatus(normalized);
-      // Sync unified_thread toggle from server state
-      if (normalized.run?.unified_thread !== undefined) {
-        setUnifiedThread(!!normalized.run.unified_thread);
-      } else if (!normalized.run) {
-        setUnifiedThread(false);
-      }
       // Only reset noReadyCards when a run with entries exists
       if (!normalized.run || normalized.entries.length > 0) setNoReadyCards(false);
     } catch {
@@ -538,7 +530,6 @@ export default function AutoQueuePanel({
         selectedRepo || null,
         selectedAgentId,
         generateMode,
-        unifiedThread,
       ) as Record<string, unknown>;
       if (result.entries && Array.isArray(result.entries) && result.entries.length === 0) {
         const counts = result.counts as Record<string, number> | undefined;
@@ -588,11 +579,7 @@ export default function AutoQueuePanel({
     setActivating(true);
     setError(null);
     try {
-      await api.activateAutoQueue(
-        selectedRepo || null,
-        selectedAgentId,
-        unifiedThread,
-      );
+      await api.activateAutoQueue(selectedRepo || null, selectedAgentId);
       await fetchStatus();
     } catch (e) {
       setError(
@@ -921,26 +908,6 @@ export default function AutoQueuePanel({
         <div className="flex items-center gap-2">
           {showRunStartControls && (
             <>
-              <label
-                className="flex items-center gap-1 text-xs cursor-pointer select-none"
-                style={{
-                  color: unifiedThread ? "#fbbf24" : "var(--th-text-secondary)",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={unifiedThread}
-                  onChange={(e) => {
-                    const val = e.target.checked;
-                    setUnifiedThread(val);
-                    if (run?.id) {
-                      void api.updateAutoQueueRun(run.id, undefined, val);
-                    }
-                  }}
-                  style={{ cursor: "pointer", accentColor: "#f59e0b" }}
-                />
-                {tr("통합 스레드", "Unified Thread")}
-              </label>
               <button
                 onClick={() => void handleActivate()}
                 disabled={activating}
