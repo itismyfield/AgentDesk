@@ -2496,7 +2496,8 @@ fn ensure_auto_queue_tables(db: &Db) {
             created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
             dispatched_at   DATETIME,
             completed_at    DATETIME,
-            thread_group    INTEGER DEFAULT 0
+            thread_group    INTEGER DEFAULT 0,
+            batch_phase     INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS auto_queue_slots (
             agent_id              TEXT NOT NULL,
@@ -2602,10 +2603,18 @@ fn auto_queue_schema_migration_drops_legacy_max_concurrent_per_agent_column() {
             |row| row.get(0),
         )
         .unwrap();
+    let has_batch_phase: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_entries') WHERE name = 'batch_phase'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
 
     assert!(!has_legacy_column);
     assert!(has_max_threads);
     assert!(has_thread_group_count);
+    assert!(has_batch_phase);
 }
 
 fn seed_live_auto_queue_run(db: &Db, run_id: &str, agent_id: &str, existing_card_id: &str) {
@@ -6563,6 +6572,89 @@ async fn auto_queue_generate_persists_unified_thread_flag() {
 }
 
 #[tokio::test]
+async fn auto_queue_generate_entries_payload_persists_batch_phases() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-generate-phase");
+    seed_repo(&db, "test-repo");
+    seed_auto_queue_card(
+        &db,
+        "card-generate-phase-1",
+        4231,
+        "ready",
+        "agent-generate-phase",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-generate-phase-2",
+        4232,
+        "ready",
+        "agent-generate-phase",
+    );
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "agent-generate-phase",
+                        "entries": [
+                            { "issue_number": 4232, "batch_phase": 2 },
+                            { "issue_number": 4231, "batch_phase": 1 }
+                        ],
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entries = json["entries"].as_array().expect("entries must be array");
+
+    let phases_by_issue: std::collections::HashMap<i64, i64> = entries
+        .iter()
+        .filter_map(|entry| {
+            Some((
+                entry["github_issue_number"].as_i64()?,
+                entry["batch_phase"].as_i64()?,
+            ))
+        })
+        .collect();
+
+    assert_eq!(phases_by_issue.get(&4231), Some(&1));
+    assert_eq!(phases_by_issue.get(&4232), Some(&2));
+
+    let conn = db.lock().unwrap();
+    let stored_phases: std::collections::HashMap<i64, i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT kc.github_issue_number, COALESCE(e.batch_phase, 0)
+                 FROM auto_queue_entries e
+                 JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+                 ORDER BY kc.github_issue_number ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+            .unwrap()
+            .filter_map(|row| row.ok())
+            .collect()
+    };
+    assert_eq!(stored_phases.get(&4231), Some(&1));
+    assert_eq!(stored_phases.get(&4232), Some(&2));
+}
+
+#[tokio::test]
 async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -6921,6 +7013,209 @@ async fn parallel_false_keeps_single_group_sequential() {
     }
     assert_eq!(run["thread_group_count"], 1);
     assert_eq!(run["max_concurrent_threads"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "agent-phase-a");
+    seed_agent(&db, "agent-phase-b");
+    seed_auto_queue_card(&db, "card-phase-1-a", 4241, "ready", "agent-phase-a");
+    seed_auto_queue_card(&db, "card-phase-1-b", 4242, "ready", "agent-phase-b");
+    seed_auto_queue_card(&db, "card-phase-2-a", 4243, "ready", "agent-phase-a");
+    seed_auto_queue_card(&db, "card-phase-2-b", 4244, "ready", "agent-phase-b");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, status, max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-batch-phase', 'test-repo', 'active', 2, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
+            ) VALUES (
+                'entry-phase-1-a', 'run-batch-phase', 'card-phase-1-a', 'agent-phase-a', 'pending', 0, 0, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
+            ) VALUES (
+                'entry-phase-1-b', 'run-batch-phase', 'card-phase-1-b', 'agent-phase-b', 'pending', 1, 1, 1
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
+            ) VALUES (
+                'entry-phase-2-a', 'run-batch-phase', 'card-phase-2-a', 'agent-phase-a', 'pending', 2, 0, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase
+            ) VALUES (
+                'entry-phase-2-b', 'run-batch-phase', 'card-phase-2-b', 'agent-phase-b', 'pending', 3, 1, 2
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-batch-phase",
+                        "active_only": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+    assert_eq!(first_json["count"], 2);
+
+    {
+        let conn = db.lock().unwrap();
+        let dispatched_phases: std::collections::HashMap<String, i64> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, COALESCE(batch_phase, 0)
+                     FROM auto_queue_entries
+                     WHERE status = 'dispatched'
+                     ORDER BY id ASC",
+                )
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .filter_map(|row| row.ok())
+            .collect()
+        };
+        assert_eq!(dispatched_phases.len(), 2);
+        assert_eq!(dispatched_phases.get("entry-phase-1-a"), Some(&1));
+        assert_eq!(dispatched_phases.get("entry-phase-1-b"), Some(&1));
+    }
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE auto_queue_entries
+             SET status = 'done', dispatch_id = NULL, completed_at = datetime('now')
+             WHERE id = 'entry-phase-1-a'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let second_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-batch-phase",
+                        "active_only": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body = axum::body::to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+    assert_eq!(
+        second_json["count"], 0,
+        "phase 2 must stay blocked while phase 1 still has an in-flight entry"
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE auto_queue_entries
+             SET status = 'done', dispatch_id = NULL, completed_at = datetime('now')
+             WHERE id = 'entry-phase-1-b'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let third_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-batch-phase",
+                        "active_only": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(third_response.status(), StatusCode::OK);
+    let third_body = axum::body::to_bytes(third_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let third_json: serde_json::Value = serde_json::from_slice(&third_body).unwrap();
+    assert_eq!(
+        third_json["count"], 2,
+        "next batch phase should become dispatchable once phase 1 is complete"
+    );
+
+    let conn = db.lock().unwrap();
+    let phase_two_dispatched: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_entries
+             WHERE status = 'dispatched' AND COALESCE(batch_phase, 0) = 2",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(phase_two_dispatched, 2);
 }
 
 /// Regression test for #191: onTick1min recovery must reset stuck auto-queue
