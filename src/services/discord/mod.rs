@@ -1180,6 +1180,33 @@ async fn catch_up_missed_messages(
     let now = Instant::now();
     let max_age = std::time::Duration::from_secs(300); // Only catch up messages within 5 minutes
 
+    // #429: prune stale checkpoints before iterating — files older than
+    // max_checkpoint_age were written by sessions that ended long before this
+    // restart, so catch-up is pointless and the API calls are wasted.
+    let max_checkpoint_age = std::time::Duration::from_secs(600); // 10 minutes
+    let mut pruned = 0usize;
+    if let Ok(prune_entries) = fs::read_dir(&dir) {
+        for entry in prune_entries.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = path.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if modified.elapsed().unwrap_or_default() > max_checkpoint_age {
+                        let _ = fs::remove_file(&path);
+                        pruned += 1;
+                    }
+                }
+            }
+        }
+    }
+    if pruned > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!("  [{ts}] 🧹 catch-up: pruned {pruned} stale checkpoint(s) (>10min old)");
+    }
+
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
