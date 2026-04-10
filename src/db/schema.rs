@@ -145,6 +145,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          UPDATE kanban_cards SET review_entered_at = updated_at WHERE status = 'review' AND review_entered_at IS NULL;
          UPDATE kanban_cards SET awaiting_dod_at = updated_at WHERE status = 'review' AND review_status = 'awaiting_dod' AND awaiting_dod_at IS NULL;",
     );
+    ensure_auto_queue_schema(conn)?;
 
     // Unique constraint: one kanban card per GitHub issue per repo.
     // Deduplicate existing rows first so CREATE UNIQUE INDEX succeeds.
@@ -699,6 +700,147 @@ fn ensure_pipeline_stage(
             provider,
             skip_condition,
         ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+            id          TEXT PRIMARY KEY,
+            repo        TEXT,
+            agent_id    TEXT,
+            status      TEXT DEFAULT 'active',
+            ai_model    TEXT,
+            ai_rationale TEXT,
+            timeout_minutes INTEGER DEFAULT 120,
+            unified_thread  INTEGER DEFAULT 0,
+            unified_thread_id TEXT,
+            unified_thread_channel_id TEXT,
+            max_concurrent_threads INTEGER DEFAULT 1,
+            thread_group_count INTEGER DEFAULT 1,
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME
+        );
+        CREATE TABLE IF NOT EXISTS auto_queue_entries (
+            id              TEXT PRIMARY KEY,
+            run_id          TEXT REFERENCES auto_queue_runs(id),
+            kanban_card_id  TEXT REFERENCES kanban_cards(id),
+            agent_id        TEXT,
+            priority_rank   INTEGER DEFAULT 0,
+            reason          TEXT,
+            status          TEXT DEFAULT 'pending',
+            dispatch_id     TEXT,
+            slot_index      INTEGER,
+            thread_group    INTEGER DEFAULT 0,
+            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+            dispatched_at   DATETIME,
+            completed_at    DATETIME
+        );
+        CREATE TABLE IF NOT EXISTS auto_queue_slots (
+            agent_id             TEXT NOT NULL,
+            slot_index           INTEGER NOT NULL,
+            assigned_run_id      TEXT,
+            assigned_thread_group INTEGER,
+            thread_id_map        TEXT,
+            created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (agent_id, slot_index)
+        );",
+    )?;
+
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_runs",
+        "unified_thread",
+        "ALTER TABLE auto_queue_runs ADD COLUMN unified_thread INTEGER DEFAULT 0;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_runs",
+        "unified_thread_id",
+        "ALTER TABLE auto_queue_runs ADD COLUMN unified_thread_id TEXT;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_runs",
+        "unified_thread_channel_id",
+        "ALTER TABLE auto_queue_runs ADD COLUMN unified_thread_channel_id TEXT;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_entries",
+        "thread_group",
+        "ALTER TABLE auto_queue_entries ADD COLUMN thread_group INTEGER DEFAULT 0;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_runs",
+        "max_concurrent_threads",
+        "ALTER TABLE auto_queue_runs ADD COLUMN max_concurrent_threads INTEGER DEFAULT 1;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_runs",
+        "thread_group_count",
+        "ALTER TABLE auto_queue_runs ADD COLUMN thread_group_count INTEGER DEFAULT 1;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_entries",
+        "dispatch_id",
+        "ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;",
+    )?;
+    backfill_auto_queue_dispatch_ids(conn)?;
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_entries",
+        "slot_index",
+        "ALTER TABLE auto_queue_entries ADD COLUMN slot_index INTEGER;",
+    )?;
+
+    if auto_queue_has_column(conn, "auto_queue_runs", "max_concurrent_per_agent") {
+        let _ =
+            conn.execute_batch("ALTER TABLE auto_queue_runs DROP COLUMN max_concurrent_per_agent;");
+    }
+
+    Ok(())
+}
+
+fn ensure_auto_queue_column(conn: &Connection, table: &str, column: &str, ddl: &str) -> Result<()> {
+    if !auto_queue_has_column(conn, table, column) {
+        conn.execute_batch(ddl)?;
+    }
+    Ok(())
+}
+
+fn auto_queue_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
+        rusqlite::params![table, column],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+fn backfill_auto_queue_dispatch_ids(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "UPDATE auto_queue_entries SET dispatch_id = (
+            SELECT td.id FROM task_dispatches td
+            WHERE td.kanban_card_id = auto_queue_entries.kanban_card_id
+              AND td.to_agent_id = auto_queue_entries.agent_id
+              AND td.dispatch_type = 'implementation'
+            ORDER BY td.created_at DESC LIMIT 1
+        )
+        WHERE auto_queue_entries.status IN ('dispatched', 'done')
+          AND auto_queue_entries.dispatch_id IS NULL
+          AND auto_queue_entries.rowid = (
+              SELECT e.rowid FROM auto_queue_entries e
+              WHERE e.kanban_card_id = auto_queue_entries.kanban_card_id
+                AND e.agent_id = auto_queue_entries.agent_id
+                AND e.status IN ('dispatched', 'done')
+              ORDER BY e.created_at DESC LIMIT 1
+          );",
     )?;
     Ok(())
 }

@@ -275,7 +275,6 @@ fn test_queue_status_facade() {
     let db = test_db();
     {
         let conn = db.separate_conn().unwrap();
-        crate::server::routes::auto_queue::ensure_tables(&conn);
         conn.execute(
             "INSERT INTO agents (id, name, discord_channel_id) VALUES ('ag-queue', 'Queue Bot', '111')",
             [],

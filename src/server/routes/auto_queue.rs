@@ -138,169 +138,6 @@ impl GenerateMode {
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-pub(crate) fn ensure_tables(conn: &rusqlite::Connection) {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS auto_queue_runs (
-            id          TEXT PRIMARY KEY,
-            repo        TEXT,
-            agent_id    TEXT,
-            status      TEXT DEFAULT 'active',
-            ai_model    TEXT,
-            ai_rationale TEXT,
-            timeout_minutes INTEGER DEFAULT 120,
-            unified_thread  INTEGER DEFAULT 0,
-            unified_thread_id TEXT,
-            unified_thread_channel_id TEXT,
-            max_concurrent_threads INTEGER DEFAULT 1,
-            thread_group_count INTEGER DEFAULT 1,
-            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-            completed_at DATETIME
-        );
-        CREATE TABLE IF NOT EXISTS auto_queue_entries (
-            id              TEXT PRIMARY KEY,
-            run_id          TEXT REFERENCES auto_queue_runs(id),
-            kanban_card_id  TEXT REFERENCES kanban_cards(id),
-            agent_id        TEXT,
-            priority_rank   INTEGER DEFAULT 0,
-            reason          TEXT,
-            status          TEXT DEFAULT 'pending',
-            dispatch_id     TEXT,
-            slot_index      INTEGER,
-            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-            dispatched_at   DATETIME,
-            completed_at    DATETIME
-        );
-        CREATE TABLE IF NOT EXISTS auto_queue_slots (
-            agent_id             TEXT NOT NULL,
-            slot_index           INTEGER NOT NULL,
-            assigned_run_id      TEXT,
-            assigned_thread_group INTEGER,
-            thread_id_map        TEXT,
-            created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (agent_id, slot_index)
-        );",
-    )
-    .ok();
-    // #137: upgrade path for existing DBs
-    let has_unified: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_runs') WHERE name = 'unified_thread'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_unified {
-        conn.execute_batch(
-            "ALTER TABLE auto_queue_runs ADD COLUMN unified_thread INTEGER DEFAULT 0;
-             ALTER TABLE auto_queue_runs ADD COLUMN unified_thread_id TEXT;
-             ALTER TABLE auto_queue_runs ADD COLUMN unified_thread_channel_id TEXT;",
-        )
-        .ok();
-    }
-    // #140: thread_group on entries — parallel thread group assignment
-    let has_thread_group: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_entries') WHERE name = 'thread_group'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_thread_group {
-        conn.execute_batch(
-            "ALTER TABLE auto_queue_entries ADD COLUMN thread_group INTEGER DEFAULT 0;",
-        )
-        .ok();
-    }
-    // #140: parallel dispatch columns on runs
-    let has_max_concurrent: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_runs') WHERE name = 'max_concurrent_threads'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_max_concurrent {
-        conn.execute_batch(
-            "ALTER TABLE auto_queue_runs ADD COLUMN max_concurrent_threads INTEGER DEFAULT 1;",
-        )
-        .ok();
-    }
-    let has_thread_group_count: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_runs') WHERE name = 'thread_group_count'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_thread_group_count {
-        conn.execute_batch(
-            "ALTER TABLE auto_queue_runs ADD COLUMN thread_group_count INTEGER DEFAULT 1;",
-        )
-        .ok();
-    }
-    let has_max_per_agent: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_runs') WHERE name = 'max_concurrent_per_agent'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if has_max_per_agent {
-        conn.execute_batch("ALTER TABLE auto_queue_runs DROP COLUMN max_concurrent_per_agent;")
-            .ok();
-    }
-
-    // #145: dispatch_id on entries — direct dispatch→run association
-    let has_dispatch_id: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_entries') WHERE name = 'dispatch_id'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_dispatch_id {
-        conn.execute_batch("ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;")
-            .ok();
-        // Backfill dispatch_id for the LATEST entry per card+agent only (#145).
-        // Only the most recent entry gets the dispatch_id to avoid stamping the same
-        // dispatch_id onto old done entries from previous runs, which would make
-        // is_unified_thread_active() ambiguous via LIMIT 1.
-        conn.execute_batch(
-            "UPDATE auto_queue_entries SET dispatch_id = (
-                SELECT td.id FROM task_dispatches td
-                WHERE td.kanban_card_id = auto_queue_entries.kanban_card_id
-                  AND td.to_agent_id = auto_queue_entries.agent_id
-                  AND td.dispatch_type = 'implementation'
-                ORDER BY td.created_at DESC LIMIT 1
-            )
-            WHERE auto_queue_entries.status IN ('dispatched', 'done')
-              AND auto_queue_entries.dispatch_id IS NULL
-              AND auto_queue_entries.rowid = (
-                  SELECT e.rowid FROM auto_queue_entries e
-                  WHERE e.kanban_card_id = auto_queue_entries.kanban_card_id
-                    AND e.agent_id = auto_queue_entries.agent_id
-                    AND e.status IN ('dispatched', 'done')
-                  ORDER BY e.created_at DESC LIMIT 1
-              );",
-        )
-        .ok();
-    }
-    let has_slot_index: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_entries') WHERE name = 'slot_index'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_slot_index {
-        conn.execute_batch("ALTER TABLE auto_queue_entries ADD COLUMN slot_index INTEGER;")
-            .ok();
-    }
-}
-
 fn run_slot_pool_size(conn: &rusqlite::Connection, run_id: &str) -> i64 {
     conn.query_row(
         "SELECT COALESCE(max_concurrent_threads, 1)
@@ -1259,7 +1096,6 @@ pub async fn generate(
                 );
             }
         };
-        ensure_tables(&conn);
         let (mut conditions, params) = build_card_filters(
             "kc",
             body.repo.as_ref(),
@@ -1354,8 +1190,6 @@ pub async fn generate(
             );
         }
     };
-    ensure_tables(&conn);
-
     // Build filter — pipeline-driven enqueueable states (dispatchable + prepared staging states)
     crate::pipeline::ensure_loaded();
     let enqueueable = crate::pipeline::try_get()
@@ -1807,8 +1641,6 @@ pub async fn activate(
             );
         }
     };
-    ensure_tables(&conn);
-
     let active_only = body.active_only.unwrap_or(false);
     // Internal recovery paths must continue only active runs. Manual activation
     // may opt into promoting the latest generated draft.
@@ -2482,8 +2314,6 @@ pub async fn status(
             );
         }
     };
-    ensure_tables(&conn);
-
     // Find latest run (NULL agent_id/repo matches any filter)
     let mut run_filter = "1=1".to_string();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -2653,8 +2483,6 @@ pub async fn skip_entry(
             );
         }
     };
-    ensure_tables(&conn);
-
     let changed = conn
         .execute(
             "UPDATE auto_queue_entries SET status = 'skipped', completed_at = datetime('now') WHERE id = ?1 AND status = 'pending'",
@@ -2687,8 +2515,6 @@ pub async fn update_run(
             );
         }
     };
-    ensure_tables(&conn);
-
     let mut changed = 0usize;
 
     if let Some(ref status) = body.status {
@@ -2741,8 +2567,6 @@ pub async fn reset(
             );
         }
     };
-    ensure_tables(&conn);
-
     let body: ResetBody = if body.is_empty() {
         ResetBody::default()
     } else {
@@ -2861,7 +2685,6 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
             );
         }
     };
-    ensure_tables(&conn);
     let paused = conn
         .execute(
             "UPDATE auto_queue_runs SET status = 'paused' WHERE status = 'active'",
@@ -2885,7 +2708,6 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
             );
         }
     };
-    ensure_tables(&conn);
     let resumed = conn
         .execute(
             "UPDATE auto_queue_runs SET status = 'active' WHERE status = 'paused'",
@@ -2932,7 +2754,6 @@ pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             );
         }
     };
-    ensure_tables(&conn);
     let cancelled_entries = conn
         .execute(
             "UPDATE auto_queue_entries SET status = 'skipped' WHERE status IN ('pending', 'dispatched')",
@@ -2969,8 +2790,6 @@ pub async fn reorder(
             );
         }
     };
-    ensure_tables(&conn);
-
     let run_id = body.ordered_ids.iter().find_map(|id| {
         conn.query_row(
             "SELECT run_id FROM auto_queue_entries WHERE id = ?1",
@@ -3070,8 +2889,6 @@ pub async fn enqueue(
             );
         }
     };
-    ensure_tables(&conn);
-
     // Resolve agent_id
     let agent_id = match body.agent_id {
         Some(ref id) if !id.is_empty() => id.clone(),
@@ -3310,8 +3127,6 @@ pub async fn submit_order(
             );
         }
     };
-    ensure_tables(&conn);
-
     // Verify run exists and is pending, get repo for filtering
     let run_info: Option<(String, Option<String>)> = conn
         .query_row(

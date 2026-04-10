@@ -833,7 +833,6 @@ mod tests {
 
         {
             let conn = db.lock().unwrap();
-            crate::server::routes::auto_queue::ensure_tables(&conn);
             conn.execute(
                 "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
                  VALUES ('run-251-aq', 'test-repo', 'agent-1', 'active')",

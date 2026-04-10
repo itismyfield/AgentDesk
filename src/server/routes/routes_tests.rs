@@ -2533,9 +2533,20 @@ fn seed_auto_queue_card(db: &Db, card_id: &str, issue_number: i64, status: &str,
 }
 
 #[test]
-fn auto_queue_ensure_tables_drops_legacy_max_concurrent_per_agent_column() {
-    let db = test_db();
-    let conn = db.lock().unwrap();
+fn auto_queue_schema_migration_drops_legacy_max_concurrent_per_agent_column() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys=ON;
+         CREATE TABLE kanban_cards (id TEXT PRIMARY KEY);
+         CREATE TABLE task_dispatches (
+            id TEXT PRIMARY KEY,
+            kanban_card_id TEXT,
+            to_agent_id TEXT,
+            dispatch_type TEXT,
+            created_at DATETIME
+         );",
+    )
+    .unwrap();
     conn.execute_batch(
         "CREATE TABLE auto_queue_runs (
             id          TEXT PRIMARY KEY,
@@ -2568,7 +2579,7 @@ fn auto_queue_ensure_tables_drops_legacy_max_concurrent_per_agent_column() {
     )
     .unwrap();
 
-    crate::server::routes::auto_queue::ensure_tables(&conn);
+    crate::db::schema::ensure_auto_queue_schema(&conn).unwrap();
 
     let has_legacy_column: bool = conn
         .query_row(

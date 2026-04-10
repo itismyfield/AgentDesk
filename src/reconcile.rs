@@ -27,8 +27,6 @@ impl BootReconcileStats {
 }
 
 pub(crate) fn reconcile_boot_db(conn: &Connection) -> Result<BootReconcileStats> {
-    crate::server::routes::auto_queue::ensure_tables(conn);
-
     let stale_processing_outbox_reset = conn
         .execute(
             "UPDATE dispatch_outbox SET status = 'pending' WHERE status = 'processing'",
