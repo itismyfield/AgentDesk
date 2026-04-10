@@ -413,6 +413,8 @@ pub struct MeetingAgentDef {
 pub struct GitHubConfig {
     #[serde(default)]
     pub repos: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub repo_dirs: std::collections::BTreeMap<String, String>,
     #[serde(default = "default_sync_interval")]
     pub sync_interval_minutes: u64,
 }
