@@ -343,7 +343,10 @@ pub(in crate::services::discord) async fn handle_event(
                 return Ok(());
             }
 
-            // Ignore bot messages, unless the bot is in the allowed_bot_ids list
+            // Ignore bot messages, unless the bot is in the allowed_bot_ids list.
+            // Some utility bot deliveries are identified by explicit author ID even
+            // when Discord does not mark the sender as `bot`, so a second text-level
+            // gate runs later once we have the full message content.
             if new_message.author.bot {
                 let allowed = {
                     let settings = data.shared.settings.read().await;
@@ -420,7 +423,15 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            if new_message.author.bot && !should_process_allowed_bot_turn_text(text) {
+            let is_allowed_bot_sender = settings_snapshot.allowed_bot_ids.contains(&user_id.get());
+            if is_allowed_bot_sender
+                && !super::super::is_allowed_turn_sender(
+                    &settings_snapshot.allowed_bot_ids,
+                    user_id.get(),
+                    new_message.author.bot,
+                    text,
+                )
+            {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!(
                     "  [{ts}] ⏭ BOT-INTAKE: skipping non-turn bot message {} in channel {}",
@@ -430,10 +441,7 @@ pub(in crate::services::discord) async fn handle_event(
             }
 
             // Auth check (allowed bots bypass auth)
-            let is_allowed_bot = new_message.author.bot && {
-                let settings = data.shared.settings.read().await;
-                settings.allowed_bot_ids.contains(&user_id.get())
-            };
+            let is_allowed_bot = is_allowed_bot_sender;
             if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
                 return Ok(());
             }
@@ -500,7 +508,7 @@ pub(in crate::services::discord) async fn handle_event(
             // ── Intake-level dedup guard ──────────────────────────────────
             // Prevents the same bot dispatch from starting two parallel turns
             // when Discord delivers the message twice in rapid succession.
-            if new_message.author.bot {
+            if is_allowed_bot {
                 let dedup_key =
                     if let Some(dispatch_id) = super::super::adk_session::parse_dispatch_id(text) {
                         // Same dispatch_id = genuine duplicate (Discord retry)
@@ -552,7 +560,7 @@ pub(in crate::services::discord) async fn handle_event(
             // to the parent channel are queued so they don't start a parallel
             // turn (the thread's cancel_token is keyed by thread_id, leaving
             // the parent channel "unlocked").
-            if new_message.author.bot {
+            if is_allowed_bot {
                 if let Some(thread_id_ref) = data.shared.dispatch_thread_parents.get(&channel_id) {
                     let thread_id = *thread_id_ref.value();
                     // Thread still has an active turn?

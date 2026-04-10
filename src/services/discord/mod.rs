@@ -106,6 +106,32 @@ pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
         && !trimmed.contains("작업 착수 금지")
 }
 
+pub(in crate::services::discord) fn is_allowed_turn_sender(
+    allowed_bot_ids: &[u64],
+    author_id: u64,
+    author_is_bot: bool,
+    text: &str,
+) -> bool {
+    if allowed_bot_ids.contains(&author_id) {
+        return should_process_allowed_bot_turn_text(text);
+    }
+    !author_is_bot
+}
+
+pub(in crate::services::discord) fn should_phase2_recover_message(
+    message_id: u64,
+    checkpoint: Option<u64>,
+    existing_ids: &std::collections::HashSet<u64>,
+) -> bool {
+    if existing_ids.contains(&message_id) {
+        return false;
+    }
+    if checkpoint.is_some_and(|saved| message_id <= saved) {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 pub(in crate::services::discord) use queue_io::channel_has_pending_soft_queue_at;
 pub(in crate::services::discord) use queue_io::schedule_deferred_idle_queue_kickoff;
@@ -1270,14 +1296,8 @@ async fn catch_up_missed_messages(
             if text.is_empty() {
                 continue;
             }
-            // Only process messages from allowed bots or authorized users
-            let is_allowed = if msg.author.bot {
-                allowed_bot_ids.contains(&msg.author.id.get())
-                    && should_process_allowed_bot_turn_text(text)
-            } else {
-                true
-            };
-            if !is_allowed {
+            if !is_allowed_turn_sender(&allowed_bot_ids, msg.author.id.get(), msg.author.bot, text)
+            {
                 continue;
             }
 
@@ -1386,7 +1406,7 @@ async fn catch_up_missed_messages(
         };
 
         // Collect existing queue IDs for dedup
-        let existing_ids: std::collections::HashSet<u64> = {
+        let mut existing_ids: std::collections::HashSet<u64> = {
             mailbox_snapshot(shared, channel_id)
                 .await
                 .intervention_queue
@@ -1394,6 +1414,7 @@ async fn catch_up_missed_messages(
                 .map(|i| i.message_id.get())
                 .collect()
         };
+        let mut phase2_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
 
         let mut channel_recovered = 0usize;
 
@@ -1405,20 +1426,20 @@ async fn catch_up_missed_messages(
             if Some(msg.author.id.get()) == bot_user_id_phase2 {
                 continue;
             }
-            if existing_ids.contains(&msg.id.get()) {
-                continue;
-            }
             let text = msg.content.trim();
             if text.is_empty() {
                 continue;
             }
-            let is_allowed = if msg.author.bot {
-                allowed_bot_ids_phase2.contains(&msg.author.id.get())
-                    && should_process_allowed_bot_turn_text(text)
-            } else {
-                true
-            };
-            if !is_allowed {
+            let mid = msg.id.get();
+            if !is_allowed_turn_sender(
+                &allowed_bot_ids_phase2,
+                msg.author.id.get(),
+                msg.author.bot,
+                text,
+            ) {
+                continue;
+            }
+            if !should_phase2_recover_message(mid, phase2_checkpoint, &existing_ids) {
                 continue;
             }
             // Skip messages older than 10 minutes (generous window for restart gap)
@@ -1440,6 +1461,8 @@ async fn catch_up_missed_messages(
                 },
             )
             .await;
+            existing_ids.insert(mid);
+            phase2_checkpoint = Some(phase2_checkpoint.map_or(mid, |saved| saved.max(mid)));
             channel_recovered += 1;
         }
 
@@ -4164,20 +4187,23 @@ mod tests {
     use super::{
         DiscordBotSettings, Intervention, InterventionMode, PendingQueueItem,
         allows_nonlocal_session_path, channel_has_pending_soft_queue_at,
-        choose_restore_channel_name, discord_gateway_intents, is_synthetic_thread_channel_name,
-        load_pending_queues, requeue_intervention_front_persisted, save_channel_queue,
-        save_pending_queues, select_restored_session_path, session_path_is_usable,
+        choose_restore_channel_name, discord_gateway_intents, is_allowed_turn_sender,
+        is_synthetic_thread_channel_name, load_pending_queues,
+        requeue_intervention_front_persisted, save_channel_queue, save_pending_queues,
+        select_restored_session_path, session_path_is_usable, should_phase2_recover_message,
         synthetic_thread_channel_name, take_next_soft_intervention_persisted, user_is_authorized,
         watcher_should_kickoff_idle_queue,
     };
-    use crate::services::discord::runtime_store::test_env_lock;
     use crate::services::discord::settings::{
         BotChannelRoutingGuardFailure, validate_bot_channel_routing,
+    };
+    use crate::services::discord::{
+        runtime_store::test_env_lock, should_process_allowed_bot_turn_text,
     };
     use crate::services::provider::CancelToken;
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::GatewayIntents;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -4259,6 +4285,37 @@ mod tests {
 
         assert!(user_is_authorized(&settings, 42));
         assert!(user_is_authorized(&settings, 99));
+    }
+
+    #[test]
+    fn allowed_bot_review_only_text_is_rejected_even_without_bot_flag() {
+        let allowed_bot_ids = vec![123];
+        let review_only = "⚠️ 검토 전용 — 작업 착수 금지";
+        let dispatch = "DISPATCH: abc123\n작업 시작";
+
+        assert!(!should_process_allowed_bot_turn_text(review_only));
+        assert!(!is_allowed_turn_sender(
+            &allowed_bot_ids,
+            123,
+            false,
+            review_only
+        ));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            123,
+            false,
+            dispatch
+        ));
+    }
+
+    #[test]
+    fn phase2_recovery_skips_messages_at_or_before_checkpoint() {
+        let existing = HashSet::from([300u64]);
+
+        assert!(!should_phase2_recover_message(300, None, &existing));
+        assert!(!should_phase2_recover_message(200, Some(250), &existing));
+        assert!(!should_phase2_recover_message(250, Some(250), &existing));
+        assert!(should_phase2_recover_message(251, Some(250), &existing));
     }
 
     #[test]
