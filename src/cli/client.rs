@@ -183,6 +183,41 @@ fn dispatch_context_string_field(dispatch: Option<&Value>, key: &str) -> Option<
         .map(str::to_string)
 }
 
+fn render_queue_thread_links(entry: &Value) -> String {
+    let rendered: Vec<String> = entry
+        .get("thread_links")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|link| {
+            let label = link
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            if let Some(url) = link
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(format!("{label}:{url}"));
+            }
+            link.get("thread_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|thread_id| format!("{label}:thread:{thread_id}"))
+        })
+        .collect();
+
+    if rendered.is_empty() {
+        "-".to_string()
+    } else {
+        rendered.join(" | ")
+    }
+}
+
 fn build_cli_advance_completion_result(card: &Value, pending_dispatch: Option<&Value>) -> Value {
     let issue_number = card.get("github_issue_number").and_then(Value::as_i64);
 
@@ -648,16 +683,6 @@ pub fn cmd_queue() -> Result<(), String> {
     );
     println!("{}", "-".repeat(100));
 
-    // Get unified_thread_id map for thread links
-    let thread_map: serde_json::Map<String, Value> = run["unified_thread_id"]
-        .as_str()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .or_else(|| run["unified_thread_id"].as_object().cloned())
-        .unwrap_or_default();
-
-    // Discord server ID — derive from channel IDs in thread_map
-    let discord_server = "1470762182344966308"; // TODO: make configurable
-
     for e in entries {
         let num = e["github_issue_number"].as_i64().unwrap_or(0);
         let status = e["status"].as_str().unwrap_or("?");
@@ -667,26 +692,7 @@ pub fn cmd_queue() -> Result<(), String> {
             .chars()
             .take(48)
             .collect::<String>();
-
-        // Build thread links
-        let mut links = Vec::new();
-        for (ch_id, thread_val) in &thread_map {
-            if let Some(tid) = thread_val.as_str() {
-                let label = if ch_id.ends_with("35") {
-                    "work"
-                } else {
-                    "review"
-                };
-                links.push(format!(
-                    "{label}:https://discord.com/channels/{discord_server}/{tid}"
-                ));
-            }
-        }
-        let links_str = if links.is_empty() {
-            "-".to_string()
-        } else {
-            links.join(" | ")
-        };
+        let links_str = render_queue_thread_links(e);
 
         println!("#{:<5} {:<12} {:<50} {}", num, status, title, links_str);
     }
@@ -841,7 +847,10 @@ pub fn cmd_terminations(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_cli_advance_completion_result, render_cards_table, runtime_config_payload};
+    use super::{
+        build_cli_advance_completion_result, render_cards_table, render_queue_thread_links,
+        runtime_config_payload,
+    };
     use crate::cli::client::cmd_advance;
     use axum::extract::{Path, Query, State};
     use axum::routing::{get, patch, post};
@@ -1078,6 +1087,42 @@ mod tests {
         assert!(rendered.contains("#90"));
         assert!(rendered.contains("feat: AgentDesk CLI client"));
         assert!(!rendered.contains("description"));
+    }
+
+    #[test]
+    fn render_queue_thread_links_prefers_server_urls() {
+        let rendered = render_queue_thread_links(&json!({
+            "thread_links": [
+                {
+                    "label": "work",
+                    "url": "https://discord.com/channels/guild-1/thread-1"
+                },
+                {
+                    "label": "review",
+                    "url": "https://discord.com/channels/guild-1/thread-2"
+                }
+            ]
+        }));
+
+        assert_eq!(
+            rendered,
+            "work:https://discord.com/channels/guild-1/thread-1 | review:https://discord.com/channels/guild-1/thread-2"
+        );
+    }
+
+    #[test]
+    fn render_queue_thread_links_falls_back_to_thread_id_without_guessing_url() {
+        let rendered = render_queue_thread_links(&json!({
+            "thread_links": [
+                {
+                    "label": "active",
+                    "thread_id": "1485506232256168011",
+                    "url": null
+                }
+            ]
+        }));
+
+        assert_eq!(rendered, "active:thread:1485506232256168011");
     }
 
     #[test]
