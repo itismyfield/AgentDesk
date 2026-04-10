@@ -682,7 +682,6 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, UserId};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn registry_remove_drops_channel_from_snapshots() {
@@ -741,6 +740,12 @@ mod tests {
         }
     }
 
+    fn make_overflow_queue(now: Instant) -> Vec<Intervention> {
+        (0..=super::super::MAX_INTERVENTIONS_PER_CHANNEL)
+            .map(|idx| make_intervention(idx as u64 + 1, &format!("fresh-{idx}"), now))
+            .collect()
+    }
+
     #[tokio::test]
     async fn has_pending_soft_queue_persists_pruned_queue_state() {
         let _lock = test_env_lock().lock().unwrap();
@@ -756,31 +761,24 @@ mod tests {
         let now = Instant::now();
 
         handle
-            .replace_queue(
-                vec![
-                    make_intervention(
-                        1,
-                        "stale",
-                        now - super::super::INTERVENTION_TTL - Duration::from_secs(1),
-                    ),
-                    make_intervention(2, "fresh", now),
-                ],
-                persistence.clone(),
-            )
+            .replace_queue(make_overflow_queue(now), persistence.clone())
             .await;
 
         assert_eq!(
             read_saved_items(tmp.path(), &provider, token_hash, channel_id).len(),
-            2
+            super::super::MAX_INTERVENTIONS_PER_CHANNEL + 1
         );
 
         let result = handle.has_pending_soft_queue(persistence).await;
         assert!(result.has_pending);
-        assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
+        assert_eq!(
+            handle.snapshot().await.intervention_queue.len(),
+            super::super::MAX_INTERVENTIONS_PER_CHANNEL
+        );
 
         let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].text, "fresh");
+        assert_eq!(items.len(), super::super::MAX_INTERVENTIONS_PER_CHANNEL);
+        assert_eq!(items[0].text, "fresh-1");
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
@@ -800,17 +798,7 @@ mod tests {
         let now = Instant::now();
 
         handle
-            .replace_queue(
-                vec![
-                    make_intervention(
-                        1,
-                        "stale",
-                        now - super::super::INTERVENTION_TTL - Duration::from_secs(1),
-                    ),
-                    make_intervention(2, "fresh", now),
-                ],
-                persistence.clone(),
-            )
+            .replace_queue(make_overflow_queue(now), persistence.clone())
             .await;
         let active_msg_id = serenity::MessageId::new(77);
         handle
@@ -828,11 +816,14 @@ mod tests {
         let snapshot = handle.snapshot().await;
         assert!(snapshot.cancel_token.is_none());
         assert_eq!(snapshot.active_user_message_id, None);
-        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(
+            snapshot.intervention_queue.len(),
+            super::super::MAX_INTERVENTIONS_PER_CHANNEL
+        );
 
         let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].text, "fresh");
+        assert_eq!(items.len(), super::super::MAX_INTERVENTIONS_PER_CHANNEL);
+        assert_eq!(items[0].text, "fresh-1");
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }

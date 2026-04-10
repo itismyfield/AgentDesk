@@ -140,7 +140,7 @@
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 811 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 675 |  |
 | `services::discord::bot_init` | `src/services/discord/bot_init.rs` | 2503 | giant-file |
-| `services::discord::channel_mailbox` | `src/services/discord/channel_mailbox.rs` | 908 |  |
+| `services::discord::channel_mailbox` | `src/services/discord/channel_mailbox.rs` | 899 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 38 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1141 | giant-file |
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 518 |  |
