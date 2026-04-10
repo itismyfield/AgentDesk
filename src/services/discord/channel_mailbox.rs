@@ -356,7 +356,11 @@ impl ChannelMailboxRegistry {
     }
 
     pub(super) fn remove(&self, channel_id: serenity::ChannelId) -> Option<ChannelMailboxHandle> {
-        self.handles.remove(&channel_id).map(|(_, handle)| handle)
+        let local_handle = self.handles.remove(&channel_id).map(|(_, handle)| handle);
+        let global_handle = GLOBAL_CHANNEL_MAILBOXES
+            .remove(&channel_id)
+            .map(|(_, handle)| handle);
+        local_handle.or(global_handle)
     }
 
     pub(super) async fn restart_drain_all(
@@ -697,11 +701,13 @@ mod tests {
             )
             .await;
         assert!(registry.snapshot_all().await.contains_key(&channel_id));
+        assert!(ChannelMailboxRegistry::global_handle(channel_id).is_some());
 
         let removed = registry.remove(channel_id);
 
         assert!(removed.is_some());
         assert!(!registry.snapshot_all().await.contains_key(&channel_id));
+        assert!(ChannelMailboxRegistry::global_handle(channel_id).is_none());
     }
 
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
