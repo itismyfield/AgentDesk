@@ -737,6 +737,21 @@ async fn mailbox_requeue_intervention_front(
         .await;
 }
 
+async fn mailbox_cancel_soft_intervention(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) -> Option<Intervention> {
+    shared
+        .mailbox(channel_id)
+        .cancel_queued_message(
+            message_id,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await
+}
+
 async fn mailbox_finish_turn(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -879,6 +894,17 @@ pub(super) fn dequeue_next_soft_intervention(
     let index = queue
         .iter()
         .position(|item| item.mode == InterventionMode::Soft)?;
+    Some(queue.remove(index))
+}
+
+pub(super) fn cancel_soft_intervention_by_message_id(
+    queue: &mut Vec<Intervention>,
+    message_id: MessageId,
+) -> Option<Intervention> {
+    prune_interventions(queue);
+    let index = queue
+        .iter()
+        .position(|item| item.mode == InterventionMode::Soft && item.message_id == message_id)?;
     Some(queue.remove(index))
 }
 
@@ -2217,7 +2243,9 @@ fn resolve_codex_skill_file(path: &Path) -> Option<std::path::PathBuf> {
 fn discord_gateway_intents() -> serenity::GatewayIntents {
     serenity::GatewayIntents::GUILDS
         | serenity::GatewayIntents::GUILD_MESSAGES
+        | serenity::GatewayIntents::GUILD_MESSAGE_REACTIONS
         | serenity::GatewayIntents::DIRECT_MESSAGES
+        | serenity::GatewayIntents::DIRECT_MESSAGE_REACTIONS
         | serenity::GatewayIntents::MESSAGE_CONTENT
 }
 
@@ -4252,11 +4280,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn discord_gateway_intents_do_not_include_reaction_events() {
+    fn discord_gateway_intents_include_reaction_events() {
         let intents = discord_gateway_intents();
 
-        assert!(!intents.contains(GatewayIntents::GUILD_MESSAGE_REACTIONS));
-        assert!(!intents.contains(GatewayIntents::DIRECT_MESSAGE_REACTIONS));
+        assert!(intents.contains(GatewayIntents::GUILD_MESSAGE_REACTIONS));
+        assert!(intents.contains(GatewayIntents::DIRECT_MESSAGE_REACTIONS));
     }
 
     #[test]

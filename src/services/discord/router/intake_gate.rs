@@ -56,6 +56,169 @@ async fn enqueue_soft_intervention(
     .await
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemovedControlReaction {
+    CancelQueuedTurn,
+    StopActiveTurn,
+}
+
+pub(super) fn classify_removed_control_reaction(
+    emoji: &serenity::ReactionType,
+) -> Option<RemovedControlReaction> {
+    match emoji {
+        serenity::ReactionType::Unicode(value) if value == "📬" => {
+            Some(RemovedControlReaction::CancelQueuedTurn)
+        }
+        serenity::ReactionType::Unicode(value) if value == "⏳" => {
+            Some(RemovedControlReaction::StopActiveTurn)
+        }
+        _ => None,
+    }
+}
+
+async fn send_reaction_control_reply(
+    ctx: &serenity::Context,
+    shared: &std::sync::Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    message_id: serenity::MessageId,
+    content: &str,
+) {
+    rate_limit_wait(shared, channel_id).await;
+    let _ = channel_id
+        .send_message(
+            &ctx.http,
+            serenity::builder::CreateMessage::new()
+                .reference_message((channel_id, message_id))
+                .content(content),
+        )
+        .await;
+}
+
+async fn handle_reaction_remove(
+    ctx: &serenity::Context,
+    removed_reaction: &serenity::Reaction,
+    data: &Data,
+) -> Result<(), Error> {
+    let Some(action) = classify_removed_control_reaction(&removed_reaction.emoji) else {
+        return Ok(());
+    };
+    let Some(user_id) = removed_reaction.user_id else {
+        return Ok(());
+    };
+    if user_id == ctx.cache.current_user().id {
+        return Ok(());
+    }
+
+    let channel_id = removed_reaction.channel_id;
+    let settings_snapshot = { data.shared.settings.read().await.clone() };
+    if validate_live_channel_routing_with_dm_hint(
+        ctx,
+        &data.provider,
+        &settings_snapshot,
+        channel_id,
+        Some(removed_reaction.guild_id.is_none()),
+    )
+    .await
+    .is_err()
+    {
+        return Ok(());
+    }
+
+    let (user_name, is_allowed_bot) = {
+        let cached_user = ctx.cache.user(user_id);
+        let user_name = cached_user
+            .as_ref()
+            .map(|user| user.name.clone())
+            .unwrap_or_else(|| format!("user:{}", user_id.get()));
+        let is_allowed_bot = cached_user
+            .as_ref()
+            .map(|user| user.bot && settings_snapshot.allowed_bot_ids.contains(&user_id.get()))
+            .unwrap_or(false);
+        (user_name, is_allowed_bot)
+    };
+    if !is_allowed_bot && !check_auth(user_id, &user_name, &data.shared, &data.token).await {
+        return Ok(());
+    }
+
+    match action {
+        RemovedControlReaction::CancelQueuedTurn => {
+            let removed = mailbox_cancel_soft_intervention(
+                &data.shared,
+                &data.provider,
+                channel_id,
+                removed_reaction.message_id,
+            )
+            .await;
+            if removed.is_some() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] 📭 QUEUE-CANCEL: removed queued message {} in channel {} via reaction removal",
+                    removed_reaction.message_id, channel_id
+                );
+                send_reaction_control_reply(
+                    ctx,
+                    &data.shared,
+                    channel_id,
+                    removed_reaction.message_id,
+                    "📭 Queued turn cancelled.",
+                )
+                .await;
+            }
+        }
+        RemovedControlReaction::StopActiveTurn => {
+            let active_message_id = mailbox_snapshot(&data.shared, channel_id)
+                .await
+                .active_user_message_id
+                .or_else(|| {
+                    super::super::inflight::load_inflight_state(&data.provider, channel_id.get())
+                        .map(|state| serenity::MessageId::new(state.user_msg_id))
+                });
+            if active_message_id != Some(removed_reaction.message_id) {
+                return Ok(());
+            }
+
+            let stop_lookup =
+                super::message_handler::cancel_text_stop_token_mailbox(&data.shared, channel_id)
+                    .await;
+            match stop_lookup {
+                super::message_handler::TextStopLookup::Stop(token) => {
+                    super::super::turn_bridge::cancel_active_token(
+                        &token,
+                        true,
+                        "reaction remove ⏳",
+                    );
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] 🛑 TURN-STOP: cancelled active turn for message {} in channel {} via reaction removal",
+                        removed_reaction.message_id, channel_id
+                    );
+                    send_reaction_control_reply(
+                        ctx,
+                        &data.shared,
+                        channel_id,
+                        removed_reaction.message_id,
+                        "Turn cancelled.",
+                    )
+                    .await;
+                }
+                super::message_handler::TextStopLookup::AlreadyStopping => {
+                    send_reaction_control_reply(
+                        ctx,
+                        &data.shared,
+                        channel_id,
+                        removed_reaction.message_id,
+                        "Already stopping...",
+                    )
+                    .await;
+                }
+                super::message_handler::TextStopLookup::NoActiveTurn => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn is_model_picker_component_custom_id(
     custom_id: &str,
     fallback_channel_id: serenity::ChannelId,
@@ -96,6 +259,9 @@ pub(in crate::services::discord) async fn handle_event(
                     return handle_model_picker_interaction(ctx, component, data).await;
                 }
             }
+        }
+        serenity::FullEvent::ReactionRemove { removed_reaction } => {
+            handle_reaction_remove(ctx, removed_reaction, data).await?;
         }
         serenity::FullEvent::Message { new_message } => {
             // ── Universal message-ID dedup ─────────────────────────────
