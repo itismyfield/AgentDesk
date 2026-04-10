@@ -1,3 +1,4 @@
+mod control_intent;
 mod intake_gate;
 mod message_handler;
 mod thread_binding;

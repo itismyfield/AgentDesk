@@ -1,119 +1,14 @@
 use super::super::gateway::{DiscordGateway, LiveDiscordTurnContext};
 use super::super::*;
+use super::control_intent::{
+    build_control_intent_system_reminder, detect_natural_language_control_intent,
+};
 use crate::services::memory::{
     RecallRequest, RecallResponse, build_memory_backend, resolve_memory_role_id,
     resolve_memory_session_id,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
 use std::sync::Arc;
-
-fn normalize_control_intent_text(text: &str) -> String {
-    text.to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn contains_review_bypass_negation(normalized: &str) -> bool {
-    const NEGATION_TERMS: &[&str] = &[
-        "하지 마",
-        "하지마",
-        "하면 안",
-        "안 돼",
-        "안돼",
-        "안 됩니다",
-        "안됩니다",
-        "안됨",
-        "못 하게",
-        "못하게",
-        "막아",
-        "막아줘",
-        "보류",
-        "금지",
-        "불가",
-        "불가능",
-    ];
-    NEGATION_TERMS.iter().any(|term| normalized.contains(term))
-}
-
-fn extract_merge_target_pr_number(user_text: &str) -> Option<u64> {
-    let explicit_re =
-        regex::Regex::new(r"(?i)(?:^|[^\w])(?:pr\s*#?\s*|#)(\d{1,6})(?:\b|$)").ok()?;
-    if let Some(caps) = explicit_re.captures(user_text) {
-        return caps.get(1)?.as_str().parse::<u64>().ok();
-    }
-
-    let leading_re = regex::Regex::new(r"^\s*(\d{1,6})(?:은|는|이|가|\s|$)").ok()?;
-    if let Some(caps) = leading_re.captures(user_text) {
-        return caps.get(1)?.as_str().parse::<u64>().ok();
-    }
-
-    None
-}
-
-fn build_review_bypass_context_hint(user_text: &str) -> Option<String> {
-    let normalized = normalize_control_intent_text(user_text);
-    if normalized.is_empty() {
-        return None;
-    }
-
-    const META_TERMS: &[&str] = &[
-        "인식",
-        "안먹",
-        "안 먹",
-        "왜",
-        "원인",
-        "버그",
-        "로그",
-        "테스트",
-        "수정",
-        "디버그",
-        "debug",
-        "parser",
-        "파서",
-        "잡아줘",
-    ];
-    if META_TERMS.iter().any(|term| normalized.contains(term)) {
-        return None;
-    }
-    if contains_review_bypass_negation(&normalized) {
-        return None;
-    }
-
-    const REVIEW_BYPASS_PHRASES: &[&str] = &[
-        "리뷰 우회",
-        "리뷰 무시",
-        "리뷰 스킵",
-        "직접 머지",
-        "직접 merge",
-        "머지 가능하게",
-        "머지가능하게",
-        "merge 가능하게",
-        "merge가능하게",
-        "기여자가 직접 머지",
-        "contributor can merge",
-        "author can merge",
-        "direct merge",
-    ];
-    if !REVIEW_BYPASS_PHRASES
-        .iter()
-        .any(|phrase| normalized.contains(phrase))
-    {
-        return None;
-    }
-
-    let pr_number = extract_merge_target_pr_number(user_text)?;
-    Some(format!(
-        "<system-reminder>\n\
-         Detected control intent from the latest user message:\n\
-         - kind: review_bypass_direct_merge\n\
-         - pr_number: {pr_number}\n\
-         - review_decision: dismiss\n\
-         Treat this as an explicit approval to bypass or dismiss review blockers so PR #{pr_number} can proceed via the direct/manual merge path if the repository/runtime supports it.\n\
-         This is not a passive status question.\n\
-         </system-reminder>"
-    ))
-}
 
 #[derive(Debug, PartialEq, Eq)]
 struct MemoryInjectionPlan<'a> {
@@ -826,8 +721,8 @@ pub(in crate::services::discord) async fn handle_text_message(
     if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
         context_chunks.push(external_recall.to_string());
     }
-    if let Some(control_intent_hint) = build_review_bypass_context_hint(user_text) {
-        context_chunks.push(control_intent_hint);
+    if let Some(control_intent) = detect_natural_language_control_intent(user_text) {
+        context_chunks.push(build_control_intent_system_reminder(&control_intent));
     }
     context_chunks.push(sanitized_input);
     let context_prompt = context_chunks.join("\n\n");
@@ -2954,52 +2849,6 @@ mod tests {
         assert_eq!(plan.shared_knowledge_for_system_prompt, None);
         assert_eq!(plan.external_recall_for_context, Some("[External Recall]"));
         assert_eq!(plan.longterm_catalog_for_system_prompt, Some("- notes.md"));
-    }
-
-    #[test]
-    fn review_bypass_hint_detects_leading_pr_number_direct_merge_request() {
-        let hint =
-            build_review_bypass_context_hint("366은 기여자가 직접 머지가능하게 만들 것 같아")
-                .expect("direct merge intent should be detected");
-
-        assert!(hint.contains("pr_number: 366"));
-        assert!(hint.contains("review_decision: dismiss"));
-    }
-
-    #[test]
-    fn review_bypass_hint_detects_explicit_pr_reference() {
-        let hint = build_review_bypass_context_hint("#366 리뷰 우회하고 직접 머지해도 돼")
-            .expect("explicit PR reference should be detected");
-
-        assert!(hint.contains("PR #366"));
-    }
-
-    #[test]
-    fn review_bypass_hint_ignores_debug_discussion() {
-        assert_eq!(
-            build_review_bypass_context_hint("366 리뷰 우회 인식이 왜 안먹었는지 잡아줘"),
-            None
-        );
-    }
-
-    #[test]
-    fn review_bypass_hint_ignores_negative_direct_merge_request() {
-        assert_eq!(
-            build_review_bypass_context_hint("#366 리뷰 우회하면 안 돼"),
-            None
-        );
-        assert_eq!(
-            build_review_bypass_context_hint("366은 직접 머지하지 마"),
-            None
-        );
-    }
-
-    #[test]
-    fn review_bypass_hint_ignores_stray_non_pr_numbers() {
-        assert_eq!(
-            build_review_bypass_context_hint("2명만 직접 머지 가능하게 해줘"),
-            None
-        );
     }
 
     #[test]
