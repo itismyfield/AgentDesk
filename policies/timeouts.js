@@ -147,64 +147,12 @@ function requestTurnWatchdogExtension(channelId, extendMinutes) {
   return resp;
 }
 
-// #231: PM Decision notification dedup — durable kv_meta buffer.
-// Reasons are persisted to kv_meta (survives restart) and flushed
-// in onTick (legacy, 5min) AFTER all tiered handlers to combine
-// cross-tier reasons into one notification per card.
-var PM_DECISION_COOLDOWN_SEC = 300;  // 5-min cross-tick cooldown
-var PM_PENDING_TTL_SEC = 600;  // 10-min TTL for pending entries (auto-cleanup)
-
 function _queuePMDecision(cardId, title, reason) {
-  var pendingKey = "pm_pending:" + cardId;
-  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
-  var entry;
-  if (existing.length > 0) {
-    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
-  }
-  if (!entry) {
-    entry = { title: title, reasons: [] };
-  }
-  // Deduplicate identical reasons
-  if (entry.reasons.indexOf(reason) === -1) {
-    entry.reasons.push(reason);
-  }
-  agentdesk.db.execute(
-    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
-    [pendingKey, JSON.stringify(entry), String(PM_PENDING_TTL_SEC)]
-  );
+  escalate(cardId, reason);
 }
 
 function _flushPMDecisions() {
-  var pmdCh = getPMDChannel();
-  var rows = agentdesk.db.query("SELECT key, value FROM kv_meta WHERE key LIKE 'pm_pending:%'");
-  for (var i = 0; i < rows.length; i++) {
-    var cardId = rows[i].key.substring("pm_pending:".length);
-    var entry;
-    try { entry = JSON.parse(rows[i].value); } catch(e) { continue; }
-    // Delete the pending entry first (consumed regardless of cooldown)
-    agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [rows[i].key]);
-    // Cross-tick cooldown: skip send if notified recently
-    var cooldownKey = "pm_decision_sent:" + cardId;
-    var cooldownRow = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]);
-    if (cooldownRow.length > 0) {
-      var sentAt = parseInt(cooldownRow[0].value, 10) || 0;
-      var now = Math.floor(Date.now() / 1000);
-      if (now - sentAt < PM_DECISION_COOLDOWN_SEC) {
-        agentdesk.log.info("[PM dedup] Skipped notification for card " + cardId +
-          " (" + entry.reasons.length + " reasons, cooldown " + (now - sentAt) + "s)");
-        continue;
-      }
-    }
-    // Send combined notification with all accumulated reasons
-    if (!pmdCh) continue;
-    var msg = "⚠️ [PM 결정 요청] " + entry.title + "\n카드가 pending_decision 상태입니다. PMD가 다음 조치를 결정해주세요.\n사유: " + entry.reasons.join("; ");
-    agentdesk.message.queue(pmdCh, msg, "announce", "system");
-    // Set cooldown with TTL
-    agentdesk.db.execute(
-      "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
-      [cooldownKey, String(Math.floor(Date.now() / 1000)), String(PM_DECISION_COOLDOWN_SEC)]
-    );
-  }
+  flushEscalations();
 }
 
 var timeouts = {
@@ -1403,7 +1351,7 @@ timeouts.onTick5min = function(ev) {
 
 // Legacy onTick: flush PM decision buffer after all tiered handlers (#231)
 timeouts.onTick = function() {
-  _flushPMDecisions();
+  flushEscalations();
 };
 
 agentdesk.registerPolicy(timeouts);

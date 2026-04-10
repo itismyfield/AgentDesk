@@ -378,6 +378,7 @@ pub fn seed_config_defaults(conn: &rusqlite::Connection, config: &crate::config:
     }
 
     crate::services::settings::seed_runtime_config_defaults(conn, config);
+    crate::server::routes::escalation::seed_escalation_defaults(conn, config);
 
     for key in RETIRED_CONFIG_KEYS {
         conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])

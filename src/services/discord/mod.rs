@@ -82,6 +82,7 @@ use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};
 
 pub(crate) use prompt_builder::DispatchProfile;
 
+pub(crate) use inflight::latest_request_owner_user_id_for_channel;
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };

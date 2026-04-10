@@ -303,6 +303,23 @@ export interface RuntimeConfigResponse {
   defaults: Record<string, number>;
 }
 
+export type EscalationMode = "pm" | "user" | "scheduled";
+
+export interface EscalationSettings {
+  mode: EscalationMode;
+  owner_user_id: number | null;
+  pm_channel_id: string | null;
+  schedule: {
+    pm_hours: string;
+    timezone: string;
+  };
+}
+
+export interface EscalationSettingsResponse {
+  current: EscalationSettings;
+  defaults: EscalationSettings;
+}
+
 export async function getRuntimeConfig(): Promise<RuntimeConfigResponse> {
   return request("/api/settings/runtime-config");
 }
@@ -313,6 +330,19 @@ export async function saveRuntimeConfig(
   return request("/api/settings/runtime-config", {
     method: "PUT",
     body: JSON.stringify(patch),
+  });
+}
+
+export async function getEscalationSettings(): Promise<EscalationSettingsResponse> {
+  return request("/api/settings/escalation");
+}
+
+export async function saveEscalationSettings(
+  settings: EscalationSettings,
+): Promise<EscalationSettingsResponse> {
+  return request("/api/settings/escalation", {
+    method: "PUT",
+    body: JSON.stringify(settings),
   });
 }
 

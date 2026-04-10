@@ -10,6 +10,7 @@ pub mod dispatched_sessions;
 pub mod dispatches;
 pub mod dm_reply;
 pub mod docs;
+pub mod escalation;
 pub mod github;
 pub mod github_dashboard;
 pub mod health_api;
@@ -338,6 +339,14 @@ pub fn api_router(
         .route(
             "/settings/runtime-config",
             get(settings::get_runtime_config).put(settings::put_runtime_config),
+        )
+        .route(
+            "/settings/escalation",
+            get(escalation::get_escalation_settings).put(escalation::put_escalation_settings),
+        )
+        .route(
+            "/internal/escalation/emit",
+            post(escalation::emit_escalation),
         )
         // Dispatched sessions
         .route(

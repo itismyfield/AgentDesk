@@ -1643,6 +1643,74 @@ pub(super) async fn cancel_text_stop_token_mailbox(
     }
 }
 
+fn escalation_settings_api_url() -> String {
+    let config = crate::config::load_graceful();
+    crate::config::local_api_url(config.server.port, "/api/settings/escalation")
+}
+
+async fn fetch_escalation_settings_via_api()
+-> Result<crate::server::routes::escalation::EscalationSettingsResponse, String> {
+    let response = reqwest::Client::new()
+        .get(escalation_settings_api_url())
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("settings fetch failed: {status} {body}"));
+    }
+    response.json().await.map_err(|err| err.to_string())
+}
+
+async fn save_escalation_settings_via_api(
+    settings: &crate::server::routes::escalation::EscalationSettings,
+) -> Result<crate::server::routes::escalation::EscalationSettingsResponse, String> {
+    let response = reqwest::Client::new()
+        .put(escalation_settings_api_url())
+        .json(settings)
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("settings save failed: {status} {body}"));
+    }
+    response.json().await.map_err(|err| err.to_string())
+}
+
+fn parse_discord_user_id(raw: &str) -> Option<u64> {
+    raw.trim()
+        .trim_start_matches("<@")
+        .trim_end_matches('>')
+        .trim_start_matches('!')
+        .parse::<u64>()
+        .ok()
+}
+
+fn format_escalation_settings_summary(
+    settings: &crate::server::routes::escalation::EscalationSettings,
+) -> String {
+    let mode = match settings.mode {
+        crate::config::EscalationMode::Pm => "pm",
+        crate::config::EscalationMode::User => "user",
+        crate::config::EscalationMode::Scheduled => "scheduled",
+    };
+    let owner = settings
+        .owner_user_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    let pm_channel = settings
+        .pm_channel_id
+        .clone()
+        .unwrap_or_else(|| "(none)".to_string());
+    format!(
+        "mode: `{}`\nowner_user_id: `{}`\npm_channel_id: `{}`\nschedule: `{}` / `{}`",
+        mode, owner, pm_channel, settings.schedule.pm_hours, settings.schedule.timezone
+    )
+}
+
 /// Handle text-based commands (!start, !meeting, !stop, !clear, etc.).
 /// Returns true if the command was handled, false otherwise.
 pub(super) async fn handle_text_command(
@@ -2001,6 +2069,134 @@ pub(super) async fn handle_text_command(
             return Ok(true);
         }
 
+        "!escalation" => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let rest = text.strip_prefix("!escalation").unwrap_or("").trim();
+            println!("  [{ts}] ◀ [{}] !escalation {}", msg.author.name, rest);
+
+            if !check_owner(msg.author.id, &data.shared).await {
+                let _ = msg
+                    .reply(&ctx.http, "Only the owner can change escalation settings.")
+                    .await;
+                return Ok(true);
+            }
+
+            let mut settings = match fetch_escalation_settings_via_api().await {
+                Ok(response) => response.current,
+                Err(err) => {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!("Failed to load escalation settings: {err}"),
+                        )
+                        .await;
+                    return Ok(true);
+                }
+            };
+
+            if rest.is_empty() || rest.eq_ignore_ascii_case("status") {
+                let _ = msg
+                    .reply(
+                        &ctx.http,
+                        format!(
+                            "**Escalation Settings**\n{}",
+                            format_escalation_settings_summary(&settings)
+                        ),
+                    )
+                    .await;
+                return Ok(true);
+            }
+
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let subcommand = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+            let value = parts.next().unwrap_or("").trim();
+
+            let usage = "Usage: `!escalation status|pm|user|scheduled|schedule <HH:MM-HH:MM>|timezone <IANA>|owner <user_id>|pm-channel <channel_id>`";
+            let update_error = match subcommand.as_str() {
+                "pm" => {
+                    settings.mode = crate::config::EscalationMode::Pm;
+                    None
+                }
+                "user" => {
+                    settings.mode = crate::config::EscalationMode::User;
+                    None
+                }
+                "scheduled" => {
+                    settings.mode = crate::config::EscalationMode::Scheduled;
+                    None
+                }
+                "schedule" => {
+                    if value.is_empty() {
+                        Some("schedule value is required")
+                    } else {
+                        settings.mode = crate::config::EscalationMode::Scheduled;
+                        settings.schedule.pm_hours = value.to_string();
+                        None
+                    }
+                }
+                "timezone" => {
+                    if value.is_empty() {
+                        Some("timezone value is required")
+                    } else {
+                        settings.schedule.timezone = value.to_string();
+                        None
+                    }
+                }
+                "owner" => match parse_discord_user_id(value) {
+                    Some(user_id) => {
+                        settings.owner_user_id = Some(user_id);
+                        None
+                    }
+                    None => Some("owner must be a numeric Discord user id or mention"),
+                },
+                "clear-owner" => {
+                    settings.owner_user_id = None;
+                    None
+                }
+                "pm-channel" => {
+                    if value.is_empty() {
+                        Some("pm-channel value is required")
+                    } else {
+                        settings.pm_channel_id = Some(value.to_string());
+                        None
+                    }
+                }
+                "clear-pm-channel" => {
+                    settings.pm_channel_id = None;
+                    None
+                }
+                _ => Some(usage),
+            };
+
+            if let Some(err) = update_error {
+                let _ = msg.reply(&ctx.http, err).await;
+                return Ok(true);
+            }
+
+            match save_escalation_settings_via_api(&settings).await {
+                Ok(response) => {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!(
+                                "**Escalation Settings Updated**\n{}",
+                                format_escalation_settings_summary(&response.current)
+                            ),
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!("Failed to save escalation settings: {err}"),
+                        )
+                        .await;
+                }
+            }
+            return Ok(true);
+        }
+
         "!help" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ◀ [{}] !help", msg.author.name);
@@ -2044,11 +2240,17 @@ Any other message is sent to {p}.
 `!debug` — Toggle debug logging
 `!metrics [date]` — Show turn metrics
 `!queue [all]` — Show pending queue
+`!escalation status` — Show escalation routing mode
 
 **User Management** (owner only)
 `!allowall on|off|status` — Allow everyone or restrict to authorized users
 `!adduser <user_id>` — Allow a user to use the bot
 `!removeuser <user_id>` — Remove a user's access
+`!escalation pm|user|scheduled` — Change escalation routing mode
+`!escalation schedule <HH:MM-HH:MM>` — Set PM hours and switch to scheduled mode
+`!escalation timezone <IANA>` — Set scheduled timezone
+`!escalation owner <user_id>` — Override fallback owner user id
+`!escalation pm-channel <channel_id>` — Override PM channel
 `!help` — Show this help",
                 p = provider_name
             );

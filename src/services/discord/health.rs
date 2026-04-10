@@ -145,6 +145,30 @@ impl HealthRegistry {
     }
 }
 
+pub async fn active_request_owner_for_channel(
+    registry: &HealthRegistry,
+    channel_id: u64,
+) -> Option<u64> {
+    let channel_id = ChannelId::new(channel_id);
+    let providers: Vec<_> = registry
+        .providers
+        .lock()
+        .await
+        .iter()
+        .map(|entry| entry.shared.clone())
+        .collect();
+    for shared in providers {
+        let snapshots = shared.mailboxes.snapshot_all().await;
+        if let Some(owner) = snapshots
+            .get(&channel_id)
+            .and_then(|snapshot| snapshot.active_request_owner)
+        {
+            return Some(owner.get());
+        }
+    }
+    None
+}
+
 /// Best-effort runtime-side equivalent of `/clear` for an existing Discord channel session.
 /// Used by auto-queue slot recycling so pooled unified-thread slots start the next group fresh
 /// without killing the shared thread itself.

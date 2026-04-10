@@ -162,6 +162,22 @@ pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnS
     load_inflight_states_from_root(&root, provider)
 }
 
+pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Option<u64> {
+    let providers = [
+        ProviderKind::Claude,
+        ProviderKind::Codex,
+        ProviderKind::Gemini,
+        ProviderKind::Qwen,
+    ];
+
+    providers
+        .iter()
+        .flat_map(load_inflight_states)
+        .filter(|state| state.channel_id == channel_id)
+        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+        .map(|state| state.request_owner_user_id)
+}
+
 /// Maximum age for inflight state files before they are considered stale and removed.
 const INFLIGHT_MAX_AGE_SECS: u64 = 300; // 5 minutes
 
@@ -227,7 +243,10 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
 
 #[cfg(test)]
 mod tests {
-    use super::{InflightTurnState, load_inflight_states_from_root, save_inflight_state_in_root};
+    use super::{
+        InflightTurnState, latest_request_owner_user_id_for_channel,
+        load_inflight_states_from_root, save_inflight_state_in_root,
+    };
     use crate::services::provider::ProviderKind;
     use tempfile::TempDir;
 
@@ -256,5 +275,55 @@ mod tests {
         assert_eq!(loaded[0].channel_id, 123);
         assert_eq!(loaded[0].current_msg_id, 999);
         assert_eq!(loaded[0].last_offset, 42);
+    }
+
+    #[test]
+    fn latest_request_owner_user_id_prefers_most_recent_state_across_providers() {
+        let temp = TempDir::new().unwrap();
+        let inflight_root = temp.path().join("runtime").join("discord_inflight");
+
+        let mut claude_state = InflightTurnState::new(
+            ProviderKind::Claude,
+            123,
+            Some("adk-cc".to_string()),
+            111,
+            789,
+            999,
+            "hello".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        claude_state.updated_at = "2026-04-11 00:00:00".to_string();
+        save_inflight_state_in_root(&inflight_root, &claude_state).unwrap();
+
+        let mut codex_state = InflightTurnState::new(
+            ProviderKind::Codex,
+            123,
+            Some("adk-cdx".to_string()),
+            222,
+            790,
+            1000,
+            "world".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        codex_state.updated_at = "2026-04-11 00:00:05".to_string();
+        save_inflight_state_in_root(&inflight_root, &codex_state).unwrap();
+
+        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let owner = latest_request_owner_user_id_for_channel(123);
+        match previous {
+            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+        }
+
+        assert_eq!(owner, Some(222));
     }
 }

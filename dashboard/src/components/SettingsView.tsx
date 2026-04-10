@@ -634,6 +634,10 @@ export default function SettingsView({
   const [rcLoaded, setRcLoaded] = useState(false);
   const [rcSaving, setRcSaving] = useState(false);
   const [rcDirty, setRcDirty] = useState(false);
+  const [escalationSettings, setEscalationSettings] = useState<api.EscalationSettings | null>(null);
+  const [escalationDefaults, setEscalationDefaults] = useState<api.EscalationSettings | null>(null);
+  const [escalationBaseline, setEscalationBaseline] = useState<api.EscalationSettings | null>(null);
+  const [escalationSaving, setEscalationSaving] = useState(false);
 
   const [configEntries, setConfigEntries] = useState<ConfigEntry[]>([]);
   const [configEdits, setConfigEdits] = useState<Record<string, ConfigEditValue>>({});
@@ -662,6 +666,14 @@ export default function SettingsView({
       .then((response) => response.json())
       .then((data: { entries: ConfigEntry[] }) => setConfigEntries(data.entries || []))
       .catch(() => {});
+
+    void api.getEscalationSettings()
+      .then((data) => {
+        setEscalationSettings(data.current);
+        setEscalationBaseline(data.current);
+        setEscalationDefaults(data.defaults);
+      })
+      .catch(() => {});
   }, []);
 
   const companyDirty =
@@ -670,6 +682,10 @@ export default function SettingsView({
     language !== settings.language ||
     theme !== settings.theme;
   const configDirty = Object.keys(configEdits).length > 0;
+  const escalationDirty =
+    escalationSettings !== null &&
+    escalationBaseline !== null &&
+    JSON.stringify(escalationSettings) !== JSON.stringify(escalationBaseline);
   const runtimeFieldCount = CATEGORIES.reduce((sum, category) => sum + category.fields.length, 0);
 
   const inputStyle: CSSProperties = {
@@ -737,6 +753,30 @@ export default function SettingsView({
     }
   };
 
+  const handleEscalationChange = (
+    patch:
+      | Partial<api.EscalationSettings>
+      | ((prev: api.EscalationSettings) => api.EscalationSettings),
+  ) => {
+    setEscalationSettings((prev) => {
+      if (!prev) return prev;
+      return typeof patch === "function" ? patch(prev) : { ...prev, ...patch };
+    });
+  };
+
+  const handleEscalationSave = async () => {
+    if (!escalationSettings) return;
+    setEscalationSaving(true);
+    try {
+      const data = await api.saveEscalationSettings(escalationSettings);
+      setEscalationSettings(data.current);
+      setEscalationBaseline(data.current);
+      setEscalationDefaults(data.defaults);
+    } finally {
+      setEscalationSaving(false);
+    }
+  };
+
   return (
     <div
       className="mx-auto h-full max-w-5xl min-w-0 space-y-6 overflow-x-hidden overflow-y-auto px-4 py-5 pb-40 sm:px-6"
@@ -797,6 +837,165 @@ export default function SettingsView({
             accent="#fb7185"
           />
         </div>
+      </section>
+
+      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
+        <SectionHeading
+          eyebrow={tr("에스컬레이션", "Escalation")}
+          title={tr("PM / owner 라우팅 전환", "Switch between PM and owner routing")}
+          description={tr(
+            "pending_decision 에스컬레이션을 PM 채널로 보낼지, owner 스레드로 보낼지, 시간대 기반으로 전환할지를 관리합니다.",
+            "Controls whether pending-decision escalations go to the PM channel, an owner thread, or switch automatically by time window.",
+          )}
+          badge={tr("api/settings/escalation", "api/settings/escalation")}
+        />
+
+        {escalationSettings ? (
+          <div className="mt-5 space-y-4">
+            <div className="grid gap-4 lg:grid-cols-2">
+              <InputCard
+                label={tr("라우팅 모드", "Routing mode")}
+                description={tr(
+                  "PM 고정, owner 고정, 또는 scheduled 자동 전환 중 하나를 고릅니다.",
+                  "Choose fixed PM, fixed owner, or scheduled automatic switching.",
+                )}
+              >
+                <select
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.mode}
+                  onChange={(event) =>
+                    handleEscalationChange({ mode: event.target.value as api.EscalationMode })
+                  }
+                >
+                  <option value="pm">{tr("PM 모드", "PM mode")}</option>
+                  <option value="user">{tr("Owner 모드", "Owner mode")}</option>
+                  <option value="scheduled">{tr("시간대 기반", "Scheduled")}</option>
+                </select>
+              </InputCard>
+
+              <InputCard
+                label={tr("fallback owner user ID", "Fallback owner user ID")}
+                description={tr(
+                  "live owner 추적이 비어 있을 때 owner 멘션에 사용할 Discord user ID입니다.",
+                  "Discord user ID used for owner mentions when live owner tracking is unavailable.",
+                )}
+              >
+                <input
+                  type="text"
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.owner_user_id ?? ""}
+                  onChange={(event) =>
+                    handleEscalationChange((prev) => ({
+                      ...prev,
+                      owner_user_id: event.target.value.trim()
+                        ? Number(event.target.value.trim())
+                        : null,
+                    }))
+                  }
+                />
+              </InputCard>
+
+              <InputCard
+                label={tr("PM channel ID", "PM channel ID")}
+                description={tr(
+                  "PM fallback 및 PM mode에서 사용할 Discord channel ID 또는 alias입니다.",
+                  "Discord channel ID or alias used for PM fallback and PM mode.",
+                )}
+              >
+                <input
+                  type="text"
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.pm_channel_id ?? ""}
+                  onChange={(event) =>
+                    handleEscalationChange({
+                      pm_channel_id: event.target.value.trim() || null,
+                    })
+                  }
+                />
+              </InputCard>
+
+              <InputCard
+                label={tr("PM hours", "PM hours")}
+                description={tr(
+                  "scheduled 모드에서 이 시간대에는 PM 라우팅으로 전환합니다. 형식: `HH:MM-HH:MM`.",
+                  "When scheduled mode is active, this window routes to PM. Format: `HH:MM-HH:MM`.",
+                )}
+              >
+                <input
+                  type="text"
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.schedule.pm_hours}
+                  onChange={(event) =>
+                    handleEscalationChange((prev) => ({
+                      ...prev,
+                      schedule: {
+                        ...prev.schedule,
+                        pm_hours: event.target.value,
+                      },
+                    }))
+                  }
+                />
+              </InputCard>
+
+              <InputCard
+                label={tr("Timezone", "Timezone")}
+                description={tr(
+                  "scheduled 모드 판단에 사용할 IANA timezone입니다. 예: `Asia/Seoul`.",
+                  "IANA timezone used for scheduled-mode evaluation. Example: `Asia/Seoul`.",
+                )}
+              >
+                <input
+                  type="text"
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.schedule.timezone}
+                  onChange={(event) =>
+                    handleEscalationChange((prev) => ({
+                      ...prev,
+                      schedule: {
+                        ...prev.schedule,
+                        timezone: event.target.value,
+                      },
+                    }))
+                  }
+                />
+              </InputCard>
+            </div>
+
+            <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
+              <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+                {tr(
+                  "Discord `!escalation` 명령과 같은 endpoint를 공유합니다. 기본값은 `agentdesk.yaml`, runtime override는 DB `kv_meta`에 저장됩니다.",
+                  "Shares the same endpoint as the Discord `!escalation` command. Defaults come from `agentdesk.yaml`, while runtime overrides are stored in DB `kv_meta`.",
+                )}
+                {escalationDefaults && (
+                  <>
+                    {" "}
+                    {tr(
+                      `기본 schedule은 ${escalationDefaults.schedule.pm_hours} / ${escalationDefaults.schedule.timezone} 입니다.`,
+                      `Default schedule is ${escalationDefaults.schedule.pm_hours} / ${escalationDefaults.schedule.timezone}.`,
+                    )}
+                  </>
+                )}
+              </p>
+              <button
+                onClick={handleEscalationSave}
+                disabled={escalationSaving || !escalationDirty}
+                className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl bg-amber-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-amber-500 disabled:opacity-50"
+              >
+                {escalationSaving ? tr("저장 중...", "Saving...") : tr("에스컬레이션 저장", "Save escalation")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-5 rounded-2xl border p-4 text-sm" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)", color: "var(--th-text-muted)" }}>
+            {tr("에스컬레이션 설정을 불러오는 중입니다.", "Loading escalation settings.")}
+          </div>
+        )}
       </section>
 
       <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>

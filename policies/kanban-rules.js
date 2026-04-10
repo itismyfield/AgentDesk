@@ -102,27 +102,7 @@ function sendDiscordNotification(target, content, bot) {
 }
 
 function notifyPMD(cardId, reason) {
-  // #267: Queue to canonical pm_pending buffer (flushed by timeouts.js)
-  var cards = agentdesk.db.query(
-    "SELECT title FROM kanban_cards WHERE id = ?", [cardId]
-  );
-  var title = cards.length > 0 ? cards[0].title : cardId;
-  var pendingKey = "pm_pending:" + cardId;
-  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
-  var entry;
-  if (existing.length > 0) {
-    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
-  }
-  if (!entry) {
-    entry = { title: title, reasons: [] };
-  }
-  if (entry.reasons.indexOf(reason) === -1) {
-    entry.reasons.push(reason);
-  }
-  agentdesk.db.execute(
-    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+600 seconds'))",
-    [pendingKey, JSON.stringify(entry)]
-  );
+  escalate(cardId, reason);
 }
 
 // ── Preflight helpers (#256) ─────────────────────────────────
