@@ -143,13 +143,20 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
 
         match result {
             Ok(()) => {
-                // Mark done
+                // Mark done + transition dispatch pending → dispatched
                 if let Ok(conn) = db.lock() {
                     conn.execute(
                         "UPDATE dispatch_outbox SET status = 'done', processed_at = datetime('now') WHERE id = ?1",
                         [id],
                     )
                     .ok();
+                    if action == "notify" {
+                        conn.execute(
+                            "UPDATE task_dispatches SET status = 'dispatched' WHERE id = ?1 AND status = 'pending'",
+                            [&dispatch_id],
+                        )
+                        .ok();
+                    }
                 }
             }
             Err(err) => {
