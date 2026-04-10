@@ -929,11 +929,24 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 let shared_for_restart_reports = shared_for_tmux.clone();
                 let provider_for_restore = provider.clone();
                 tokio::spawn(async move {
+                    // #429: utility bots (notify/announce) have a fixed `agent`
+                    // binding and no channel read permissions.  Running the full
+                    // recovery pipeline on them only wastes time on failing API
+                    // calls.  Skip straight to reconcile-complete.
+                    let is_utility_bot = {
+                        let s = shared_for_tmux2.settings.read().await;
+                        s.agent.is_some()
+                    };
+                    if is_utility_bot {
+                        super::mark_reconcile_complete(&shared_for_tmux2);
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!("  [{ts}] ✓ Utility bot reconcile — skipped recovery");
+                        // Still need to loop for restart report flushing below
+                    } else {
+
                     gc_stale_fixed_working_sessions(&shared_for_tmux2).await;
 
                     // #429: catch-up FIRST to minimize message loss window.
-                    // This is independent of inflight restore — it reads the
-                    // saved checkpoint and queues missed messages for later KICKOFF.
                     catch_up_missed_messages(
                         &http_for_tmux,
                         &shared_for_tmux2,
@@ -1073,6 +1086,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     super::mark_reconcile_complete(&shared_for_restart_reports);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ✓ Reconcile complete — intake open");
+
+                    } // end of !is_utility_bot recovery block
 
                     // Kick off again to drain messages queued during reconcile window
                     kickoff_idle_queues(
