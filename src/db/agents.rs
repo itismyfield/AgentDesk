@@ -156,6 +156,23 @@ pub fn sync_agents_from_config(db: &Db, agents: &[AgentDef]) -> Result<usize> {
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
     let mut count = 0;
 
+    // Remove DB agents that are no longer in yaml config
+    {
+        let config_ids: std::collections::HashSet<&str> =
+            agents.iter().map(|a| a.id.as_str()).collect();
+        let mut stmt = conn.prepare("SELECT id FROM agents")?;
+        let db_ids: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        for db_id in &db_ids {
+            if !config_ids.contains(db_id.as_str()) {
+                conn.execute("DELETE FROM agents WHERE id = ?1", [db_id])?;
+                tracing::info!("[agent-sync] Removed agent '{db_id}' (not in yaml config)");
+            }
+        }
+    }
+
     for agent in agents {
         let discord_channel_cc = agent
             .channels
