@@ -5916,6 +5916,165 @@ async fn auto_queue_activate_keeps_same_group_slot_context_between_entries() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_is_active() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-same-group-guard");
+    ensure_auto_queue_tables(&db);
+    seed_auto_queue_card(
+        &db,
+        "card-same-group-guard-0",
+        4160,
+        "ready",
+        "agent-same-group-guard",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-same-group-guard-1",
+        4161,
+        "ready",
+        "agent-same-group-guard",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-same-group-guard-2",
+        4162,
+        "ready",
+        "agent-same-group-guard",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+             VALUES ('agent-same-group-guard', 0, ?1)",
+            [json!({"111": "222000000000000201"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
+             VALUES ('agent-same-group-guard', 1, ?1)",
+            [json!({"111": "222000000000000202"}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, unified_thread,
+                max_concurrent_threads, thread_group_count
+            ) VALUES (
+                'run-same-group-guard', 'test-repo', 'agent-same-group-guard', 'active', 1, 2, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group)
+             VALUES ('entry-same-group-guard-0', 'run-same-group-guard', 'card-same-group-guard-0', 'agent-same-group-guard', 'pending', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group)
+             VALUES ('entry-same-group-guard-1', 'run-same-group-guard', 'card-same-group-guard-1', 'agent-same-group-guard', 'pending', 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group)
+             VALUES ('entry-same-group-guard-2', 'run-same-group-guard', 'card-same-group-guard-2', 'agent-same-group-guard', 'pending', 0, 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-same-group-guard",
+                        "active_only": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+    assert_eq!(
+        first_json["count"], 2,
+        "first activate should dispatch one entry per group"
+    );
+
+    let second_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-same-group-guard",
+                        "active_only": true
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body = axum::body::to_bytes(second_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+    assert_eq!(
+        second_json["count"], 0,
+        "same-group follow-up must stay pending while the prior entry is still dispatched"
+    );
+
+    let conn = db.lock().unwrap();
+    let guard_entry_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'entry-same-group-guard-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        guard_entry_status, "pending",
+        "follow-up entry must not be marked dispatched before prior same-group work completes"
+    );
+
+    let guard_dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM task_dispatches
+             WHERE kanban_card_id = 'card-same-group-guard-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        guard_dispatch_count, 0,
+        "no dispatch row should be created for the blocked same-group follow-up"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
     crate::pipeline::ensure_loaded();
     let db = test_db();

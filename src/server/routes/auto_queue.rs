@@ -423,6 +423,14 @@ fn assigned_groups_with_pending_entries(conn: &rusqlite::Connection, run_id: &st
                  AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
                  AND e.status = 'pending'
            )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM auto_queue_entries e
+               WHERE e.run_id = ?1
+                 AND e.agent_id = s.agent_id
+                 AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
+                 AND e.status = 'dispatched'
+           )
          ORDER BY s.assigned_thread_group ASC, s.slot_index ASC",
     ) {
         Ok(stmt) => stmt,
