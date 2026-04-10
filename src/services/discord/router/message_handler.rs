@@ -668,7 +668,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 if let Some(session) = data.sessions.get_mut(&channel_id) {
                     session.restore_provider_session(restored.clone());
                 }
-                memento_context_loaded = true;
+                memento_context_loaded = false;
             }
             session_id = restored;
         }
@@ -2788,7 +2788,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_resets_memento_skip_so_next_turn_can_reload_context() {
+    fn restore_and_clear_keep_memento_recall_retryable_until_success() {
         let memento = settings::ResolvedMemorySettings {
             backend: settings::MemoryBackendKind::Memento,
             ..settings::ResolvedMemorySettings::default()
@@ -2796,6 +2796,12 @@ mod tests {
         let mut session = make_session(Some("/tmp/project".to_string()), None);
 
         session.restore_provider_session(Some("session-1".to_string()));
+        assert!(!should_skip_memento_recall(
+            &memento,
+            session.memento_context_loaded
+        ));
+
+        session.note_memento_context_loaded();
         assert!(should_skip_memento_recall(
             &memento,
             session.memento_context_loaded

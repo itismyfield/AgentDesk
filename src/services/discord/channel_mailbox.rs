@@ -247,6 +247,10 @@ impl ChannelMailboxRegistry {
         }
         snapshots
     }
+
+    pub(super) fn remove(&self, channel_id: serenity::ChannelId) -> Option<ChannelMailboxHandle> {
+        self.handles.remove(&channel_id).map(|(_, handle)| handle)
+    }
 }
 
 enum ChannelMailboxMsg {
@@ -429,4 +433,31 @@ fn spawn_channel_mailbox(channel_id: serenity::ChannelId) -> ChannelMailboxHandl
         }
     });
     ChannelMailboxHandle { sender: tx }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use poise::serenity_prelude::{ChannelId, UserId};
+
+    use super::*;
+    use crate::services::provider::CancelToken;
+
+    #[tokio::test]
+    async fn registry_remove_drops_channel_from_snapshots() {
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(42);
+        let handle = registry.handle(channel_id);
+
+        handle
+            .restore_active_turn(Arc::new(CancelToken::new()), UserId::new(7))
+            .await;
+        assert!(registry.snapshot_all().await.contains_key(&channel_id));
+
+        let removed = registry.remove(channel_id);
+
+        assert!(removed.is_some());
+        assert!(!registry.snapshot_all().await.contains_key(&channel_id));
+    }
 }

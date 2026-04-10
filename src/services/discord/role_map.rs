@@ -213,35 +213,66 @@ fn collect_registry_entry(
     let metadata = metadata
         .get(&role_id)
         .cloned()
-        .unwrap_or_else(|| ParsedMeetingAgentMetadata {
-            role_id: role_id.clone(),
-            display_name: role_id.clone(),
-            keywords: Vec::new(),
-            domain_summary: None,
-            strengths: Vec::new(),
-            task_types: Vec::new(),
-            anti_signals: Vec::new(),
-            provider_hint: None,
-            metadata_missing: true,
-            metadata_confidence: "low".to_string(),
-        });
+        .unwrap_or_else(|| fallback_meeting_agent_metadata(&role_id));
 
     registry
         .entry(role_id.clone())
-        .or_insert(MeetingAgentConfig {
-            role_id,
-            display_name: metadata.display_name,
-            keywords: metadata.keywords,
-            domain_summary: metadata.domain_summary,
-            strengths: metadata.strengths,
-            task_types: metadata.task_types,
-            anti_signals: metadata.anti_signals,
-            provider_hint: metadata.provider_hint,
-            metadata_missing: metadata.metadata_missing,
-            metadata_confidence: metadata.metadata_confidence,
-            binding,
-            workspace,
-        });
+        .or_insert_with(|| meeting_agent_config(role_id, binding, metadata, workspace));
+}
+
+fn fallback_meeting_agent_metadata(role_id: &str) -> ParsedMeetingAgentMetadata {
+    ParsedMeetingAgentMetadata {
+        role_id: role_id.to_string(),
+        display_name: role_id.to_string(),
+        keywords: Vec::new(),
+        domain_summary: None,
+        strengths: Vec::new(),
+        task_types: Vec::new(),
+        anti_signals: Vec::new(),
+        provider_hint: None,
+        metadata_missing: true,
+        metadata_confidence: "low".to_string(),
+    }
+}
+
+fn meeting_agent_config(
+    role_id: String,
+    binding: RoleBinding,
+    metadata: ParsedMeetingAgentMetadata,
+    workspace: Option<String>,
+) -> MeetingAgentConfig {
+    MeetingAgentConfig {
+        role_id,
+        display_name: metadata.display_name,
+        keywords: metadata.keywords,
+        domain_summary: metadata.domain_summary,
+        strengths: metadata.strengths,
+        task_types: metadata.task_types,
+        anti_signals: metadata.anti_signals,
+        provider_hint: metadata.provider_hint,
+        metadata_missing: metadata.metadata_missing,
+        metadata_confidence: metadata.metadata_confidence,
+        binding,
+        workspace,
+    }
+}
+
+fn meeting_available_agent_config(
+    agent: &serde_json::Value,
+    binding: RoleBinding,
+    metadata: &BTreeMap<String, ParsedMeetingAgentMetadata>,
+) -> MeetingAgentConfig {
+    let role_id = binding.role_id.clone();
+    let workspace = agent
+        .get("workspace")
+        .and_then(|v| v.as_str())
+        .map(expand_tilde);
+    let metadata = metadata
+        .get(&role_id)
+        .cloned()
+        .unwrap_or_else(|| fallback_meeting_agent_metadata(&role_id));
+
+    meeting_agent_config(role_id, binding, metadata, workspace)
 }
 
 #[derive(Clone, Debug)]
@@ -468,28 +499,10 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
     for agent in &explicit_agents {
         if let Some(binding) = parse_meeting_role_binding(agent) {
             let role_id = binding.role_id.clone();
-            let workspace = agent
-                .get("workspace")
-                .and_then(|v| v.as_str())
-                .map(expand_tilde);
-            if let Some(metadata) = metadata.get(&role_id).cloned() {
-                registry
-                    .entry(role_id.clone())
-                    .or_insert(MeetingAgentConfig {
-                        role_id,
-                        display_name: metadata.display_name,
-                        keywords: metadata.keywords,
-                        domain_summary: metadata.domain_summary,
-                        strengths: metadata.strengths,
-                        task_types: metadata.task_types,
-                        anti_signals: metadata.anti_signals,
-                        provider_hint: metadata.provider_hint,
-                        metadata_missing: metadata.metadata_missing,
-                        metadata_confidence: metadata.metadata_confidence,
-                        binding,
-                        workspace,
-                    });
-            }
+            registry.insert(
+                role_id,
+                meeting_available_agent_config(agent, binding, &metadata),
+            );
         }
     }
 
@@ -730,6 +743,58 @@ mod tests {
                     .find(|agent| agent.role_id == "ch-td")
                     .and_then(|agent| agent.workspace.as_deref()),
                 Some(&expand_tilde("~/workspaces/td")[..])
+            );
+        });
+    }
+
+    #[test]
+    fn test_load_meeting_config_meeting_available_agent_overrides_channel_binding() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(
+                temp_home.path(),
+                r#"{
+  "byChannelId": {
+    "456": {
+      "roleId": "ch-pd",
+      "promptFile": "~/prompts/channel-pd.md",
+      "provider": "codex",
+      "workspace": "~/workspaces/channel"
+    }
+  },
+  "meeting": {
+    "channel_name": "meeting-room",
+    "summary_agent": "ch-pd",
+    "available_agents": [
+      {
+        "role_id": "ch-pd",
+        "display_name": "Meeting PD",
+        "keywords": ["회의"],
+        "domain_summary": "회의 전용 제품 판단",
+        "promptFile": "~/prompts/meeting-pd.md",
+        "provider": "gemini",
+        "workspace": "~/workspaces/meeting"
+      }
+    ]
+  }
+}"#,
+            );
+
+            let config = load_meeting_config().expect("meeting config should load");
+            let agent = config
+                .available_agents
+                .iter()
+                .find(|agent| agent.role_id == "ch-pd")
+                .expect("meeting agent should be present");
+
+            assert_eq!(agent.display_name, "Meeting PD");
+            assert_eq!(
+                agent.binding.prompt_file,
+                expand_tilde("~/prompts/meeting-pd.md")
+            );
+            assert_eq!(agent.binding.provider, Some(ProviderKind::Gemini));
+            assert_eq!(
+                agent.workspace.as_deref(),
+                Some(&expand_tilde("~/workspaces/meeting")[..])
             );
         });
     }

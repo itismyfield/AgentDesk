@@ -1176,18 +1176,35 @@ fn build_meeting_participants(
     selected_role_ids: &[String],
     required_role_ids: &[String],
 ) -> Result<Vec<MeetingParticipant>, String> {
-    let normalized_selected = merge_required_role_ids(selected_role_ids, required_role_ids);
+    let known_role_ids: HashSet<&str> = candidate_pool
+        .iter()
+        .map(|candidate| candidate.role_id.as_str())
+        .collect();
+    for role_id in normalize_role_id_list(required_role_ids) {
+        if !known_role_ids.contains(role_id.as_str()) {
+            return Err(format!(
+                "Unknown required meeting participant '{}'",
+                role_id
+            ));
+        }
+    }
 
-    if normalized_selected.len() < MIN_MEETING_PARTICIPANTS
-        || normalized_selected.len() > MAX_MEETING_PARTICIPANTS
+    let normalized_selected = merge_required_role_ids(selected_role_ids, required_role_ids);
+    let valid_selected: Vec<String> = normalized_selected
+        .into_iter()
+        .filter(|role_id| known_role_ids.contains(role_id.as_str()))
+        .collect();
+
+    if valid_selected.len() < MIN_MEETING_PARTICIPANTS
+        || valid_selected.len() > MAX_MEETING_PARTICIPANTS
     {
         return Err(format!(
             "Invalid participant count after cross-check: {}",
-            normalized_selected.len()
+            valid_selected.len()
         ));
     }
 
-    normalized_selected
+    valid_selected
         .into_iter()
         .map(|role_id| {
             let agent = candidate_pool
@@ -2692,6 +2709,45 @@ mod tests {
             .collect();
 
         assert_eq!(role_ids, vec!["uxd", "td", "pd"]);
+    }
+
+    #[test]
+    fn test_build_meeting_participants_ignores_unknown_model_role_ids_when_valid_remain() {
+        let agents = vec![
+            fixture_agent("td"),
+            fixture_agent("pd"),
+            fixture_agent("uxd"),
+        ];
+        let candidate_pool: Vec<&MeetingAgentConfig> = agents.iter().collect();
+
+        let participants = build_meeting_participants(
+            &candidate_pool,
+            &["td".to_string(), "unknown".to_string(), "pd".to_string()],
+            &["uxd".to_string()],
+        )
+        .expect("unknown non-fixed role should be ignored");
+
+        let role_ids: Vec<&str> = participants
+            .iter()
+            .map(|participant| participant.role_id.as_str())
+            .collect();
+
+        assert_eq!(role_ids, vec!["uxd", "td", "pd"]);
+    }
+
+    #[test]
+    fn test_build_meeting_participants_rejects_unknown_fixed_invite() {
+        let agents = vec![fixture_agent("td"), fixture_agent("pd")];
+        let candidate_pool: Vec<&MeetingAgentConfig> = agents.iter().collect();
+
+        let error = build_meeting_participants(
+            &candidate_pool,
+            &["td".to_string(), "pd".to_string()],
+            &["uxd".to_string()],
+        )
+        .expect_err("unknown fixed role should fail as config error");
+
+        assert!(error.contains("Unknown required meeting participant 'uxd'"));
     }
 
     #[test]

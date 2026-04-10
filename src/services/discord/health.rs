@@ -6,7 +6,7 @@ use poise::serenity_prelude as serenity;
 use serde::Serialize;
 use serenity::ChannelId;
 
-use super::{SharedData, mailbox_clear_channel};
+use super::{SharedData, mailbox_clear_channel, mailbox_remove_channel};
 use crate::db::Db;
 use crate::services::provider::ProviderKind;
 
@@ -237,6 +237,7 @@ pub async fn clear_provider_channel_runtime(
         super::turn_bridge::cancel_active_token(&token, true, "auto-queue slot clear");
         shared.global_active.fetch_sub(1, Ordering::Relaxed);
     }
+    mailbox_remove_channel(&shared, channel_id);
 
     {
         let mut data = shared.core.lock().await;

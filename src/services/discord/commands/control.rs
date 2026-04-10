@@ -11,6 +11,7 @@ use super::super::settings::cleanup_channel_uploads;
 use super::super::turn_bridge::cancel_active_token;
 use super::super::{
     Context, Error, SharedData, check_auth, mailbox_cancel_token, mailbox_clear_channel,
+    mailbox_remove_channel,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,7 +120,7 @@ pub(in crate::services::discord) async fn reset_provider_session_if_pending(
     let tmux_name = {
         let mut data = shared.core.lock().await;
         data.sessions.get_mut(&channel_id).and_then(|session| {
-            session.session_id = None;
+            session.clear_provider_session();
             session
                 .channel_name
                 .as_ref()
@@ -169,7 +170,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             cleanup_channel_uploads(channel_id);
-            session.session_id = None;
+            session.clear_provider_session();
             session.history.clear();
             session.pending_uploads.clear();
             session.cleared = true;
@@ -183,6 +184,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     if let Some(token) = cleared.removed_token {
         cancel_active_token(&token, true, clear_source);
     }
+    mailbox_remove_channel(shared, channel_id);
 
     if let Some(session_key) =
         resolve_session_key_for_clear(http, shared, channel_id, provider).await

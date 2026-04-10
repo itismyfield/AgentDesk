@@ -267,7 +267,7 @@ impl DiscordSession {
 
     pub(super) fn restore_provider_session(&mut self, session_id: Option<String>) {
         self.session_id = session_id;
-        self.memento_context_loaded = self.session_id.is_some();
+        self.memento_context_loaded = false;
         self.memento_reflected = false;
     }
 
@@ -661,6 +661,10 @@ async fn mailbox_clear_channel(
         .mailbox(channel_id)
         .clear(queue_persistence_context(shared, provider, channel_id))
         .await
+}
+
+fn mailbox_remove_channel(shared: &SharedData, channel_id: ChannelId) {
+    let _ = shared.mailboxes.remove(channel_id);
 }
 
 async fn mailbox_replace_queue(
@@ -3246,6 +3250,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
                 .global_active
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+        mailbox_remove_channel(shared, *ch);
         shared.api_timestamps.remove(ch);
         shared.tmux_watchers.remove(ch);
     }

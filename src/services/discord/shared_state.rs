@@ -44,7 +44,7 @@ impl DiscordSession {
 
     pub(super) fn restore_provider_session(&mut self, session_id: Option<String>) {
         self.session_id = session_id;
-        self.memento_context_loaded = self.session_id.is_some();
+        self.memento_context_loaded = false;
         self.memento_reflected = false;
     }
 
@@ -347,13 +347,13 @@ mod tests {
     }
 
     #[test]
-    fn restore_provider_session_marks_memento_context_for_resumed_sessions() {
+    fn restore_provider_session_does_not_mark_memento_context_loaded() {
         let mut session = sample_session();
 
         session.restore_provider_session(Some("restored-1".to_string()));
 
         assert_eq!(session.session_id.as_deref(), Some("restored-1"));
-        assert!(session.memento_context_loaded);
+        assert!(!session.memento_context_loaded);
         assert!(!session.memento_reflected);
     }
 
