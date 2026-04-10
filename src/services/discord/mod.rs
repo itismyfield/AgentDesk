@@ -99,6 +99,13 @@ const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minut
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
+pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    parse_dispatch_id(trimmed).is_some()
+        && !trimmed.contains("검토 전용")
+        && !trimmed.contains("작업 착수 금지")
+}
+
 #[cfg(test)]
 pub(in crate::services::discord) use queue_io::channel_has_pending_soft_queue_at;
 pub(in crate::services::discord) use queue_io::schedule_deferred_idle_queue_kickoff;
@@ -1264,7 +1271,12 @@ async fn catch_up_missed_messages(
                 continue;
             }
             // Only process messages from allowed bots or authorized users
-            let is_allowed = !msg.author.bot || allowed_bot_ids.contains(&msg.author.id.get());
+            let is_allowed = if msg.author.bot {
+                allowed_bot_ids.contains(&msg.author.id.get())
+                    && should_process_allowed_bot_turn_text(text)
+            } else {
+                true
+            };
             if !is_allowed {
                 continue;
             }
@@ -1337,6 +1349,11 @@ async fn catch_up_missed_messages(
         };
         let channel_id = ChannelId::new(channel_id_raw);
 
+        match resolve_runtime_channel_binding_status(http, channel_id).await {
+            RuntimeChannelBindingStatus::Owned => {}
+            RuntimeChannelBindingStatus::Unowned | RuntimeChannelBindingStatus::Unknown => continue,
+        }
+
         // Fetch last 20 messages (newest first — default Discord order)
         let recent = match channel_id
             .messages(http, serenity::builder::GetMessages::new().limit(20))
@@ -1395,8 +1412,12 @@ async fn catch_up_missed_messages(
             if text.is_empty() {
                 continue;
             }
-            let is_allowed =
-                !msg.author.bot || allowed_bot_ids_phase2.contains(&msg.author.id.get());
+            let is_allowed = if msg.author.bot {
+                allowed_bot_ids_phase2.contains(&msg.author.id.get())
+                    && should_process_allowed_bot_turn_text(text)
+            } else {
+                true
+            };
             if !is_allowed {
                 continue;
             }
@@ -2476,8 +2497,19 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
 
                     // Restore pending intervention queues saved during previous SIGTERM
                     let (restored_queues, restored_overrides) = load_pending_queues(&provider_for_restore, &shared_for_tmux2.token_hash);
+                    let allowed_bot_ids_for_restore: Vec<u64> = {
+                        let settings = shared_for_tmux2.settings.read().await;
+                        settings.allowed_bot_ids.clone()
+                    };
                     // P1-1: Restore dispatch_role_overrides from queue snapshots
                     for (thread_channel_id, alt_channel_id) in &restored_overrides {
+                        if !matches!(
+                            resolve_runtime_channel_binding_status(&http_for_tmux, *thread_channel_id)
+                                .await,
+                            RuntimeChannelBindingStatus::Owned
+                        ) {
+                            continue;
+                        }
                         shared_for_tmux2.dispatch_role_overrides.insert(*thread_channel_id, *alt_channel_id);
                     }
                     if !restored_overrides.is_empty() {
@@ -2488,11 +2520,25 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                         let mut added = 0usize;
                         let mut skipped = 0usize;
                         for (channel_id, items) in restored_queues {
+                            if !matches!(
+                                resolve_runtime_channel_binding_status(&http_for_tmux, channel_id)
+                                    .await,
+                                RuntimeChannelBindingStatus::Owned
+                            ) {
+                                skipped += items.len();
+                                continue;
+                            }
                             let snapshot = mailbox_snapshot(&shared_for_tmux2, channel_id).await;
                             let mut queue = snapshot.intervention_queue;
                             let mut existing_ids: std::collections::HashSet<u64> =
                                 queue.iter().map(|item| item.message_id.get()).collect();
                             for item in items {
+                                if allowed_bot_ids_for_restore.contains(&item.author_id.get())
+                                    && !should_process_allowed_bot_turn_text(&item.text)
+                                {
+                                    skipped += 1;
+                                    continue;
+                                }
                                 if existing_ids.insert(item.message_id.get()) {
                                     queue.push(item);
                                     added += 1;

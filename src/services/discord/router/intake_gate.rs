@@ -420,6 +420,15 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
+            if new_message.author.bot && !should_process_allowed_bot_turn_text(text) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ⏭ BOT-INTAKE: skipping non-turn bot message {} in channel {}",
+                    new_message.id, channel_id
+                );
+                return Ok(());
+            }
+
             // Auth check (allowed bots bypass auth)
             let is_allowed_bot = new_message.author.bot && {
                 let settings = data.shared.settings.read().await;

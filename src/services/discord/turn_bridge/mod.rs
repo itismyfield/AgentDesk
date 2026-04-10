@@ -1063,9 +1063,20 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
+            let mut delivery_response = full_response.clone();
+            if let Some(warning) = review_dispatch_warning.as_deref() {
+                let warning = warning.trim();
+                if !warning.is_empty() {
+                    if !delivery_response.trim().is_empty() {
+                        delivery_response.push_str("\n\n");
+                    }
+                    delivery_response.push_str(warning);
+                }
+            }
+
             // If response is empty (e.g. auto-retry on stale session), show
             // recovery notice instead of deleting — avoids visual gap.
-            if full_response.trim().is_empty() {
+            if delivery_response.trim().is_empty() {
                 let _ = gateway
                     .edit_message(
                         channel_id,
@@ -1074,10 +1085,12 @@ pub(super) fn spawn_turn_bridge(
                     )
                     .await;
             } else {
-                full_response =
-                    super::formatting::format_for_discord_with_provider(&full_response, &provider);
+                delivery_response = super::formatting::format_for_discord_with_provider(
+                    &delivery_response,
+                    &provider,
+                );
                 let _ = gateway
-                    .replace_message(channel_id, current_msg_id, &full_response)
+                    .replace_message(channel_id, current_msg_id, &delivery_response)
                     .await;
             }
 
@@ -1087,7 +1100,7 @@ pub(super) fn spawn_turn_bridge(
                 watcher.turn_delivered.store(true, Ordering::Relaxed);
             }
 
-            if !full_response.trim().is_empty() {
+            if !delivery_response.trim().is_empty() {
                 gateway.add_reaction(channel_id, user_msg_id, '✅').await;
             }
 
@@ -1095,25 +1108,6 @@ pub(super) fn spawn_turn_bridge(
             println!("  [{ts}] ▶ Response sent");
             if let Ok(mut last) = shared_owned.last_turn_at.lock() {
                 *last = Some(chrono::Local::now().to_rfc3339());
-            }
-
-            if let Some(warning) = review_dispatch_warning.as_deref() {
-                let enqueued = super::enqueue_internal_followup(
-                    &shared_owned,
-                    &provider,
-                    channel_id,
-                    user_msg_id,
-                    warning.to_string(),
-                    "review dispatch warning",
-                )
-                .await;
-                if !enqueued {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
-                        "  [{ts}] ⏭ review dispatch warning deduped for channel {}",
-                        channel_id
-                    );
-                }
             }
         }
 
