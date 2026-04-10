@@ -737,9 +737,11 @@ var timeouts = {
     }
 
     // 데드락 의심 세션: sessions.last_heartbeat 기반 판별
+    // deadlock-manager 자신의 세션은 제외 (자기 자신을 오탐하는 무한 루프 방지)
     var staleSessions = agentdesk.db.query(
       "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat " +
       "FROM sessions WHERE status = 'working' " +
+      "AND session_key NOT LIKE '%deadlock-manager%' " +
       "AND last_heartbeat < datetime('now', '-" + DEADLOCK_MINUTES + " minutes')"
     );
     for (var dl = 0; dl < staleSessions.length; dl++) {
@@ -785,6 +787,18 @@ var timeouts = {
             "정상 진행 확인, watchdog 연장 실패: " + extendResp.error
           );
         }
+        continue;
+      }
+
+      // 활성 턴(inflight)이 없는 working 세션은 idle로 전환하고 스킵
+      // (턴 완료 후 세션 상태가 working으로 남은 stale 케이스)
+      if (!tmuxAlive || (!inflightProgress.channel_id && !inflightProgress.recent)) {
+        agentdesk.db.execute(
+          "UPDATE sessions SET status = 'idle' WHERE session_key = ? AND status = 'working'",
+          [sess.session_key]
+        );
+        agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
+        agentdesk.log.info("[deadlock] Stale working session → idle (no active turn): " + sess.session_key);
         continue;
       }
 
