@@ -63,6 +63,7 @@ pub(crate) struct RecallResponse {
     pub external_recall: Option<String>,
     pub warnings: Vec<String>,
     pub token_usage: TokenUsage,
+    pub memento_context_loaded: bool,
 }
 
 #[derive(Clone, Debug)]

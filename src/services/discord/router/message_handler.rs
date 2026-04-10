@@ -168,6 +168,16 @@ fn should_skip_memento_recall(
     memory_settings.backend == settings::MemoryBackendKind::Memento && memento_context_loaded
 }
 
+fn should_mark_memento_context_loaded(
+    memory_settings: &settings::ResolvedMemorySettings,
+    memento_context_loaded: bool,
+    memory_recall: &RecallResponse,
+) -> bool {
+    memory_settings.backend == settings::MemoryBackendKind::Memento
+        && !memento_context_loaded
+        && memory_recall.memento_context_loaded
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -726,7 +736,8 @@ pub(in crate::services::discord) async fn handle_text_message(
             })
             .await
     };
-    if memory_settings.backend == settings::MemoryBackendKind::Memento && !memento_context_loaded {
+    if should_mark_memento_context_loaded(&memory_settings, memento_context_loaded, &memory_recall)
+    {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             session.note_memento_context_loaded();
@@ -2548,6 +2559,7 @@ mod tests {
             external_recall: Some("[External Recall]".to_string()),
             warnings: Vec::new(),
             token_usage: crate::services::memory::TokenUsage::default(),
+            memento_context_loaded: false,
         }
     }
 
@@ -2754,6 +2766,25 @@ mod tests {
         assert!(should_skip_memento_recall(&memento, true));
         assert!(!should_skip_memento_recall(&memento, false));
         assert!(!should_skip_memento_recall(&file, true));
+    }
+
+    #[test]
+    fn memento_context_loaded_mark_only_triggers_after_successful_memento_recall() {
+        let memento = settings::ResolvedMemorySettings {
+            backend: settings::MemoryBackendKind::Memento,
+            ..settings::ResolvedMemorySettings::default()
+        };
+        let file = settings::ResolvedMemorySettings::default();
+        let mut recall = sample_recall();
+
+        assert!(!should_mark_memento_context_loaded(
+            &memento, false, &recall
+        ));
+
+        recall.memento_context_loaded = true;
+        assert!(should_mark_memento_context_loaded(&memento, false, &recall));
+        assert!(!should_mark_memento_context_loaded(&memento, true, &recall));
+        assert!(!should_mark_memento_context_loaded(&file, false, &recall));
     }
 
     #[test]

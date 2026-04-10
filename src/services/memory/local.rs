@@ -16,6 +16,7 @@ impl MemoryBackend for LocalMemoryBackend {
                 external_recall: None,
                 warnings: Vec::new(),
                 token_usage: Default::default(),
+                memento_context_loaded: false,
             }
         })
     }
