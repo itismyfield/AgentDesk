@@ -1,6 +1,5 @@
 mod adk_session;
 pub(crate) mod agentdesk_config;
-mod channel_mailbox;
 mod commands;
 pub(crate) mod config_audit;
 mod formatting;
@@ -48,13 +47,11 @@ use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
 use crate::services::qwen;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
 
+use crate::services::turn_orchestrator::ChannelMailboxHandle;
+use crate::services::turn_orchestrator::HasPendingSoftQueueResult;
 use adk_session::{
     build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
     lookup_pending_dispatch_for_thread, parse_dispatch_id, post_adk_session_status,
-};
-use channel_mailbox::{
-    CancelActiveTurnResult, ChannelMailboxRegistry, ChannelMailboxSnapshot, ClearChannelResult,
-    FinishTurnResult, QueuePersistenceContext, RecoveryKickoffResult,
 };
 use formatting::{
     BUILTIN_SKILLS, extract_skill_description, format_for_discord, format_skills_notice,
@@ -83,6 +80,20 @@ use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};
 
 pub(crate) use prompt_builder::DispatchProfile;
 
+use crate::services::turn_orchestrator::{
+    CancelActiveTurnResult, ChannelMailboxSnapshot, ClearChannelResult, FinishTurnResult,
+    QueuePersistenceContext, RecoveryKickoffResult, load_pending_queues,
+    warn_legacy_pending_queue_files,
+};
+pub(super) use crate::services::turn_orchestrator::{
+    ChannelMailboxRegistry, INTERVENTION_TTL, Intervention, InterventionMode,
+    MAX_INTERVENTIONS_PER_CHANNEL, PendingQueueItem,
+};
+#[cfg(test)]
+use crate::services::turn_orchestrator::{
+    requeue_intervention_front_persisted, save_channel_queue, save_pending_queues,
+    take_next_soft_intervention_persisted,
+};
 pub(crate) use inflight::latest_request_owner_user_id_for_channel;
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
@@ -90,9 +101,6 @@ pub use settings::{
 
 /// Discord message length limit
 pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
-const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
-const INTERVENTION_TTL: Duration = Duration::from_secs(10 * 60);
-const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
@@ -347,20 +355,6 @@ pub(super) struct WorktreeInfo {
     pub branch_name: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InterventionMode {
-    Soft,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct Intervention {
-    author_id: UserId,
-    message_id: MessageId,
-    text: String,
-    mode: InterventionMode,
-    created_at: Instant,
-}
-
 /// Bot-level settings persisted to disk
 #[derive(Clone)]
 pub(super) struct DiscordBotSettings {
@@ -566,7 +560,7 @@ pub(super) struct SharedData {
 }
 
 impl SharedData {
-    fn mailbox(&self, channel_id: ChannelId) -> channel_mailbox::ChannelMailboxHandle {
+    fn mailbox(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
         self.mailboxes.handle(channel_id)
     }
 }
@@ -706,7 +700,7 @@ async fn mailbox_has_pending_soft_queue(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> channel_mailbox::HasPendingSoftQueueResult {
+) -> HasPendingSoftQueueResult {
     shared
         .mailbox(channel_id)
         .has_pending_soft_queue(queue_persistence_context(shared, provider, channel_id))
@@ -852,340 +846,6 @@ pub(super) fn mark_reconcile_complete(shared: &SharedData) {
 pub(super) type Error = Box<dyn std::error::Error + Send + Sync>;
 pub(super) type Context<'a> = poise::Context<'a, Data, Error>;
 
-fn prune_interventions(queue: &mut Vec<Intervention>) {
-    let now = Instant::now();
-    queue.retain(|i| now.duration_since(i.created_at) <= INTERVENTION_TTL);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
-        queue.drain(0..overflow);
-    }
-}
-
-pub(super) fn enqueue_intervention(
-    queue: &mut Vec<Intervention>,
-    intervention: Intervention,
-) -> bool {
-    prune_interventions(queue);
-
-    if let Some(last) = queue.last() {
-        if last.author_id == intervention.author_id
-            && last.text == intervention.text
-            && intervention.created_at.duration_since(last.created_at) <= INTERVENTION_DEDUP_WINDOW
-        {
-            return false;
-        }
-    }
-
-    queue.push(intervention);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
-        queue.drain(0..overflow);
-    }
-    true
-}
-
-pub(super) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> bool {
-    prune_interventions(queue);
-    queue.iter().any(|item| item.mode == InterventionMode::Soft)
-}
-
-pub(super) fn dequeue_next_soft_intervention(
-    queue: &mut Vec<Intervention>,
-) -> Option<Intervention> {
-    prune_interventions(queue);
-    let index = queue
-        .iter()
-        .position(|item| item.mode == InterventionMode::Soft)?;
-    Some(queue.remove(index))
-}
-
-pub(super) fn cancel_soft_intervention_by_message_id(
-    queue: &mut Vec<Intervention>,
-    message_id: MessageId,
-) -> Option<Intervention> {
-    prune_interventions(queue);
-    let index = queue
-        .iter()
-        .position(|item| item.mode == InterventionMode::Soft && item.message_id == message_id)?;
-    Some(queue.remove(index))
-}
-
-pub(super) fn requeue_intervention_front(
-    queue: &mut Vec<Intervention>,
-    intervention: Intervention,
-) {
-    prune_interventions(queue);
-    queue.insert(0, intervention);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        queue.truncate(MAX_INTERVENTIONS_PER_CHANNEL);
-    }
-}
-
-#[cfg(test)]
-pub(super) fn take_next_soft_intervention_persisted(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
-    dispatch_role_overrides: &dashmap::DashMap<ChannelId, ChannelId>,
-) -> Option<(Intervention, bool)> {
-    let mut remove_queue = false;
-    let (next, has_more) = if let Some(queue) = intervention_queue.get_mut(&channel_id) {
-        let next = dequeue_next_soft_intervention(queue);
-        let has_more = has_soft_intervention(queue);
-        remove_queue = queue.is_empty();
-        (next, has_more)
-    } else {
-        (None, false)
-    };
-
-    if next.is_none() {
-        if remove_queue {
-            intervention_queue.remove(&channel_id);
-            dispatch_role_overrides.remove(&channel_id);
-            save_channel_queue(provider, token_hash, channel_id, &[], None);
-        }
-        return None;
-    }
-
-    let intervention = next.unwrap();
-
-    if remove_queue {
-        intervention_queue.remove(&channel_id);
-        dispatch_role_overrides.remove(&channel_id);
-        save_channel_queue(provider, token_hash, channel_id, &[], None);
-    } else if let Some(queue) = intervention_queue.get(&channel_id) {
-        save_channel_queue(
-            provider,
-            token_hash,
-            channel_id,
-            queue,
-            dispatch_role_overrides
-                .get(&channel_id)
-                .map(|override_id| override_id.value().get()),
-        );
-    }
-
-    Some((intervention, has_more))
-}
-
-#[cfg(test)]
-pub(super) fn requeue_intervention_front_persisted(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
-    dispatch_role_overrides: &dashmap::DashMap<ChannelId, ChannelId>,
-    intervention: Intervention,
-) {
-    let queue = intervention_queue.entry(channel_id).or_default();
-    requeue_intervention_front(queue, intervention);
-    save_channel_queue(
-        provider,
-        token_hash,
-        channel_id,
-        queue,
-        dispatch_role_overrides
-            .get(&channel_id)
-            .map(|override_id| override_id.value().get()),
-    );
-}
-
-// ─── Pending queue persistence (write-through + SIGTERM) ─────────────────────
-
-/// Serializable form of a queued intervention for disk persistence.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(super) struct PendingQueueItem {
-    pub(super) author_id: u64,
-    pub(super) message_id: u64,
-    pub(super) text: String,
-    /// Channel this item belongs to (routing snapshot — used by the kickoff guard).
-    #[serde(default)]
-    pub(super) channel_id: Option<u64>,
-    /// Human-readable channel name at save time (best-effort, may be None).
-    #[serde(default)]
-    pub(super) channel_name: Option<String>,
-    /// Active dispatch role override at save time (lost on restart; stored for diagnostics).
-    #[serde(default)]
-    pub(super) override_channel_id: Option<u64>,
-}
-
-/// Write-through: save a single channel's queue to disk.
-/// If the queue is empty the file is removed.
-/// This is designed to be called from `tokio::spawn` after every enqueue/dequeue.
-///
-/// Queue path: `discord_pending_queue/{provider}/{token_hash}/{channel_id}.json`
-/// The `token_hash` namespace prevents multi-bot queue cross-contamination on restart.
-/// `dispatch_role_override`: if `dispatch_role_overrides[channel_id]` is set, pass it here
-/// so it survives restart and can be restored to `SharedData.dispatch_role_overrides`.
-pub(super) fn save_channel_queue(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    queue: &[Intervention],
-    dispatch_role_override: Option<u64>,
-) {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return;
-    };
-    let dir = root.join(provider.as_str()).join(token_hash);
-    let path = dir.join(format!("{}.json", channel_id.get()));
-    if queue.is_empty() {
-        let _ = fs::remove_file(&path);
-        return;
-    }
-    let _ = fs::create_dir_all(&dir);
-    let items: Vec<PendingQueueItem> = queue
-        .iter()
-        .map(|i| PendingQueueItem {
-            author_id: i.author_id.get(),
-            message_id: i.message_id.get(),
-            text: i.text.clone(),
-            channel_id: Some(channel_id.get()),
-            channel_name: None,
-            override_channel_id: dispatch_role_override,
-        })
-        .collect();
-    if let Ok(json) = serde_json::to_string_pretty(&items) {
-        let _ = runtime_store::atomic_write(&path, &json);
-    }
-}
-
-/// Save all non-empty intervention queues to `discord_pending_queue/{provider}/{token_hash}/`.
-/// `dispatch_role_overrides` is snapshotted per channel so that `override_channel_id` survives
-/// restart and can be restored to `SharedData.dispatch_role_overrides`.
-#[cfg(test)]
-fn save_pending_queues(
-    provider: &ProviderKind,
-    token_hash: &str,
-    queues: &HashMap<ChannelId, Vec<Intervention>>,
-    dispatch_role_overrides: &dashmap::DashMap<ChannelId, ChannelId>,
-) {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return;
-    };
-    let dir = root.join(provider.as_str()).join(token_hash);
-    let _ = fs::create_dir_all(&dir);
-    // Clean stale files first (within this bot's namespace)
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-    for (channel_id, queue) in queues {
-        if queue.is_empty() {
-            continue;
-        }
-        let override_id = dispatch_role_overrides
-            .get(channel_id)
-            .map(|r| r.value().get());
-        let items: Vec<PendingQueueItem> = queue
-            .iter()
-            .map(|i| PendingQueueItem {
-                author_id: i.author_id.get(),
-                message_id: i.message_id.get(),
-                text: i.text.clone(),
-                channel_id: Some(channel_id.get()),
-                channel_name: None,
-                override_channel_id: override_id,
-            })
-            .collect();
-        if let Ok(json) = serde_json::to_string_pretty(&items) {
-            let path = dir.join(format!("{}.json", channel_id.get()));
-            let _ = runtime_store::atomic_write(&path, &json);
-        }
-    }
-}
-
-/// Load persisted pending queues from `discord_pending_queue/{provider}/{token_hash}/` and delete the files.
-/// Only reads files in this bot's token-namespaced subdirectory.
-/// Returns `(queues, dispatch_role_overrides)` so the caller can restore both.
-fn load_pending_queues(
-    provider: &ProviderKind,
-    token_hash: &str,
-) -> (
-    HashMap<ChannelId, Vec<Intervention>>,
-    HashMap<ChannelId, ChannelId>,
-) {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return (HashMap::new(), HashMap::new());
-    };
-    let dir = root.join(provider.as_str()).join(token_hash);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return (HashMap::new(), HashMap::new());
-    };
-    let now = Instant::now();
-    let mut result: HashMap<ChannelId, Vec<Intervention>> = HashMap::new();
-    let mut restored_overrides: HashMap<ChannelId, ChannelId> = HashMap::new();
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let channel_id: u64 = match path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse().ok())
-        {
-            Some(id) => id,
-            None => continue,
-        };
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
-            let _ = fs::remove_file(&path);
-            continue;
-        };
-        // Restore dispatch_role_override from snapshot (first non-None value wins)
-        if let Some(override_id) = items.iter().find_map(|item| item.override_channel_id) {
-            restored_overrides.insert(ChannelId::new(channel_id), ChannelId::new(override_id));
-        }
-        let interventions: Vec<Intervention> = items
-            .into_iter()
-            .map(|item| Intervention {
-                author_id: UserId::new(item.author_id),
-                message_id: MessageId::new(item.message_id),
-                text: item.text,
-                mode: InterventionMode::Soft,
-                created_at: now,
-            })
-            .collect();
-        if !interventions.is_empty() {
-            result.insert(ChannelId::new(channel_id), interventions);
-        }
-        let _ = fs::remove_file(&path);
-    }
-    (result, restored_overrides)
-}
-
-/// P1-2: Log a structured warning for legacy pending queue files at the old flat
-/// `discord_pending_queue/{provider}/` path (not in a token_hash subdirectory).
-/// These files were written before P0 namespacing and cannot be safely restored.
-/// Called once at startup after `load_pending_queues`.
-fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return;
-    };
-    let dir = root.join(provider.as_str());
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Warn only about flat JSON files directly under {provider}/ (not subdirectories)
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("json") {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] ⚠ LEGACY-QUEUE: found legacy pending queue file '{}' — \
-                predates bot-identity namespacing and will NOT be restored. \
-                Remove manually if no longer needed.",
-                path.display()
-            );
-        }
-    }
-}
-
 /// Startup catch-up polling: fetch messages that arrived during the restart gap.
 /// Uses saved last_message_ids to query Discord REST API for missed messages,
 /// filters out bot messages and duplicates, and inserts into intervention queue.
@@ -1202,9 +862,6 @@ async fn catch_up_missed_messages(
         return;
     }
 
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
     let mut total_recovered = 0usize;
     let now = Instant::now();
     let max_age = std::time::Duration::from_secs(300); // Only catch up messages within 5 minutes

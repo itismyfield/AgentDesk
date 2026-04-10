@@ -28,6 +28,7 @@ pub mod tmux_common;
 pub mod tmux_diagnostics;
 #[cfg(unix)]
 pub mod tmux_wrapper;
+pub mod turn_orchestrator;
 
 // Compatibility alias: code referencing services::remote::* uses the stub
 pub use remote_stub as remote;
