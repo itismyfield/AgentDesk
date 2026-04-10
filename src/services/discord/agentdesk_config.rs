@@ -97,11 +97,8 @@ fn match_channel(
     channel_name: Option<&str>,
 ) -> Option<u8> {
     let channel_id_str = channel_id.get().to_string();
-    let channel_target = channel.target();
-    if channel.channel_id().as_deref() == Some(channel_id_str.as_str())
-        || channel_target.as_deref() == Some(channel_id_str.as_str())
-    {
-        return Some(2);
+    if let Some(explicit_channel_id) = channel.channel_id() {
+        return (explicit_channel_id == channel_id_str).then_some(2);
     }
 
     let channel_name = channel_name?.trim();
@@ -517,6 +514,35 @@ agents:
             let workspace = resolve_workspace(ChannelId::new(1479671301387059200), Some("adk-cdx"))
                 .expect("workspace");
             assert!(workspace.ends_with("/workspaces/agentdesk"));
+        });
+    }
+
+    #[test]
+    fn resolve_role_binding_does_not_match_different_explicit_channel_id_by_name() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home.path(),
+                r#"
+server:
+  port: 8791
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      claude:
+        id: "1484070499783803081"
+        name: "adk-cc"
+        aliases: ["agentdesk-cc"]
+"#,
+            );
+
+            assert!(
+                resolve_role_binding(ChannelId::new(1479671298497183835), Some("adk-cc")).is_none()
+            );
+            assert!(
+                resolve_workspace(ChannelId::new(1479671298497183835), Some("adk-cc")).is_none()
+            );
         });
     }
 
