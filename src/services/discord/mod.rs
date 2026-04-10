@@ -1198,6 +1198,16 @@ async fn catch_up_missed_messages(
         let channel_id = ChannelId::new(channel_id_raw);
         let after_msg = MessageId::new(last_id);
 
+        // #429: skip channels this bot cannot access.  Utility bots
+        // (notify/announce) share the claude provider checkpoint dir but
+        // have no channel read permissions → every API call fails slowly.
+        {
+            let settings = shared.settings.read().await;
+            if !settings::bot_settings_allow_channel(&settings, channel_id, false) {
+                continue;
+            }
+        }
+
         match resolve_runtime_channel_binding_status(http, channel_id).await {
             RuntimeChannelBindingStatus::Owned => {}
             RuntimeChannelBindingStatus::Unowned => {
@@ -2488,6 +2498,16 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                 let shared_for_restart_reports = shared_for_tmux.clone();
                 let provider_for_restore = provider.clone();
                 tokio::spawn(async move {
+                    let is_utility_bot = {
+                        let s = shared_for_tmux2.settings.read().await;
+                        s.agent.is_some()
+                    };
+                    if is_utility_bot {
+                        mark_reconcile_complete(&shared_for_tmux2);
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!("  [{ts}] ✓ Utility bot reconcile — skipped recovery");
+                    } else {
+
                     gc_stale_fixed_working_sessions(&shared_for_tmux2).await;
 
                     // #429: catch-up FIRST to minimize message loss window.
@@ -2654,6 +2674,8 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                     mark_reconcile_complete(&shared_for_restart_reports);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ✓ Reconcile complete — intake open");
+
+                    } // end of !is_utility_bot recovery block
 
                     // Kick off again to drain messages queued during reconcile window
                     kickoff_idle_queues(
