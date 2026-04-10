@@ -66,6 +66,33 @@ jobs:
         env:
           AGENTDESK_ROOT_DIR: ${{ runner.temp }}/adk-smoke
 
+  high-risk-recovery:
+    name: High-risk recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-recovery-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-recovery-
+
+      - name: High-risk recovery lane
+        run: cargo test --bin agentdesk high_risk_recovery::
+        env:
+          RUST_BACKTRACE: 1
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

@@ -3226,6 +3226,7 @@ pub async fn dispatch(
         None
     };
 
+    let guild_id = state.config.discord.guild_id.as_deref();
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
