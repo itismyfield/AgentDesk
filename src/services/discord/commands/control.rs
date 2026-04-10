@@ -4,13 +4,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::services::provider::ProviderKind;
-use crate::services::provider::cancel_requested;
 
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::settings::cleanup_channel_uploads;
 use super::super::turn_bridge::cancel_active_token;
 use super::super::{
-    Context, Error, SharedData, check_auth, mailbox_cancel_token, mailbox_clear_channel,
+    Context, Error, SharedData, check_auth, mailbox_cancel_active_turn, mailbox_clear_channel,
     mailbox_remove_channel,
 };
 
@@ -239,11 +238,11 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     println!("  [{ts}] ◀ [{user_name}] /stop");
 
     let channel_id = ctx.channel_id();
-    let token = mailbox_cancel_token(&ctx.data().shared, channel_id).await;
+    let result = mailbox_cancel_active_turn(&ctx.data().shared, channel_id).await;
 
-    match token {
+    match result.token {
         Some(token) => {
-            if cancel_requested(Some(token.as_ref())) {
+            if result.already_stopping {
                 ctx.say("Already stopping...").await?;
                 return Ok(());
             }

@@ -5,14 +5,16 @@ var triage = {
   // Periodic: auto-assign unassigned cards based on labels
   onTick: function() {
     // Find backlog cards without assigned agent
-    var unassigned = agentdesk.db.query(
-      "SELECT id, metadata, repo_id FROM kanban_cards WHERE status = 'backlog' AND assigned_agent_id IS NULL AND metadata IS NOT NULL"
-    );
+    var unassigned = agentdesk.cards.list({
+      status: "backlog",
+      unassigned: true,
+      metadata_present: true
+    });
 
     for (var i = 0; i < unassigned.length; i++) {
       var card = unassigned[i];
-      var metadata = {};
-      try { metadata = JSON.parse(card.metadata); } catch(e) { continue; }
+      var metadata = card.metadata || {};
+      if (!metadata || typeof metadata !== "object") continue;
 
       var labels = (metadata.labels || "").toLowerCase();
 
@@ -21,16 +23,10 @@ var triage = {
       if (agentMatch) {
         var agentId = agentMatch[1];
         // Try exact match first, then with ch- prefix
-        var agents = agentdesk.db.query(
-          "SELECT id FROM agents WHERE id = ? OR id = ?",
-          [agentId, "ch-" + agentId]
-        );
-        if (agents.length > 0) {
-          agentId = agents[0].id; // Use the actual agent ID from DB
-          agentdesk.db.execute(
-            "UPDATE kanban_cards SET assigned_agent_id = ?, updated_at = datetime('now') WHERE id = ?",
-            [agentId, card.id]
-          );
+        var agent = agentdesk.agents.get(agentId) || agentdesk.agents.get("ch-" + agentId);
+        if (agent) {
+          agentId = agent.id;
+          agentdesk.cards.assign(card.id, agentId);
           agentdesk.log.info("[triage] Auto-assigned card " + card.id + " to " + agentId);
         }
       }
@@ -38,24 +34,15 @@ var triage = {
       // If no agent label found, request PMD classification (async)
       if (!agentMatch) {
         // Check if we already requested classification (avoid spam)
-        var alreadyRequested = agentdesk.db.query(
-          "SELECT value FROM kv_meta WHERE key = ?",
-          ["triage_requested:" + card.id]
-        );
-        if (alreadyRequested.length === 0) {
-          agentdesk.db.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, datetime('now'))",
-            ["triage_requested:" + card.id]
-          );
+        var triageKey = "triage_requested:" + card.id;
+        var alreadyRequested = agentdesk.kv.get(triageKey);
+        if (alreadyRequested === null) {
+          agentdesk.kv.set(triageKey, new Date().toISOString());
           // Send classification request to PMD via announce bot
-          var issueNum = agentdesk.db.query(
-            "SELECT github_issue_number, github_issue_url, title FROM kanban_cards WHERE id = ?",
-            [card.id]
-          );
-          if (issueNum.length > 0 && issueNum[0].github_issue_url) {
+          if (card.github_issue_url) {
             var pmdCh = agentdesk.config.get("kanban_manager_channel_id");
             if (pmdCh) {
-              var issueLink = "[" + issueNum[0].title + " #" + issueNum[0].github_issue_number + "](<" + issueNum[0].github_issue_url + ">)";
+              var issueLink = "[" + card.title + " #" + (card.github_issue_number || "?") + "](<" + card.github_issue_url + ">)";
               agentdesk.message.queue(
                 "channel:" + pmdCh,
                 "📋 Triage 분류 요청: " + issueLink,
@@ -70,20 +57,17 @@ var triage = {
 
       // Auto-set priority based on labels
       if (labels.indexOf("priority:urgent") >= 0 || labels.indexOf("critical") >= 0) {
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET priority = 'urgent' WHERE id = ? AND priority = 'medium'",
-          [card.id]
-        );
+        if ((card.priority || "medium") === "medium") {
+          agentdesk.cards.setPriority(card.id, "urgent");
+        }
       } else if (labels.indexOf("priority:high") >= 0) {
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET priority = 'high' WHERE id = ? AND priority = 'medium'",
-          [card.id]
-        );
+        if ((card.priority || "medium") === "medium") {
+          agentdesk.cards.setPriority(card.id, "high");
+        }
       } else if (labels.indexOf("priority:low") >= 0) {
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET priority = 'low' WHERE id = ? AND priority = 'medium'",
-          [card.id]
-        );
+        if ((card.priority || "medium") === "medium") {
+          agentdesk.cards.setPriority(card.id, "low");
+        }
       }
     }
   }

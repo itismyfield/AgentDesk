@@ -1588,7 +1588,6 @@ mod tests {
                 unified_thread_id TEXT,
                 unified_thread_channel_id TEXT,
                 max_concurrent_threads INTEGER DEFAULT 1,
-                max_concurrent_per_agent INTEGER DEFAULT 1,
                 thread_group_count INTEGER DEFAULT 1,
                 created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
                 completed_at DATETIME
@@ -1932,6 +1931,7 @@ mod tests {
         let state = crate::server::routes::AppState {
             db: db.clone(),
             engine: engine.clone(),
+            config: std::sync::Arc::new(crate::config::Config::default()),
             broadcast_tx: crate::server::ws::new_broadcast(),
             batch_buffer: crate::server::ws::spawn_batch_flusher(crate::server::ws::new_broadcast()),
             health_registry: None,

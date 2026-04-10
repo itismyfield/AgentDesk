@@ -8,6 +8,8 @@
  *   onReviewVerdict     — 외부 API verdict 수신 처리
  */
 
+var prTracking = agentdesk.prTracking;
+
 function sendDiscordReview(target, content, bot) {
   agentdesk.message.queue(target, content, bot || "announce", "system");
 }
@@ -184,24 +186,77 @@ var reviewAutomation = {
     if (dispatches.length === 0) return;
     var dispatch = dispatches[0];
 
-    // #198: create-pr dispatch completed — transition card to terminal
+    // #198/#211: create-pr dispatch completed — canonicalize PR tracking, then wait for CI
     if (dispatch.dispatch_type === "create-pr") {
-      var cfg2 = agentdesk.pipeline.resolveForCard(dispatch.kanban_card_id);
-      // Terminal guard — skip if card already reached terminal state
-      var cardStatus2 = agentdesk.db.query(
-        "SELECT status FROM kanban_cards WHERE id = ?", [dispatch.kanban_card_id]
+      var cardMeta = agentdesk.db.query(
+        "SELECT repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
+        [dispatch.kanban_card_id]
       );
-      if (cardStatus2.length > 0 && agentdesk.pipeline.isTerminal(cardStatus2[0].status, cfg2)) {
-        agentdesk.log.info("[review] create-pr completion skipped — card " + dispatch.kanban_card_id + " already terminal");
+      var tracking = loadPrTracking(dispatch.kanban_card_id);
+      var latestWork = loadLatestCompletedWorkTarget(dispatch.kanban_card_id);
+      var repoId = (tracking && tracking.repo_id)
+        || (cardMeta.length > 0 ? (cardMeta[0].repo_id || extractRepoFromIssueUrl(cardMeta[0].github_issue_url)) : null);
+      var worktreePath = (tracking && tracking.worktree_path)
+        || (latestWork && latestWork.worktree_path);
+      var branch = (tracking && tracking.branch)
+        || (latestWork && latestWork.branch);
+      var trackedSha = (tracking && tracking.head_sha)
+        || (latestWork && latestWork.head_sha);
+
+      if (!repoId || !branch) {
+        upsertPrTracking(
+          dispatch.kanban_card_id,
+          repoId,
+          worktreePath,
+          branch,
+          tracking ? tracking.pr_number : null,
+          trackedSha,
+          "create-pr",
+          "create-pr completed without canonical repo/branch"
+        );
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed' WHERE id = ?",
+          [dispatch.kanban_card_id]
+        );
+        agentdesk.log.warn("[review] Create-PR completed but canonical tracking is incomplete for card " + dispatch.kanban_card_id);
         return;
       }
-      // #257: Set card to wait for CI before going terminal
-      // ci-recovery.js will poll CI status and transition to terminal on success
+
+      var pr = findOpenPrByTrackedBranch(repoId, branch);
+      if (!pr) {
+        upsertPrTracking(
+          dispatch.kanban_card_id,
+          repoId,
+          worktreePath,
+          branch,
+          tracking ? tracking.pr_number : null,
+          trackedSha,
+          "create-pr",
+          "create-pr completed but no open PR found for branch " + branch
+        );
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed' WHERE id = ?",
+          [dispatch.kanban_card_id]
+        );
+        agentdesk.log.warn("[review] Create-PR completed but no open PR was found for card " + dispatch.kanban_card_id + " branch " + branch);
+        return;
+      }
+
+      upsertPrTracking(
+        dispatch.kanban_card_id,
+        repoId,
+        worktreePath,
+        pr.branch || branch,
+        pr.number,
+        pr.sha || trackedSha,
+        "wait-ci",
+        null
+      );
       agentdesk.db.execute(
         "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = ?",
         [dispatch.kanban_card_id]
       );
-      agentdesk.log.info("[review] Create-PR completed for card " + dispatch.kanban_card_id + " → waiting for CI");
+      agentdesk.log.info("[review] Create-PR completed for card " + dispatch.kanban_card_id + " → wait-ci on PR #" + pr.number);
       return;
     }
 
@@ -347,6 +402,96 @@ function setNormalSuggestionPending(cardId, verdict) {
   agentdesk.reviewState.sync(cardId, "suggestion_pending", { last_verdict: verdict });
 }
 
+function parseJsonObject(raw) {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function firstPresent() {
+  for (var i = 0; i < arguments.length; i++) {
+    var value = arguments[i];
+    if (value === null || value === undefined) continue;
+    if (typeof value === "string" && value.trim() === "") continue;
+    return value;
+  }
+  return null;
+}
+
+function extractRepoFromIssueUrl(url) {
+  return prTracking.extractRepoFromIssueUrl(url);
+}
+
+function loadLatestCompletedWorkTarget(cardId) {
+  var rows = agentdesk.db.query(
+    "SELECT result, context FROM task_dispatches " +
+    "WHERE kanban_card_id = ? " +
+    "AND dispatch_type IN ('implementation', 'rework') " +
+    "AND status = 'completed' " +
+    "ORDER BY COALESCE(completed_at, updated_at) DESC, rowid DESC LIMIT 1",
+    [cardId]
+  );
+  if (rows.length === 0) return null;
+
+  var result = parseJsonObject(rows[0].result);
+  var context = parseJsonObject(rows[0].context);
+  var worktreePath = firstPresent(
+    result.completed_worktree_path,
+    result.worktree_path,
+    context.completed_worktree_path,
+    context.worktree_path
+  );
+  var branch = firstPresent(
+    result.completed_branch,
+    result.worktree_branch,
+    result.branch,
+    context.completed_branch,
+    context.worktree_branch,
+    context.branch
+  );
+  var headSha = firstPresent(
+    result.completed_commit,
+    result.reviewed_commit,
+    context.completed_commit,
+    context.reviewed_commit
+  );
+
+  if (!branch && worktreePath) {
+    var branchResult = agentdesk.exec("git", ["-C", worktreePath, "branch", "--show-current"]);
+    if (branchResult && branchResult.indexOf("ERROR") !== 0 && branchResult.trim()) {
+      branch = branchResult.trim();
+    }
+  }
+  if (!headSha && worktreePath) {
+    var headResult = agentdesk.exec("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+    if (headResult && headResult.indexOf("ERROR") !== 0 && headResult.trim()) {
+      headSha = headResult.trim();
+    }
+  }
+
+  if (!worktreePath && !branch && !headSha) return null;
+  return {
+    worktree_path: worktreePath,
+    branch: branch,
+    head_sha: headSha
+  };
+}
+
+function loadPrTracking(cardId) {
+  return prTracking.load(cardId);
+}
+
+function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
+  return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
+}
+
+function findOpenPrByTrackedBranch(repoId, branch) {
+  return prTracking.findOpenPrByBranch(repoId, branch);
+}
+
 function processVerdict(cardId, verdict, result) {
   // Guard: skip processing for terminal cards — prevents stale dispatches from
   // re-triggering review state changes after dismiss.
@@ -439,8 +584,25 @@ function processVerdict(cardId, verdict, result) {
           agentdesk.kanban.setStatus(cardId, inProgressState);
           agentdesk.log.info("[review] Card " + cardId + " queued for self-hosted stage: " + nextStage.stage_name);
         }
-        // #197: Counter-model stage (e2e-test) — dispatch to counter agent
+        // #197: Counter-model stage (e2e-test) — dispatch only if DoD contains e2e item
         else if (nextStage.provider === "counter") {
+          // Skip e2e if DoD doesn't mention it — review pass goes straight to done
+          var dodCheck = agentdesk.db.query(
+            "SELECT description FROM kanban_cards WHERE id = ?", [cardId]
+          );
+          var dodText = (dodCheck.length > 0 && dodCheck[0].description) ? dodCheck[0].description.toLowerCase() : "";
+          if (dodText.indexOf("e2e") === -1 && dodText.indexOf("end-to-end") === -1 && dodText.indexOf("end to end") === -1) {
+            agentdesk.log.info("[review] Skipping e2e-test for card " + cardId + " — DoD has no e2e item");
+            // Skip remaining pipeline stages and go to done
+            agentdesk.db.execute(
+              "UPDATE kanban_cards SET pipeline_stage_id = NULL, blocked_reason = NULL, updated_at = datetime('now') WHERE id = ?",
+              [cardId]
+            );
+            var skipCfg = agentdesk.pipeline.resolveForCard(cardId);
+            var skipTerminal = agentdesk.pipeline.terminalState(skipCfg);
+            agentdesk.kanban.setStatus(cardId, skipTerminal);
+            return;
+          }
           var counterCardInfo = agentdesk.db.query(
             "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?", [cardId]
           );
@@ -493,20 +655,29 @@ function processVerdict(cardId, verdict, result) {
         agentdesk.log.info("[review] Card " + cardId + " completed all pipeline stages");
       }
 
-      // #198: If the card has worktree sessions, create a "create-pr" dispatch
-      // so the agent pushes the branch and opens a PR before going terminal.
+      // #198/#211: If the card completed work in a canonical worktree, create
+      // a create-pr dispatch and seed pr_tracking before going terminal.
       var prDispatched = false;
+      var latestWorkTarget = loadLatestCompletedWorkTarget(cardId);
       var prCardInfo = agentdesk.db.query(
-        "SELECT assigned_agent_id, title, github_issue_number FROM kanban_cards WHERE id = ?",
+        "SELECT assigned_agent_id, title, github_issue_number, repo_id, github_issue_url FROM kanban_cards WHERE id = ?",
         [cardId]
       );
-      if (prCardInfo.length > 0 && prCardInfo[0].assigned_agent_id) {
+      if (prCardInfo.length > 0 && prCardInfo[0].assigned_agent_id && latestWorkTarget) {
         var agentId = prCardInfo[0].assigned_agent_id;
-        var wtSessions = agentdesk.db.query(
-          "SELECT cwd FROM sessions WHERE agent_id = ? AND cwd LIKE '%worktrees/%' ORDER BY last_heartbeat DESC LIMIT 1",
-          [agentId]
-        );
-        if (wtSessions.length > 0) {
+        var repoId = prCardInfo[0].repo_id || extractRepoFromIssueUrl(prCardInfo[0].github_issue_url);
+        if (repoId && latestWorkTarget.branch) {
+          upsertPrTracking(
+            cardId,
+            repoId,
+            latestWorkTarget.worktree_path,
+            latestWorkTarget.branch,
+            null,
+            latestWorkTarget.head_sha,
+            "create-pr",
+            null
+          );
+
           var issueNum = prCardInfo[0].github_issue_number || "?";
           try {
             agentdesk.dispatch.create(
@@ -514,8 +685,18 @@ function processVerdict(cardId, verdict, result) {
               "[PR 생성] #" + issueNum + " " + prCardInfo[0].title
             );
             prDispatched = true;
-            agentdesk.log.info("[review] Create-PR dispatch created for worktree card " + cardId);
+            agentdesk.log.info("[review] Create-PR dispatch created for tracked worktree card " + cardId);
           } catch (e) {
+            upsertPrTracking(
+              cardId,
+              repoId,
+              latestWorkTarget.worktree_path,
+              latestWorkTarget.branch,
+              null,
+              latestWorkTarget.head_sha,
+              "create-pr",
+              String(e)
+            );
             agentdesk.log.warn("[review] Create-PR dispatch failed: " + e + " — falling through to terminal");
           }
         }

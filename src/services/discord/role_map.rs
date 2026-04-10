@@ -296,6 +296,18 @@ fn fallback_enabled(json: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+fn entry_matches_channel_id(entry: &serde_json::Value, channel_id: ChannelId) -> bool {
+    match entry
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(explicit_channel_id) => explicit_channel_id == channel_id.get().to_string(),
+        None => true,
+    }
+}
+
 pub(super) fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
@@ -315,7 +327,9 @@ pub(super) fn resolve_role_binding(
 
     let cname = channel_name?;
     let by_name = json.get("byChannelName").and_then(|v| v.as_object())?;
-    by_name.get(cname).and_then(parse_role_binding)
+    let entry = by_name.get(cname)?;
+    entry_matches_channel_id(entry, channel_id).then_some(())?;
+    parse_role_binding(entry)
 }
 
 pub(super) fn resolve_workspace(
@@ -339,9 +353,10 @@ pub(super) fn resolve_workspace(
 
     let cname = channel_name?;
     let by_name = json.get("byChannelName").and_then(|v| v.as_object())?;
-    by_name
-        .get(cname)
-        .and_then(|entry| entry.get("workspace"))
+    let entry = by_name.get(cname)?;
+    entry_matches_channel_id(entry, channel_id).then_some(())?;
+    entry
+        .get("workspace")
         .and_then(|v| v.as_str())
         .map(|s| expand_tilde(s))
 }
@@ -351,6 +366,17 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
     json.get("sharedPromptFile")
         .and_then(|v| v.as_str())
         .map(|s| expand_tilde(s))
+        .or_else(|| {
+            let root = crate::config::runtime_root()?;
+            let canonical = crate::runtime_layout::shared_prompt_path(&root);
+            canonical
+                .exists()
+                .then(|| canonical.display().to_string())
+                .or_else(|| {
+                    let legacy = crate::runtime_layout::config_dir(&root).join("_shared.md");
+                    legacy.exists().then(|| legacy.display().to_string())
+                })
+        })
 }
 
 /// Check if a role_id exists in any channel binding in role_map.json.
@@ -748,6 +774,36 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_role_binding_skips_by_name_entry_when_channel_id_mismatches() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(
+                temp_home.path(),
+                r#"{
+  "byChannelName": {
+    "adk-cc": {
+      "channelId": "1484070499783803081",
+      "promptFile": "~/prompts/project-agentdesk.md",
+      "provider": "claude",
+      "roleId": "project-agentdesk",
+      "workspace": "~/workspaces/agentdesk"
+    }
+  },
+  "fallbackByChannelName": {
+    "enabled": true
+  }
+}"#,
+            );
+
+            assert!(
+                resolve_role_binding(ChannelId::new(1479671298497183835), Some("adk-cc")).is_none()
+            );
+            assert!(
+                resolve_workspace(ChannelId::new(1479671298497183835), Some("adk-cc")).is_none()
+            );
+        });
+    }
+
+    #[test]
     fn test_load_meeting_config_meeting_available_agent_overrides_channel_binding() {
         with_temp_root(|temp_home: &TempDir| {
             write_role_map(
@@ -883,6 +939,24 @@ mod tests {
                 agent.workspace.as_deref(),
                 Some(&expand_tilde("~/workspaces/standalone")[..])
             );
+        });
+    }
+
+    #[test]
+    fn test_load_shared_prompt_path_falls_back_to_canonical_runtime_path() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(temp_home.path(), r#"{"byChannelId": {}}"#);
+            let canonical = temp_home
+                .path()
+                .join(".adk")
+                .join("config")
+                .join("agents")
+                .join("_shared.prompt.md");
+            std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+            std::fs::write(&canonical, "# shared").unwrap();
+
+            let shared = load_shared_prompt_path().expect("shared prompt path");
+            assert!(shared.ends_with("/config/agents/_shared.prompt.md"));
         });
     }
 }

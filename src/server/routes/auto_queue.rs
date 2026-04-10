@@ -13,13 +13,23 @@ use super::AppState;
 // ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+pub struct GenerateEntryBody {
+    pub issue_number: i64,
+    pub batch_phase: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct GenerateBody {
     pub repo: Option<String>,
     pub agent_id: Option<String>,
     pub issue_numbers: Option<Vec<i64>>,
+    pub entries: Option<Vec<GenerateEntryBody>>,
     pub mode: Option<String>, // "priority-sort" (default), "dependency-aware", "similarity-aware", or "pm-assisted"
+    pub unified_thread: Option<bool>,
     pub parallel: Option<bool>,
     pub max_concurrent_threads: Option<i64>,
+    // Legacy compatibility only. Accepted from callers, but ignored.
+    #[allow(dead_code)]
     pub max_concurrent_per_agent: Option<i64>,
 }
 
@@ -74,6 +84,7 @@ struct GenerateCandidate {
     description: Option<String>,
     metadata: Option<String>,
     github_issue_number: Option<i64>,
+    batch_phase: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -135,149 +146,24 @@ impl GenerateMode {
     }
 }
 
-const DEFAULT_SLOT_POOL_SIZE: i64 = 3;
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-pub(crate) fn ensure_tables(conn: &rusqlite::Connection) {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS auto_queue_runs (
-            id          TEXT PRIMARY KEY,
-            repo        TEXT,
-            agent_id    TEXT,
-            status      TEXT DEFAULT 'active',
-            ai_model    TEXT,
-            ai_rationale TEXT,
-            timeout_minutes INTEGER DEFAULT 120,
-            unified_thread  INTEGER DEFAULT 0,
-            unified_thread_id TEXT,
-            unified_thread_channel_id TEXT,
-            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-            completed_at DATETIME
-        );
-        CREATE TABLE IF NOT EXISTS auto_queue_entries (
-            id              TEXT PRIMARY KEY,
-            run_id          TEXT REFERENCES auto_queue_runs(id),
-            kanban_card_id  TEXT REFERENCES kanban_cards(id),
-            agent_id        TEXT,
-            priority_rank   INTEGER DEFAULT 0,
-            reason          TEXT,
-            status          TEXT DEFAULT 'pending',
-            dispatch_id     TEXT,
-            slot_index      INTEGER,
-            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-            dispatched_at   DATETIME,
-            completed_at    DATETIME
-        );
-        CREATE TABLE IF NOT EXISTS auto_queue_slots (
-            agent_id             TEXT NOT NULL,
-            slot_index           INTEGER NOT NULL,
-            assigned_run_id      TEXT,
-            assigned_thread_group INTEGER,
-            thread_id_map        TEXT,
-            created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (agent_id, slot_index)
-        );",
+fn run_slot_pool_size(conn: &rusqlite::Connection, run_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE(max_concurrent_threads, 1)
+         FROM auto_queue_runs
+         WHERE id = ?1",
+        [run_id],
+        |row| row.get::<_, i64>(0),
     )
-    .ok();
-    // #137: upgrade path for existing DBs
-    let has_unified: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_runs') WHERE name = 'unified_thread'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_unified {
-        conn.execute_batch(
-            "ALTER TABLE auto_queue_runs ADD COLUMN unified_thread INTEGER DEFAULT 0;
-             ALTER TABLE auto_queue_runs ADD COLUMN unified_thread_id TEXT;
-             ALTER TABLE auto_queue_runs ADD COLUMN unified_thread_channel_id TEXT;",
-        )
-        .ok();
-    }
-    // #140: thread_group on entries — parallel thread group assignment
-    let has_thread_group: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_entries') WHERE name = 'thread_group'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_thread_group {
-        conn.execute_batch(
-            "ALTER TABLE auto_queue_entries ADD COLUMN thread_group INTEGER DEFAULT 0;",
-        )
-        .ok();
-    }
-    // #140: parallel dispatch columns on runs
-    let has_max_concurrent: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_runs') WHERE name = 'max_concurrent_threads'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_max_concurrent {
-        conn.execute_batch(
-            "ALTER TABLE auto_queue_runs ADD COLUMN max_concurrent_threads INTEGER DEFAULT 1;
-             ALTER TABLE auto_queue_runs ADD COLUMN max_concurrent_per_agent INTEGER DEFAULT 1;
-             ALTER TABLE auto_queue_runs ADD COLUMN thread_group_count INTEGER DEFAULT 1;",
-        )
-        .ok();
-    }
-
-    // #145: dispatch_id on entries — direct dispatch→run association
-    let has_dispatch_id: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_entries') WHERE name = 'dispatch_id'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_dispatch_id {
-        conn.execute_batch("ALTER TABLE auto_queue_entries ADD COLUMN dispatch_id TEXT;")
-            .ok();
-        // Backfill dispatch_id for the LATEST entry per card+agent only (#145).
-        // Only the most recent entry gets the dispatch_id to avoid stamping the same
-        // dispatch_id onto old done entries from previous runs, which would make
-        // is_unified_thread_active() ambiguous via LIMIT 1.
-        conn.execute_batch(
-            "UPDATE auto_queue_entries SET dispatch_id = (
-                SELECT td.id FROM task_dispatches td
-                WHERE td.kanban_card_id = auto_queue_entries.kanban_card_id
-                  AND td.to_agent_id = auto_queue_entries.agent_id
-                  AND td.dispatch_type = 'implementation'
-                ORDER BY td.created_at DESC LIMIT 1
-            )
-            WHERE auto_queue_entries.status IN ('dispatched', 'done')
-              AND auto_queue_entries.dispatch_id IS NULL
-              AND auto_queue_entries.rowid = (
-                  SELECT e.rowid FROM auto_queue_entries e
-                  WHERE e.kanban_card_id = auto_queue_entries.kanban_card_id
-                    AND e.agent_id = auto_queue_entries.agent_id
-                    AND e.status IN ('dispatched', 'done')
-                  ORDER BY e.created_at DESC LIMIT 1
-              );",
-        )
-        .ok();
-    }
-    let has_slot_index: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('auto_queue_entries') WHERE name = 'slot_index'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_slot_index {
-        conn.execute_batch("ALTER TABLE auto_queue_entries ADD COLUMN slot_index INTEGER;")
-            .ok();
-    }
+    .unwrap_or(1)
+    .clamp(1, 10)
 }
 
-fn ensure_agent_slot_rows(conn: &rusqlite::Connection, agent_id: &str) -> rusqlite::Result<()> {
-    for slot_index in 0..DEFAULT_SLOT_POOL_SIZE {
+pub(crate) fn ensure_agent_slot_pool_rows(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    slot_pool_size: i64,
+) -> rusqlite::Result<()> {
+    for slot_index in 0..slot_pool_size.clamp(1, 32) {
         conn.execute(
             "INSERT OR IGNORE INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
              VALUES (?1, ?2, '{}')",
@@ -285,6 +171,14 @@ fn ensure_agent_slot_rows(conn: &rusqlite::Connection, agent_id: &str) -> rusqli
         )?;
     }
     Ok(())
+}
+
+fn ensure_agent_slot_rows(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    agent_id: &str,
+) -> rusqlite::Result<()> {
+    ensure_agent_slot_pool_rows(conn, agent_id, run_slot_pool_size(conn, run_id))
 }
 
 fn clear_inactive_slot_assignments(conn: &rusqlite::Connection) {
@@ -367,10 +261,104 @@ fn release_run_slots(conn: &rusqlite::Connection, run_id: &str) {
     .ok();
 }
 
-fn assigned_groups_with_pending_entries(conn: &rusqlite::Connection, run_id: &str) -> Vec<i64> {
+fn current_batch_phase(conn: &rusqlite::Connection, run_id: &str) -> Option<i64> {
+    conn.query_row(
+        "SELECT MIN(COALESCE(batch_phase, 0))
+         FROM auto_queue_entries
+         WHERE run_id = ?1
+           AND status IN ('pending', 'dispatched')
+           AND COALESCE(batch_phase, 0) > 0",
+        [run_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+fn batch_phase_is_eligible(batch_phase: i64, current_phase: Option<i64>) -> bool {
+    if batch_phase == 0 {
+        return true;
+    }
+    match current_phase {
+        Some(phase) => batch_phase == phase,
+        None => true,
+    }
+}
+
+fn group_has_pending_entries(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    thread_group: i64,
+    current_phase: Option<i64>,
+) -> bool {
     let mut stmt = match conn.prepare(
-        "SELECT DISTINCT s.assigned_thread_group
+        "SELECT COALESCE(batch_phase, 0)
+         FROM auto_queue_entries
+         WHERE run_id = ?1
+           AND COALESCE(thread_group, 0) = ?2
+           AND status = 'pending'
+         ORDER BY priority_rank ASC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return false,
+    };
+    stmt.query_map(rusqlite::params![run_id, thread_group], |row| {
+        row.get::<_, i64>(0)
+    })
+    .ok()
+    .map(|rows| {
+        rows.filter_map(|row| row.ok())
+            .any(|batch_phase| batch_phase_is_eligible(batch_phase, current_phase))
+    })
+    .unwrap_or(false)
+}
+
+fn first_pending_entry_for_group(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    thread_group: i64,
+    current_phase: Option<i64>,
+) -> Option<(String, String, String)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.id, e.kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)
+             FROM auto_queue_entries e
+             WHERE e.run_id = ?1
+               AND COALESCE(e.thread_group, 0) = ?2
+               AND e.status = 'pending'
+             ORDER BY e.priority_rank ASC",
+        )
+        .ok()?;
+    stmt.query_map(rusqlite::params![run_id, thread_group], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })
+    .ok()
+    .and_then(|rows| {
+        rows.filter_map(|row| row.ok())
+            .find_map(|(entry_id, card_id, agent_id, batch_phase)| {
+                batch_phase_is_eligible(batch_phase, current_phase)
+                    .then_some((entry_id, card_id, agent_id))
+            })
+    })
+}
+
+fn assigned_groups_with_pending_entries(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    current_phase: Option<i64>,
+) -> Vec<i64> {
+    let mut stmt = match conn.prepare(
+        "SELECT DISTINCT s.assigned_thread_group, COALESCE(e.batch_phase, 0)
          FROM auto_queue_slots s
+         JOIN auto_queue_entries e
+           ON e.run_id = ?1
+          AND e.agent_id = s.agent_id
+          AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
          WHERE s.assigned_run_id = ?1
            AND s.assigned_thread_group IS NOT NULL
            AND EXISTS (
@@ -381,15 +369,80 @@ fn assigned_groups_with_pending_entries(conn: &rusqlite::Connection, run_id: &st
                  AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
                  AND e.status = 'pending'
            )
-         ORDER BY s.assigned_thread_group ASC, s.slot_index ASC",
+           AND NOT EXISTS (
+               SELECT 1
+               FROM auto_queue_entries e
+               WHERE e.run_id = ?1
+                 AND e.agent_id = s.agent_id
+                 AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
+                 AND e.status = 'dispatched'
+           )
+         ORDER BY s.assigned_thread_group ASC, s.slot_index ASC, COALESCE(e.batch_phase, 0) ASC",
     ) {
         Ok(stmt) => stmt,
         Err(_) => return Vec::new(),
     };
-    stmt.query_map([run_id], |row| row.get::<_, i64>(0))
-        .ok()
-        .map(|rows| rows.filter_map(|row| row.ok()).collect())
-        .unwrap_or_default()
+    let mut seen = HashSet::new();
+    stmt.query_map([run_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })
+    .ok()
+    .map(|rows| {
+        rows.filter_map(|row| row.ok())
+            .filter_map(|(thread_group, batch_phase)| {
+                (batch_phase_is_eligible(batch_phase, current_phase) && seen.insert(thread_group))
+                    .then_some(thread_group)
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestedGenerateEntry {
+    issue_number: i64,
+    batch_phase: i64,
+}
+
+fn normalize_generate_entries(
+    body: &GenerateBody,
+) -> Result<Option<Vec<RequestedGenerateEntry>>, String> {
+    if body
+        .entries
+        .as_ref()
+        .is_some_and(|entries| !entries.is_empty())
+        && body
+            .issue_numbers
+            .as_ref()
+            .is_some_and(|issue_numbers| !issue_numbers.is_empty())
+    {
+        return Err("use either issue_numbers or entries, not both".to_string());
+    }
+
+    let Some(entries) = body.entries.as_ref().filter(|entries| !entries.is_empty()) else {
+        return Ok(None);
+    };
+
+    let mut normalized = Vec::with_capacity(entries.len());
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let batch_phase = entry.batch_phase.unwrap_or(0);
+        if batch_phase < 0 {
+            return Err("batch_phase must be >= 0".to_string());
+        }
+        if !seen.insert(entry.issue_number) {
+            return Err(format!(
+                "duplicate issue_number in entries payload: {}",
+                entry.issue_number
+            ));
+        }
+        normalized.push(RequestedGenerateEntry {
+            issue_number: entry.issue_number,
+            batch_phase,
+        });
+    }
+
+    Ok(Some(normalized))
 }
 
 fn allocate_slot_for_group_agent(
@@ -398,7 +451,7 @@ fn allocate_slot_for_group_agent(
     thread_group: i64,
     agent_id: &str,
 ) -> Option<(i64, bool)> {
-    ensure_agent_slot_rows(conn, agent_id).ok()?;
+    ensure_agent_slot_rows(conn, run_id, agent_id).ok()?;
 
     let existing: Option<i64> = conn
         .query_row(
@@ -554,7 +607,10 @@ fn build_slot_clear_target(
     }
 }
 
-fn clear_slot_sessions_db(conn: &rusqlite::Connection, thread_channel_ids: &[u64]) -> usize {
+pub(crate) fn clear_slot_sessions_db(
+    conn: &rusqlite::Connection,
+    thread_channel_ids: &[u64],
+) -> usize {
     thread_channel_ids
         .iter()
         .map(|thread_channel_id| {
@@ -562,9 +618,9 @@ fn clear_slot_sessions_db(conn: &rusqlite::Connection, thread_channel_ids: &[u64
                 "UPDATE sessions
                  SET status = 'idle',
                      active_dispatch_id = NULL,
-                     session_info = 'Auto-queue slot cleared',
-                     tokens = 0,
+                     session_info = 'Slot thread reset',
                      claude_session_id = NULL,
+                     tokens = 0,
                      last_heartbeat = datetime('now')
                  WHERE thread_channel_id = ?1
                    AND status IN ('working', 'idle')",
@@ -600,6 +656,117 @@ fn clear_slot_threads_for_slot(
     }
 
     cleared
+}
+
+pub(crate) fn slot_has_active_dispatch(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    slot_index: i64,
+) -> bool {
+    let auto_queue_active: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0
+             FROM auto_queue_entries
+             WHERE agent_id = ?1
+               AND slot_index = ?2
+               AND status = 'dispatched'",
+            rusqlite::params![agent_id, slot_index],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if auto_queue_active {
+        return true;
+    }
+
+    conn.query_row(
+        "SELECT COUNT(*) > 0
+         FROM task_dispatches
+         WHERE to_agent_id = ?1
+           AND status IN ('pending', 'dispatched')
+           AND CAST(json_extract(COALESCE(context, '{}'), '$.slot_index') AS INTEGER) = ?2",
+        rusqlite::params![agent_id, slot_index],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+fn clear_slot_thread_map(conn: &rusqlite::Connection, agent_id: &str, slot_index: i64) -> usize {
+    conn.execute(
+        "UPDATE auto_queue_slots
+         SET thread_id_map = '{}',
+             updated_at = datetime('now')
+         WHERE agent_id = ?1 AND slot_index = ?2",
+        rusqlite::params![agent_id, slot_index],
+    )
+    .unwrap_or(0)
+}
+
+async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, String> {
+    if thread_channel_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let token = crate::credential::read_bot_token("announce")
+        .ok_or_else(|| "no announce bot token".to_string())?;
+    let client = reqwest::Client::new();
+    let mut archived = 0usize;
+
+    for thread_channel_id in thread_channel_ids {
+        let thread_url = format!("https://discord.com/api/v10/channels/{thread_channel_id}");
+        match client
+            .patch(&thread_url)
+            .header("Authorization", format!("Bot {}", token))
+            .json(&serde_json::json!({"archived": true}))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND => {
+                archived += 1;
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(format!(
+                    "failed to archive slot thread {thread_channel_id}: {status} {body}"
+                ));
+            }
+            Err(err) => {
+                return Err(format!(
+                    "failed to archive slot thread {thread_channel_id}: {err}"
+                ));
+            }
+        }
+    }
+
+    Ok(archived)
+}
+
+pub(crate) async fn reset_slot_thread_bindings(
+    db: &crate::db::Db,
+    agent_id: &str,
+    slot_index: i64,
+) -> Result<(usize, usize, usize), String> {
+    let conn = db
+        .separate_conn()
+        .map_err(|err| format!("db open failed for slot reset: {err}"))?;
+    if slot_has_active_dispatch(&conn, agent_id, slot_index) {
+        return Err(format!(
+            "slot {slot_index} for agent {agent_id} has active dispatch"
+        ));
+    }
+    let target = build_slot_clear_target(&conn, agent_id, slot_index);
+    drop(conn);
+
+    let archived_threads = archive_slot_threads(&target.thread_channel_ids).await?;
+
+    let conn = db
+        .separate_conn()
+        .map_err(|err| format!("db reopen failed for slot reset: {err}"))?;
+    let cleared_sessions = clear_slot_sessions_db(&conn, &target.thread_channel_ids);
+    let cleared_bindings = clear_slot_thread_map(&conn, agent_id, slot_index);
+    drop(conn);
+
+    Ok((archived_threads, cleared_sessions, cleared_bindings))
 }
 
 fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<String> {
@@ -1065,7 +1232,8 @@ fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Val
                 CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
                 kc.title, kc.github_issue_number, kc.github_issue_url,
                 COALESCE(e.thread_group, 0),
-                e.slot_index
+                e.slot_index,
+                COALESCE(e.batch_phase, 0)
          FROM auto_queue_entries e
          LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
          WHERE e.id = ?1",
@@ -1086,6 +1254,7 @@ fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Val
                 "github_repo": row.get::<_, Option<String>>(11)?,
                 "thread_group": row.get::<_, i64>(12)?,
                 "slot_index": row.get::<_, Option<i64>>(13)?,
+                "batch_phase": row.get::<_, i64>(14)?,
             }))
         },
     )
@@ -1100,7 +1269,6 @@ fn run_to_json(conn: &rusqlite::Connection, run_id: &str) -> serde_json::Value {
                 CASE WHEN completed_at IS NOT NULL THEN CAST(strftime('%s', completed_at) AS INTEGER) * 1000 END,
                 unified_thread, unified_thread_id,
                 COALESCE(max_concurrent_threads, 1),
-                COALESCE(max_concurrent_per_agent, 1),
                 COALESCE(thread_group_count, 1)
          FROM auto_queue_runs WHERE id = ?1",
         [run_id],
@@ -1115,11 +1283,10 @@ fn run_to_json(conn: &rusqlite::Connection, run_id: &str) -> serde_json::Value {
                 "ai_rationale": row.get::<_, Option<String>>(6)?,
                 "created_at": row.get::<_, Option<i64>>(7)?.unwrap_or(0),
                 "completed_at": row.get::<_, Option<i64>>(8)?,
-                "unified_thread": row.get::<_, i64>(9).unwrap_or(0) != 0,
-                "unified_thread_id": row.get::<_, Option<String>>(10)?,
+                "unified_thread": false,
+                "unified_thread_id": serde_json::Value::Null,
                 "max_concurrent_threads": row.get::<_, i64>(11)?,
-                "max_concurrent_per_agent": row.get::<_, i64>(12)?,
-                "thread_group_count": row.get::<_, i64>(13)?,
+                "thread_group_count": row.get::<_, i64>(12)?,
             }))
         },
     )
@@ -1207,7 +1374,37 @@ pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(issue_numbers) = body.issue_numbers.as_ref().filter(|nums| !nums.is_empty()) {
+    let _ignored_unified_thread = body.unified_thread.is_some();
+    let requested_entries = match normalize_generate_entries(&body) {
+        Ok(entries) => entries,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
+        }
+    };
+    let requested_issue_numbers = requested_entries
+        .as_ref()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry.issue_number)
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| body.issue_numbers.clone().filter(|nums| !nums.is_empty()));
+    let requested_entry_meta: HashMap<i64, (usize, i64)> = requested_entries
+        .as_ref()
+        .map(|entries| {
+            entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| (entry.issue_number, (index, entry.batch_phase)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(issue_numbers) = requested_issue_numbers
+        .as_ref()
+        .filter(|nums| !nums.is_empty())
+    {
         let conn = match state.db.separate_conn() {
             Ok(c) => c,
             Err(e) => {
@@ -1217,7 +1414,6 @@ pub async fn generate(
                 );
             }
         };
-        ensure_tables(&conn);
         let (mut conditions, params) = build_card_filters(
             "kc",
             body.repo.as_ref(),
@@ -1312,8 +1508,6 @@ pub async fn generate(
             );
         }
     };
-    ensure_tables(&conn);
-
     // Build filter — pipeline-driven enqueueable states (dispatchable + prepared staging states)
     crate::pipeline::ensure_loaded();
     let enqueueable = crate::pipeline::try_get()
@@ -1329,7 +1523,7 @@ pub async fn generate(
         "kc",
         body.repo.as_ref(),
         body.agent_id.as_ref(),
-        body.issue_numbers.as_ref(),
+        requested_issue_numbers.as_ref(),
     );
     conditions.insert(0, format!("kc.status IN ({})", enqueueable));
 
@@ -1371,11 +1565,29 @@ pub async fn generate(
                 description: row.get::<_, Option<String>>(3)?,
                 metadata: row.get::<_, Option<String>>(4)?,
                 github_issue_number: row.get::<_, Option<i64>>(5)?,
+                batch_phase: 0,
             })
         })
         .ok()
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
+    let mut cards = cards;
+
+    if !requested_entry_meta.is_empty() {
+        cards.sort_by_key(|card| {
+            card.github_issue_number
+                .and_then(|issue_number| requested_entry_meta.get(&issue_number).copied())
+                .map(|(index, _)| index)
+                .unwrap_or(usize::MAX)
+        });
+        for card in &mut cards {
+            card.batch_phase = card
+                .github_issue_number
+                .and_then(|issue_number| requested_entry_meta.get(&issue_number).copied())
+                .map(|(_, batch_phase)| batch_phase)
+                .unwrap_or(0);
+        }
+    }
 
     if cards.is_empty() {
         // Provide context: how many cards are in backlog vs other statuses
@@ -1433,9 +1645,15 @@ pub async fn generate(
         // Create pending run
         let run_id = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale) VALUES (?1, ?2, ?3, 'pending', 'pm-assisted', ?4)",
-            rusqlite::params![run_id, body.repo, body.agent_id, format!("PMD 분석 대기 중 — {}개 카드 제출", cards.len())],
-        ).ok();
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, unified_thread) VALUES (?1, ?2, ?3, 'pending', 'pm-assisted', ?4, 0)",
+            rusqlite::params![
+                run_id,
+                body.repo,
+                body.agent_id,
+                format!("PMD 분석 대기 중 — {}개 카드 제출", cards.len())
+            ],
+        )
+        .ok();
 
         // Collect card info for PMD request
         let mut card_summaries = Vec::new();
@@ -1590,7 +1808,6 @@ pub async fn generate(
             .min(plan.thread_group_count.max(1)),
         None => 1,
     };
-    let max_per_agent = body.max_concurrent_per_agent.unwrap_or(1).clamp(1, 10);
 
     let (
         grouped_entries,
@@ -1694,9 +1911,17 @@ pub async fn generate(
     };
     let ai_model_str = ai_model.to_string();
     conn.execute(
-        "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, max_concurrent_threads, max_concurrent_per_agent, thread_group_count) \
-         VALUES (?1, ?2, ?3, 'generated', ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![run_id, body.repo, body.agent_id, ai_model_str, ai_rationale, max_concurrent, max_per_agent, thread_group_count],
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, thread_group_count) \
+         VALUES (?1, ?2, ?3, 'generated', ?4, ?5, 0, ?6, ?7)",
+        rusqlite::params![
+            run_id,
+            body.repo,
+            body.agent_id,
+            ai_model_str,
+            ai_rationale,
+            max_concurrent,
+            thread_group_count
+        ],
     )
     .ok();
 
@@ -1711,8 +1936,8 @@ pub async fn generate(
             card.agent_id.as_str()
         };
         conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, reason, batch_phase)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 entry_id,
                 run_id,
@@ -1720,7 +1945,8 @@ pub async fn generate(
                 agent,
                 planned.priority_rank,
                 planned.thread_group,
-                planned.reason
+                planned.reason,
+                card.batch_phase
             ],
         )
         .ok();
@@ -1741,6 +1967,7 @@ pub async fn activate(
     State(state): State<AppState>,
     Json(body): Json<ActivateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let _ignored_unified_thread = body.unified_thread.is_some();
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -1750,8 +1977,6 @@ pub async fn activate(
             );
         }
     };
-    ensure_tables(&conn);
-
     let active_only = body.active_only.unwrap_or(false);
     // Internal recovery paths must continue only active runs. Manual activation
     // may opt into promoting the latest generated draft.
@@ -1803,15 +2028,6 @@ pub async fn activate(
         conn.execute(
             "UPDATE auto_queue_runs SET status = 'active' WHERE id = ?1 AND status IN ('generated', 'pending')",
             [&run_id],
-        )
-        .ok();
-    }
-
-    // #137: Apply unified_thread toggle if provided
-    if let Some(unified) = body.unified_thread {
-        conn.execute(
-            "UPDATE auto_queue_runs SET unified_thread = ?1 WHERE id = ?2",
-            rusqlite::params![unified as i32, run_id],
         )
         .ok();
     }
@@ -1901,31 +2117,19 @@ pub async fn activate(
         }
     }
 
-    // #140: Read run parallel config
-    let (max_concurrent, max_per_agent, _thread_group_count, unified_thread_enabled): (
-        i64,
-        i64,
-        i64,
-        bool,
-    ) = conn
+    // Slot pooling is always enabled. The legacy `unified_thread` field is
+    // accepted at the API boundary for compatibility, but no longer affects runtime.
+    let (max_concurrent, _thread_group_count): (i64, i64) = conn
         .query_row(
             "SELECT COALESCE(max_concurrent_threads, 1),
-                    COALESCE(max_concurrent_per_agent, 1),
-                    COALESCE(thread_group_count, 1),
-                    COALESCE(unified_thread, 0)
+                    COALESCE(thread_group_count, 1)
              FROM auto_queue_runs
              WHERE id = ?1",
             [&run_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get::<_, i64>(3)? != 0,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .unwrap_or((1, 1, 1, false));
+        .unwrap_or((1, 1));
+    let current_phase = current_batch_phase(&conn, &run_id);
 
     // Count currently active groups (groups with at least one 'dispatched' entry)
     let active_groups: Vec<i64> = {
@@ -1941,22 +2145,6 @@ pub async fn activate(
             .unwrap_or_default()
     };
 
-    // Count per-agent active dispatches (across all groups in this run)
-    let mut agent_dispatch_counts: HashMap<String, i64> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT agent_id, COUNT(*) FROM auto_queue_entries \
-                 WHERE run_id = ?1 AND status = 'dispatched' GROUP BY agent_id",
-            )
-            .unwrap();
-        stmt.query_map([&run_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
-    };
-
     let active_group_count = active_groups.len() as i64;
 
     // Find pending groups not currently active, ordered by group number
@@ -1964,19 +2152,28 @@ pub async fn activate(
         let active_set: HashSet<i64> = active_groups.iter().copied().collect();
         let mut stmt = conn
             .prepare(
-                "SELECT DISTINCT COALESCE(thread_group, 0) FROM auto_queue_entries \
-                 WHERE run_id = ?1 AND status = 'pending' \
-                 ORDER BY thread_group ASC",
+                "SELECT DISTINCT COALESCE(thread_group, 0), COALESCE(batch_phase, 0)
+                 FROM auto_queue_entries
+                 WHERE run_id = ?1 AND status = 'pending'
+                 ORDER BY thread_group ASC, batch_phase ASC",
             )
             .unwrap();
-        stmt.query_map([&run_id], |row| row.get::<_, i64>(0))
-            .ok()
-            .map(|rows| {
-                rows.filter_map(|r| r.ok())
-                    .filter(|g| !active_set.contains(g))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let mut seen = HashSet::new();
+        stmt.query_map([&run_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .ok()
+        .map(|rows| {
+            rows.filter_map(|r| r.ok())
+                .filter_map(|(thread_group, batch_phase)| {
+                    (!active_set.contains(&thread_group)
+                        && batch_phase_is_eligible(batch_phase, current_phase)
+                        && seen.insert(thread_group))
+                    .then_some(thread_group)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     };
 
     drop(conn);
@@ -1987,17 +2184,7 @@ pub async fn activate(
 
     if let Some(group) = preferred_group {
         let conn = state.db.separate_conn().unwrap();
-        let has_pending: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0
-                 FROM auto_queue_entries
-                 WHERE run_id = ?1
-                   AND COALESCE(thread_group, 0) = ?2
-                   AND status = 'pending'",
-                rusqlite::params![run_id, group],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
+        let has_pending = group_has_pending_entries(&conn, &run_id, group, current_phase);
         let has_dispatched: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0
@@ -2014,9 +2201,9 @@ pub async fn activate(
         }
     }
 
-    if unified_thread_enabled {
+    {
         let conn = state.db.separate_conn().unwrap();
-        for group in assigned_groups_with_pending_entries(&conn, &run_id) {
+        for group in assigned_groups_with_pending_entries(&conn, &run_id, current_phase) {
             if !groups_to_dispatch.contains(&group) {
                 groups_to_dispatch.push(group);
             }
@@ -2028,14 +2215,7 @@ pub async fn activate(
     {
         let conn = state.db.separate_conn().unwrap();
         for &grp in &active_groups {
-            let has_pending: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM auto_queue_entries \
-                     WHERE run_id = ?1 AND COALESCE(thread_group, 0) = ?2 AND status = 'pending'",
-                    rusqlite::params![run_id, grp],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
+            let has_pending = group_has_pending_entries(&conn, &run_id, grp, current_phase);
             let has_dispatched: bool = conn
                 .query_row(
                     "SELECT COUNT(*) > 0 FROM auto_queue_entries \
@@ -2067,36 +2247,12 @@ pub async fn activate(
     for group in &groups_to_dispatch {
         // Get first pending entry in this group
         let conn = state.db.separate_conn().unwrap();
-        let entry: Option<(String, String, String)> = conn
-            .query_row(
-                "SELECT e.id, e.kanban_card_id, e.agent_id \
-                 FROM auto_queue_entries e \
-                 WHERE e.run_id = ?1 AND COALESCE(e.thread_group, 0) = ?2 AND e.status = 'pending' \
-                 ORDER BY e.priority_rank ASC LIMIT 1",
-                rusqlite::params![run_id, group],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .ok();
+        let entry = first_pending_entry_for_group(&conn, &run_id, *group, current_phase);
         drop(conn);
 
         let Some((entry_id, card_id, agent_id)) = entry else {
             continue;
         };
-
-        // Per-agent concurrency guard (#140)
-        let current_agent_count = agent_dispatch_counts.get(&agent_id).copied().unwrap_or(0);
-        if current_agent_count >= max_per_agent {
-            tracing::info!(
-                "[auto-queue] Skipping group {group} for {agent_id}: at max_concurrent_per_agent ({max_per_agent})"
-            );
-            continue;
-        }
 
         // Busy-agent guard (#110): skip if agent has active cards outside auto-queue.
         // Exclude the card being dispatched (#162) and cards that belong to the
@@ -2282,7 +2438,6 @@ pub async fn activate(
                                 rusqlite::params![dispatch_id, entry_id],
                             )
                             .ok();
-                            *agent_dispatch_counts.entry(agent_id.clone()).or_insert(0) += 1;
                             dispatched.push(entry_to_json(&conn, &entry_id));
                             drop(conn);
                             continue;
@@ -2314,28 +2469,24 @@ pub async fn activate(
         }
 
         // Create dispatch
-        let slot_allocation: Option<(i64, bool)> = if unified_thread_enabled {
-            let conn = state.db.separate_conn().unwrap();
-            allocate_slot_for_group_agent(&conn, &run_id, *group, &agent_id)
-        } else {
-            None
-        };
+        let conn = state.db.separate_conn().unwrap();
+        let slot_allocation = allocate_slot_for_group_agent(&conn, &run_id, *group, &agent_id);
         let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
-        if unified_thread_enabled && slot_allocation.is_none() {
+        if slot_allocation.is_none() {
             tracing::info!(
                 "[auto-queue] Skipping group {group} for {agent_id}: no free slot in pool"
             );
             continue;
         }
-        if let Some((assigned_slot, newly_assigned)) = slot_allocation {
+        if let Some((assigned_slot, _newly_assigned)) = slot_allocation {
             let slot_key = (agent_id.clone(), assigned_slot);
-            if newly_assigned && !cleared_slots.contains(&slot_key) {
+            if !cleared_slots.contains(&slot_key) {
                 let clear_conn = state.db.separate_conn().unwrap();
                 let cleared =
                     clear_slot_threads_for_slot(&state, &clear_conn, &agent_id, assigned_slot);
                 if cleared > 0 {
                     tracing::info!(
-                        "[auto-queue] cleared {cleared} slot thread session(s) before assigning {agent_id} slot {assigned_slot} to group {group}"
+                        "[auto-queue] cleared {cleared} slot thread session(s) before dispatching {agent_id} slot {assigned_slot} group {group}"
                     );
                 }
                 cleared_slots.insert(slot_key);
@@ -2383,9 +2534,6 @@ pub async fn activate(
         )
         .ok();
         drop(conn);
-
-        // #140: Update local per-agent count so subsequent iterations respect max_concurrent_per_agent
-        *agent_dispatch_counts.entry(agent_id.clone()).or_insert(0) += 1;
 
         let conn = state.db.separate_conn().unwrap();
         dispatched.push(entry_to_json(&conn, &entry_id));
@@ -2467,8 +2615,6 @@ pub async fn status(
             );
         }
     };
-    ensure_tables(&conn);
-
     // Find latest run (NULL agent_id/repo matches any filter)
     let mut run_filter = "1=1".to_string();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -2591,6 +2737,7 @@ pub async fn status(
                     "card_id": entry["card_id"],
                     "status": entry_status,
                     "github_issue_number": entry["github_issue_number"],
+                    "batch_phase": entry["batch_phase"],
                 }));
             }
         }
@@ -2638,8 +2785,6 @@ pub async fn skip_entry(
             );
         }
     };
-    ensure_tables(&conn);
-
     let changed = conn
         .execute(
             "UPDATE auto_queue_entries SET status = 'skipped', completed_at = datetime('now') WHERE id = ?1 AND status = 'pending'",
@@ -2672,8 +2817,6 @@ pub async fn update_run(
             );
         }
     };
-    ensure_tables(&conn);
-
     let mut changed = 0usize;
 
     if let Some(ref status) = body.status {
@@ -2692,23 +2835,48 @@ pub async fn update_run(
             .unwrap_or(0);
     }
 
-    if let Some(unified) = body.unified_thread {
-        changed += conn
-            .execute(
-                "UPDATE auto_queue_runs SET unified_thread = ?1 WHERE id = ?2",
-                rusqlite::params![unified as i32, id],
-            )
-            .unwrap_or(0);
-    }
-
-    if changed == 0 && body.status.is_none() && body.unified_thread.is_none() {
+    let ignored_unified_thread = body.unified_thread.is_some();
+    if changed == 0 && body.status.is_none() && !ignored_unified_thread {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "no fields to update"})),
         );
     }
 
-    (StatusCode::OK, Json(json!({ "ok": true })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "ignored": ignored_unified_thread.then_some(vec!["unified_thread"]),
+        })),
+    )
+}
+
+/// POST /api/auto-queue/slots/{agent_id}/{slot_index}/reset-thread
+pub async fn reset_slot_thread(
+    State(state): State<AppState>,
+    Path((agent_id, slot_index)): Path<(String, i64)>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match reset_slot_thread_bindings(&state.db, &agent_id, slot_index).await {
+        Ok((archived_threads, cleared_sessions, cleared_bindings)) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "agent_id": agent_id,
+                "slot_index": slot_index,
+                "archived_threads": archived_threads,
+                "cleared_sessions": cleared_sessions,
+                "cleared_bindings": cleared_bindings,
+            })),
+        ),
+        Err(err) if err.contains("has active dispatch") => {
+            (StatusCode::CONFLICT, Json(json!({"error": err})))
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err})),
+        ),
+    }
 }
 
 /// POST /api/auto-queue/reset
@@ -2726,8 +2894,6 @@ pub async fn reset(
             );
         }
     };
-    ensure_tables(&conn);
-
     let body: ResetBody = if body.is_empty() {
         ResetBody::default()
     } else {
@@ -2846,7 +3012,6 @@ pub async fn pause(State(state): State<AppState>) -> (StatusCode, Json<serde_jso
             );
         }
     };
-    ensure_tables(&conn);
     let paused = conn
         .execute(
             "UPDATE auto_queue_runs SET status = 'paused' WHERE status = 'active'",
@@ -2870,7 +3035,6 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
             );
         }
     };
-    ensure_tables(&conn);
     let resumed = conn
         .execute(
             "UPDATE auto_queue_runs SET status = 'active' WHERE status = 'paused'",
@@ -2917,7 +3081,6 @@ pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_js
             );
         }
     };
-    ensure_tables(&conn);
     let cancelled_entries = conn
         .execute(
             "UPDATE auto_queue_entries SET status = 'skipped' WHERE status IN ('pending', 'dispatched')",
@@ -2954,8 +3117,6 @@ pub async fn reorder(
             );
         }
     };
-    ensure_tables(&conn);
-
     let run_id = body.ordered_ids.iter().find_map(|id| {
         conn.query_row(
             "SELECT run_id FROM auto_queue_entries WHERE id = ?1",
@@ -3055,8 +3216,6 @@ pub async fn enqueue(
             );
         }
     };
-    ensure_tables(&conn);
-
     // Resolve agent_id
     let agent_id = match body.agent_id {
         Some(ref id) if !id.is_empty() => id.clone(),
@@ -3295,8 +3454,6 @@ pub async fn submit_order(
             );
         }
     };
-    ensure_tables(&conn);
-
     // Verify run exists and is pending, get repo for filtering
     let run_info: Option<(String, Option<String>)> = conn
         .query_row(

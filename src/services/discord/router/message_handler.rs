@@ -1,3 +1,4 @@
+use super::super::gateway::{DiscordGateway, LiveDiscordTurnContext};
 use super::super::*;
 use crate::services::memory::{
     RecallRequest, RecallResponse, build_memory_backend, resolve_memory_role_id,
@@ -278,8 +279,14 @@ pub(in crate::services::discord) async fn handle_text_message(
 
                     // Check worktree: always use worktree for thread sessions,
                     // or when conflict detected with another session on same path.
+                    // Use both dispatch_thread_parents (for reused threads) AND Discord API
+                    // thread detection (for first-turn in newly created threads where
+                    // dispatch_thread_parents hasn't been populated yet).
                     let wt_info = {
-                        let is_thread = shared.dispatch_thread_parents.contains_key(&channel_id);
+                        let is_thread = shared.dispatch_thread_parents.contains_key(&channel_id)
+                            || super::super::resolve_thread_parent(&ctx.http, channel_id)
+                                .await
+                                .is_some();
                         let data = shared.core.lock().await;
                         let conflict =
                             detect_worktree_conflict(&data.sessions, &canonical, channel_id);
@@ -435,6 +442,14 @@ pub(in crate::services::discord) async fn handle_text_message(
             .map(ChannelId::new);
 
         if is_already_thread {
+            // Ensure thread is accessible (unarchive if needed) before proceeding
+            if !super::verify_thread_accessible(ctx, channel_id).await {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ Dispatch {did} thread {channel_id} is not accessible (archived/locked), skipping"
+                );
+                return Ok(());
+            }
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "  [{ts}] 🧵 Dispatch {did} arrived in existing thread, skipping thread creation"
@@ -684,6 +699,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         channel_id,
         cancel_token.clone(),
         request_owner,
+        user_msg_id,
     )
     .await;
     if !started {
@@ -928,13 +944,13 @@ pub(in crate::services::discord) async fn handle_text_message(
                     .cancelled
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    super::super::clear_watchdog_deadline_override(watchdog_channel_id_num);
+                    super::super::clear_watchdog_deadline_override(watchdog_channel_id_num).await;
                     return;
                 }
 
                 // Check for API-based deadline extension
                 if let Some(new_deadline) =
-                    super::super::take_watchdog_deadline_override(watchdog_channel_id_num)
+                    super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
                 {
                     let max_dl = watchdog_token
                         .watchdog_max_deadline_ms
@@ -1338,19 +1354,25 @@ pub(in crate::services::discord) async fn handle_text_message(
     });
 
     spawn_turn_bridge(
-        ctx.http.clone(),
         shared.clone(),
         cancel_token.clone(),
         rx,
         TurnBridgeContext {
-            provider,
+            provider: provider.clone(),
+            gateway: Arc::new(DiscordGateway::new(
+                ctx.http.clone(),
+                shared.clone(),
+                provider.clone(),
+                Some(LiveDiscordTurnContext {
+                    ctx: ctx.clone(),
+                    token: token.to_string(),
+                    request_owner,
+                }),
+            )),
             channel_id,
             user_msg_id,
             user_text_owned: user_text.to_string(),
             request_owner_name: request_owner_name.to_string(),
-            request_owner: Some(request_owner),
-            serenity_ctx: Some(ctx.clone()),
-            token: Some(token.to_string()),
             role_binding: role_binding.clone(),
             adk_session_key,
             adk_session_name,
@@ -1565,12 +1587,25 @@ pub(super) fn lookup_text_stop_token(
     }
 }
 
+#[allow(dead_code)]
 pub(super) async fn lookup_text_stop_token_mailbox(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
 ) -> TextStopLookup {
     match super::super::mailbox_cancel_token(shared, channel_id).await {
         Some(token) if cancel_requested(Some(token.as_ref())) => TextStopLookup::AlreadyStopping,
+        Some(token) => TextStopLookup::Stop(token),
+        None => TextStopLookup::NoActiveTurn,
+    }
+}
+
+pub(super) async fn cancel_text_stop_token_mailbox(
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+) -> TextStopLookup {
+    let result = super::super::mailbox_cancel_active_turn(shared, channel_id).await;
+    match result.token {
+        Some(_) if result.already_stopping => TextStopLookup::AlreadyStopping,
         Some(token) => TextStopLookup::Stop(token),
         None => TextStopLookup::NoActiveTurn,
     }
@@ -1811,7 +1846,7 @@ pub(super) async fn handle_text_command(
         }
 
         "!stop" => {
-            let stop_lookup = lookup_text_stop_token_mailbox(&data.shared, channel_id).await;
+            let stop_lookup = cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
             match stop_lookup {
                 TextStopLookup::Stop(token) => {
                     super::super::turn_bridge::cancel_active_token(&token, true, "!stop");
@@ -2415,7 +2450,7 @@ Any other message is sent to {p}.
                 }
                 "stop" => {
                     let stop_lookup =
-                        lookup_text_stop_token_mailbox(&data.shared, channel_id).await;
+                        cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
                     match stop_lookup {
                         TextStopLookup::Stop(token) => {
                             super::super::turn_bridge::cancel_active_token(

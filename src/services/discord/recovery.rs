@@ -1,5 +1,9 @@
+use super::gateway::DiscordGateway;
 use super::handoff::{HandoffRecord, save_handoff};
-use super::settings::{resolve_role_binding, validate_bot_channel_routing_with_provider_channel};
+use super::settings::{
+    load_last_remote_profile, load_last_session_path, resolve_role_binding,
+    validate_bot_channel_routing_with_provider_channel,
+};
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 #[cfg(unix)]
@@ -995,9 +999,16 @@ pub(super) async fn restore_inflight_turns(
                 .map(|(_, ch)| ch)
             });
             {
-                let channel_key = channel_id.get().to_string();
-                let last_path = settings_snapshot.last_sessions.get(&channel_key).cloned();
-                let saved_remote = settings_snapshot.last_remotes.get(&channel_key).cloned();
+                let last_path = load_last_session_path(
+                    shared.db.as_ref(),
+                    &shared.token_hash,
+                    channel_id.get(),
+                );
+                let saved_remote = load_last_remote_profile(
+                    shared.db.as_ref(),
+                    &shared.token_hash,
+                    channel_id.get(),
+                );
                 let mut data = shared.core.lock().await;
                 let session = data
                     .sessions
@@ -1098,9 +1109,10 @@ pub(super) async fn restore_inflight_turns(
             .recovering_channels
             .insert(channel_id, std::time::Instant::now());
 
-        let channel_key = channel_id.get().to_string();
-        let last_path = settings_snapshot.last_sessions.get(&channel_key).cloned();
-        let saved_remote = settings_snapshot.last_remotes.get(&channel_key).cloned();
+        let last_path =
+            load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get());
+        let saved_remote =
+            load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
 
         let cancel_token = Arc::new(CancelToken::new());
         if let Ok(mut guard) = cancel_token.tmux_session.lock() {
@@ -1142,16 +1154,12 @@ pub(super) async fn restore_inflight_turns(
             }
         }
 
-        if !mailbox_has_active_turn(shared, channel_id).await {
-            shared
-                .global_active
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        mailbox_restore_active_turn(
+        mailbox_recovery_kickoff(
             shared,
             channel_id,
             cancel_token.clone(),
             UserId::new(state.request_owner_user_id),
+            MessageId::new(state.user_msg_id),
         )
         .await;
 
@@ -1193,7 +1201,7 @@ pub(super) async fn restore_inflight_turns(
         let recovery_session_id = state.session_id.clone();
         let retry_channel_id = channel_id.get();
         std::thread::spawn(move || {
-            match claude::read_output_file_until_result(
+            match crate::services::session_backend::read_output_file_until_result(
                 &output_for_reader,
                 start_offset,
                 tx.clone(),
@@ -1264,19 +1272,21 @@ pub(super) async fn restore_inflight_turns(
         let role_binding = resolve_role_binding(channel_id, channel_name.as_deref());
 
         spawn_turn_bridge(
-            http.clone(),
             shared.clone(),
             cancel_token,
             rx,
             TurnBridgeContext {
                 provider: provider.clone(),
+                gateway: Arc::new(DiscordGateway::new(
+                    http.clone(),
+                    shared.clone(),
+                    provider.clone(),
+                    None,
+                )),
                 channel_id,
                 user_msg_id,
                 user_text_owned: state.user_text.clone(),
                 request_owner_name: String::new(),
-                request_owner: None,
-                serenity_ctx: None,
-                token: None,
                 role_binding,
                 adk_session_key,
                 adk_session_name,

@@ -1,15 +1,21 @@
+use std::sync::Arc;
+
 use crate::config::local_api_url;
-use serenity::all::ChannelId;
+use crate::services::discord::SharedData;
+use crate::services::provider::ProviderKind;
+use serenity::all::{ChannelId, MessageId};
 
 /// Auto-retry a failed resume by fetching recent Discord history,
 /// storing it in kv_meta for the router to inject into the LLM prompt,
-/// and re-sending the original message via announce bot.
-/// Discord only sees a short notice — the full history is LLM-only.
-pub(super) async fn auto_retry_with_history(
+/// and queueing the original message as an internal intervention.
+/// Discord only sees the next provider reply — the full history is LLM-only.
+pub(in crate::services::discord) async fn auto_retry_with_history(
     http: &serenity::http::Http,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: ChannelId,
+    user_message_id: MessageId,
     user_text: &str,
-    api_port: u16,
 ) {
     let ts = chrono::Local::now().format("%H:%M:%S");
 
@@ -61,7 +67,7 @@ pub(super) async fn auto_retry_with_history(
     // Key: session_retry_context:{channel_id} — consumed on next turn start.
     if let Some(ref hist) = history {
         let _ = reqwest::Client::new()
-            .post(local_api_url(api_port, "/api/kv"))
+            .post(local_api_url(shared.api_port, "/api/kv"))
             .json(&serde_json::json!({
                 "key": format!("session_retry_context:{}", channel_id),
                 "value": hist,
@@ -75,16 +81,16 @@ pub(super) async fn auto_retry_with_history(
         "[이전 대화 복원 — 세션이 만료되어 최근 대화를 컨텍스트로 제공합니다]\n\n{}",
         user_text
     );
-    let retry_ch = channel_id.get().to_string();
-
-    let _ = reqwest::Client::new()
-        .post(local_api_url(api_port, "/api/send"))
-        .json(&serde_json::json!({
-            "target": format!("channel:{retry_ch}"),
-            "content": retry_content,
-            "source": "pipeline",
-            "bot": "announce",
-        }))
-        .send()
-        .await;
+    let enqueued = super::super::enqueue_internal_followup(
+        shared,
+        provider,
+        channel_id,
+        user_message_id,
+        retry_content,
+        "auto-retry with history",
+    )
+    .await;
+    if !enqueued {
+        eprintln!("  [{ts}] ⏭ auto-retry: follow-up deduped for channel {channel_id}");
+    }
 }

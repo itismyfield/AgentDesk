@@ -1,19 +1,21 @@
 mod completion_guard;
 mod context_window;
+mod memory_lifecycle;
 mod recovery_text;
 mod retry_state;
+mod skill_usage;
 mod stale_resume;
 mod tmux_runtime;
 
 #[cfg(test)]
 mod tests;
 
+use super::gateway::TurnGateway;
 use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
 use crate::services::memory::{
-    CaptureRequest, ReflectRequest, SessionEndReason, TokenUsage, build_resolved_memory_backend,
-    resolve_memory_role_id, resolve_memory_session_id,
+    CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
@@ -21,8 +23,10 @@ use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 use crate::utils::format::tail_with_ellipsis;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package
-pub(super) use completion_guard::guard_review_dispatch_completion;
-pub(super) use completion_guard::runtime_db_fallback_complete;
+pub(super) use completion_guard::{
+    fail_dispatch_with_retry, guard_review_dispatch_completion, runtime_db_fallback_complete,
+};
+pub(super) use recovery_text::auto_retry_with_history;
 pub(super) use stale_resume::result_event_has_stale_resume_error;
 pub(super) use tmux_runtime::cancel_active_token;
 pub(super) use tmux_runtime::stale_inflight_message;
@@ -31,166 +35,29 @@ pub(super) use tmux_runtime::stale_inflight_message;
 pub(crate) use tmux_runtime::tmux_runtime_paths;
 
 // Items used by spawn_turn_bridge from submodules
-use completion_guard::{complete_work_dispatch_on_turn_end, fail_dispatch_with_retry};
+use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{persisted_context_tokens, resolve_done_response};
-use recovery_text::auto_retry_with_history;
+use memory_lifecycle::{
+    optional_metric_token_fields, plan_turn_end_memory, spawn_memory_capture_task,
+    spawn_memory_reflect_task, take_memento_reflect_request,
+};
 use retry_state::{
     clear_local_session_state, handle_gemini_retry_boundary, reset_session_for_auto_retry,
 };
+use skill_usage::record_skill_usage_from_tool_use;
 use stale_resume::{
     output_file_has_stale_resume_error_after_offset, stream_error_has_stale_resume_error,
     stream_error_requires_terminal_session_reset,
 };
 use tmux_runtime::{is_dcserver_restart_command, should_resume_watcher_after_turn};
 
-pub(super) fn spawn_memory_capture_task(
-    channel_id: ChannelId,
-    capture_memory_settings: settings::ResolvedMemorySettings,
-    capture_request: CaptureRequest,
-) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
-    tokio::spawn(async move {
-        let backend = build_resolved_memory_backend(&capture_memory_settings);
-        let result = backend.capture(capture_request).await;
-        for warning in &result.warnings {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] [memory] capture warning for channel {}: {}",
-                channel_id.get(),
-                warning
-            );
-        }
-        result
-    })
-}
-
-pub(super) fn spawn_memory_reflect_task(
-    channel_id: ChannelId,
-    reflect_memory_settings: settings::ResolvedMemorySettings,
-    reflect_request: ReflectRequest,
-) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
-    tokio::spawn(async move {
-        let backend = build_resolved_memory_backend(&reflect_memory_settings);
-        let reason = reflect_request.reason.as_str().to_string();
-        let result = backend.reflect(reflect_request).await;
-        for warning in &result.warnings {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] [memory] reflect warning for channel {} ({}): {}",
-                channel_id.get(),
-                reason,
-                warning
-            );
-        }
-        result
-    })
-}
-
-fn build_memento_transcript(history: &[HistoryItem]) -> String {
-    history
-        .iter()
-        .filter_map(|item| {
-            let content = item.content.trim();
-            if content.is_empty() {
-                return None;
-            }
-
-            let label = match item.item_type {
-                HistoryType::User => "User",
-                HistoryType::Assistant => "Assistant",
-                HistoryType::Error => "Error",
-                HistoryType::System => "System",
-                HistoryType::ToolUse => "ToolUse",
-                HistoryType::ToolResult => "ToolResult",
-            };
-
-            Some(format!("[{label}]: {content}"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub(super) fn take_memento_reflect_request(
-    session: &mut DiscordSession,
-    memory_settings: &settings::ResolvedMemorySettings,
-    provider: &ProviderKind,
-    role_binding: Option<&RoleBinding>,
-    channel_id: u64,
-    reason: SessionEndReason,
-) -> Option<ReflectRequest> {
-    if memory_settings.backend != settings::MemoryBackendKind::Memento
-        || !session.memento_context_loaded
-        || session.memento_reflected
-    {
-        return None;
-    }
-
-    let session_id = session
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?
-        .to_string();
-    let transcript = build_memento_transcript(&session.history);
-    if transcript.trim().is_empty() {
-        return None;
-    }
-
-    session.memento_reflected = true;
-    Some(ReflectRequest {
-        provider: provider.clone(),
-        role_id: resolve_memory_role_id(role_binding),
-        channel_id,
-        session_id,
-        reason,
-        transcript,
-    })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct TurnEndMemoryPlan {
-    pub(super) reflect_reason: Option<SessionEndReason>,
-    pub(super) clear_provider_session: bool,
-    pub(super) persist_transcript: bool,
-    pub(super) spawn_capture: bool,
-}
-
-pub(super) fn plan_turn_end_memory(
-    session: &DiscordSession,
-    backend: settings::MemoryBackendKind,
-    is_prompt_too_long: bool,
-    resume_failure_detected: bool,
-    terminal_session_reset_required: bool,
-    should_record_final_turn: bool,
-) -> Option<TurnEndMemoryPlan> {
-    if session.cleared || is_prompt_too_long {
-        return None;
-    }
-
-    let persist_transcript = should_record_final_turn;
-    let reflect_reason = if terminal_session_reset_required {
-        Some(SessionEndReason::LocalSessionReset)
-    } else {
-        None
-    };
-    let clear_provider_session = resume_failure_detected || terminal_session_reset_required;
-
-    Some(TurnEndMemoryPlan {
-        reflect_reason,
-        clear_provider_session,
-        persist_transcript,
-        spawn_capture: persist_transcript && backend != settings::MemoryBackendKind::Memento,
-    })
-}
-
 pub(super) struct TurnBridgeContext {
     pub(super) provider: ProviderKind,
+    pub(super) gateway: Arc<dyn TurnGateway>,
     pub(super) channel_id: ChannelId,
     pub(super) user_msg_id: MessageId,
     pub(super) user_text_owned: String,
     pub(super) request_owner_name: String,
-    pub(super) request_owner: Option<UserId>,
-    pub(super) serenity_ctx: Option<serenity::Context>,
-    pub(super) token: Option<String>,
     pub(super) role_binding: Option<RoleBinding>,
     pub(super) adk_session_key: Option<String>,
     pub(super) adk_session_name: Option<String>,
@@ -208,81 +75,7 @@ pub(super) struct TurnBridgeContext {
     pub(super) inflight_state: InflightTurnState,
 }
 
-pub(super) fn optional_metric_token_fields(usage: TokenUsage) -> (Option<u64>, Option<u64>) {
-    if usage.is_zero() {
-        return (None, None);
-    }
-    (
-        if usage.input_tokens > 0 {
-            Some(usage.input_tokens)
-        } else {
-            None
-        },
-        if usage.output_tokens > 0 {
-            Some(usage.output_tokens)
-        } else {
-            None
-        },
-    )
-}
-
-fn extract_skill_id_from_tool_use(name: &str, input: &str) -> Option<String> {
-    if name != "Skill" {
-        return None;
-    }
-
-    serde_json::from_str::<serde_json::Value>(input)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("skill")
-                .and_then(|skill| skill.as_str())
-                .map(str::trim)
-                .filter(|skill| !skill.is_empty())
-                .map(ToString::to_string)
-        })
-}
-
-fn resolve_skill_usage_agent_id(
-    conn: &rusqlite::Connection,
-    session_key: Option<&str>,
-    role_binding: Option<&RoleBinding>,
-) -> Option<String> {
-    session_key
-        .and_then(|key| {
-            conn.query_row(
-                "SELECT agent_id FROM sessions WHERE session_key = ?1",
-                [key],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-        })
-        .or_else(|| {
-            role_binding
-                .map(|binding| binding.role_id.trim().to_string())
-                .filter(|role_id| !role_id.is_empty())
-        })
-}
-
-fn record_skill_usage(
-    db: &crate::db::Db,
-    skill_id: &str,
-    session_key: Option<&str>,
-    role_binding: Option<&RoleBinding>,
-) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| format!("db lock failed: {e}"))?;
-    let agent_id = resolve_skill_usage_agent_id(&conn, session_key, role_binding);
-    conn.execute(
-        "INSERT INTO skill_usage (skill_id, agent_id, session_key) VALUES (?1, ?2, ?3)",
-        rusqlite::params![skill_id, agent_id, session_key],
-    )
-    .map_err(|e| format!("insert skill_usage failed: {e}"))?;
-    Ok(())
-}
-
 pub(super) fn spawn_turn_bridge(
-    http: Arc<serenity::Http>,
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
     rx: mpsc::Receiver<StreamMessage>,
@@ -292,12 +85,10 @@ pub(super) fn spawn_turn_bridge(
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let channel_id = bridge.channel_id;
         let provider = bridge.provider.clone();
+        let gateway = bridge.gateway.clone();
         let user_msg_id = bridge.user_msg_id;
         let user_text_owned = bridge.user_text_owned.clone();
         let request_owner_name = bridge.request_owner_name.clone();
-        let request_owner = bridge.request_owner;
-        let serenity_ctx = bridge.serenity_ctx.clone();
-        let token = bridge.token.clone();
         let role_binding = bridge.role_binding.clone();
         let adk_session_key = bridge.adk_session_key.clone();
         let adk_session_name = bridge.adk_session_name.clone();
@@ -453,18 +244,21 @@ pub(super) fn spawn_turn_bridge(
                             has_post_tool_text = false;
                             inflight_state.any_tool_used = true;
                             inflight_state.has_post_tool_text = false;
-                            if let Some(skill_id) = extract_skill_id_from_tool_use(&name, &input) {
-                                if let Some(db) = shared_owned.db.as_ref() {
-                                    if let Err(e) = record_skill_usage(
-                                        db,
-                                        &skill_id,
-                                        adk_session_key.as_deref(),
-                                        role_binding.as_ref(),
-                                    ) {
+                            if let Some(db) = shared_owned.db.as_ref() {
+                                match record_skill_usage_from_tool_use(
+                                    db,
+                                    &name,
+                                    &input,
+                                    adk_session_key.as_deref(),
+                                    role_binding.as_ref(),
+                                ) {
+                                    Ok(Some(_)) => {}
+                                    Ok(None) => {}
+                                    Err(e) => {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         eprintln!(
-                                            "  [{ts}] ⚠ Failed to record skill usage for {}: {}",
-                                            skill_id, e
+                                            "  [{ts}] ⚠ Failed to record skill usage for tool {}: {}",
+                                            name, e
                                         );
                                     }
                                 }
@@ -519,13 +313,8 @@ pub(super) fn spawn_turn_bridge(
                                     }
 
                                     let handoff_text = "♻️ dcserver 재시작 중...\n\n새 dcserver가 이 메시지를 이어받는 중입니다.";
-                                    rate_limit_wait(&shared_owned, channel_id).await;
-                                    let _ = channel_id
-                                        .edit_message(
-                                            &http,
-                                            current_msg_id,
-                                            EditMessage::new().content(handoff_text),
-                                        )
+                                    let _ = gateway
+                                        .edit_message(channel_id, current_msg_id, handoff_text)
                                         .await;
                                     last_edit_text = handoff_text.to_string();
                                     inflight_state.current_msg_id = current_msg_id.get();
@@ -715,21 +504,29 @@ pub(super) fn spawn_turn_bridge(
                             if watcher_claimed {
                                 #[cfg(unix)]
                                 {
-                                    let http_bg = http.clone();
-                                    let shared_bg = shared_owned.clone();
-                                    tokio::spawn(tmux_output_watcher(
-                                        channel_id,
-                                        http_bg,
-                                        shared_bg,
-                                        output_path,
-                                        tmux_session_name,
-                                        last_offset,
-                                        cancel,
-                                        paused,
-                                        resume_offset,
-                                        pause_epoch,
-                                        turn_delivered,
-                                    ));
+                                    if let Some(ctx) = shared_owned.cached_serenity_ctx.get() {
+                                        let http_bg = ctx.http.clone();
+                                        let shared_bg = shared_owned.clone();
+                                        tokio::spawn(tmux_output_watcher(
+                                            channel_id,
+                                            http_bg,
+                                            shared_bg,
+                                            output_path,
+                                            tmux_session_name,
+                                            last_offset,
+                                            cancel,
+                                            paused,
+                                            resume_offset,
+                                            pause_epoch,
+                                            turn_delivered,
+                                        ));
+                                    } else {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        eprintln!(
+                                            "  [{ts}] ⚠ cached serenity context missing; tmux watcher not started for channel {}",
+                                            channel_id
+                                        );
+                                    }
                                 }
                             }
                             state_dirty = true;
@@ -795,13 +592,8 @@ pub(super) fn spawn_turn_bridge(
                 && !done
                 && last_status_edit.elapsed() >= status_interval
             {
-                rate_limit_wait(&shared_owned, channel_id).await;
-                let _ = channel_id
-                    .edit_message(
-                        &http,
-                        current_msg_id,
-                        EditMessage::new().content(&stable_display_text),
-                    )
+                let _ = gateway
+                    .edit_message(channel_id, current_msg_id, &stable_display_text)
                     .await;
                 last_edit_text = stable_display_text;
                 last_status_edit = tokio::time::Instant::now();
@@ -891,8 +683,7 @@ pub(super) fn spawn_turn_bridge(
         )
         .await;
 
-        let can_chain_locally =
-            serenity_ctx.is_some() && request_owner.is_some() && token.is_some();
+        let can_chain_locally = gateway.can_chain_locally();
         // Mark this turn as finalizing — deferred restart must wait until we finish
         // sending the Discord response and cleaning up state.
         shared_owned
@@ -913,7 +704,7 @@ pub(super) fn spawn_turn_bridge(
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
         // Clean up any pending watchdog deadline override for this channel
-        super::clear_watchdog_deadline_override(channel_id.get());
+        super::clear_watchdog_deadline_override(channel_id.get()).await;
         // Clean up dispatch-thread parent mapping when the thread turn ends.
         // Iterate and remove entries whose thread matches this channel_id.
         shared_owned
@@ -930,7 +721,7 @@ pub(super) fn spawn_turn_bridge(
         // When tmux watcher is handling the response, it will do ⏳→✅ after delivery.
         let tmux_handoff_path = rx_disconnected && tmux_handed_off && full_response.is_empty();
         if !tmux_handoff_path {
-            remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
+            gateway.remove_reaction(channel_id, user_msg_id, '⏳').await;
         }
 
         // Recovery auto-retry: session died during restart recovery
@@ -951,19 +742,19 @@ pub(super) fn spawn_turn_bridge(
             )
             .await;
             // Auto-retry with Discord history
-            let http_c = http.clone();
+            let gateway_c = gateway.clone();
             let retry_text = user_text_owned.clone();
-            let retry_port = shared_owned.api_port;
             tokio::spawn(async move {
-                auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
+                gateway_c
+                    .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
+                    .await;
             });
             // Replace placeholder with recovery notice (don't delete — avoids visual gap)
-            let _ = channel_id
+            let _ = gateway
                 .edit_message(
-                    &http,
+                    channel_id,
                     current_msg_id,
-                    serenity::EditMessage::new()
-                        .content("↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다."),
+                    "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
                 )
                 .await;
             full_response = String::new();
@@ -978,15 +769,25 @@ pub(super) fn spawn_turn_bridge(
                     } else {
                         full_response.clone()
                     };
-                let handed_off = super::tmux::start_restart_handoff_from_state(
-                    channel_id,
-                    &http,
-                    &shared_owned,
-                    &provider,
-                    inflight_state.clone(),
-                    &best_response,
-                )
-                .await;
+                let handed_off = if let Some(ctx) = shared_owned.cached_serenity_ctx.get() {
+                    let http = ctx.http.clone();
+                    super::tmux::start_restart_handoff_from_state(
+                        channel_id,
+                        &http,
+                        &shared_owned,
+                        &provider,
+                        inflight_state.clone(),
+                        &best_response,
+                    )
+                    .await
+                } else {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!(
+                        "  [{ts}] ⚠ cached serenity context missing; restart handoff unavailable (channel {})",
+                        channel_id
+                    );
+                    false
+                };
                 if handed_off {
                     full_response = String::new();
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1010,28 +811,26 @@ pub(super) fn spawn_turn_bridge(
                         "restart recovery handoff failed",
                     )
                     .await;
-                    let http_c = http.clone();
+                    let gateway_c = gateway.clone();
                     let retry_text = user_text_owned.clone();
-                    let retry_port = shared_owned.api_port;
                     tokio::spawn(async move {
-                        auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
+                        gateway_c
+                            .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
+                            .await;
                     });
-                    let _ = channel_id
+                    let _ = gateway
                         .edit_message(
-                            &http,
+                            channel_id,
                             current_msg_id,
-                            serenity::EditMessage::new()
-                                .content("↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다."),
+                            "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
                         )
                         .await;
                     full_response = String::new();
                 }
             }
         } else if cancelled {
-            if let Ok(guard) = cancel_token.child_pid.lock() {
-                if let Some(pid) = *guard {
-                    crate::services::process::kill_pid_tree(pid);
-                }
+            if let Some(pid) = cancel_token.child_pid.lock().ok().and_then(|guard| *guard) {
+                crate::services::process::kill_pid_tree(pid);
             }
 
             full_response = if full_response.trim().is_empty() {
@@ -1042,41 +841,27 @@ pub(super) fn spawn_turn_bridge(
                 format!("{}\n\n[Stopped]", formatted)
             };
 
-            rate_limit_wait(&shared_owned, channel_id).await;
-            let _ = super::formatting::replace_long_message_raw(
-                &http,
-                channel_id,
-                current_msg_id,
-                &full_response,
-                &shared_owned,
-            )
-            .await;
+            let _ = gateway
+                .replace_message(channel_id, current_msg_id, &full_response)
+                .await;
 
-            add_reaction_raw(&http, channel_id, user_msg_id, '🛑').await;
+            gateway.add_reaction(channel_id, user_msg_id, '🛑').await;
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ■ Stopped");
         } else if is_prompt_too_long {
-            let mention = request_owner
-                .map(|uid| format!("<@{}>", uid.get()))
-                .unwrap_or_default();
+            let mention = gateway.requester_mention().unwrap_or_default();
             full_response = format!(
                 "{} ⚠️ 프롬프트가 너무 깁니다. 대화 컨텍스트가 모델 한도를 초과했습니다.\n\n\
                  다음 메시지를 보내면 자동으로 새 턴이 시작됩니다.\n\
                  컨텍스트를 줄이려면 `/compact` 또는 `/clear`를 사용해 주세요.",
                 mention
             );
-            rate_limit_wait(&shared_owned, channel_id).await;
-            let _ = super::formatting::replace_long_message_raw(
-                &http,
-                channel_id,
-                current_msg_id,
-                &full_response,
-                &shared_owned,
-            )
-            .await;
+            let _ = gateway
+                .replace_message(channel_id, current_msg_id, &full_response)
+                .await;
 
-            add_reaction_raw(&http, channel_id, user_msg_id, '⚠').await;
+            gateway.add_reaction(channel_id, user_msg_id, '⚠').await;
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ⚠ Prompt too long (channel {})", channel_id);
@@ -1084,12 +869,8 @@ pub(super) fn spawn_turn_bridge(
             // Tmux watcher is handling response delivery — this is normal.
             // Don't delete placeholder — update it so the user sees the turn is still active.
             // The tmux watcher will replace this content when output arrives.
-            let _ = channel_id
-                .edit_message(
-                    &http,
-                    current_msg_id,
-                    serenity::builder::EditMessage::new().content("⏳ 처리 중..."),
-                )
+            let _ = gateway
+                .edit_message(channel_id, current_msg_id, "⏳ 처리 중...")
                 .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
@@ -1116,11 +897,12 @@ pub(super) fn spawn_turn_bridge(
                 )
                 .await;
                 // Auto-retry with Discord history context
-                let http_c = http.clone();
+                let gateway_c = gateway.clone();
                 let retry_text = user_text_owned.clone();
-                let retry_port = shared_owned.api_port;
                 tokio::spawn(async move {
-                    auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
+                    gateway_c
+                        .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
+                        .await;
                 });
                 full_response = String::new(); // Suppress error message to user
             } else if full_response.is_empty() {
@@ -1169,11 +951,12 @@ pub(super) fn spawn_turn_bridge(
                         "stale session_id in recovered output",
                     )
                     .await;
-                    let http_c = http.clone();
+                    let gateway_c = gateway.clone();
                     let retry_text = user_text_owned.clone();
-                    let retry_port = shared_owned.api_port;
                     tokio::spawn(async move {
-                        auto_retry_with_history(&http_c, channel_id, &retry_text, retry_port).await;
+                        gateway_c
+                            .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
+                            .await;
                     });
                     full_response = String::new();
                 } else {
@@ -1181,42 +964,37 @@ pub(super) fn spawn_turn_bridge(
                     let mut resume_failed = false;
                     let quick_exit = turn_start.elapsed().as_secs() < 10;
                     // Method 1: check tmux output file
-                    if let Some(ref path) = inflight_state.output_path {
-                        if output_file_has_stale_resume_error_after_offset(
+                    if let Some(ref path) = inflight_state.output_path
+                        && output_file_has_stale_resume_error_after_offset(
                             path,
                             inflight_state.last_offset,
-                        ) {
-                            resume_failed = true;
-                            resume_failure_detected = true;
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!(
-                                "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
-                                channel_id
-                            );
-                            reset_session_for_auto_retry(
-                                &shared_owned,
-                                channel_id,
-                                &cancel_token,
-                                adk_session_key.as_deref(),
-                                &mut new_session_id,
-                                &mut inflight_state,
-                                "stale session_id in output file",
-                            )
-                            .await;
-                            let http_c = http.clone();
-                            let retry_text = user_text_owned.clone();
-                            let retry_port = shared_owned.api_port;
-                            tokio::spawn(async move {
-                                auto_retry_with_history(
-                                    &http_c,
-                                    channel_id,
-                                    &retry_text,
-                                    retry_port,
-                                )
+                        )
+                    {
+                        resume_failed = true;
+                        resume_failure_detected = true;
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!(
+                            "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
+                            channel_id
+                        );
+                        reset_session_for_auto_retry(
+                            &shared_owned,
+                            channel_id,
+                            &cancel_token,
+                            adk_session_key.as_deref(),
+                            &mut new_session_id,
+                            &mut inflight_state,
+                            "stale session_id in output file",
+                        )
+                        .await;
+                        let gateway_c = gateway.clone();
+                        let retry_text = user_text_owned.clone();
+                        tokio::spawn(async move {
+                            gateway_c
+                                .schedule_retry_with_history(channel_id, user_msg_id, &retry_text)
                                 .await;
-                            });
-                            full_response = String::new();
-                        }
+                        });
+                        full_response = String::new();
                     }
                     // Method 2: quick exit (<10s) + empty response + had a session_id to resume
                     if !resume_failed && quick_exit && rx_disconnected {
@@ -1245,17 +1023,16 @@ pub(super) fn spawn_turn_bridge(
                                 "quick exit with empty response",
                             )
                             .await;
-                            let http_c = http.clone();
+                            let gateway_c = gateway.clone();
                             let retry_text = user_text_owned.clone();
-                            let retry_port = shared_owned.api_port;
                             tokio::spawn(async move {
-                                auto_retry_with_history(
-                                    &http_c,
-                                    channel_id,
-                                    &retry_text,
-                                    retry_port,
-                                )
-                                .await;
+                                gateway_c
+                                    .schedule_retry_with_history(
+                                        channel_id,
+                                        user_msg_id,
+                                        &retry_text,
+                                    )
+                                    .await;
                             });
                             full_response = String::new();
                         }
@@ -1282,28 +1059,35 @@ pub(super) fn spawn_turn_bridge(
                 }
             }
 
+            let mut delivery_response = full_response.clone();
+            if let Some(warning) = review_dispatch_warning.as_deref() {
+                let warning = warning.trim();
+                if !warning.is_empty() {
+                    if !delivery_response.trim().is_empty() {
+                        delivery_response.push_str("\n\n");
+                    }
+                    delivery_response.push_str(warning);
+                }
+            }
+
             // If response is empty (e.g. auto-retry on stale session), show
             // recovery notice instead of deleting — avoids visual gap.
-            if full_response.trim().is_empty() {
-                let _ = channel_id
+            if delivery_response.trim().is_empty() {
+                let _ = gateway
                     .edit_message(
-                        &http,
+                        channel_id,
                         current_msg_id,
-                        serenity::EditMessage::new()
-                            .content("↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다."),
+                        "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
                     )
                     .await;
             } else {
-                full_response =
-                    super::formatting::format_for_discord_with_provider(&full_response, &provider);
-                let _ = super::formatting::replace_long_message_raw(
-                    &http,
-                    channel_id,
-                    current_msg_id,
-                    &full_response,
-                    &shared_owned,
-                )
-                .await;
+                delivery_response = super::formatting::format_for_discord_with_provider(
+                    &delivery_response,
+                    &provider,
+                );
+                let _ = gateway
+                    .replace_message(channel_id, current_msg_id, &delivery_response)
+                    .await;
             }
 
             // Signal the watcher that this turn's response was already delivered.
@@ -1312,8 +1096,8 @@ pub(super) fn spawn_turn_bridge(
                 watcher.turn_delivered.store(true, Ordering::Relaxed);
             }
 
-            if !full_response.trim().is_empty() {
-                add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
+            if !delivery_response.trim().is_empty() {
+                gateway.add_reaction(channel_id, user_msg_id, '✅').await;
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1321,51 +1105,29 @@ pub(super) fn spawn_turn_bridge(
             if let Ok(mut last) = shared_owned.last_turn_at.lock() {
                 *last = Some(chrono::Local::now().to_rfc3339());
             }
-
-            if let Some(warning) = review_dispatch_warning.as_deref() {
-                // Send via announce bot so the agent sees this as an external
-                // message and re-triggers a turn to handle the pending review.
-                // Using the provider bot (claude/codex) would be ignored as
-                // the agent treats its own bot's messages as self-messages.
-                let _ = reqwest::Client::new()
-                    .post(crate::config::local_api_url(
-                        shared_owned.api_port,
-                        "/api/send",
-                    ))
-                    .json(&serde_json::json!({
-                        "target": format!("channel:{}", channel_id),
-                        "content": warning,
-                        "source": "pipeline",
-                        "bot": "announce",
-                    }))
-                    .send()
-                    .await;
-            }
         }
 
         if should_resume_watcher_after_turn(
             defer_watcher_resume,
             has_queued_turns,
             can_chain_locally,
-        ) {
-            if let Some(offset) = tmux_last_offset {
-                if let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id) {
-                    if let Ok(mut guard) = watcher.resume_offset.lock() {
-                        *guard = Some(offset);
-                    }
-                    // NOTE: turn_delivered is NOT cleared here — the watcher clears it
-                    // when it consumes resume_offset, ensuring the flag stays active
-                    // until the watcher actually starts reading from the new offset.
-                    watcher.paused.store(false, Ordering::Relaxed);
-                }
+        ) && let Some(offset) = tmux_last_offset
+            && let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id)
+        {
+            if let Ok(mut guard) = watcher.resume_offset.lock() {
+                *guard = Some(offset);
             }
+            // NOTE: turn_delivered is NOT cleared here — the watcher clears it
+            // when it consumes resume_offset, ensuring the flag stays active
+            // until the watcher actually starts reading from the new offset.
+            watcher.paused.store(false, Ordering::Relaxed);
         }
 
-        let should_record_final_turn = !is_prompt_too_long
-            && !resume_failure_detected
-            && !recovery_retry
-            && !restart_recovery_handoff
-            && !(rx_disconnected && tmux_handed_off && full_response.is_empty())
+        let should_record_final_turn = !(is_prompt_too_long
+            || resume_failure_detected
+            || recovery_retry
+            || restart_recovery_handoff
+            || (rx_disconnected && tmux_handed_off && full_response.is_empty()))
             && !full_response.trim().is_empty();
 
         // Update in-memory session under lock.
@@ -1433,33 +1195,28 @@ pub(super) fn spawn_turn_bridge(
                 )
                 .await;
             }
-        } else if terminal_session_reset_required {
-            if let Some(ref session_key) = adk_session_key {
-                super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
-                    .await;
-            }
+        } else if terminal_session_reset_required && let Some(ref session_key) = adk_session_key {
+            super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port).await;
         }
 
-        if should_persist_transcript {
-            if let Some(db) = shared_owned.db.as_ref() {
-                let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
-                let channel_id_text = channel_id.get().to_string();
-                if let Err(e) = crate::db::session_transcripts::persist_turn(
-                    db,
-                    crate::db::session_transcripts::PersistSessionTranscript {
-                        turn_id: &turn_id,
-                        session_key: adk_session_key.as_deref(),
-                        channel_id: Some(channel_id_text.as_str()),
-                        agent_id: None,
-                        provider: Some(provider.as_str()),
-                        dispatch_id: dispatch_id.as_deref(),
-                        user_message: &user_text_owned,
-                        assistant_message: &full_response,
-                    },
-                ) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!("  [{ts}] ⚠ failed to persist session transcript: {e}");
-                }
+        if should_persist_transcript && let Some(db) = shared_owned.db.as_ref() {
+            let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
+            let channel_id_text = channel_id.get().to_string();
+            if let Err(e) = crate::db::session_transcripts::persist_turn(
+                db,
+                crate::db::session_transcripts::PersistSessionTranscript {
+                    turn_id: &turn_id,
+                    session_key: adk_session_key.as_deref(),
+                    channel_id: Some(channel_id_text.as_str()),
+                    agent_id: None,
+                    provider: Some(provider.as_str()),
+                    dispatch_id: dispatch_id.as_deref(),
+                    user_message: &user_text_owned,
+                    assistant_message: &full_response,
+                },
+            ) {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!("  [{ts}] ⚠ failed to persist session transcript: {e}");
             }
         }
 
@@ -1562,7 +1319,7 @@ pub(super) fn spawn_turn_bridge(
         clear_inflight_state(&provider, channel_id.get());
         // Defuse the guard — cleanup already done above.
         inflight_guard.provider.take();
-        shared_owned.recovering_channels.remove(&channel_id);
+        super::mailbox_clear_recovery_marker(&shared_owned, channel_id).await;
 
         // For dispatch-based turns (threads), kill the tmux session after
         // finalization. Thread sessions are one-shot — keeping claude alive
@@ -1620,20 +1377,16 @@ pub(super) fn spawn_turn_bridge(
 
                     // Only delete the DB session row if tmux kill succeeded.
                     // If kill failed, leave the row so the periodic reaper can retry.
-                    if kill_ok {
-                        if let Some(session_key) = super::adk_session::build_adk_session_key(
+                    if kill_ok
+                        && let Some(session_key) = super::adk_session::build_adk_session_key(
                             &shared_owned,
                             channel_id,
                             &provider,
                         )
                         .await
-                        {
-                            super::adk_session::delete_adk_session(
-                                &session_key,
-                                shared_owned.api_port,
-                            )
+                    {
+                        super::adk_session::delete_adk_session(&session_key, shared_owned.api_port)
                             .await;
-                        }
                     }
                 }
             } else {
@@ -1668,19 +1421,8 @@ pub(super) fn spawn_turn_bridge(
                     "  [{ts}] ⏸ DRAIN: skipping queued turn dequeue for channel {} (restart pending)",
                     channel_id
                 );
-            } else if let (Some(ctx), Some(owner), Some(tok)) =
-                (serenity_ctx.as_ref(), request_owner, token.as_deref())
-            {
-                let bot_owner_provider = super::resolve_discord_bot_provider(tok);
-                let settings_snapshot = shared_owned.settings.read().await.clone();
-                if let Err(reason) = super::validate_live_channel_routing(
-                    ctx,
-                    &bot_owner_provider,
-                    &settings_snapshot,
-                    channel_id,
-                )
-                .await
-                {
+            } else if let Some(bot_owner_provider) = gateway.bot_owner_provider() {
+                if let Err(reason) = gateway.validate_live_routing(channel_id).await {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
                         "  [{ts}] ⚠ QUEUE-GUARD: preserving queued command(s) for channel {} (reason={})",
@@ -1697,23 +1439,15 @@ pub(super) fn spawn_turn_bridge(
                     if let Some((intervention, has_more_queued_turns)) = next_intervention {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         println!("  [{ts}] 📋 Processing next queued command");
-                        // Remove 📬 (queued) reaction before processing
-                        remove_reaction_raw(&http, channel_id, intervention.message_id, '📬').await;
-                        if let Err(e) = handle_text_message(
-                            ctx,
-                            channel_id,
-                            intervention.message_id,
-                            owner,
-                            &request_owner_name,
-                            &intervention.text,
-                            &shared_owned,
-                            tok,
-                            true,
-                            has_more_queued_turns,
-                            true,
-                            None,
-                        )
-                        .await
+                        if let Err(e) = gateway
+                            .dispatch_queued_turn(
+                                channel_id,
+                                intervention.message_id,
+                                &request_owner_name,
+                                &intervention.text,
+                                has_more_queued_turns,
+                            )
+                            .await
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             println!("  [{ts}]   ⚠ queued command failed: {e}");
@@ -1732,13 +1466,13 @@ pub(super) fn spawn_turn_bridge(
                 println!(
                     "  [{ts}] 📦 preserving queued command(s): missing live Discord context — scheduling deferred drain"
                 );
-                if let Some(offset) = tmux_last_offset {
-                    if let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id) {
-                        if let Ok(mut guard) = watcher.resume_offset.lock() {
-                            *guard = Some(offset);
-                        }
-                        watcher.paused.store(false, Ordering::Relaxed);
+                if let Some(offset) = tmux_last_offset
+                    && let Some(watcher) = shared_owned.tmux_watchers.get(&channel_id)
+                {
+                    if let Ok(mut guard) = watcher.resume_offset.lock() {
+                        *guard = Some(offset);
                     }
+                    watcher.paused.store(false, Ordering::Relaxed);
                 }
                 // Deferred drain: wait briefly then kickoff idle queues using cached context
                 let shared_for_drain = shared_owned.clone();

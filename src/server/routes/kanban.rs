@@ -988,9 +988,6 @@ pub async fn defer_dod(
         }
     };
 
-    // Ensure deferred_dod_json column exists
-    let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN deferred_dod_json TEXT;");
-
     // Check card exists
     let exists: bool = conn
         .query_row(
@@ -3051,7 +3048,6 @@ fn cleanup_force_transition_revert_on_conn(
     card_id: &str,
     target_status: &str,
 ) -> anyhow::Result<(usize, usize)> {
-    super::auto_queue::ensure_tables(conn);
     let reason = format!("force-transition to {target_status}");
     let cancelled_dispatches =
         crate::dispatch::cancel_active_dispatches_for_card_on_conn(conn, card_id, Some(&reason))?;

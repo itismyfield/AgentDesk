@@ -93,10 +93,13 @@ pub(in crate::services::discord) async fn build_health_report(
     let channel_inflight = inflight_states
         .iter()
         .find(|s| s.channel_id == channel_id.get());
-    let recovering_count = shared.recovering_channels.len();
+    let recovering_count = mailbox_snapshots
+        .values()
+        .filter(|snapshot| snapshot.recovery_started_at.is_some())
+        .count();
     let watchers = shared.tmux_watchers.len();
     let channel_watcher = shared.tmux_watchers.contains_key(&channel_id);
-    let channel_recovering = shared.recovering_channels.contains_key(&channel_id);
+    let channel_recovering = channel_snapshot.recovery_started_at.is_some();
     let current_path_text =
         compact_path(session_path.unwrap_or_else(|| "(no session)".to_string()));
     let session_id_text = session_id.unwrap_or_else(|| "(none)".to_string());
@@ -258,7 +261,7 @@ pub(in crate::services::discord) async fn build_status_report(
         "unknown"
     };
     let channel_watcher = shared.tmux_watchers.contains_key(&channel_id);
-    let channel_recovering = shared.recovering_channels.contains_key(&channel_id);
+    let channel_recovering = channel_snapshot.recovery_started_at.is_some();
     let channel_state = if channel_recovering {
         "recovering"
     } else if active_request {
@@ -313,7 +316,13 @@ pub(in crate::services::discord) async fn build_inflight_report(
     let mut inflight_states = load_inflight_states(provider);
     inflight_states.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
-    let recovering_count = shared.recovering_channels.len();
+    let recovering_count = shared
+        .mailboxes
+        .snapshot_all()
+        .await
+        .values()
+        .filter(|snapshot| snapshot.recovery_started_at.is_some())
+        .count();
     let channel_inflight = inflight_states
         .iter()
         .find(|state| state.channel_id == channel_id.get());

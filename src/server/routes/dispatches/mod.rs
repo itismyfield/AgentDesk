@@ -25,9 +25,15 @@ pub use thread_reuse::{get_card_thread, get_pending_dispatch_for_thread, link_di
 
 // ── Shared utilities (used by both discord_delivery and thread_reuse) ──
 
-/// Resolve a channel name alias (e.g. "adk-cc") to a numeric channel ID
-/// by reading role_map.json's byChannelName section.
+/// Resolve a channel name alias (e.g. "adk-cc") to a numeric channel ID.
+/// Prefer agentdesk.yaml, then fall back to role_map.json.
 pub(crate) fn resolve_channel_alias(alias: &str) -> Option<u64> {
+    if let Some(channel_id) =
+        crate::services::discord::agentdesk_config::resolve_channel_alias(alias)
+    {
+        return Some(channel_id);
+    }
+
     let root = crate::cli::agentdesk_runtime_root()?;
     let path = root.join("config/role_map.json");
     let content = std::fs::read_to_string(&path).ok()?;

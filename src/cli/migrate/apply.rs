@@ -7,7 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
-use crate::config::{self, AgentDef as RuntimeAgentDef};
+use crate::config::{self, AgentChannels, AgentDef as RuntimeAgentDef};
 use crate::db;
 use crate::db::agents::sync_agents_from_config;
 use crate::runtime_layout;
@@ -2628,7 +2628,8 @@ fn merge_imported_agents(
             name: agent.display_name.clone(),
             name_ko: None,
             provider,
-            channels: std::collections::HashMap::new(),
+            channels: AgentChannels::default(),
+            keywords: Vec::new(),
             department: None,
             avatar_emoji: agent.avatar_emoji.clone(),
         };

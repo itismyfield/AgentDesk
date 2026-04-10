@@ -149,6 +149,17 @@ github:
     - "owner/repo-name"
   sync_interval_minutes: 10
 
+memory:
+  backend: auto
+  file:
+    sak_path: "memories/shared-agent-knowledge/shared_knowledge.md"
+    sam_path: "memories/shared-agent-memory"
+    ltm_root: "memories/long-term"
+    auto_memory_root: "~/.claude/projects/*{workspace}*/memory/"
+  mcp:
+    endpoint: "http://127.0.0.1:8765"
+    access_key_env: "MEMENTO_API_KEY"
+
 policies:
   dir: "./policies"
   hot_reload: true

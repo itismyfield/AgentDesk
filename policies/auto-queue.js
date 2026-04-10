@@ -44,7 +44,7 @@ var autoQueue = {
     // runs may also be auto-skipped for the same card, but they must not steal
     // continuation from the originating run.
     var doneEntries = agentdesk.db.query(
-      "SELECT e.run_id, COALESCE(e.thread_group, 0) as thread_group FROM auto_queue_entries e " +
+      "SELECT e.run_id, COALESCE(e.thread_group, 0) as thread_group, COALESCE(e.batch_phase, 0) as batch_phase FROM auto_queue_entries e " +
       "JOIN auto_queue_runs r ON e.run_id = r.id " +
       "WHERE e.kanban_card_id = ? AND e.status IN ('done', 'skipped') " +
       "AND r.status IN ('active', 'paused') " +
@@ -57,6 +57,7 @@ var autoQueue = {
 
     var runId = doneEntries[0].run_id;
     var doneGroup = doneEntries[0].thread_group;
+    var donePhase = doneEntries[0].batch_phase || 0;
 
     // Check if the entire run is complete (no pending or dispatched entries remain)
     var remaining = agentdesk.db.query(
@@ -73,20 +74,40 @@ var autoQueue = {
       return;
     }
 
+    if (donePhase > 0) {
+      var phaseRemaining = agentdesk.db.query(
+        "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
+        "WHERE run_id = ? AND status IN ('pending', 'dispatched') AND COALESCE(batch_phase, 0) = ?",
+        [runId, donePhase]
+      );
+      var currentPhaseDone = phaseRemaining.length > 0 && phaseRemaining[0].cnt === 0;
+      if (currentPhaseDone) {
+        var nextPhaseRows = agentdesk.db.query(
+          "SELECT MIN(batch_phase) as next_phase FROM auto_queue_entries " +
+          "WHERE run_id = ? AND status IN ('pending', 'dispatched') AND COALESCE(batch_phase, 0) > ?",
+          [runId, donePhase]
+        );
+        var nextPhase = (nextPhaseRows.length > 0) ? nextPhaseRows[0].next_phase : null;
+        if (nextPhase !== null && nextPhase !== undefined) {
+          var nextPhaseCountRows = agentdesk.db.query(
+            "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
+            "WHERE run_id = ? AND status IN ('pending', 'dispatched') AND COALESCE(batch_phase, 0) = ?",
+            [runId, nextPhase]
+          );
+          var nextPhaseCount = (nextPhaseCountRows.length > 0) ? nextPhaseCountRows[0].cnt : 0;
+          agentdesk.log.info("[auto-queue] Phase " + donePhase + " 완료, Phase " + nextPhase + " 시작 (" + nextPhaseCount + " entries)");
+          activateRun(runId, null);
+          return;
+        }
+      }
+    }
+
     // #140: Check if the completed entry's GROUP is now done
     var groupRemaining = agentdesk.db.query(
       "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND COALESCE(thread_group, 0) = ? AND status IN ('pending', 'dispatched')",
       [runId, doneGroup]
     );
     var groupDone = groupRemaining.length > 0 && groupRemaining[0].cnt === 0;
-
-    // Read run config for parallel dispatch
-    var runCfg = agentdesk.db.query(
-      "SELECT COALESCE(max_concurrent_threads, 1) as mct, COALESCE(max_concurrent_per_agent, 1) as mca FROM auto_queue_runs WHERE id = ?",
-      [runId]
-    );
-    var maxConcurrent = (runCfg.length > 0) ? runCfg[0].mct : 1;
-    var maxPerAgent = (runCfg.length > 0) ? runCfg[0].mca : 1;
 
     // Check if agent has any active (non-terminal) cards — don't dispatch if busy
     var tCfg = agentdesk.pipeline.getConfig();

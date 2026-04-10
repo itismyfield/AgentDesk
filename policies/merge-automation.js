@@ -19,6 +19,8 @@
 //   Set kv: merge_request:{pr_number} = "{owner/repo}"
 //   OnTick5min picks it up and merges (no author check — explicit request)
 
+var prTracking = agentdesk.prTracking;
+
 var CODEX_REVIEWERS = {
   "chatgpt-codex-connector": true,
   "chatgpt-codex-connector[bot]": true
@@ -36,22 +38,20 @@ var mergeAutomation = {
     if (!isEnabled()) return;
 
     var cardId = payload.card_id;
-    agentdesk.log.info("[merge] Card " + cardId + " terminal — checking for PR to merge");
-
-    var pr = findPrForCard(cardId);
-    if (!pr) {
-      agentdesk.log.info("[merge] No open PR found for card " + cardId);
+    var tracking = loadTrackedPrForCard(cardId);
+    if (!tracking || tracking.state !== "merge" || !tracking.pr_number || !tracking.repo_id) {
       return;
     }
+    agentdesk.log.info("[merge] Card " + cardId + " terminal — checking tracked PR #" + tracking.pr_number);
 
     // Author check — only auto-merge PRs from allowed authors
-    var author = getPrAuthor(pr.number, pr.repo);
+    var author = getPrAuthor(tracking.pr_number, tracking.repo_id);
     if (!isAllowedAuthor(author)) {
-      agentdesk.log.info("[merge] PR #" + pr.number + " author '" + author + "' not in allowed list, skipping auto-merge");
+      agentdesk.log.info("[merge] PR #" + tracking.pr_number + " author '" + author + "' not in allowed list, skipping auto-merge");
       return;
     }
 
-    enableAutoMerge(pr.number, pr.repo, cardId);
+    enableAutoMerge(tracking.pr_number, tracking.repo_id, cardId);
   },
 
   // ── Periodic: manual merge requests + conflicts + cleanup ────────────
@@ -60,6 +60,7 @@ var mergeAutomation = {
 
     processCodexReviewSignals();
     processManualMergeRequests();
+    processTrackedMergeQueue();
     cleanupMergedWorktrees();
     detectConflictingPrs();
   }
@@ -106,6 +107,100 @@ function loadCardContext(cardId) {
     [cardId]
   );
   return cards.length > 0 ? cards[0] : null;
+}
+
+function loadTrackedPrForCard(cardId) {
+  return prTracking.load(cardId);
+}
+
+function loadTrackedPrForRepoPr(repoId, prNumber) {
+  return prTracking.findByRepoPr(repoId, prNumber);
+}
+
+function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
+  return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
+}
+
+function listTrackedPrRows(whereClause, params) {
+  return prTracking.list(whereClause, params);
+}
+
+function findOpenPrByTrackedBranch(repoId, branch) {
+  return prTracking.findOpenPrByBranch(repoId, branch);
+}
+
+function getCurrentPrHeadSha(prNumber, repo) {
+  var json = agentdesk.exec("gh", [
+    "pr", "view", String(prNumber),
+    "--json", "headRefOid",
+    "--jq", ".headRefOid",
+    "--repo", repo
+  ]);
+  if (json && json.indexOf("ERROR") !== 0) return json.trim();
+  return null;
+}
+
+function getLatestCiRunForTrackedPr(repo, branch, headSha) {
+  if (!repo || !branch) return null;
+  var runsJson = agentdesk.exec("gh", [
+    "run", "list",
+    "--branch", branch,
+    "--repo", repo,
+    "--json", "databaseId,status,conclusion,headSha,event",
+    "--limit", "5"
+  ]);
+  if (!runsJson || runsJson.indexOf("ERROR") === 0) return null;
+  try {
+    var runs = JSON.parse(runsJson);
+    if (!runs || runs.length === 0) return null;
+    if (headSha) {
+      for (var i = 0; i < runs.length; i++) {
+        if (runs[i].headSha === headSha) return runs[i];
+      }
+    }
+    return runs[0];
+  } catch (e) {
+    return null;
+  }
+}
+
+function verifyTrackedPrMergeReadiness(tracking, currentSha) {
+  if (!tracking) return { ok: false, reason: "missing pr_tracking" };
+  if (!tracking.branch) return { ok: false, reason: "missing tracked branch" };
+  if (!tracking.repo_id) return { ok: false, reason: "missing tracked repo" };
+  if (tracking.head_sha && currentSha && tracking.head_sha !== currentSha) {
+    return {
+      ok: false,
+      reason: "tracked head SHA mismatch (" + tracking.head_sha + " != " + currentSha + ")"
+    };
+  }
+  var run = getLatestCiRunForTrackedPr(tracking.repo_id, tracking.branch, currentSha || tracking.head_sha);
+  if (!run) return { ok: false, reason: "no CI run found for tracked branch" };
+  if (run.status !== "completed") {
+    return { ok: false, reason: "CI still " + run.status + " for run " + run.databaseId };
+  }
+  if (run.conclusion !== "success") {
+    return { ok: false, reason: "CI not green (" + run.conclusion + ") for run " + run.databaseId };
+  }
+  return { ok: true, run: run };
+}
+
+function findLatestSessionForWorktree(worktreePath) {
+  if (!worktreePath) return null;
+  var rows = agentdesk.db.query(
+    "SELECT agent_id, thread_channel_id, status, session_key, cwd " +
+    "FROM sessions WHERE cwd = ? OR cwd LIKE ? ORDER BY last_heartbeat DESC LIMIT 1",
+    [worktreePath, worktreePath + "/%"]
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+function listSessionsForWorktree(worktreePath) {
+  if (!worktreePath) return [];
+  return agentdesk.db.query(
+    "SELECT session_key, cwd FROM sessions WHERE cwd = ? OR cwd LIKE ?",
+    [worktreePath, worktreePath + "/%"]
+  );
 }
 
 function getReviewTargets(cardId) {
@@ -317,50 +412,8 @@ function hasActiveReworkDispatch(cardId) {
 }
 
 function findCardForPr(repo, pr) {
-  var cached = agentdesk.db.query(
-    "SELECT key, value FROM kv_meta WHERE key LIKE 'pr:%' AND (expires_at IS NULL OR expires_at > datetime('now'))",
-    []
-  );
-  for (var i = 0; i < cached.length; i++) {
-    try {
-      var info = JSON.parse(cached[i].value || "{}");
-      if (String(info.number) !== String(pr.number)) continue;
-      if (info.repo && info.repo !== repo) continue;
-      var card = loadCardContext(cached[i].key.replace("pr:", ""));
-      if (card) return card;
-    } catch (e) {}
-  }
-
-  var issueNumber = extractIssueNumberFromText(pr.title);
-  if (issueNumber) {
-    var byIssue = agentdesk.db.query(
-      "SELECT id, status, assigned_agent_id, title, github_issue_number, active_thread_id, repo_id " +
-      "FROM kanban_cards WHERE github_issue_number = ? AND (repo_id = ? OR repo_id IS NULL) " +
-      "ORDER BY updated_at DESC LIMIT 1",
-      [issueNumber, repo]
-    );
-    if (byIssue.length > 0) return byIssue[0];
-  }
-
-  var branch = pr.headRefName || pr.branch || "";
-  if (branch) {
-    var dirSuffix = branch.replace(/^wt\//, "");
-    var sessions = agentdesk.db.query(
-      "SELECT agent_id FROM sessions WHERE cwd LIKE ? ORDER BY last_heartbeat DESC LIMIT 1",
-      ["%/worktrees/%" + dirSuffix + "%"]
-    );
-    if (sessions.length > 0 && sessions[0].agent_id) {
-      var byAgent = agentdesk.db.query(
-        "SELECT id, status, assigned_agent_id, title, github_issue_number, active_thread_id, repo_id " +
-        "FROM kanban_cards WHERE assigned_agent_id = ? AND status != 'archived' " +
-        "ORDER BY updated_at DESC LIMIT 1",
-        [sessions[0].agent_id]
-      );
-      if (byAgent.length > 0) return byAgent[0];
-    }
-  }
-
-  return null;
+  var tracking = loadTrackedPrForRepoPr(repo, pr.number);
+  return tracking ? loadCardContext(tracking.card_id) : null;
 }
 
 function resolveCodexNotificationTarget(card) {
@@ -514,28 +567,31 @@ function processCodexPassReview(card, pr, snapshot) {
 }
 
 function processCodexReviewSignals() {
-  var repos = agentdesk.db.query("SELECT id FROM github_repos", []);
-  for (var r = 0; r < repos.length; r++) {
-    var repo = repos[r].id;
-    var prs = listOpenPrs(repo);
-    for (var i = 0; i < prs.length; i++) {
-      var pr = prs[i] || {};
-      pr.repo = repo;
+  var tracked = listTrackedPrRows(
+    "pr_number IS NOT NULL AND state IN ('wait-ci', 'merge')",
+    []
+  );
+  for (var i = 0; i < tracked.length; i++) {
+    var row = tracked[i];
+    if (!row.repo_id || !row.pr_number) continue;
 
-      var snapshot = buildCodexReviewSnapshot(repo, pr.number);
-      if (!snapshot) continue;
+    var snapshot = buildCodexReviewSnapshot(row.repo_id, row.pr_number);
+    if (!snapshot) continue;
 
-      var card = findCardForPr(repo, pr);
-      if (!card) {
-        agentdesk.log.info("[merge] No card mapping for Codex-reviewed PR #" + pr.number + " in " + repo);
-        continue;
-      }
+    var card = loadCardContext(row.card_id);
+    if (!card) continue;
 
-      if (snapshot.hasBlocking) {
-        processCodexBlockingReview(card, pr, snapshot);
-      } else {
-        processCodexPassReview(card, pr, snapshot);
-      }
+    var pr = {
+      number: row.pr_number,
+      repo: row.repo_id,
+      branch: row.branch || "",
+      headRefName: row.branch || ""
+    };
+
+    if (snapshot.hasBlocking) {
+      processCodexBlockingReview(card, pr, snapshot);
+    } else {
+      processCodexPassReview(card, pr, snapshot);
     }
   }
 }
@@ -545,19 +601,63 @@ function processCodexReviewSignals() {
  * Returns true on success, false on failure.
  */
 function enableAutoMerge(prNumber, repo, trackingKey) {
+  var tracking = String(trackingKey || "").indexOf("manual:") === 0
+    ? loadTrackedPrForRepoPr(repo, prNumber)
+    : loadTrackedPrForCard(trackingKey);
+  if (!tracking) {
+    tracking = loadTrackedPrForRepoPr(repo, prNumber);
+  }
+  var trackingId = tracking ? tracking.card_id : trackingKey;
+  var currentSha = getCurrentPrHeadSha(prNumber, repo);
+
+  if (tracking) {
+    var readiness = verifyTrackedPrMergeReadiness(tracking, currentSha || tracking.head_sha);
+    if (!readiness.ok) {
+      agentdesk.log.warn("[merge] Merge pre-check failed for PR #" + prNumber + ": " + readiness.reason);
+      upsertPrTracking(
+        tracking.card_id,
+        tracking.repo_id,
+        tracking.worktree_path,
+        tracking.branch,
+        tracking.pr_number,
+        currentSha || tracking.head_sha,
+        tracking.state || "merge",
+        readiness.reason
+      );
+      agentdesk.kv.set("merge_failed:" + trackingId, JSON.stringify({
+        pr_number: prNumber,
+        error: readiness.reason,
+        timestamp: new Date().toISOString()
+      }), 86400);
+      return false;
+    }
+  }
+
   var snapshot = buildCodexReviewSnapshot(repo, prNumber);
   if (snapshot && snapshot.hasBlocking) {
     agentdesk.log.warn("[merge] Blocking auto-merge for PR #" + prNumber + " due to unresolved Codex P1/P2 comments");
-    agentdesk.kv.set("merge_blocked:" + trackingKey, JSON.stringify({
+    agentdesk.kv.set("merge_blocked:" + trackingId, JSON.stringify({
       pr_number: prNumber,
       review_id: snapshot.triggerReviewId,
       blocked_comments: snapshot.blockingComments.length,
       timestamp: new Date().toISOString()
     }), 86400);
+    if (tracking) {
+      upsertPrTracking(
+        tracking.card_id,
+        tracking.repo_id,
+        tracking.worktree_path,
+        tracking.branch,
+        tracking.pr_number,
+        currentSha || tracking.head_sha,
+        tracking.state || "merge",
+        "unresolved Codex blocking comment"
+      );
+    }
 
     var guardKey = mergeGuardDedupKey(repo, prNumber, snapshot.triggerReviewId);
     if (!agentdesk.kv.get(guardKey)) {
-      var card = findCardForPr(repo, { number: prNumber, repo: repo, title: "", headRefName: "" });
+      var card = tracking ? loadCardContext(tracking.card_id) : null;
       if (card) {
         notifyCodexReview(card, { number: prNumber, repo: repo }, snapshot, "merge-guard", false, true);
       }
@@ -575,16 +675,40 @@ function enableAutoMerge(prNumber, repo, trackingKey) {
 
   if (result && result.indexOf("ERROR") === 0) {
     agentdesk.log.warn("[merge] Auto-merge failed for PR #" + prNumber + ": " + result);
-    agentdesk.kv.set("merge_failed:" + trackingKey, JSON.stringify({
+    agentdesk.kv.set("merge_failed:" + trackingId, JSON.stringify({
       pr_number: prNumber,
       error: result,
       timestamp: new Date().toISOString()
     }), 86400);
+    if (tracking) {
+      upsertPrTracking(
+        tracking.card_id,
+        tracking.repo_id,
+        tracking.worktree_path,
+        tracking.branch,
+        tracking.pr_number,
+        currentSha || tracking.head_sha,
+        tracking.state || "merge",
+        result
+      );
+    }
     return false;
   }
 
   agentdesk.log.info("[merge] Auto-merge enabled for PR #" + prNumber + " (" + strategy + ")");
-  agentdesk.kv.set("merge_pending:" + trackingKey, String(prNumber), 86400);
+  agentdesk.kv.set("merge_pending:" + trackingId, String(prNumber), 86400);
+  if (tracking) {
+    upsertPrTracking(
+      tracking.card_id,
+      tracking.repo_id,
+      tracking.worktree_path,
+      tracking.branch,
+      tracking.pr_number,
+      currentSha || tracking.head_sha,
+      "post-merge-cleanup",
+      null
+    );
+  }
   return true;
 }
 
@@ -661,6 +785,24 @@ function processManualMergeRequests() {
   }
 }
 
+function processTrackedMergeQueue() {
+  var tracked = listTrackedPrRows(
+    "state = 'merge' AND pr_number IS NOT NULL AND repo_id IS NOT NULL",
+    []
+  );
+  for (var i = 0; i < tracked.length; i++) {
+    var row = tracked[i];
+    var card = loadCardContext(row.card_id);
+    if (!card) continue;
+    var cfg = agentdesk.pipeline.resolveForCard(card.id);
+    if (!agentdesk.pipeline.isTerminal(card.status, cfg)) continue;
+
+    var author = getPrAuthor(row.pr_number, row.repo_id);
+    if (!isAllowedAuthor(author)) continue;
+    enableAutoMerge(row.pr_number, row.repo_id, row.card_id);
+  }
+}
+
 /**
  * Find the PR associated with a card by looking up the agent's worktree branch.
  *
@@ -671,91 +813,31 @@ function processManualMergeRequests() {
  *   4. Find PR by branch name via gh CLI
  */
 function findPrForCard(cardId) {
-  // Check kv cache first
-  var cached = agentdesk.kv.get("pr:" + cardId);
-  if (cached) {
-    try {
-      return JSON.parse(cached);
-    } catch(e) {}
-  }
-
-  // Get card's agent and repo info
-  var cards = agentdesk.db.query(
-    "SELECT assigned_agent_id, github_issue_url FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  if (!cards.length || !cards[0].assigned_agent_id) return null;
-
-  var agentId = cards[0].assigned_agent_id;
-  var repo = extractRepo(cards[0].github_issue_url);
-  if (!repo) {
-    // Fallback: use first registered repo
-    var repos = agentdesk.db.query("SELECT id FROM github_repos LIMIT 1", []);
-    if (repos.length) repo = repos[0].id;
-  }
-  if (!repo) return null;
-
-  // Find agent's sessions with worktree paths (cwd contains "worktrees/")
-  var sessions = agentdesk.db.query(
-    "SELECT cwd FROM sessions WHERE agent_id = ? AND cwd LIKE '%worktrees/%' ORDER BY last_heartbeat DESC LIMIT 5",
-    [agentId]
-  );
-
-  for (var i = 0; i < sessions.length; i++) {
-    var branch = getBranchFromWorktree(sessions[i].cwd);
-    if (!branch) continue;
-
-    var prJson = agentdesk.exec("gh", [
-      "pr", "list",
-      "--head", branch,
-      "--state", "open",
-      "--json", "number,headRefName",
-      "--limit", "1",
-      "--repo", repo
-    ]);
-
-    if (prJson && prJson.indexOf("ERROR") !== 0) {
-      try {
-        var prs = JSON.parse(prJson);
-        if (prs.length > 0) {
-          var pr = { number: prs[0].number, branch: branch, repo: repo };
-          // Cache for future lookups
-          agentdesk.kv.set("pr:" + cardId, JSON.stringify(pr), 86400);
-          return pr;
-        }
-      } catch(e) {}
+  var tracking = loadTrackedPrForCard(cardId);
+  if (!tracking) return null;
+  if ((!tracking.pr_number || !tracking.head_sha) && tracking.repo_id && tracking.branch) {
+    var discovered = findOpenPrByTrackedBranch(tracking.repo_id, tracking.branch);
+    if (discovered) {
+      upsertPrTracking(
+        tracking.card_id,
+        tracking.repo_id,
+        tracking.worktree_path,
+        discovered.branch || tracking.branch,
+        discovered.number,
+        discovered.sha,
+        tracking.state || "merge",
+        null
+      );
+      tracking = loadTrackedPrForCard(cardId) || tracking;
     }
   }
-
-  // Fallback: search by card ID in PR title
-  var searchJson = agentdesk.exec("gh", [
-    "pr", "list",
-    "--state", "open",
-    "--search", cardId,
-    "--json", "number,headRefName",
-    "--limit", "1",
-    "--repo", repo
-  ]);
-
-  if (searchJson && searchJson.indexOf("ERROR") !== 0) {
-    try {
-      var found = JSON.parse(searchJson);
-      if (found.length > 0) {
-        var pr = { number: found[0].number, branch: found[0].headRefName, repo: repo };
-        agentdesk.kv.set("pr:" + cardId, JSON.stringify(pr), 86400);
-        return pr;
-      }
-    } catch(e) {}
-  }
-
-  return null;
-}
-
-function extractRepo(githubUrl) {
-  if (!githubUrl) return null;
-  // https://github.com/owner/repo/issues/42 → owner/repo
-  var match = githubUrl.match(/github\.com\/([^\/]+\/[^\/]+)/);
-  return match ? match[1] : null;
+  if (!tracking.pr_number || !tracking.repo_id) return null;
+  return {
+    number: tracking.pr_number,
+    branch: tracking.branch,
+    repo: tracking.repo_id,
+    sha: tracking.head_sha
+  };
 }
 
 function getBranchFromWorktree(cwd) {
@@ -772,95 +854,105 @@ function getBranchFromWorktree(cwd) {
  * Checks recently merged PRs and removes their worktree + branch.
  */
 function cleanupMergedWorktrees() {
-  var repos = agentdesk.db.query("SELECT id FROM github_repos", []);
-  for (var r = 0; r < repos.length; r++) {
-    var repo = repos[r].id;
-    var mergedJson = agentdesk.exec("gh", [
-      "pr", "list",
-      "--state", "merged",
-      "--limit", "10",
-      "--json", "number,headRefName,mergedAt",
-      "--repo", repo
-    ]);
-
-    if (!mergedJson || mergedJson.indexOf("ERROR") === 0) continue;
-
+  var tracked = listTrackedPrRows(
+    "state = 'post-merge-cleanup' AND pr_number IS NOT NULL AND repo_id IS NOT NULL",
+    []
+  );
+  for (var i = 0; i < tracked.length; i++) {
+    var row = tracked[i];
     try {
-      var merged = JSON.parse(mergedJson);
-      for (var i = 0; i < merged.length; i++) {
-        var branch = merged[i].headRefName;
-        if (!branch || branch.indexOf("wt/") !== 0) continue;
+      var prJson = agentdesk.exec("gh", [
+        "pr", "view", String(row.pr_number),
+        "--json", "mergedAt,headRefName",
+        "--repo", row.repo_id
+      ]);
+      if (!prJson || prJson.indexOf("ERROR") === 0) continue;
 
-        // Match worktree dir by the part after "wt/" — dir names don't have "wt/" prefix
-        // Branch: "wt/claude-channel-20260329-070702" → dir suffix: "claude-channel-20260329-070702"
-        var dirSuffix = branch.replace(/^wt\//, "");
-        var sessions = agentdesk.db.query(
-          "SELECT session_key, cwd FROM sessions WHERE cwd LIKE ?",
-          ["%/worktrees/%" + dirSuffix + "%"]
+      var pr = JSON.parse(prJson);
+      if (!pr || !pr.mergedAt) continue;
+
+      var branch = row.branch || pr.headRefName;
+      var cwd = row.worktree_path;
+      if (!cwd || !branch) {
+        upsertPrTracking(
+          row.card_id,
+          row.repo_id,
+          row.worktree_path,
+          branch,
+          row.pr_number,
+          row.head_sha,
+          "post-merge-cleanup",
+          "cleanup requires canonical worktree_path and branch"
         );
+        continue;
+      }
 
-        if (sessions.length > 0) {
-          var inUseBy = null;
-          for (var s = 0; s < sessions.length; s++) {
-            var tmuxName = sessionKeyToTmuxName(sessions[s].session_key);
-            if (tmuxSessionHasLivePane(tmuxName)) {
-              inUseBy = sessions[s];
-              break;
-            }
-          }
-          if (inUseBy) {
-            agentdesk.log.info(
-              "[merge] Skipping cleanup for merged worktree still in use: " +
-              branch + " at " + inUseBy.cwd + " (" + inUseBy.session_key + ")"
-            );
-            continue;
-          }
-
-          var cwd = sessions[0].cwd;
-          agentdesk.log.info("[merge] Cleaning up merged worktree: " + branch + " at " + cwd);
-
-          // Discover the main repo root dynamically via git
-          var mainRepo = agentdesk.exec("git", [
-            "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"
-          ]);
-          if (mainRepo && mainRepo.indexOf("ERROR") !== 0) {
-            // git-common-dir returns e.g. "/path/to/repo/.git" — strip /.git
-            mainRepo = mainRepo.replace(/\/.git\/?$/, "");
-            agentdesk.exec("git", ["-C", mainRepo, "worktree", "remove", cwd, "--force"]);
-            agentdesk.exec("git", ["-C", mainRepo, "branch", "-d", branch]);
-            agentdesk.log.info("[merge] Worktree removed: " + cwd);
-          } else {
-            agentdesk.log.warn("[merge] Could not determine main repo for worktree: " + cwd);
-          }
-        }
-
-        // Clear kv entries — find cardId by PR number stored in merge_pending
-        // merge_pending is stored as merge_pending:{cardId} = prNumber
-        // Scan for matching PR number to find the right key
-        var prNum = String(merged[i].number);
-        var pendingCards = agentdesk.db.query(
-          "SELECT key FROM kv_meta WHERE key LIKE 'merge_pending:%' AND value = ?",
-          [prNum]
-        );
-        for (var pc = 0; pc < pendingCards.length; pc++) {
-          agentdesk.kv.delete(pendingCards[pc].key);
-        }
-        // merge_failed is also stored as merge_failed:{cardId}
-        var failedCards = agentdesk.db.query(
-          "SELECT key FROM kv_meta WHERE key LIKE 'merge_failed:%'",
-          []
-        );
-        for (var fc = 0; fc < failedCards.length; fc++) {
-          try {
-            var val = agentdesk.kv.get(failedCards[fc].key);
-            if (val && JSON.parse(val).pr_number === merged[i].number) {
-              agentdesk.kv.delete(failedCards[fc].key);
-            }
-          } catch(e2) {}
+      var sessions = listSessionsForWorktree(cwd);
+      var inUseBy = null;
+      for (var s = 0; s < sessions.length; s++) {
+        var tmuxName = sessionKeyToTmuxName(sessions[s].session_key);
+        if (tmuxSessionHasLivePane(tmuxName)) {
+          inUseBy = sessions[s];
+          break;
         }
       }
-    } catch(e) {
-      agentdesk.log.warn("[merge] Cleanup error: " + e);
+      if (inUseBy) {
+        agentdesk.log.info(
+          "[merge] Skipping cleanup for merged worktree still in use: " +
+          branch + " at " + inUseBy.cwd + " (" + inUseBy.session_key + ")"
+        );
+        continue;
+      }
+
+      agentdesk.log.info("[merge] Cleaning up merged worktree: " + branch + " at " + cwd);
+      var mainRepo = agentdesk.exec("git", [
+        "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"
+      ]);
+      if (!mainRepo || mainRepo.indexOf("ERROR") === 0) {
+        upsertPrTracking(
+          row.card_id,
+          row.repo_id,
+          row.worktree_path,
+          branch,
+          row.pr_number,
+          row.head_sha,
+          "post-merge-cleanup",
+          "could not determine main repo for worktree"
+        );
+        agentdesk.log.warn("[merge] Could not determine main repo for worktree: " + cwd);
+        continue;
+      }
+
+      mainRepo = mainRepo.replace(/\/.git\/?$/, "");
+      agentdesk.exec("git", ["-C", mainRepo, "worktree", "remove", cwd, "--force"]);
+      agentdesk.exec("git", ["-C", mainRepo, "branch", "-d", branch]);
+      agentdesk.log.info("[merge] Worktree removed: " + cwd);
+
+      upsertPrTracking(
+        row.card_id,
+        row.repo_id,
+        cwd,
+        branch,
+        row.pr_number,
+        row.head_sha,
+        "closed",
+        null
+      );
+      agentdesk.kv.delete("merge_pending:" + row.card_id);
+      agentdesk.kv.delete("merge_failed:" + row.card_id);
+      agentdesk.kv.delete("merge_blocked:" + row.card_id);
+    } catch (e) {
+      agentdesk.log.warn("[merge] Cleanup error for card " + row.card_id + ": " + e);
+      upsertPrTracking(
+        row.card_id,
+        row.repo_id,
+        row.worktree_path,
+        row.branch,
+        row.pr_number,
+        row.head_sha,
+        "post-merge-cleanup",
+        String(e)
+      );
     }
   }
 }
@@ -875,89 +967,92 @@ function cleanupMergedWorktrees() {
  *   4. Fallback: notify agent's main channel if no session found
  */
 function detectConflictingPrs() {
-  var repos = agentdesk.db.query("SELECT id FROM github_repos", []);
-  for (var r = 0; r < repos.length; r++) {
-    var repo = repos[r].id;
-    var prsJson = agentdesk.exec("gh", [
-      "pr", "list",
-      "--state", "open",
+  var tracked = listTrackedPrRows(
+    "pr_number IS NOT NULL AND repo_id IS NOT NULL AND state IN ('wait-ci', 'merge', 'post-merge-cleanup')",
+    []
+  );
+  for (var i = 0; i < tracked.length; i++) {
+    var row = tracked[i];
+    var prJson = agentdesk.exec("gh", [
+      "pr", "view", String(row.pr_number),
       "--json", "number,headRefName,mergeable,title",
-      "--repo", repo
+      "--repo", row.repo_id
     ]);
-
-    if (!prsJson || prsJson.indexOf("ERROR") === 0) continue;
+    if (!prJson || prJson.indexOf("ERROR") === 0) continue;
 
     try {
-      var prs = JSON.parse(prsJson);
-      for (var i = 0; i < prs.length; i++) {
-        if (prs[i].mergeable !== "CONFLICTING") continue;
+      var pr = JSON.parse(prJson);
+      if (!pr || pr.mergeable !== "CONFLICTING") continue;
 
-        var prNum = prs[i].number;
-        var branch = prs[i].headRefName;
-        var title = prs[i].title;
-        var dirSuffix = branch.replace(/^wt\//, "");
+      var prNum = pr.number;
+      var title = pr.title;
+      agentdesk.log.warn("[merge] PR #" + prNum + " has conflicts: " + title);
 
-        agentdesk.log.warn("[merge] PR #" + prNum + " has conflicts: " + title);
+      var session = findLatestSessionForWorktree(row.worktree_path);
+      var card = loadCardContext(row.card_id);
+      if (session && session.thread_channel_id) {
+        var isAlive = session.status === "working" || session.status === "idle";
+        if (isAlive) {
+          var msgKey = "conflict_messaged:" + prNum;
+          if (agentdesk.kv.get(msgKey)) continue;
 
-        // Find session with thread info for this branch
-        var sessions = agentdesk.db.query(
-          "SELECT agent_id, thread_channel_id, status, session_key, cwd " +
-          "FROM sessions WHERE cwd LIKE ? ORDER BY last_heartbeat DESC LIMIT 1",
-          ["%/worktrees/%" + dirSuffix + "%"]
-        );
-
-        if (sessions.length > 0 && sessions[0].thread_channel_id) {
-          var session = sessions[0];
-          var isAlive = session.status === "working" || session.status === "idle";
-
-          if (isAlive) {
-            // Path A: thread session alive → send message directly
-            var msgKey = "conflict_messaged:" + prNum;
-            if (agentdesk.kv.get(msgKey)) continue;
-
-            agentdesk.message.queue(
-              session.thread_channel_id,
-              "⚠️ PR #" + prNum + " has merge conflicts with main.\n" +
-              "Please rebase: `git fetch origin main && git rebase origin/main`\n" +
-              "Then force push: `git push --force-with-lease`",
-              "announce",
-              "merge-automation"
-            );
-            agentdesk.kv.set(msgKey, "true", 1800); // 30min TTL
-            agentdesk.log.info("[merge] Sent rebase message to thread " + session.thread_channel_id);
-          } else {
-            // Path B: thread session dead → create dispatch for new thread
-            var dispKey = "conflict_dispatched:" + prNum;
-            if (agentdesk.kv.get(dispKey)) continue;
-
-            var card = findCardForAgent(session.agent_id);
-            if (card) {
-              try {
-                agentdesk.dispatch.create(
-                  card.id,
-                  session.agent_id,
-                  "implementation",
-                  "[Rebase] PR #" + prNum + " — resolve merge conflicts with main"
-                );
-                agentdesk.kv.set(dispKey, "true", 7200); // 2h TTL
-                agentdesk.log.info("[merge] Created rebase dispatch for agent " + session.agent_id);
-              } catch(e) {
-                agentdesk.log.info("[merge] Dispatch create failed (likely pending exists): " + e);
-                // Fallback to main channel message
-                notifyAgentMainChannel(session.agent_id, prNum, title);
-              }
-            } else {
-              notifyAgentMainChannel(session.agent_id, prNum, title);
-            }
-          }
-        } else if (sessions.length > 0) {
-          // Session found but no thread — notify main channel
-          notifyAgentMainChannel(sessions[0].agent_id, prNum, title);
-        } else {
-          agentdesk.log.info("[merge] No session found for branch " + branch);
+          agentdesk.message.queue(
+            session.thread_channel_id,
+            "⚠️ PR #" + prNum + " has merge conflicts with main.\n" +
+            "Please rebase: `git fetch origin main && git rebase origin/main`\n" +
+            "Then force push: `git push --force-with-lease`",
+            "announce",
+            "merge-automation"
+          );
+          agentdesk.kv.set(msgKey, "true", 1800);
+          agentdesk.log.info("[merge] Sent rebase message to thread " + session.thread_channel_id);
+          continue;
         }
+
+        var dispKey = "conflict_dispatched:" + prNum;
+        if (agentdesk.kv.get(dispKey)) continue;
+        if (card && session.agent_id) {
+          try {
+            agentdesk.dispatch.create(
+              card.id,
+              session.agent_id,
+              "implementation",
+              "[Rebase] PR #" + prNum + " — resolve merge conflicts with main"
+            );
+            agentdesk.kv.set(dispKey, "true", 7200);
+            agentdesk.log.info("[merge] Created rebase dispatch for agent " + session.agent_id);
+            continue;
+          } catch (e) {
+            agentdesk.log.info("[merge] Dispatch create failed (likely pending exists): " + e);
+          }
+        }
+        if (session.agent_id) {
+          notifyAgentMainChannel(session.agent_id, prNum, title);
+        }
+        continue;
       }
-    } catch(e) {
+
+      if (card && card.active_thread_id) {
+        var activeKey = "conflict_messaged:" + prNum;
+        if (agentdesk.kv.get(activeKey)) continue;
+        agentdesk.message.queue(
+          card.active_thread_id,
+          "⚠️ PR #" + prNum + " has merge conflicts with main.\n" +
+          "Please rebase: `git fetch origin main && git rebase origin/main`\n" +
+          "Then force push: `git push --force-with-lease`",
+          "announce",
+          "merge-automation"
+        );
+        agentdesk.kv.set(activeKey, "true", 1800);
+        continue;
+      }
+
+      if (card && card.assigned_agent_id) {
+        notifyAgentMainChannel(card.assigned_agent_id, prNum, title);
+      } else {
+        agentdesk.log.info("[merge] No tracked session found for conflicting PR #" + prNum);
+      }
+    } catch (e) {
       agentdesk.log.warn("[merge] Conflict detection error: " + e);
     }
   }

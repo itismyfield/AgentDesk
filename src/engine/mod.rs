@@ -43,6 +43,12 @@ pub struct PolicyEngine {
     db: crate::db::Db,
 }
 
+#[derive(Clone)]
+pub struct PolicyEngineHandle {
+    inner: std::sync::Weak<Mutex<PolicyEngineInner>>,
+    db: crate::db::Db,
+}
+
 /// Summary of a loaded policy (for the /api/policies endpoint).
 #[derive(serde::Serialize)]
 pub struct PolicyInfo {
@@ -55,6 +61,7 @@ pub struct PolicyInfo {
 impl PolicyEngine {
     /// Create a new policy engine, initializing QuickJS and loading policies.
     pub fn new(config: &Config, db: Db) -> Result<Self> {
+        let supervisor_bridge = crate::supervisor::BridgeHandle::new();
         let runtime =
             Runtime::new().map_err(|e| anyhow::anyhow!("QuickJS runtime creation failed: {e}"))?;
         let context = Context::full(&runtime)
@@ -62,7 +69,7 @@ impl PolicyEngine {
 
         // Register bridge ops (agentdesk.*)
         context.with(|ctx| {
-            ops::register_globals(&ctx, db.clone())
+            ops::register_globals_with_supervisor(&ctx, db.clone(), supervisor_bridge.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to register bridge ops: {e}"))
         })?;
 
@@ -81,9 +88,10 @@ impl PolicyEngine {
 
             // Register bridge ops in the reload context too
             reload_ctx.with(|ctx| {
-                ops::register_globals(&ctx, db.clone()).map_err(|e| {
-                    anyhow::anyhow!("Failed to register bridge ops in reload ctx: {e}")
-                })
+                ops::register_globals_with_supervisor(&ctx, db.clone(), supervisor_bridge.clone())
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to register bridge ops in reload ctx: {e}")
+                    })
             })?;
 
             match loader::start_hot_reload(policies_dir.clone(), reload_ctx, store.clone()) {
@@ -105,7 +113,7 @@ impl PolicyEngine {
             policies_dir.display()
         );
 
-        Ok(Self {
+        let engine = Self {
             inner: Arc::new(Mutex::new(PolicyEngineInner {
                 _runtime: runtime,
                 context,
@@ -113,7 +121,17 @@ impl PolicyEngine {
                 _watcher: watcher,
             })),
             db: db.clone(),
-        })
+        };
+        supervisor_bridge.attach_engine(&engine);
+
+        Ok(engine)
+    }
+
+    pub fn downgrade(&self) -> PolicyEngineHandle {
+        PolicyEngineHandle {
+            inner: Arc::downgrade(&self.inner),
+            db: self.db.clone(),
+        }
     }
 
     /// Fire a hook with the given JSON payload. All policies that registered
@@ -176,6 +194,15 @@ impl PolicyEngine {
     pub fn drain_startup_hooks(&self) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}] 🔄 [startup] draining deferred hooks from DB");
+
+        // Record server boot time for orphan recovery grace period
+        if let Ok(conn) = self.db.separate_conn() {
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_boot_at', datetime('now'))",
+                [],
+            )
+            .ok();
+        }
 
         loop {
             // Read a batch and mark as 'processing' so nested drain in try_fire_hook
@@ -688,6 +715,15 @@ impl PolicyEngine {
     }
 }
 
+impl PolicyEngineHandle {
+    pub fn upgrade(&self) -> Option<PolicyEngine> {
+        Some(PolicyEngine {
+            inner: self.inner.upgrade()?,
+            db: self.db.clone(),
+        })
+    }
+}
+
 /// Convert a serde_json::Value to a rquickjs::Value.
 fn json_to_js<'js>(
     ctx: &rquickjs::Ctx<'js>,
@@ -879,6 +915,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(val, "fired");
+    }
+
+    #[test]
+    fn test_triage_policy_uses_typed_facade() {
+        let dir = tempfile::tempdir().unwrap();
+        let triage_src = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/triage-rules.js"),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("triage-rules.js"), triage_src).unwrap();
+
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, discord_channel_id) \
+                 VALUES ('ch-backend', 'Backend', 'claude', '111')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, priority, metadata, github_issue_number, github_issue_url, created_at, updated_at) \
+                 VALUES ('triage-card', 'Typed facade triage', 'backlog', 'medium', '{\"labels\":\"agent:backend priority:high\"}', 348, 'https://github.com/itismyfield/AgentDesk/issues/348', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+        engine
+            .fire_hook(Hook::OnTick, serde_json::json!({}))
+            .unwrap();
+
+        let conn = db.lock().unwrap();
+        let (assigned_agent_id, priority): (Option<String>, String) = conn
+            .query_row(
+                "SELECT assigned_agent_id, priority FROM kanban_cards WHERE id = 'triage-card'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(assigned_agent_id.as_deref(), Some("ch-backend"));
+        assert_eq!(priority, "high");
     }
 
     #[test]

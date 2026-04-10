@@ -1,7 +1,7 @@
 # Phase 상세 — 수집, 위생정리, 작성, 초기화
 
 ## Phase 1: 수집
-1. `memory-backend.json`의 `file.auto_memory_root` 패턴을 기준으로 `*.md` 파일을 수집한다
+1. `agentdesk.yaml`의 `memory.file.auto_memory_root` 패턴을 기준으로 `*.md` 파일을 수집한다 (`memory:`가 없으면 legacy `memory-backend.json` fallback)
 2. `MEMORY.md`는 인덱스 파일로만 취급하고 본문 merge 대상에서는 제외한다
 3. 각 파일을 읽고 출처 워크스페이스와 roleId를 기록한다
 4. 파일이 없으면 "병합 대상 없음"으로 보고하고 종료한다

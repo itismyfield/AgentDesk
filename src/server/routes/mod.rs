@@ -47,19 +47,43 @@ use crate::services::discord::health::HealthRegistry;
 pub struct AppState {
     pub db: Db,
     pub engine: PolicyEngine,
+    pub config: Arc<crate::config::Config>,
     pub broadcast_tx: crate::server::ws::BroadcastTx,
     pub batch_buffer: crate::server::ws::BatchBuffer,
     pub health_registry: Option<Arc<HealthRegistry>>,
 }
 
+impl AppState {
+    pub fn dispatch_service(&self) -> crate::services::dispatches::DispatchService {
+        crate::services::dispatches::DispatchService::new(self.db.clone(), self.engine.clone())
+    }
+
+    pub fn queue_service(&self) -> crate::services::queue::QueueService {
+        crate::services::queue::QueueService::new(self.db.clone())
+    }
+
+    pub fn settings_service(&self) -> crate::services::settings::SettingsService {
+        crate::services::settings::SettingsService::new(self.db.clone(), self.config.clone())
+    }
+}
+
 #[cfg(test)]
 impl AppState {
     pub fn test_state(db: Db, engine: PolicyEngine) -> Self {
+        Self::test_state_with_config(db, engine, crate::config::Config::default())
+    }
+
+    pub fn test_state_with_config(
+        db: Db,
+        engine: PolicyEngine,
+        config: crate::config::Config,
+    ) -> Self {
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         Self {
             db,
             engine,
+            config: Arc::new(config),
             broadcast_tx: tx,
             batch_buffer: buf,
             health_registry: None,
@@ -70,6 +94,7 @@ impl AppState {
 pub fn api_router(
     db: Db,
     engine: PolicyEngine,
+    config: crate::config::Config,
     broadcast_tx: crate::server::ws::BroadcastTx,
     batch_buffer: crate::server::ws::BatchBuffer,
     health_registry: Option<Arc<HealthRegistry>>,
@@ -77,6 +102,7 @@ pub fn api_router(
     let state = AppState {
         db,
         engine,
+        config: Arc::new(config),
         broadcast_tx,
         batch_buffer,
         health_registry,
@@ -418,6 +444,10 @@ pub fn api_router(
         )
         .route("/auto-queue/runs/{id}", patch(auto_queue::update_run))
         .route("/auto-queue/reorder", patch(auto_queue::reorder))
+        .route(
+            "/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
+            post(auto_queue::reset_slot_thread),
+        )
         .route("/auto-queue/reset", post(auto_queue::reset))
         .route("/auto-queue/pause", post(auto_queue::pause))
         .route("/auto-queue/resume", post(auto_queue::resume_run))

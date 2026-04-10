@@ -15,6 +15,8 @@
  *      - ambiguous/exhausted: escalate to pending_decision
  */
 
+var prTracking = agentdesk.prTracking;
+
 var CI_MAX_RETRIES = 3;
 var CI_LOG_MAX_LINES = 50;
 
@@ -47,109 +49,22 @@ var CODE_JOB_PATTERNS = [
   "scripts"
 ];
 
-// ── Helper: Extract owner/repo from card's github_issue_url ──
-
 function getRepoForCard(cardId) {
-  var cards = agentdesk.db.query(
-    "SELECT github_issue_url FROM kanban_cards WHERE id = ?", [cardId]
-  );
-  if (cards.length === 0 || !cards[0].github_issue_url) return null;
-  // Extract "owner/repo" from "https://github.com/owner/repo/issues/123"
-  var match = cards[0].github_issue_url.match(/github\.com\/([^/]+\/[^/]+)/);
-  return match ? match[1] : null;
+  return prTracking.repoForCard(cardId);
 }
 
-// ── Helper: Find PR branch for card (same pattern as merge-automation.js) ──
+function loadPrTracking(cardId) {
+  return prTracking.load(cardId, { fallback_state: "wait-ci" });
+}
+
+function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError) {
+  return prTracking.upsert(cardId, repoId, worktreePath, branch, prNumber, headSha, state, lastError);
+}
+
+// ── Helper: Find canonical PR info for card via pr_tracking ──
 
 function findPrInfoForCard(cardId) {
-  // Check kv cache first (merge-automation stores pr:{cardId})
-  var cached = agentdesk.kv.get("pr:" + cardId);
-  if (cached) {
-    try {
-      return JSON.parse(cached);
-    } catch (e) {}
-  }
-
-  var cards = agentdesk.db.query(
-    "SELECT assigned_agent_id, github_issue_url FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  if (cards.length === 0 || !cards[0].assigned_agent_id) return null;
-
-  var agentId = cards[0].assigned_agent_id;
-  var repo = getRepoForCard(cardId);
-  if (!repo) {
-    var repos = agentdesk.db.query("SELECT id FROM github_repos LIMIT 1", []);
-    if (repos.length > 0) repo = repos[0].id;
-  }
-  if (!repo) return null;
-
-  // Find agent's sessions with worktree paths
-  var sessions = agentdesk.db.query(
-    "SELECT cwd FROM sessions WHERE agent_id = ? AND cwd LIKE '%worktrees/%' ORDER BY last_heartbeat DESC LIMIT 5",
-    [agentId]
-  );
-
-  for (var i = 0; i < sessions.length; i++) {
-    var cwd = sessions[i].cwd;
-    if (!cwd) continue;
-    var branchResult = agentdesk.exec("git", ["-C", cwd, "branch", "--show-current"]);
-    if (!branchResult || branchResult.indexOf("ERROR") === 0 || !branchResult.trim()) continue;
-    var branch = branchResult.trim();
-
-    var prJson = agentdesk.exec("gh", [
-      "pr", "list",
-      "--head", branch,
-      "--state", "open",
-      "--json", "number,headRefName,headRefOid",
-      "--limit", "1",
-      "--repo", repo
-    ]);
-
-    if (prJson && prJson.indexOf("ERROR") !== 0) {
-      try {
-        var prs = JSON.parse(prJson);
-        if (prs.length > 0) {
-          var pr = {
-            number: prs[0].number,
-            branch: prs[0].headRefName,
-            sha: prs[0].headRefOid,
-            repo: repo
-          };
-          agentdesk.kv.set("pr:" + cardId, JSON.stringify(pr), 86400);
-          return pr;
-        }
-      } catch (e) {}
-    }
-  }
-
-  // Fallback: search by card ID in PR title
-  var searchJson = agentdesk.exec("gh", [
-    "pr", "list",
-    "--state", "open",
-    "--search", cardId,
-    "--json", "number,headRefName,headRefOid",
-    "--limit", "1",
-    "--repo", repo
-  ]);
-
-  if (searchJson && searchJson.indexOf("ERROR") !== 0) {
-    try {
-      var found = JSON.parse(searchJson);
-      if (found.length > 0) {
-        var pr = {
-          number: found[0].number,
-          branch: found[0].headRefName,
-          sha: found[0].headRefOid,
-          repo: repo
-        };
-        agentdesk.kv.set("pr:" + cardId, JSON.stringify(pr), 86400);
-        return pr;
-      }
-    } catch (e) {}
-  }
-
-  return null;
+  return prTracking.resolvePrInfoForCard(cardId, { fallback_state: "wait-ci" });
 }
 
 // ── Helper: Get current PR head SHA ──
@@ -323,12 +238,14 @@ function processWaitingCard(cardId, blockedReason) {
   var branch = pr.branch;
 
   // ── Head SHA change detection ──
-  var storedSha = agentdesk.kv.get("ci:" + cardId + ":head_sha");
+  var tracked = loadPrTracking(cardId) || {};
+  var storedSha = tracked.head_sha || agentdesk.kv.get("ci:" + cardId + ":head_sha");
   var currentSha = getCurrentPrSha(pr.number, repo);
   if (currentSha && storedSha && currentSha !== storedSha) {
     agentdesk.log.info("[ci-recovery] Head SHA changed for card " + cardId + " — resetting recovery state");
     agentdesk.kv.set("ci:" + cardId + ":retry_count", "0", 86400);
     agentdesk.kv.delete("ci:" + cardId + ":last_run_id");
+    upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha, "wait-ci", null);
     agentdesk.db.execute(
       "UPDATE kanban_cards SET blocked_reason = 'ci:waiting' WHERE id = ?",
       [cardId]
@@ -336,6 +253,7 @@ function processWaitingCard(cardId, blockedReason) {
   }
   if (currentSha) {
     agentdesk.kv.set("ci:" + cardId + ":head_sha", currentSha, 86400);
+    upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha, "wait-ci", null);
   }
 
   // ── Get CI runs ──
@@ -365,8 +283,16 @@ function processWaitingCard(cardId, blockedReason) {
     return;
   }
 
-  // Use the most recent run
+  // Prefer the most recent run for the tracked head SHA.
   var run = runs[0];
+  if (currentSha) {
+    for (var idx = 0; idx < runs.length; idx++) {
+      if (runs[idx].headSha === currentSha) {
+        run = runs[idx];
+        break;
+      }
+    }
+  }
   var runId = run.databaseId;
 
   // ── Dedup: skip if we already processed this run ──
@@ -393,6 +319,7 @@ function processWaitingCard(cardId, blockedReason) {
   // ── CI passed ──
   if (run.conclusion === "success") {
     agentdesk.log.info("[ci-recovery] CI passed for card " + cardId + " (run " + runId + ")");
+    upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "merge", null);
     agentdesk.db.execute(
       "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = ?",
       [cardId]
@@ -425,6 +352,7 @@ function processWaitingCard(cardId, blockedReason) {
 
       if (rerunResult && rerunResult.indexOf("ERROR") === 0) {
         agentdesk.log.warn("[ci-recovery] Rerun failed for run " + runId + ": " + rerunResult);
+        upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "wait-ci", "CI rerun failed: " + rerunResult);
         escalateToPendingDecision(cardId, "CI rerun failed: " + rerunResult);
         return;
       }
@@ -438,6 +366,7 @@ function processWaitingCard(cardId, blockedReason) {
       agentdesk.kv.delete("ci:" + cardId + ":last_run_id");
       agentdesk.log.info("[ci-recovery] Rerunning failed jobs for card " + cardId + " (retry " + (retryCount + 1) + "/" + CI_MAX_RETRIES + ")");
     } else {
+      upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "wait-ci", "CI transient failure — max retries exhausted");
       escalateToPendingDecision(cardId,
         "CI transient failure — max retries (" + CI_MAX_RETRIES + ") exhausted for run " + runId);
     }
@@ -481,6 +410,7 @@ function processWaitingCard(cardId, blockedReason) {
     }
 
     // Move card back to in_progress for rework
+    upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "wait-ci", "CI code failure: " + classification.reason);
     agentdesk.db.execute(
       "UPDATE kanban_cards SET blocked_reason = 'ci:rework' WHERE id = ?",
       [cardId]
@@ -497,6 +427,7 @@ function processWaitingCard(cardId, blockedReason) {
 
   } else {
     // ambiguous
+    upsertPrTracking(cardId, repo, pr.worktree_path, branch, pr.number, currentSha || pr.sha, "wait-ci", "CI failure ambiguous: " + classification.reason);
     escalateToPendingDecision(cardId,
       "CI failure — ambiguous classification for run " + runId + ": " + classification.reason);
   }
@@ -509,9 +440,14 @@ var ciRecovery = {
   priority: 46,
 
   onTick1min: function() {
-    // Find all cards waiting for CI
+    prTracking.importLegacyOnce("wait-ci");
+
+    // Find canonical PR lifecycle entries that are waiting for CI.
     var cards = agentdesk.db.query(
-      "SELECT id, blocked_reason FROM kanban_cards WHERE blocked_reason LIKE 'ci:%'",
+      "SELECT p.card_id AS id, c.blocked_reason AS blocked_reason " +
+      "FROM pr_tracking p " +
+      "JOIN kanban_cards c ON c.id = p.card_id " +
+      "WHERE p.state = 'wait-ci'",
       []
     );
 

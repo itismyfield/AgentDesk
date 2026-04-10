@@ -1177,7 +1177,6 @@ export interface AutoQueueRun {
   created_at: number;
   completed_at: number | null;
   max_concurrent_threads?: number;
-  max_concurrent_per_agent?: number;
   thread_group_count?: number;
 }
 
@@ -1195,6 +1194,7 @@ export interface DispatchQueueEntry {
   github_issue_number?: number | null;
   github_repo?: string | null;
   thread_group?: number;
+  batch_phase?: number;
 }
 
 export interface ThreadGroupStatus {
@@ -1236,21 +1236,21 @@ export async function generateAutoQueue(
   run: AutoQueueRun;
   entries: DispatchQueueEntry[];
 }> {
+  const body: Record<string, unknown> = {
+    repo: repo ?? null,
+    agent_id: agentId ?? null,
+    mode: mode ?? "priority-sort",
+    parallel: mode === "similarity-aware" || undefined,
+  };
   return request("/api/auto-queue/generate", {
     method: "POST",
-    body: JSON.stringify({
-      repo: repo ?? null,
-      agent_id: agentId ?? null,
-      mode: mode ?? "priority-sort",
-      parallel: mode === "similarity-aware" || undefined,
-    }),
+    body: JSON.stringify(body),
   });
 }
 
 export async function activateAutoQueue(
   repo?: string | null,
   agentId?: string | null,
-  unifiedThread?: boolean,
 ): Promise<{
   dispatched: KanbanCard[];
   count: number;
@@ -1258,7 +1258,6 @@ export async function activateAutoQueue(
   const body: Record<string, unknown> = {};
   if (repo) body.repo = repo;
   if (agentId) body.agent_id = agentId;
-  if (unifiedThread !== undefined) body.unified_thread = unifiedThread;
   return request("/api/auto-queue/activate", {
     method: "POST",
     body: JSON.stringify(body),
@@ -1294,11 +1293,9 @@ export async function skipAutoQueueEntry(id: string): Promise<{ ok: boolean }> {
 export async function updateAutoQueueRun(
   id: string,
   status?: "paused" | "active" | "completed",
-  unified_thread?: boolean,
 ): Promise<{ ok: boolean }> {
   const body: Record<string, unknown> = {};
   if (status !== undefined) body.status = status;
-  if (unified_thread !== undefined) body.unified_thread = unified_thread;
   return request(`/api/auto-queue/runs/${id}`, {
     method: "PATCH",
     body: JSON.stringify(body),

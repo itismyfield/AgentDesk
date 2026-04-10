@@ -15,6 +15,7 @@ pub(crate) mod runtime;
 pub(crate) mod runtime_layout;
 mod server;
 mod services;
+pub(crate) mod supervisor;
 mod ui;
 mod utils;
 
@@ -41,7 +42,7 @@ struct Cli {
 enum Commands {
     /// Start Discord bot server(s)
     Dcserver {
-        /// Bot token (defaults to bot_settings.json or AGENTDESK_TOKEN env)
+        /// Bot token (defaults to configured Discord bots or AGENTDESK_TOKEN env)
         token: Option<String>,
     },
     /// Run the initial setup wizard
@@ -79,7 +80,7 @@ enum Commands {
         /// Message text
         #[arg(long)]
         message: String,
-        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN or bot_settings.json)
+        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN or configured Discord bots)
         #[arg(long)]
         key: Option<String>,
     },
@@ -91,7 +92,7 @@ enum Commands {
         /// Message text
         #[arg(long)]
         message: String,
-        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN or bot_settings.json)
+        /// Authentication key hash (optional; falls back to AGENTDESK_TOKEN or configured Discord bots)
         #[arg(long)]
         key: Option<String>,
     },
@@ -596,6 +597,11 @@ fn main() -> Result<()> {
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::from_default_env().add_directive(directive))
             .init();
+
+        if let Some(root) = config::runtime_root() {
+            crate::runtime_layout::ensure_runtime_layout(&root)
+                .map_err(|error| anyhow::anyhow!("Failed to prepare runtime layout: {error}"))?;
+        }
 
         let config = config::load().context("Failed to load config")?;
         let db = db::init(&config).context("Failed to init DB")?;

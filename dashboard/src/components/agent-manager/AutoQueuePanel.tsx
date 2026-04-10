@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../../api";
 import type {
@@ -118,6 +119,35 @@ function threadGroupColor(group: number): string {
   return THREAD_GROUP_COLORS[group % THREAD_GROUP_COLORS.length];
 }
 
+function batchPhaseColor(phase: number): string {
+  if (phase <= 0) return "#94a3b8";
+  return THREAD_GROUP_COLORS[(phase - 1) % THREAD_GROUP_COLORS.length];
+}
+
+function batchPhaseLabel(phase: number): string {
+  return `P${phase}`;
+}
+
+function isCompletedEntry(entry: DispatchQueueEntryType): boolean {
+  return entry.status === "done" || entry.status === "skipped";
+}
+
+function sortEntriesForDisplay(entries: DispatchQueueEntryType[]): DispatchQueueEntryType[] {
+  const statusOrder: Record<string, number> = {
+    dispatched: 0,
+    pending: 1,
+    done: 2,
+    skipped: 3,
+  };
+
+  return [...entries].sort((a, b) => {
+    const sa = statusOrder[a.status] ?? 1;
+    const sb = statusOrder[b.status] ?? 1;
+    if (sa !== sb) return sa - sb;
+    return a.priority_rank - b.priority_rank;
+  });
+}
+
 function EntryRow({
   entry,
   idx,
@@ -129,6 +159,7 @@ function EntryRow({
   dragHandlers,
   moveControls,
   showThreadGroup,
+  showBatchPhase,
 }: {
   entry: DispatchQueueEntryType;
   idx: number;
@@ -138,6 +169,7 @@ function EntryRow({
   isDragging?: boolean;
   isDropTarget?: boolean;
   showThreadGroup?: boolean;
+  showBatchPhase?: boolean;
   dragHandlers?: {
     draggable: boolean;
     onDragStart: (e: React.DragEvent) => void;
@@ -197,6 +229,17 @@ function EntryRow({
           className="text-xs truncate"
           style={{ color: "var(--th-text-primary)" }}
         >
+          {showBatchPhase && (
+            <span
+              className="mr-1 text-xs font-mono px-1 py-0.5 rounded"
+              style={{
+                backgroundColor: `${batchPhaseColor(entry.batch_phase ?? 0)}22`,
+                color: batchPhaseColor(entry.batch_phase ?? 0),
+              }}
+            >
+              {batchPhaseLabel(entry.batch_phase ?? 0)}
+            </span>
+          )}
           {showThreadGroup && entry.thread_group != null && (
             <span
               className="mr-1 text-xs font-mono px-1 py-0.5 rounded"
@@ -427,7 +470,6 @@ export default function AutoQueuePanel({
   const [expanded, setExpanded] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [activating, setActivating] = useState(false);
-  const [unifiedThread, setUnifiedThread] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [noReadyCards, setNoReadyCards] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("thread");
@@ -439,7 +481,6 @@ export default function AutoQueuePanel({
     setStatus(createEmptyAutoQueueStatus());
     setError(null);
     setNoReadyCards(false);
-    setUnifiedThread(false);
     setViewMode("thread");
     setGenerating(false);
     setActivating(false);
@@ -453,12 +494,6 @@ export default function AutoQueuePanel({
         suppressedRunIdRef.current = null;
       }
       setStatus(normalized);
-      // Sync unified_thread toggle from server state
-      if (normalized.run?.unified_thread !== undefined) {
-        setUnifiedThread(!!normalized.run.unified_thread);
-      } else if (!normalized.run) {
-        setUnifiedThread(false);
-      }
       // Only reset noReadyCards when a run with entries exists
       if (!normalized.run || normalized.entries.length > 0) setNoReadyCards(false);
     } catch {
@@ -491,7 +526,11 @@ export default function AutoQueuePanel({
         repo: selectedRepo || null,
         agentId: selectedAgentId || null,
       });
-      const result = await api.generateAutoQueue(selectedRepo || null, selectedAgentId, generateMode) as Record<string, unknown>;
+      const result = await api.generateAutoQueue(
+        selectedRepo || null,
+        selectedAgentId,
+        generateMode,
+      ) as Record<string, unknown>;
       if (result.entries && Array.isArray(result.entries) && result.entries.length === 0) {
         const counts = result.counts as Record<string, number> | undefined;
         const backlog = counts?.backlog ?? 0;
@@ -540,11 +579,7 @@ export default function AutoQueuePanel({
     setActivating(true);
     setError(null);
     try {
-      await api.activateAutoQueue(
-        selectedRepo || null,
-        selectedAgentId,
-        unifiedThread,
-      );
+      await api.activateAutoQueue(selectedRepo || null, selectedAgentId);
       await fetchStatus();
     } catch (e) {
       setError(
@@ -646,6 +681,13 @@ export default function AutoQueuePanel({
   const hasThreadGroups =
     threadGroupCount > 1 || Object.keys(threadGroups).length > 1;
   const maxConcurrent = run?.max_concurrent_threads ?? 1;
+  const hasBatchPhases = entries.some((entry) => (entry.batch_phase ?? 0) > 0);
+  const currentBatchPhase = entries.reduce<number | null>((minPhase, entry) => {
+    const phase = entry.batch_phase ?? 0;
+    if (phase <= 0) return minPhase;
+    if (entry.status !== "pending" && entry.status !== "dispatched") return minPhase;
+    return minPhase == null ? phase : Math.min(minPhase, phase);
+  }, null);
 
   // Group entries by thread_group
   const entriesByThreadGroup = new Map<number, DispatchQueueEntryType[]>();
@@ -656,22 +698,168 @@ export default function AutoQueuePanel({
     entriesByThreadGroup.set(g, list);
   }
 
+  const entriesByBatchPhase = new Map<number, DispatchQueueEntryType[]>();
+  for (const entry of entries) {
+    const phase = entry.batch_phase ?? 0;
+    const list = entriesByBatchPhase.get(phase) ?? [];
+    list.push(entry);
+    entriesByBatchPhase.set(phase, list);
+  }
+  const phaseSections = Array.from(entriesByBatchPhase.entries()).sort(
+    ([left], [right]) => left - right,
+  );
+
   // All-queue view: merge all entries sorted by status then rank
-  const allEntriesSorted = [...entries].sort((a, b) => {
-    const statusOrder: Record<string, number> = {
-      dispatched: 0,
-      pending: 1,
-      done: 2,
-      skipped: 3,
-    };
-    const sa = statusOrder[a.status] ?? 1;
-    const sb = statusOrder[b.status] ?? 1;
-    if (sa !== sb) return sa - sb;
-    return a.priority_rank - b.priority_rank;
-  });
+  const allEntriesSorted = sortEntriesForDisplay(entries);
 
   // Drag & drop for "all" view (pending only, no agent scope)
   const allDrag = useDragReorder(allEntriesSorted, handleReorder);
+
+  const renderPhaseBlock = (
+    phase: number,
+    phaseEntries: DispatchQueueEntryType[],
+    content: ReactNode,
+  ) => {
+    const activePhase = currentBatchPhase === phase;
+    const phaseColor = batchPhaseColor(phase);
+    const doneInPhase = phaseEntries.filter(isCompletedEntry).length;
+
+    return (
+      <div
+        key={phase}
+        className="rounded-xl border p-2 space-y-2"
+        style={{
+          borderColor: activePhase
+            ? `${phaseColor}66`
+            : "rgba(148,163,184,0.16)",
+          backgroundColor: activePhase ? `${phaseColor}10` : "transparent",
+        }}
+      >
+        <div className="flex items-center gap-2 px-1">
+          <span
+            className="text-xs font-mono font-bold px-2 py-0.5 rounded"
+            style={{ backgroundColor: `${phaseColor}26`, color: phaseColor }}
+          >
+            {batchPhaseLabel(phase)}
+          </span>
+          <span
+            className="text-xs px-1.5 py-0.5 rounded"
+            style={{
+              backgroundColor: activePhase
+                ? "rgba(245,158,11,0.18)"
+                : "rgba(100,116,139,0.18)",
+              color: activePhase ? "#fbbf24" : "var(--th-text-muted)",
+            }}
+          >
+            {activePhase
+              ? tr("현재 phase", "Current phase")
+              : phase <= 0
+                ? tr("즉시 가능", "Always eligible")
+                : tr("대기 phase", "Queued phase")}
+          </span>
+          <div
+            className="flex-1 h-px"
+            style={{ backgroundColor: `${phaseColor}40` }}
+          />
+          <span
+            className="text-xs font-mono"
+            style={{ color: "var(--th-text-muted)" }}
+          >
+            {doneInPhase}/{phaseEntries.length}
+          </span>
+        </div>
+        {content}
+      </div>
+    );
+  };
+
+  const renderThreadGroupCard = (
+    groupNum: number,
+    groupEntries: DispatchQueueEntryType[],
+  ) => {
+    const isActive = groupEntries.some((entry) => entry.status === "dispatched");
+    const isDone = groupEntries.every(isCompletedEntry);
+    const groupStatusLabel = isActive
+      ? tr("진행", "Active")
+      : isDone
+        ? tr("완료", "Done")
+        : tr("대기", "Pending");
+    const color = threadGroupColor(groupNum);
+    const reason =
+      groupEntries.find((entry) => !!entry.reason)?.reason ??
+      threadGroups[String(groupNum)]?.reason;
+
+    return (
+      <div
+        key={groupNum}
+        className="rounded-xl border p-2 space-y-1"
+        style={{
+          borderColor: isActive
+            ? `${color}55`
+            : isDone
+              ? "rgba(34,197,94,0.2)"
+              : "rgba(148,163,184,0.12)",
+          backgroundColor: isActive ? `${color}0a` : "transparent",
+        }}
+      >
+        <div className="flex items-center gap-2 px-1 mb-1">
+          <span
+            className="text-xs font-mono font-bold px-2 py-0.5 rounded"
+            style={{ backgroundColor: `${color}30`, color }}
+          >
+            G{groupNum}
+          </span>
+          <span
+            className="text-xs px-1.5 py-0.5 rounded"
+            style={{
+              backgroundColor: isActive
+                ? "rgba(245,158,11,0.18)"
+                : isDone
+                  ? "rgba(34,197,94,0.18)"
+                  : "rgba(100,116,139,0.18)",
+              color: isActive
+                ? "#fbbf24"
+                : isDone
+                  ? "#4ade80"
+                  : "#94a3b8",
+            }}
+          >
+            {groupStatusLabel}
+          </span>
+          <div
+            className="flex-1 h-px"
+            style={{ backgroundColor: `${color}40` }}
+          />
+          <span
+            className="text-xs font-mono"
+            style={{ color: "var(--th-text-muted)" }}
+          >
+            {groupEntries.filter((entry) => entry.status === "done").length}/
+            {groupEntries.length}
+          </span>
+        </div>
+        {reason && (
+          <div
+            className="px-1 text-[10px]"
+            style={{ color: "var(--th-text-muted)" }}
+          >
+            {reason}
+          </div>
+        )}
+        {groupEntries.map((entry, idx) => (
+          <EntryRow
+            key={entry.id}
+            entry={entry}
+            idx={idx}
+            tr={tr}
+            locale={locale}
+            onSkip={handleSkip}
+            showBatchPhase={hasBatchPhases}
+          />
+        ))}
+      </div>
+    );
+  };
 
   return (
     <section
@@ -720,26 +908,6 @@ export default function AutoQueuePanel({
         <div className="flex items-center gap-2">
           {showRunStartControls && (
             <>
-              <label
-                className="flex items-center gap-1 text-xs cursor-pointer select-none"
-                style={{
-                  color: unifiedThread ? "#fbbf24" : "var(--th-text-secondary)",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={unifiedThread}
-                  onChange={(e) => {
-                    const val = e.target.checked;
-                    setUnifiedThread(val);
-                    if (run?.id) {
-                      void api.updateAutoQueueRun(run.id, undefined, val);
-                    }
-                  }}
-                  style={{ cursor: "pointer", accentColor: "#f59e0b" }}
-                />
-                {tr("통합 스레드", "Unified Thread")}
-              </label>
               <button
                 onClick={() => void handleActivate()}
                 disabled={activating}
@@ -1079,35 +1247,76 @@ export default function AutoQueuePanel({
 
           {/* ── All view: merged list with drag & drop ── */}
           {viewMode === "all" && (
-            <div className="space-y-1">
-              {allEntriesSorted.map((entry, idx) => (
-                <div key={entry.id} className="flex items-center gap-1">
-                  <span
-                    className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
-                    style={{
-                      backgroundColor: "rgba(139,92,246,0.12)",
-                      color: "#a78bfa",
-                    }}
-                  >
-                    {getAgentLabel(entry.agent_id)}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <EntryRow
-                      entry={entry}
-                      idx={idx}
-                      tr={tr}
-                      locale={locale}
-                      onSkip={handleSkip}
-                      showThreadGroup={hasThreadGroups}
-                      isDragging={allDrag.dragId === entry.id}
-                      isDropTarget={allDrag.dropTargetId === entry.id}
-                      dragHandlers={allDrag.makeDragHandlers(entry)}
-                      moveControls={allDrag.makeMoveControls(entry)}
-                    />
+            hasBatchPhases ? (
+              <div className="space-y-3">
+                {phaseSections.map(([phase, phaseEntries]) =>
+                  renderPhaseBlock(
+                    phase,
+                    phaseEntries,
+                    <div className="space-y-1">
+                      {sortEntriesForDisplay(phaseEntries).map((entry, idx) => (
+                        <div key={entry.id} className="flex items-center gap-1">
+                          <span
+                            className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
+                            style={{
+                              backgroundColor: "rgba(139,92,246,0.12)",
+                              color: "#a78bfa",
+                            }}
+                          >
+                            {getAgentLabel(entry.agent_id)}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <EntryRow
+                              entry={entry}
+                              idx={idx}
+                              tr={tr}
+                              locale={locale}
+                              onSkip={handleSkip}
+                              showThreadGroup={hasThreadGroups}
+                              showBatchPhase={hasBatchPhases}
+                              isDragging={allDrag.dragId === entry.id}
+                              isDropTarget={allDrag.dropTargetId === entry.id}
+                              dragHandlers={allDrag.makeDragHandlers(entry)}
+                              moveControls={allDrag.makeMoveControls(entry)}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>,
+                  ),
+                )}
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {allEntriesSorted.map((entry, idx) => (
+                  <div key={entry.id} className="flex items-center gap-1">
+                    <span
+                      className="text-xs px-1.5 py-0.5 rounded shrink-0 max-w-[60px] truncate"
+                      style={{
+                        backgroundColor: "rgba(139,92,246,0.12)",
+                        color: "#a78bfa",
+                      }}
+                    >
+                      {getAgentLabel(entry.agent_id)}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <EntryRow
+                        entry={entry}
+                        idx={idx}
+                        tr={tr}
+                        locale={locale}
+                        onSkip={handleSkip}
+                        showThreadGroup={hasThreadGroups}
+                        isDragging={allDrag.dragId === entry.id}
+                        isDropTarget={allDrag.dropTargetId === entry.id}
+                        dragHandlers={allDrag.makeDragHandlers(entry)}
+                        moveControls={allDrag.makeMoveControls(entry)}
+                      />
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )
           )}
 
           {/* ── Thread group view ── */}
@@ -1130,99 +1339,32 @@ export default function AutoQueuePanel({
                   </span>
                 </div>
               )}
-              {Array.from(entriesByThreadGroup.entries())
-                .sort(([a], [b]) => a - b)
-                .map(([groupNum, groupEntries]) => {
-                  const tgStatus = threadGroups[String(groupNum)];
-                  const isActive =
-                    tgStatus?.status === "active" ||
-                    groupEntries.some((e) => e.status === "dispatched");
-                  const isDone =
-                    tgStatus?.status === "done" ||
-                    groupEntries.every(
-                      (e) => e.status === "done" || e.status === "skipped",
+              {hasBatchPhases
+                ? phaseSections.map(([phase, phaseEntries]) => {
+                    const groupsInPhase = new Map<number, DispatchQueueEntryType[]>();
+                    for (const entry of phaseEntries) {
+                      const groupNum = entry.thread_group ?? 0;
+                      const list = groupsInPhase.get(groupNum) ?? [];
+                      list.push(entry);
+                      groupsInPhase.set(groupNum, list);
+                    }
+                    return renderPhaseBlock(
+                      phase,
+                      phaseEntries,
+                      <div className="space-y-2">
+                        {Array.from(groupsInPhase.entries())
+                          .sort(([left], [right]) => left - right)
+                          .map(([groupNum, groupEntries]) =>
+                            renderThreadGroupCard(groupNum, groupEntries),
+                          )}
+                      </div>,
                     );
-                  const groupStatusLabel = isActive
-                    ? tr("진행", "Active")
-                    : isDone
-                      ? tr("완료", "Done")
-                      : tr("대기", "Pending");
-                  const color = threadGroupColor(groupNum);
-                  return (
-                    <div
-                      key={groupNum}
-                      className="rounded-xl border p-2 space-y-1"
-                      style={{
-                        borderColor: isActive
-                          ? `${color}55`
-                          : isDone
-                            ? "rgba(34,197,94,0.2)"
-                            : "rgba(148,163,184,0.12)",
-                        backgroundColor: isActive
-                          ? `${color}0a`
-                          : "transparent",
-                      }}
-                    >
-                      <div className="flex items-center gap-2 px-1 mb-1">
-                        <span
-                          className="text-xs font-mono font-bold px-2 py-0.5 rounded"
-                          style={{ backgroundColor: `${color}30`, color }}
-                        >
-                          G{groupNum}
-                        </span>
-                        <span
-                          className="text-xs px-1.5 py-0.5 rounded"
-                          style={{
-                            backgroundColor: isActive
-                              ? "rgba(245,158,11,0.18)"
-                              : isDone
-                                ? "rgba(34,197,94,0.18)"
-                                : "rgba(100,116,139,0.18)",
-                            color: isActive
-                              ? "#fbbf24"
-                              : isDone
-                                ? "#4ade80"
-                                : "#94a3b8",
-                          }}
-                        >
-                          {groupStatusLabel}
-                        </span>
-                        <div
-                          className="flex-1 h-px"
-                          style={{ backgroundColor: `${color}40` }}
-                        />
-                        <span
-                          className="text-xs font-mono"
-                          style={{ color: "var(--th-text-muted)" }}
-                        >
-                          {
-                            groupEntries.filter((e) => e.status === "done")
-                              .length
-                          }
-                          /{groupEntries.length}
-                        </span>
-                      </div>
-                      {tgStatus?.reason && (
-                        <div
-                          className="px-1 text-[10px]"
-                          style={{ color: "var(--th-text-muted)" }}
-                        >
-                          {tgStatus.reason}
-                        </div>
-                      )}
-                      {groupEntries.map((entry, idx) => (
-                        <EntryRow
-                          key={entry.id}
-                          entry={entry}
-                          idx={idx}
-                          tr={tr}
-                          locale={locale}
-                          onSkip={handleSkip}
-                        />
-                      ))}
-                    </div>
-                  );
-                })}
+                  })
+                : Array.from(entriesByThreadGroup.entries())
+                    .sort(([left], [right]) => left - right)
+                    .map(([groupNum, groupEntries]) =>
+                      renderThreadGroupCard(groupNum, groupEntries),
+                    )}
             </div>
           )}
 
@@ -1239,6 +1381,7 @@ export default function AutoQueuePanel({
                   locale={locale}
                   onSkip={handleSkip}
                   onReorder={handleReorder}
+                  showBatchPhase={hasBatchPhases}
                 />
               ),
             )}
@@ -1257,6 +1400,12 @@ export default function AutoQueuePanel({
                 <span>
                   {tr("동시", "Concur")}: {maxConcurrent}
                   {tr("그룹", "grp")}
+                </span>
+              )}
+              {hasBatchPhases && (
+                <span>
+                  {tr("활성 phase", "Active phase")}:{" "}
+                  {batchPhaseLabel(currentBatchPhase ?? 0)}
                 </span>
               )}
               <span>
@@ -1302,6 +1451,7 @@ function AgentSubQueue({
   locale,
   onSkip,
   onReorder,
+  showBatchPhase,
 }: {
   agentId: string;
   agentEntries: DispatchQueueEntryType[];
@@ -1310,6 +1460,7 @@ function AgentSubQueue({
   locale: UiLanguage;
   onSkip: (id: string) => void;
   onReorder: (orderedIds: string[], agentId?: string | null) => Promise<void>;
+  showBatchPhase?: boolean;
 }) {
   const drag = useDragReorder(agentEntries, onReorder, agentId);
 
@@ -1385,6 +1536,7 @@ function AgentSubQueue({
           tr={tr}
           locale={locale}
           onSkip={onSkip}
+          showBatchPhase={showBatchPhase}
           isDragging={drag.dragId === entry.id}
           isDropTarget={drag.dropTargetId === entry.id}
           dragHandlers={drag.makeDragHandlers(entry)}

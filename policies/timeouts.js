@@ -878,6 +878,20 @@ var timeouts = {
     // 해당 dispatch_id를 가진 working 세션이 없는 경우 = 고아 디스패치.
     // dcserver 재시작 등으로 세션-디스패치 연결이 끊긴 상태.
     // dispatch를 completed로 마크하고 card를 review로 전이하여 리뷰 파이프라인을 재개한다.
+
+    // Grace period: 서버 부팅 후 10분간은 orphan 판정 유예.
+    // 재시작 직후 세션이 아직 복원되지 않은 상태를 orphan으로 오판하는 것을 방지.
+    var bootRows = agentdesk.db.query(
+      "SELECT value FROM kv_meta WHERE key = 'server_boot_at'"
+    );
+    if (bootRows.length > 0) {
+      var bootAt = new Date(bootRows[0].value + "Z");
+      var bootElapsedMin = (Date.now() - bootAt.getTime()) / 60000;
+      if (bootElapsedMin < 10) {
+        return;
+      }
+    }
+
     var kCfg = agentdesk.pipeline.getConfig();
     var kInitial = agentdesk.pipeline.kickoffState(kCfg);
     var kInProgress = agentdesk.pipeline.nextGatedTarget(kInitial, kCfg);
@@ -899,60 +913,22 @@ var timeouts = {
     );
     for (var op = 0; op < orphanedDispatches.length; op++) {
       var od = orphanedDispatches[op];
-      var beforeCard = agentdesk.db.query(
-        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = ?",
-        [od.kanban_card_id]
-      );
-      if (beforeCard.length === 0 ||
-          beforeCard[0].status !== kInProgress ||
-          beforeCard[0].latest_dispatch_id !== od.dispatch_id) {
-        agentdesk.log.warn("[orphan-recovery] Skip stale orphan candidate " + od.dispatch_id +
-          " — card moved to status=" + ((beforeCard.length > 0 && beforeCard[0].status) || "?") +
-          " latest_dispatch_id=" + ((beforeCard.length > 0 && beforeCard[0].latest_dispatch_id) || "null"));
-        continue;
-      }
-
-      // 1) Dispatch를 completed로 마크
-      var markCompletedResult = agentdesk.dispatch.markCompleted(
-        od.dispatch_id,
-        '{"auto_completed":true,"completion_source":"orphan_recovery"}'
-      );
-      if (!markCompletedResult || markCompletedResult.rows_affected === 0) {
-        agentdesk.log.warn("[orphan-recovery] Skip " + od.dispatch_id +
-          " — dispatch already terminal or cleanup won the race");
-        continue;
-      }
-
-      var currentCard = agentdesk.db.query(
-        "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = ?",
-        [od.kanban_card_id]
-      );
-      if (currentCard.length === 0 ||
-          currentCard[0].status !== kInProgress ||
-          currentCard[0].latest_dispatch_id !== od.dispatch_id) {
-        agentdesk.log.warn("[orphan-recovery] Skip post-complete transition for " + od.dispatch_id +
-          " — card moved to status=" + ((currentCard.length > 0 && currentCard[0].status) || "?") +
-          " latest_dispatch_id=" + ((currentCard.length > 0 && currentCard[0].latest_dispatch_id) || "null"));
-        continue;
-      }
-
-      // 2) Card를 review로 전이 → OnReviewEnter 훅이 review dispatch를 생성
-      agentdesk.kanban.setStatus(od.kanban_card_id, kReview);
-      agentdesk.log.warn("[orphan-recovery] Completed orphaned dispatch " + od.dispatch_id +
-        " (type=" + od.dispatch_type + ") → card " + od.kanban_card_id + " → " + kReview);
-      // 3) PMD 알림
-      var orphanInfo = agentdesk.db.query(
-        "SELECT title, assigned_agent_id FROM kanban_cards WHERE id = ?",
-        [od.kanban_card_id]
-      );
-      var orphanTitle = (orphanInfo.length > 0) ? orphanInfo[0].title : od.kanban_card_id;
-      var orphanAgent = (orphanInfo.length > 0) ? orphanInfo[0].assigned_agent_id : "?";
-      var kmCh = getPMDChannel();
-      if (kmCh) {
-        agentdesk.message.queue(kmCh,
-          "🔄 [고아 디스패치 복구] " + orphanAgent + " — " + orphanTitle +
-          "\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → " + kReview + " 전이",
-          "announce", "system");
+      try {
+        var decision = agentdesk.runtime.emitSignal("OrphanCandidate", {
+          dispatch_id: od.dispatch_id,
+          card_id: od.kanban_card_id,
+          dispatch_type: od.dispatch_type,
+          detected_from: "timeouts._section_K"
+        });
+        if (decision.executed) {
+          agentdesk.log.warn("[orphan-recovery] Supervisor resumed orphaned dispatch " +
+            od.dispatch_id + " → card " + od.kanban_card_id + " → " + kReview);
+        } else {
+          agentdesk.log.info("[orphan-recovery] Supervisor skipped " + od.dispatch_id +
+            (decision.note ? " — " + decision.note : ""));
+        }
+      } catch (e) {
+        agentdesk.log.error("[orphan-recovery] Supervisor emit failed for " + od.dispatch_id + ": " + e);
       }
     }
   },

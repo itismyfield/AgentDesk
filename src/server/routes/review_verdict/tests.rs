@@ -796,6 +796,7 @@ async fn accept_on_done_card_fails_closed_without_stranding() {
 
 #[tokio::test]
 async fn accept_skip_rework_falls_back_to_rework_when_direct_review_creates_no_dispatch() {
+    let _env_lock = crate::services::discord::runtime_store::lock_test_env();
     let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
     let db = test_db();
     let engine = test_engine(&db);
@@ -1539,6 +1540,7 @@ fn latest_completed_review_lookup_prefers_completed_at() {
 /// review_status='reviewing'. The accept cleanup must NOT clear it.
 #[tokio::test]
 async fn accept_direct_review_preserves_reviewing_status() {
+    let _env_lock = crate::services::discord::runtime_store::lock_test_env();
     let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
     let db = test_db();
     {

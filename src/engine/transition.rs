@@ -1160,7 +1160,6 @@ mod tests {
                 created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
                 completed_at DATETIME,
                 max_concurrent_threads INTEGER DEFAULT 1,
-                max_concurrent_per_agent INTEGER DEFAULT 1,
                 thread_group_count INTEGER DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS auto_queue_entries (

@@ -11,18 +11,22 @@ const SESSION_INFO_MAX_CHARS: usize = 60;
 
 /// Parse `DISPATCH:<uuid> - <title>` format and return the dispatch_id (uuid part).
 pub(super) fn parse_dispatch_id(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    let rest = trimmed.strip_prefix("DISPATCH:")?;
-    // UUID is the part before " - "
-    let id = if let Some(idx) = rest.find(" - ") {
-        rest[..idx].trim()
-    } else {
-        rest.trim()
-    };
-    if id.is_empty() {
-        return None;
+    // Search each line for "DISPATCH:" prefix (the message may have a
+    // decorative header line like "── implementation dispatch ──" before it).
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("DISPATCH:") {
+            let id = if let Some(idx) = rest.find(" - ") {
+                rest[..idx].trim()
+            } else {
+                rest.trim()
+            };
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
     }
-    Some(id.to_string())
+    None
 }
 
 /// #222: Look up a pending implementation/rework dispatch for a thread channel
