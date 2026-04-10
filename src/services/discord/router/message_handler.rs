@@ -169,16 +169,6 @@ fn should_skip_memento_recall(
     memory_settings.backend == settings::MemoryBackendKind::Memento && memento_context_loaded
 }
 
-fn should_mark_memento_context_loaded(
-    memory_settings: &settings::ResolvedMemorySettings,
-    memento_context_loaded: bool,
-    memory_recall: &RecallResponse,
-) -> bool {
-    memory_settings.backend == settings::MemoryBackendKind::Memento
-        && !memento_context_loaded
-        && memory_recall.memento_context_loaded
-}
-
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -643,56 +633,9 @@ pub(in crate::services::discord) async fn handle_text_message(
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
-    super::super::commands::reset_provider_session_if_pending(
-        &ctx.http, shared, &provider, channel_id,
-    )
-    .await;
-    let prompt_prep_started = std::time::Instant::now();
-
-    // Resolve channel/tmux session name from current session state. We need the
-    // persisted provider session_id before recall so Mem0 can scope search by run_id.
-    let (channel_name, tmux_session_name) = {
-        let data = shared.core.lock().await;
-        let channel_name = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|s| s.channel_name.clone());
-        let tmux_session_name = channel_name
-            .as_ref()
-            .map(|name| provider.build_tmux_session_name(name));
-        (channel_name, tmux_session_name)
-    };
-    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
-    let mut session_id = session_id;
-    let mut memento_context_loaded = memento_context_loaded;
-    if session_id.is_none() {
-        if let Some(ref key) = adk_session_key {
-            let restored = super::super::adk_session::fetch_provider_session_id(
-                key,
-                &provider,
-                shared.api_port,
-            )
-            .await;
-            if restored.is_some() {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
-                    key
-                );
-                let mut data = shared.core.lock().await;
-                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.restore_provider_session(restored.clone());
-                }
-                memento_context_loaded = false;
-            }
-            session_id = restored;
-        }
-    }
-
-    // Create cancel token — with second check to close the TOCTOU race window.
-    // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
-    // because the async gap between check and insert allows interleaving.
-    // If another message won the race, queue ourselves and clean up.
+    // Claim the turn before consuming one-shot state such as model reset flags.
+    // If another message already won the channel, this message must be queued
+    // without stealing the next admitted turn's reset.
     let cancel_token = Arc::new(CancelToken::new());
     let started = super::super::mailbox_try_start_turn(
         shared,
@@ -717,7 +660,6 @@ pub(in crate::services::discord) async fn handle_text_message(
             },
         )
         .await;
-        // Clean up: remove placeholder and reaction created before this check
         let _ = channel_id
             .delete_message(&ctx.http, placeholder_msg_id)
             .await;
@@ -737,6 +679,57 @@ pub(in crate::services::discord) async fn handle_text_message(
         .turn_start_times
         .insert(channel_id, std::time::Instant::now());
 
+    let reset_session_for_model_change = super::super::commands::reset_provider_session_if_pending(
+        &ctx.http, shared, &provider, channel_id,
+    )
+    .await;
+    let prompt_prep_started = std::time::Instant::now();
+
+    // Resolve channel/tmux session name from current session state. We need the
+    // persisted provider session_id before recall so Mem0 can scope search by run_id.
+    let (channel_name, tmux_session_name) = {
+        let data = shared.core.lock().await;
+        let channel_name = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|s| s.channel_name.clone());
+        let tmux_session_name = channel_name
+            .as_ref()
+            .map(|name| provider.build_tmux_session_name(name));
+        (channel_name, tmux_session_name)
+    };
+    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
+    let mut session_id =
+        resolve_session_id_for_current_turn(session_id, reset_session_for_model_change);
+    let mut memento_context_loaded = if reset_session_for_model_change {
+        false
+    } else {
+        memento_context_loaded
+    };
+    if session_id.is_none() && !reset_session_for_model_change {
+        if let Some(ref key) = adk_session_key {
+            let restored = super::super::adk_session::fetch_provider_session_id(
+                key,
+                &provider,
+                shared.api_port,
+            )
+            .await;
+            if restored.is_some() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
+                    key
+                );
+                let mut data = shared.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.restore_provider_session(restored.clone());
+                }
+                memento_context_loaded = true;
+            }
+            session_id = restored;
+        }
+    }
+
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
     let memory_recall = if should_skip_memento_recall(&memory_settings, memento_context_loaded) {
         RecallResponse::default()
@@ -752,8 +745,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             })
             .await
     };
-    if should_mark_memento_context_loaded(&memory_settings, memento_context_loaded, &memory_recall)
-    {
+    if memory_settings.backend == settings::MemoryBackendKind::Memento && !memento_context_loaded {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             session.note_memento_context_loaded();
@@ -2581,6 +2573,14 @@ Any other message is sent to {p}.
 
     Ok(false)
 }
+
+fn resolve_session_id_for_current_turn(
+    session_id: Option<String>,
+    reset_applied: bool,
+) -> Option<String> {
+    if reset_applied { None } else { session_id }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::DiscordSession;
@@ -2618,6 +2618,50 @@ mod tests {
             worktree: None,
             born_generation: 0,
         }
+    }
+
+    fn make_shared_data_for_tests() -> Arc<SharedData> {
+        Arc::new(SharedData {
+            core: tokio::sync::Mutex::new(CoreState {
+                sessions: std::collections::HashMap::new(),
+                active_meetings: std::collections::HashMap::new(),
+            }),
+            mailboxes: ChannelMailboxRegistry::default(),
+            settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
+            api_timestamps: dashmap::DashMap::new(),
+            skills_cache: tokio::sync::RwLock::new(Vec::new()),
+            tmux_watchers: dashmap::DashMap::new(),
+            recovering_channels: dashmap::DashMap::new(),
+            shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            current_generation: 0,
+            restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
+            recovery_started_at: std::time::Instant::now(),
+            recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
+            global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+            intake_dedup: dashmap::DashMap::new(),
+            dispatch_thread_parents: dashmap::DashMap::new(),
+            bot_connected: std::sync::atomic::AtomicBool::new(false),
+            last_turn_at: std::sync::Mutex::new(None),
+            model_overrides: dashmap::DashMap::new(),
+            model_session_reset_pending: dashmap::DashSet::new(),
+            model_picker_pending: dashmap::DashMap::new(),
+            dispatch_role_overrides: dashmap::DashMap::new(),
+            last_message_ids: dashmap::DashMap::new(),
+            turn_start_times: dashmap::DashMap::new(),
+            cached_serenity_ctx: tokio::sync::OnceCell::new(),
+            cached_bot_token: tokio::sync::OnceCell::new(),
+            token_hash: "test-token-hash".to_string(),
+            api_port: 9,
+            db: None,
+            engine: None,
+            known_slash_commands: tokio::sync::OnceCell::new(),
+        })
     }
 
     #[test]
@@ -2717,6 +2761,40 @@ mod tests {
     }
 
     #[test]
+    fn resolve_session_id_for_current_turn_drops_resume_after_model_reset() {
+        assert_eq!(
+            resolve_session_id_for_current_turn(Some("session-123".to_string()), true),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_session_id_for_current_turn_keeps_existing_session_when_not_reset() {
+        assert_eq!(
+            resolve_session_id_for_current_turn(Some("session-123".to_string()), false),
+            Some("session-123".to_string())
+        );
+    }
+
+    #[test]
+    fn memory_injection_plan_treats_model_reset_as_fresh_turn() {
+        let recall = sample_recall();
+        let session_id = resolve_session_id_for_current_turn(Some("session-123".to_string()), true);
+        let plan = build_memory_injection_plan(
+            &ProviderKind::Codex,
+            session_id.is_some(),
+            DispatchProfile::Full,
+            &recall,
+        );
+
+        assert_eq!(
+            plan.shared_knowledge_for_context,
+            Some("[Shared Knowledge]")
+        );
+        assert_eq!(plan.external_recall_for_context, Some("[External Recall]"));
+    }
+
+    #[test]
     fn session_path_is_usable_for_existing_local_path() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = make_session(Some(dir.path().to_str().unwrap().to_string()), None);
@@ -2804,26 +2882,7 @@ mod tests {
     }
 
     #[test]
-    fn memento_context_loaded_mark_only_triggers_after_successful_memento_recall() {
-        let memento = settings::ResolvedMemorySettings {
-            backend: settings::MemoryBackendKind::Memento,
-            ..settings::ResolvedMemorySettings::default()
-        };
-        let file = settings::ResolvedMemorySettings::default();
-        let mut recall = sample_recall();
-
-        assert!(!should_mark_memento_context_loaded(
-            &memento, false, &recall
-        ));
-
-        recall.memento_context_loaded = true;
-        assert!(should_mark_memento_context_loaded(&memento, false, &recall));
-        assert!(!should_mark_memento_context_loaded(&memento, true, &recall));
-        assert!(!should_mark_memento_context_loaded(&file, false, &recall));
-    }
-
-    #[test]
-    fn restore_and_clear_keep_memento_recall_retryable_until_success() {
+    fn clear_resets_memento_skip_so_next_turn_can_reload_context() {
         let memento = settings::ResolvedMemorySettings {
             backend: settings::MemoryBackendKind::Memento,
             ..settings::ResolvedMemorySettings::default()
@@ -2831,12 +2890,6 @@ mod tests {
         let mut session = make_session(Some("/tmp/project".to_string()), None);
 
         session.restore_provider_session(Some("session-1".to_string()));
-        assert!(!should_skip_memento_recall(
-            &memento,
-            session.memento_context_loaded
-        ));
-
-        session.note_memento_context_loaded();
         assert!(should_skip_memento_recall(
             &memento,
             session.memento_context_loaded

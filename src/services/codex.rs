@@ -4,19 +4,16 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::claude;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{
-    configure_child_process_group, kill_child_tree, shell_escape, wait_with_output_timeout,
-};
+use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
-    fold_read_output_result, is_readonly_tool_policy, register_child_pid,
+    fold_read_output_result, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
@@ -83,48 +80,24 @@ fn build_tmux_launch_env_lines(
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
-    execute_command_simple_inner(prompt, None)
-}
-
-pub fn execute_command_simple_with_timeout(
-    prompt: &str,
-    timeout: Duration,
-    label: &str,
-) -> Result<String, String> {
-    execute_command_simple_inner(prompt, Some((timeout, label)))
-}
-
-fn execute_command_simple_inner(
-    prompt: &str,
-    timeout: Option<(Duration, &str)>,
-) -> Result<String, String> {
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let args = base_exec_args(None, prompt, None, false);
+    let args = base_exec_args(None, prompt, None);
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let mut command = Command::new(&codex_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    command
+    let output = command
         .args(&args)
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = if let Some((timeout, label)) = timeout {
-        configure_child_process_group(&mut command);
-        let child = command
-            .spawn()
-            .map_err(|e| format!("Failed to start Codex: {}", e))?;
-        wait_with_output_timeout(child, timeout, label)?
-    } else {
-        command
-            .output()
-            .map_err(|e| format!("Failed to start Codex: {}", e))?
-    };
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -190,7 +163,6 @@ pub fn execute_command_streaming(
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
-    let readonly_mode = is_readonly_tool_policy(allowed_tools);
 
     if let Some(profile) = remote_profile {
         #[cfg(unix)]
@@ -242,7 +214,6 @@ pub fn execute_command_streaming(
                 report_channel_id,
                 report_provider,
                 compact_token_limit,
-                readonly_mode,
             );
         }
         // ProcessBackend fallback for Codex (no tmux or non-unix)
@@ -255,7 +226,6 @@ pub fn execute_command_streaming(
             cancel_token,
             tmux_name,
             compact_token_limit,
-            readonly_mode,
         );
     }
 
@@ -269,7 +239,6 @@ pub fn execute_command_streaming(
         report_channel_id,
         report_provider,
         compact_token_limit,
-        readonly_mode,
     )
 }
 
@@ -291,14 +260,13 @@ fn execute_streaming_direct(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     compact_token_limit: Option<u64>,
-    readonly_mode: bool,
 ) -> Result<(), String> {
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let mut args = base_exec_args(session_id, prompt, model, readonly_mode);
+    let mut args = base_exec_args(session_id, prompt, model);
     if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
         // Insert -c config before the "exec" subcommand.
         let exec_pos = args.iter().position(|a| a == "exec").unwrap_or(0);
@@ -323,7 +291,6 @@ fn execute_streaming_direct(
     if let Some(provider) = report_provider {
         command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
     }
-    configure_child_process_group(&mut command);
 
     let mut child = command
         .spawn()
@@ -439,7 +406,6 @@ fn execute_streaming_local_tmux(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     compact_token_limit: Option<u64>,
-    readonly_mode: bool,
 ) -> Result<(), String> {
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
@@ -531,7 +497,7 @@ fn execute_streaming_local_tmux(
         --input-fifo {input_fifo} \\\n  \
         --prompt-file {prompt} \\\n  \
         --cwd {wd} \\\n  \
-        --codex-bin {codex_bin}{readonly_arg}{model_arg}{effort_arg}{resume_arg}{compact_arg}\n",
+        --codex-bin {codex_bin}{model_arg}{effort_arg}{resume_arg}{compact_arg}\n",
         env = env_lines,
         exe = shell_escape(&exe.display().to_string()),
         output = shell_escape(&output_path),
@@ -539,11 +505,6 @@ fn execute_streaming_local_tmux(
         prompt = shell_escape(&prompt_path),
         wd = shell_escape(working_dir),
         codex_bin = shell_escape(&codex_bin),
-        readonly_arg = if readonly_mode {
-            " \\\n  --readonly-mode".to_string()
-        } else {
-            String::new()
-        },
         model_arg = model
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -702,7 +663,6 @@ fn execute_streaming_local_process_codex(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     session_name: &str,
     compact_token_limit: Option<u64>,
-    readonly_mode: bool,
 ) -> Result<(), String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
@@ -783,9 +743,6 @@ fn execute_streaming_local_process_codex(
         wrapper_subcommand: "codex-tmux-wrapper".to_string(),
         wrapper_args: {
             let mut args = vec!["--codex-bin".to_string(), codex_bin.to_string()];
-            if readonly_mode {
-                args.push("--readonly-mode".to_string());
-            }
             if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
                 args.push("--codex-model".to_string());
                 args.push(model.to_string());
@@ -851,12 +808,7 @@ fn execute_streaming_local_process_codex(
     Ok(())
 }
 
-fn base_exec_args(
-    session_id: Option<&str>,
-    prompt: &str,
-    model: Option<&str>,
-    readonly_mode: bool,
-) -> Vec<String> {
+fn base_exec_args(session_id: Option<&str>, prompt: &str, model: Option<&str>) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
         args.push("-c".to_string());
@@ -864,24 +816,18 @@ fn base_exec_args(
         args.push("-m".to_string());
         args.push(model.to_string());
     }
-    if readonly_mode {
-        args.extend([
-            "-a".to_string(),
-            "never".to_string(),
-            "-s".to_string(),
-            "read-only".to_string(),
-        ]);
-    } else {
-        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-    }
     args.push("exec".to_string());
     if let Some(existing_thread_id) = session_id {
         args.push("resume".to_string());
         args.push(existing_thread_id.to_string());
     }
-    args.extend(["--skip-git-repo-check".to_string(), "--json".to_string()]);
-    args.push("--".to_string());
-    args.push(prompt.to_string());
+    args.extend([
+        "--skip-git-repo-check".to_string(),
+        "--json".to_string(),
+        "--dangerously-bypass-approvals-and-sandbox".to_string(),
+        "--".to_string(),
+        prompt.to_string(),
+    ]);
     args
 }
 
@@ -1172,7 +1118,7 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_includes_model_before_exec() {
-        let args = base_exec_args(None, "hello", Some("gpt-5-codex"), false);
+        let args = base_exec_args(None, "- starts like option", Some("gpt-5-codex"));
         assert!(args.starts_with(&[
             "-c".to_string(),
             r#"model_reasoning_effort="high""#.to_string(),
@@ -1180,34 +1126,34 @@ mod tests {
             "gpt-5-codex".to_string()
         ]));
         assert!(args.iter().any(|arg| arg == "exec"));
-    }
-
-    #[test]
-    fn test_base_exec_args_enables_readonly_sandbox_when_requested() {
-        let args = base_exec_args(None, "hello", None, true);
-        assert!(args.windows(2).any(|pair| pair == ["-s", "read-only"]));
-        assert!(args.windows(2).any(|pair| pair == ["-a", "never"]));
-        assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
+        let separator_index = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("prompt separator should be present");
+        assert_eq!(
+            args.get(separator_index + 1).map(String::as_str),
+            Some("- starts like option")
         );
-        assert!(args.iter().any(|arg| arg == "--"));
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--skip-git-repo-check")
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn test_base_exec_args_includes_resume_before_flags() {
-        let args = base_exec_args(Some("thread-123"), "hello", None, false);
+        let args = base_exec_args(Some("thread-123"), "hello", None);
         assert_eq!(
             args,
             vec![
-                "--dangerously-bypass-approvals-and-sandbox".to_string(),
                 "exec".to_string(),
                 "resume".to_string(),
                 "thread-123".to_string(),
                 "--skip-git-repo-check".to_string(),
                 "--json".to_string(),
-                "--".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
                 "hello".to_string(),
             ]
         );

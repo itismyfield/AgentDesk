@@ -288,6 +288,7 @@ fn has_runtime_references(tx: &rusqlite::Transaction<'_>, agent_id: &str) -> Res
 mod tests {
     use super::*;
     use crate::config::AgentChannels;
+
     fn test_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();

@@ -314,44 +314,6 @@ export interface RuntimeConfigResponse {
   defaults: Record<string, number>;
 }
 
-export interface HealthProviderStatus {
-  active_turns: number;
-  connected: boolean;
-  last_turn_at: number | null;
-  name: string;
-  queue_depth: number;
-  restart_pending: boolean;
-  sessions: number;
-}
-
-export interface HealthDispatchOutbox {
-  oldest_pending_age: number;
-  pending: number;
-  permanent_failures: number;
-  retrying: number;
-}
-
-export interface HealthResponse {
-  dashboard?: boolean;
-  db?: boolean;
-  deferred_hooks?: number;
-  degraded_reasons?: string[];
-  dispatch_outbox?: HealthDispatchOutbox;
-  global_active?: number;
-  global_finalizing?: number;
-  outbox_age?: number;
-  providers?: HealthProviderStatus[];
-  queue_depth?: number;
-  recovery_duration?: number;
-  status: string;
-  uptime_secs?: number;
-  version?: string;
-  watcher_count?: number;
-}
-
-export async function getHealth(): Promise<HealthResponse> {
-  return request("/api/health");
-}
 export async function getRuntimeConfig(): Promise<RuntimeConfigResponse> {
   return request("/api/settings/runtime-config");
 }
@@ -363,6 +325,47 @@ export async function saveRuntimeConfig(
     method: "PUT",
     body: JSON.stringify(patch),
   });
+}
+
+// ── Runtime Health ──
+
+export interface HealthProviderStatus {
+  name: string;
+  connected: boolean;
+  active_turns: number;
+  queue_depth: number;
+  sessions: number;
+  restart_pending: boolean;
+  last_turn_at: string | null;
+}
+
+export interface HealthDispatchOutboxStats {
+  pending: number;
+  retrying: number;
+  permanent_failures: number;
+  oldest_pending_age: number;
+}
+
+export interface HealthResponse {
+  status: "healthy" | "degraded" | "unhealthy" | string;
+  version?: string;
+  uptime_secs?: number;
+  global_active?: number;
+  global_finalizing?: number;
+  deferred_hooks?: number;
+  queue_depth?: number;
+  watcher_count?: number;
+  recovery_duration?: number;
+  degraded_reasons?: string[];
+  providers?: HealthProviderStatus[];
+  db?: boolean;
+  dashboard?: boolean;
+  outbox_age?: number;
+  dispatch_outbox?: HealthDispatchOutboxStats;
+}
+
+export async function getHealth(): Promise<HealthResponse> {
+  return request("/api/health");
 }
 
 // ── Dispatches ──
@@ -1046,7 +1049,10 @@ export async function getRoundTableMeetings(): Promise<RoundTableMeeting[]> {
 export async function getRoundTableMeeting(
   id: string,
 ): Promise<RoundTableMeeting> {
-  return request(`/api/round-table-meetings/${id}`);
+  const data = await request<{ meeting: RoundTableMeeting }>(
+    `/api/round-table-meetings/${id}`,
+  );
+  return data.meeting;
 }
 
 export async function getRoundTableMeetingChannels(): Promise<
@@ -1139,7 +1145,6 @@ export async function startRoundTableMeeting(
   channelId: string,
   primaryProvider: string,
   reviewerProvider: string,
-  fixedParticipants: string[] = [],
 ): Promise<{ ok: boolean; message?: string }> {
   return request("/api/round-table-meetings/start", {
     method: "POST",
@@ -1148,7 +1153,6 @@ export async function startRoundTableMeeting(
       channel_id: channelId,
       primary_provider: primaryProvider,
       reviewer_provider: reviewerProvider,
-      fixed_participants: fixedParticipants,
     }),
   });
 }

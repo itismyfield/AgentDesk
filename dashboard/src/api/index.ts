@@ -108,7 +108,6 @@ export type {
   DiscordBinding,
   CronJobGlobal,
   MachineStatus,
-  HealthResponse,
   HeatmapData,
   AgentStreak,
   Achievement,
@@ -122,8 +121,9 @@ export type {
   GitHubComment,
   ChatMessage,
   RuntimeConfigResponse,
+  HealthResponse,
   HealthProviderStatus,
-  HealthDispatchOutbox,
+  HealthDispatchOutboxStats,
   TimelineEvent,
   PipelineConfigResponse,
 } from "./client";

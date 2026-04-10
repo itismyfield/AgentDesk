@@ -4,10 +4,7 @@ use std::fs;
 use poise::serenity_prelude::ChannelId;
 use serde::Deserialize;
 
-use super::meeting::{
-    MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule,
-    derive_agent_metadata_quality,
-};
+use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::org_schema_path;
 use super::settings::{
     MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
@@ -82,6 +79,7 @@ pub(super) struct ChannelsByName {
 pub(super) struct MeetingDef {
     pub channel_name: String,
     pub max_rounds: Option<u32>,
+    pub max_participants: Option<usize>,
     pub summary_agent: Option<SummaryAgentDef>,
     /// Explicit list of agent role_ids eligible for meetings.
     /// When omitted, all agents in the schema are eligible.
@@ -306,9 +304,23 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
     };
 
     let prompts_root = schema.prompts_root.as_deref().map(expand_tilde);
-    let agent_registry: Vec<MeetingAgentConfig> = schema
-        .agents
-        .iter()
+    // Use explicit meeting.available_agents if set, otherwise all agents
+    let eligible_agents: Box<dyn Iterator<Item = (&String, &AgentDef)>> =
+        if let Some(explicit_list) = meeting_def
+            .available_agents
+            .as_ref()
+            .filter(|list| !list.is_empty())
+        {
+            Box::new(
+                schema
+                    .agents
+                    .iter()
+                    .filter(|(role_id, _)| explicit_list.contains(role_id)),
+            )
+        } else {
+            Box::new(schema.agents.iter())
+        };
+    let available_agents: Vec<MeetingAgentConfig> = eligible_agents
         .map(|(role_id, def)| {
             let prompt_file = def
                 .prompt_file
@@ -320,60 +332,26 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                         .map(|root| format!("{}/agents/{}/IDENTITY.md", root, role_id))
                 })
                 .unwrap_or_default();
-            let strengths = def.strengths.clone().unwrap_or_default();
-            let task_types = def.task_types.clone().unwrap_or_default();
-            let anti_signals = def.anti_signals.clone().unwrap_or_default();
-            let (metadata_missing, metadata_confidence) = derive_agent_metadata_quality(
-                def.domain_summary.as_deref(),
-                &strengths,
-                &task_types,
-                &anti_signals,
-            );
             MeetingAgentConfig {
                 role_id: role_id.clone(),
                 display_name: def.display_name.clone(),
                 keywords: def.keywords.clone().unwrap_or_default(),
+                prompt_file,
                 domain_summary: def.domain_summary.clone(),
-                strengths,
-                task_types,
-                anti_signals,
-                provider_hint: def.provider_hint.clone(),
-                metadata_missing,
-                metadata_confidence,
-                binding: RoleBinding {
-                    role_id: role_id.clone(),
-                    prompt_file,
-                    provider: def.provider.as_deref().and_then(ProviderKind::from_str),
-                    model: def.model.clone(),
-                    reasoning_effort: None,
-                    peer_agents_enabled: def.peer_agents.unwrap_or(true),
-                    memory: resolve_memory_settings(def.memory.as_ref(), None),
-                },
-                workspace: def.workspace.as_deref().map(expand_tilde),
+                strengths: def.strengths.clone().unwrap_or_default(),
+                task_types: def.task_types.clone().unwrap_or_default(),
+                anti_signals: def.anti_signals.clone().unwrap_or_default(),
+                provider_hint: def.provider_hint.clone().or_else(|| def.provider.clone()),
             }
         })
         .collect();
 
-    let available_agents = if let Some(explicit_list) = meeting_def
-        .available_agents
-        .as_ref()
-        .filter(|agents| !agents.is_empty())
-    {
-        agent_registry
-            .iter()
-            .filter(|agent| explicit_list.contains(&agent.role_id))
-            .cloned()
-            .collect()
-    } else {
-        agent_registry.clone()
-    };
-
     Some(MeetingConfig {
         channel_name: meeting_def.channel_name.clone(),
         max_rounds: meeting_def.max_rounds.unwrap_or(3),
+        max_participants: meeting_def.max_participants.unwrap_or(5),
         summary_agent,
         available_agents,
-        agent_registry,
     })
 }
 
@@ -768,10 +746,10 @@ agents:
   td:
     display_name: "TD"
     keywords: ["code"]
-    domain_summary: "코드 구조와 구현 위험을 본다"
-    strengths: ["아키텍처", "구현 검토"]
-    task_types: ["설계", "리뷰"]
-    anti_signals: ["사업성 판단 단독 담당"]
+    domain_summary: "Architecture and implementation review"
+    strengths: ["system design", "performance"]
+    task_types: ["architecture"]
+    anti_signals: ["marketing"]
     provider_hint: "codex"
   pd:
     display_name: "PD"
@@ -781,6 +759,7 @@ agents:
     keywords: ["test"]
 meeting:
   channel_name: "meeting"
+  max_participants: 4
   summary_agent: "td"
   available_agents: ["td", "pd"]
 channels:
@@ -804,6 +783,7 @@ channels:
                 "qad should NOT be in available_agents"
             );
             assert_eq!(config.available_agents.len(), 2);
+            assert_eq!(config.max_participants, 4);
             let td = config
                 .available_agents
                 .iter()
@@ -811,19 +791,20 @@ channels:
                 .expect("td metadata");
             assert_eq!(
                 td.domain_summary.as_deref(),
-                Some("코드 구조와 구현 위험을 본다")
+                Some("Architecture and implementation review")
             );
-            assert_eq!(td.strengths, vec!["아키텍처", "구현 검토"]);
-            assert_eq!(td.task_types, vec!["설계", "리뷰"]);
-            assert_eq!(td.anti_signals, vec!["사업성 판단 단독 담당"]);
+            assert_eq!(
+                td.strengths,
+                vec!["system design".to_string(), "performance".to_string()]
+            );
+            assert_eq!(td.task_types, vec!["architecture".to_string()]);
+            assert_eq!(td.anti_signals, vec!["marketing".to_string()]);
             assert_eq!(td.provider_hint.as_deref(), Some("codex"));
-            assert!(!td.metadata_missing);
-            assert_eq!(td.metadata_confidence, "high");
         });
     }
 
     #[test]
-    fn test_meeting_available_agents_empty_list_falls_back_to_registry() {
+    fn test_meeting_empty_available_agents_falls_back_to_all_agents() {
         with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(
                 temp_home.path(),
@@ -832,21 +813,12 @@ version: 1
 agents:
   td:
     display_name: "TD"
-    keywords: ["code"]
   pd:
     display_name: "PD"
-    keywords: ["product"]
-  qad:
-    display_name: "QAD"
-    keywords: ["test"]
 meeting:
   channel_name: "meeting"
   summary_agent: "td"
   available_agents: []
-channels:
-  by_id:
-    "300":
-      agent: td
 "#,
             );
 
@@ -856,14 +828,9 @@ channels:
                 .iter()
                 .map(|agent| agent.role_id.as_str())
                 .collect();
-
-            assert_eq!(config.available_agents.len(), config.agent_registry.len());
-            assert!(role_ids.contains(&"td"), "td should be in available_agents");
-            assert!(role_ids.contains(&"pd"), "pd should be in available_agents");
-            assert!(
-                role_ids.contains(&"qad"),
-                "qad should be in available_agents"
-            );
+            assert_eq!(role_ids.len(), 2);
+            assert!(role_ids.contains(&"td"));
+            assert!(role_ids.contains(&"pd"));
         });
     }
 

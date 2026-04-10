@@ -1,12 +1,8 @@
-use std::collections::BTreeMap;
 use std::fs;
 
 use poise::serenity_prelude::ChannelId;
 
-use super::meeting::{
-    MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule,
-    derive_agent_metadata_quality,
-};
+use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::runtime_store::role_map_path;
 use super::settings::{
     MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
@@ -72,221 +68,84 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
     })
 }
 
-fn parse_meeting_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
-    let obj = value.as_object()?;
-    let role_id = obj
+fn json_string_vec(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn json_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(String::from)
+    })
+}
+
+fn meeting_agent_from_json(agent: &serde_json::Value) -> Option<MeetingAgentConfig> {
+    let role_id = agent
         .get("role_id")
-        .or_else(|| obj.get("roleId"))?
-        .as_str()?
-        .to_string();
-    let prompt_file = obj
-        .get("prompt_file")
-        .or_else(|| obj.get("promptFile"))
+        .or_else(|| agent.get("roleId"))?
+        .as_str()?;
+    let display_name = agent
+        .get("display_name")
+        .or_else(|| agent.get("displayName"))
         .and_then(|v| v.as_str())
-        .map(expand_tilde)?;
-    let provider = obj
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .and_then(ProviderKind::from_str);
-    let model = obj
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let reasoning_effort = obj
-        .get("reasoning_effort")
-        .or_else(|| obj.get("reasoningEffort"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let peer_agents_enabled = obj
-        .get("peer_agents")
-        .or_else(|| obj.get("peerAgents"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let memory_override = obj.get("memory").and_then(|raw| {
-        serde_json::from_value::<MemoryConfigOverride>(raw.clone())
-            .map_err(|err| {
-                eprintln!(
-                    "  [memory] Warning: invalid meeting.available_agents memory block: {err}"
-                );
-                err
-            })
-            .ok()
-    });
-    Some(RoleBinding {
-        role_id,
-        prompt_file,
-        provider,
-        model,
-        reasoning_effort,
-        peer_agents_enabled,
-        memory: resolve_memory_settings(None, memory_override.as_ref()),
-    })
-}
-
-fn parse_meeting_agent_metadata(value: &serde_json::Value) -> Option<ParsedMeetingAgentMetadata> {
-    let obj = value.as_object()?;
-    let role_id = obj.get("role_id")?.as_str()?.to_string();
-    let display_name = obj.get("display_name")?.as_str()?.to_string();
-    let keywords = obj
-        .get("keywords")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let domain_summary = obj
-        .get("domain_summary")
-        .and_then(|v| v.as_str())
-        .map(|value| value.to_string());
-    let strengths = obj
-        .get("strengths")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let task_types = obj
-        .get("task_types")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let anti_signals = obj
-        .get("anti_signals")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let provider_hint = obj
-        .get("provider_hint")
-        .and_then(|v| v.as_str())
-        .map(|value| value.to_string());
-    let (metadata_missing, metadata_confidence) = derive_agent_metadata_quality(
-        domain_summary.as_deref(),
-        &strengths,
-        &task_types,
-        &anti_signals,
+        .unwrap_or(role_id);
+    let prompt_file = expand_tilde(
+        agent
+            .get("prompt_file")
+            .or_else(|| agent.get("promptFile"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
     );
-    Some(ParsedMeetingAgentMetadata {
-        role_id,
-        display_name,
-        keywords,
-        domain_summary,
-        strengths,
-        task_types,
-        anti_signals,
-        provider_hint,
-        metadata_missing,
-        metadata_confidence,
+
+    Some(MeetingAgentConfig {
+        role_id: role_id.to_string(),
+        display_name: display_name.to_string(),
+        keywords: json_string_vec(agent, "keywords"),
+        prompt_file,
+        domain_summary: json_string_field(agent, &["domain_summary", "domainSummary"]),
+        strengths: json_string_vec(agent, "strengths"),
+        task_types: json_string_vec(agent, "task_types")
+            .into_iter()
+            .chain(json_string_vec(agent, "taskTypes"))
+            .collect(),
+        anti_signals: json_string_vec(agent, "anti_signals")
+            .into_iter()
+            .chain(json_string_vec(agent, "antiSignals"))
+            .collect(),
+        provider_hint: json_string_field(agent, &["provider_hint", "providerHint", "provider"]),
     })
 }
 
-fn collect_registry_entry(
-    registry: &mut BTreeMap<String, MeetingAgentConfig>,
-    value: &serde_json::Value,
-    metadata: &BTreeMap<String, ParsedMeetingAgentMetadata>,
-) {
-    let Some(binding) = parse_role_binding(value) else {
-        return;
-    };
-
-    let role_id = binding.role_id.clone();
-    let workspace = value
-        .get("workspace")
-        .and_then(|v| v.as_str())
-        .map(expand_tilde);
-
-    let metadata = metadata
-        .get(&role_id)
-        .cloned()
-        .unwrap_or_else(|| fallback_meeting_agent_metadata(&role_id));
-
-    registry
-        .entry(role_id.clone())
-        .or_insert_with(|| meeting_agent_config(role_id, binding, metadata, workspace));
-}
-
-fn fallback_meeting_agent_metadata(role_id: &str) -> ParsedMeetingAgentMetadata {
-    ParsedMeetingAgentMetadata {
-        role_id: role_id.to_string(),
-        display_name: role_id.to_string(),
-        keywords: Vec::new(),
-        domain_summary: None,
-        strengths: Vec::new(),
-        task_types: Vec::new(),
-        anti_signals: Vec::new(),
-        provider_hint: None,
-        metadata_missing: true,
-        metadata_confidence: "low".to_string(),
+fn collect_role_map_binding_agents(json: &serde_json::Value) -> Vec<MeetingAgentConfig> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for section in ["byChannelId", "byChannelName"] {
+        let Some(bindings) = json.get(section).and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for binding in bindings.values() {
+            let Some(agent) = meeting_agent_from_json(binding) else {
+                continue;
+            };
+            if seen.insert(agent.role_id.clone()) {
+                result.push(agent);
+            }
+        }
     }
-}
-
-fn meeting_agent_config(
-    role_id: String,
-    binding: RoleBinding,
-    metadata: ParsedMeetingAgentMetadata,
-    workspace: Option<String>,
-) -> MeetingAgentConfig {
-    MeetingAgentConfig {
-        role_id,
-        display_name: metadata.display_name,
-        keywords: metadata.keywords,
-        domain_summary: metadata.domain_summary,
-        strengths: metadata.strengths,
-        task_types: metadata.task_types,
-        anti_signals: metadata.anti_signals,
-        provider_hint: metadata.provider_hint,
-        metadata_missing: metadata.metadata_missing,
-        metadata_confidence: metadata.metadata_confidence,
-        binding,
-        workspace,
-    }
-}
-
-fn meeting_available_agent_config(
-    agent: &serde_json::Value,
-    binding: RoleBinding,
-    metadata: &BTreeMap<String, ParsedMeetingAgentMetadata>,
-) -> MeetingAgentConfig {
-    let role_id = binding.role_id.clone();
-    let workspace = agent
-        .get("workspace")
-        .and_then(|v| v.as_str())
-        .map(expand_tilde);
-    let metadata = metadata
-        .get(&role_id)
-        .cloned()
-        .unwrap_or_else(|| fallback_meeting_agent_metadata(&role_id));
-
-    meeting_agent_config(role_id, binding, metadata, workspace)
-}
-
-#[derive(Clone, Debug)]
-struct ParsedMeetingAgentMetadata {
-    role_id: String,
-    display_name: String,
-    keywords: Vec<String>,
-    domain_summary: Option<String>,
-    strengths: Vec<String>,
-    task_types: Vec<String>,
-    anti_signals: Vec<String>,
-    provider_hint: Option<String>,
-    metadata_missing: bool,
-    metadata_confidence: String,
+    result.sort_by(|a, b| a.role_id.cmp(&b.role_id));
+    result
 }
 
 fn fallback_enabled(json: &serde_json::Value) -> bool {
@@ -407,44 +266,30 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
     let Some(json) = load_role_map_json() else {
         return Vec::new();
     };
-    let Some(agents) = json
+    let agents = json
         .get("meeting")
         .and_then(|meeting| meeting.get("available_agents"))
         .and_then(|v| v.as_array())
-    else {
-        return Vec::new();
-    };
+        .and_then(|available| {
+            let parsed = available
+                .iter()
+                .filter_map(meeting_agent_from_json)
+                .collect::<Vec<_>>();
+            (!parsed.is_empty()).then_some(parsed)
+        })
+        .unwrap_or_else(|| collect_role_map_binding_agents(&json));
 
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
     for agent in agents {
-        let Some(obj) = agent.as_object() else {
-            continue;
-        };
-        let Some(role_id) = obj.get("role_id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if !seen.insert(role_id.to_string()) {
+        if !seen.insert(agent.role_id.clone()) {
             continue;
         }
-        let Some(display_name) = obj.get("display_name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let keywords = obj
-            .get("keywords")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
 
         result.push(PeerAgentInfo {
-            role_id: role_id.to_string(),
-            display_name: display_name.to_string(),
-            keywords,
+            role_id: agent.role_id,
+            display_name: agent.display_name,
+            keywords: agent.keywords,
         });
     }
 
@@ -493,67 +338,31 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         .get("max_rounds")
         .and_then(|v| v.as_u64())
         .unwrap_or(3) as u32;
+    let max_participants = meeting
+        .get("max_participants")
+        .or_else(|| meeting.get("maxParticipants"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5) as usize;
     let summary_agent = parse_summary_agent_config(meeting.get("summary_agent")?)?;
 
-    let explicit_agents = meeting
+    let available_agents = meeting
         .get("available_agents")
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut metadata = BTreeMap::new();
-    for agent in &explicit_agents {
-        if let Some(parsed) = parse_meeting_agent_metadata(agent) {
-            metadata.insert(parsed.role_id.clone(), parsed);
-        }
-    }
-
-    let mut registry = BTreeMap::new();
-    if let Some(by_id) = json.get("byChannelId").and_then(|v| v.as_object()) {
-        for entry in by_id.values() {
-            collect_registry_entry(&mut registry, entry, &metadata);
-        }
-    }
-    if let Some(by_name) = json.get("byChannelName").and_then(|v| v.as_object()) {
-        for (key, entry) in by_name {
-            if key == "enabled" {
-                continue;
-            }
-            collect_registry_entry(&mut registry, entry, &metadata);
-        }
-    }
-    for agent in &explicit_agents {
-        if let Some(binding) = parse_meeting_role_binding(agent) {
-            let role_id = binding.role_id.clone();
-            registry.insert(
-                role_id,
-                meeting_available_agent_config(agent, binding, &metadata),
-            );
-        }
-    }
-
-    let agent_registry: Vec<MeetingAgentConfig> = registry.into_values().collect();
-    let available_agents = if explicit_agents.is_empty() {
-        agent_registry.clone()
-    } else {
-        explicit_agents
-            .iter()
-            .filter_map(|agent| {
-                let role_id = agent.get("role_id").and_then(|v| v.as_str())?;
-                agent_registry
-                    .iter()
-                    .find(|candidate| candidate.role_id == role_id)
-                    .cloned()
-            })
-            .collect()
-    };
+        .and_then(|agents_arr| {
+            let parsed = agents_arr
+                .iter()
+                .filter_map(meeting_agent_from_json)
+                .collect::<Vec<_>>();
+            (!parsed.is_empty()).then_some(parsed)
+        })
+        .unwrap_or_else(|| collect_role_map_binding_agents(&json));
 
     Some(MeetingConfig {
         channel_name,
         max_rounds,
+        max_participants,
         summary_agent,
         available_agents,
-        agent_registry,
     })
 }
 
@@ -695,85 +504,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_meeting_config_uses_registry_and_available_agents_subset() {
-        with_temp_root(|temp_home: &TempDir| {
-            write_role_map(
-                temp_home.path(),
-                r#"{
-  "byChannelId": {
-    "123": {
-      "roleId": "ch-td",
-      "promptFile": "~/prompts/ch-td.md",
-      "provider": "claude",
-      "workspace": "~/workspaces/td"
-    },
-    "456": {
-      "roleId": "ch-pd",
-      "promptFile": "~/prompts/ch-pd.md",
-      "provider": "codex"
-    }
-  },
-  "meeting": {
-    "channel_name": "meeting-room",
-    "max_rounds": 4,
-    "summary_agent": "ch-td",
-    "available_agents": [
-      {
-        "role_id": "ch-pd",
-        "display_name": "PD",
-        "keywords": ["제품"],
-        "domain_summary": "제품 방향과 사용자 가치 판단",
-        "strengths": ["우선순위", "문제 정의"],
-        "task_types": ["기획", "검토"],
-        "anti_signals": ["코드 세부 구현 단독 담당"],
-        "provider_hint": "gemini"
-      }
-    ]
-  }
-}"#,
-            );
-
-            let config = load_meeting_config().expect("meeting config should load");
-            assert_eq!(config.max_rounds, 4);
-            assert_eq!(config.agent_registry.len(), 2);
-            assert_eq!(config.available_agents.len(), 1);
-            assert_eq!(config.available_agents[0].role_id, "ch-pd");
-            assert_eq!(config.available_agents[0].display_name, "PD");
-            assert_eq!(
-                config.available_agents[0].domain_summary.as_deref(),
-                Some("제품 방향과 사용자 가치 판단")
-            );
-            assert_eq!(
-                config.available_agents[0].strengths,
-                vec!["우선순위", "문제 정의"]
-            );
-            assert_eq!(config.available_agents[0].task_types, vec!["기획", "검토"]);
-            assert_eq!(
-                config.available_agents[0].anti_signals,
-                vec!["코드 세부 구현 단독 담당"]
-            );
-            assert_eq!(
-                config.available_agents[0].provider_hint.as_deref(),
-                Some("gemini")
-            );
-            assert!(!config.available_agents[0].metadata_missing);
-            assert_eq!(config.available_agents[0].metadata_confidence, "high");
-            assert_eq!(
-                config.available_agents[0].binding.provider,
-                Some(ProviderKind::Codex)
-            );
-            assert_eq!(
-                config
-                    .agent_registry
-                    .iter()
-                    .find(|agent| agent.role_id == "ch-td")
-                    .and_then(|agent| agent.workspace.as_deref()),
-                Some(&expand_tilde("~/workspaces/td")[..])
-            );
-        });
-    }
-
-    #[test]
     fn test_resolve_role_binding_skips_by_name_entry_when_channel_id_mismatches() {
         with_temp_root(|temp_home: &TempDir| {
             write_role_map(
@@ -804,31 +534,26 @@ mod tests {
     }
 
     #[test]
-    fn test_load_meeting_config_meeting_available_agent_overrides_channel_binding() {
+    fn test_load_meeting_config_reads_metadata_and_max_participants() {
         with_temp_root(|temp_home: &TempDir| {
             write_role_map(
                 temp_home.path(),
                 r#"{
-  "byChannelId": {
-    "456": {
-      "roleId": "ch-pd",
-      "promptFile": "~/prompts/channel-pd.md",
-      "provider": "codex",
-      "workspace": "~/workspaces/channel"
-    }
-  },
   "meeting": {
-    "channel_name": "meeting-room",
-    "summary_agent": "ch-pd",
+    "channel_name": "meeting",
+    "max_participants": 4,
+    "summary_agent": "qwen",
     "available_agents": [
       {
-        "role_id": "ch-pd",
-        "display_name": "Meeting PD",
-        "keywords": ["회의"],
-        "domain_summary": "회의 전용 제품 판단",
-        "promptFile": "~/prompts/meeting-pd.md",
-        "provider": "gemini",
-        "workspace": "~/workspaces/meeting"
+        "role_id": "qwen",
+        "display_name": "Qwen Specialist",
+        "prompt_file": "~/prompts/qwen.md",
+        "keywords": ["analysis"],
+        "domain_summary": "Deep reasoning specialist",
+        "strengths": ["long-context synthesis"],
+        "task_types": ["analysis"],
+        "anti_signals": ["short notification"],
+        "provider_hint": "qwen"
       }
     ]
   }
@@ -836,109 +561,20 @@ mod tests {
             );
 
             let config = load_meeting_config().expect("meeting config should load");
-            let agent = config
-                .available_agents
-                .iter()
-                .find(|agent| agent.role_id == "ch-pd")
-                .expect("meeting agent should be present");
-
-            assert_eq!(agent.display_name, "Meeting PD");
-            assert_eq!(
-                agent.binding.prompt_file,
-                expand_tilde("~/prompts/meeting-pd.md")
-            );
-            assert_eq!(agent.binding.provider, Some(ProviderKind::Gemini));
-            assert_eq!(
-                agent.workspace.as_deref(),
-                Some(&expand_tilde("~/workspaces/meeting")[..])
-            );
-        });
-    }
-
-    #[test]
-    fn test_load_meeting_config_empty_available_agents_falls_back_to_registry() {
-        with_temp_root(|temp_home: &TempDir| {
-            write_role_map(
-                temp_home.path(),
-                r#"{
-  "byChannelId": {
-    "123": {
-      "roleId": "ch-td",
-      "promptFile": "~/prompts/ch-td.md",
-      "provider": "claude"
-    },
-    "456": {
-      "roleId": "ch-pd",
-      "promptFile": "~/prompts/ch-pd.md",
-      "provider": "codex"
-    }
-  },
-  "meeting": {
-    "channel_name": "meeting-room",
-    "summary_agent": "ch-td",
-    "available_agents": []
-  }
-}"#,
-            );
-
-            let config = load_meeting_config().expect("meeting config should load");
-            let role_ids: Vec<&str> = config
-                .available_agents
-                .iter()
-                .map(|agent| agent.role_id.as_str())
-                .collect();
-
-            assert_eq!(config.available_agents.len(), config.agent_registry.len());
-            assert!(role_ids.contains(&"ch-td"));
-            assert!(role_ids.contains(&"ch-pd"));
-        });
-    }
-
-    #[test]
-    fn test_load_meeting_config_registers_meeting_only_available_agent() {
-        with_temp_root(|temp_home: &TempDir| {
-            write_role_map(
-                temp_home.path(),
-                r#"{
-  "byChannelId": {},
-  "meeting": {
-    "channel_name": "meeting-room",
-    "summary_agent": "standalone",
-    "available_agents": [
-      {
-        "role_id": "standalone",
-        "display_name": "Standalone Expert",
-        "keywords": ["strategy"],
-        "domain_summary": "채널 바인딩 없이 회의에서만 쓰는 전문가",
-        "promptFile": "~/prompts/standalone.md",
-        "provider": "gemini",
-        "workspace": "~/workspaces/standalone"
-      }
-    ]
-  }
-}"#,
-            );
-
-            let config = load_meeting_config().expect("meeting config should load");
-
-            assert_eq!(config.agent_registry.len(), 1);
+            assert_eq!(config.max_participants, 4);
             assert_eq!(config.available_agents.len(), 1);
-            let agent = &config.available_agents[0];
-            assert_eq!(agent.role_id, "standalone");
-            assert_eq!(agent.display_name, "Standalone Expert");
+            let qwen = &config.available_agents[0];
+            assert_eq!(qwen.role_id, "qwen");
+            assert_eq!(qwen.display_name, "Qwen Specialist");
+            assert!(qwen.prompt_file.ends_with("/prompts/qwen.md"));
             assert_eq!(
-                agent.domain_summary.as_deref(),
-                Some("채널 바인딩 없이 회의에서만 쓰는 전문가")
+                qwen.domain_summary.as_deref(),
+                Some("Deep reasoning specialist")
             );
-            assert_eq!(agent.binding.provider, Some(ProviderKind::Gemini));
-            assert_eq!(
-                agent.binding.prompt_file,
-                expand_tilde("~/prompts/standalone.md")
-            );
-            assert_eq!(
-                agent.workspace.as_deref(),
-                Some(&expand_tilde("~/workspaces/standalone")[..])
-            );
+            assert_eq!(qwen.strengths, vec!["long-context synthesis".to_string()]);
+            assert_eq!(qwen.task_types, vec!["analysis".to_string()]);
+            assert_eq!(qwen.anti_signals, vec!["short notification".to_string()]);
+            assert_eq!(qwen.provider_hint.as_deref(), Some("qwen"));
         });
     }
 
@@ -957,6 +593,38 @@ mod tests {
 
             let shared = load_shared_prompt_path().expect("shared prompt path");
             assert!(shared.ends_with("/config/agents/_shared.prompt.md"));
+        });
+    }
+
+    #[test]
+    fn test_load_meeting_config_empty_available_agents_falls_back_to_channel_bindings() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(
+                temp_home.path(),
+                r#"{
+  "byChannelId": {
+    "123": {
+      "roleId": "gemini",
+      "displayName": "Gemini Specialist",
+      "promptFile": "~/prompts/gemini.md",
+      "provider": "gemini"
+    }
+  },
+  "meeting": {
+    "channel_name": "meeting",
+    "summary_agent": "gemini",
+    "available_agents": []
+  }
+}"#,
+            );
+
+            let config = load_meeting_config().expect("meeting config should load");
+            assert_eq!(config.available_agents.len(), 1);
+            assert_eq!(config.available_agents[0].role_id, "gemini");
+            assert_eq!(
+                config.available_agents[0].provider_hint.as_deref(),
+                Some("gemini")
+            );
         });
     }
 }

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
-use crate::services::discord::{health, meeting, settings};
+use crate::services::discord::{health, settings};
 use crate::services::provider::ProviderKind;
 
 // ── Body types ─────────────────────────────────────────────────
@@ -24,7 +24,6 @@ pub struct StartMeetingBody {
     pub channel_id: Option<String>,
     pub primary_provider: Option<String>,
     pub reviewer_provider: Option<String>,
-    pub fixed_participants: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,7 +112,6 @@ pub async fn list_meeting_channels(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let bindings = settings::list_registered_channel_bindings();
     let registry = state.health_registry.as_ref();
-    let available_experts = meeting::load_meeting_expert_options();
 
     let mut channels = Vec::new();
     for binding in bindings {
@@ -135,18 +133,6 @@ pub async fn list_meeting_channels(
             "channel_id": binding.channel_id.to_string(),
             "channel_name": channel_name,
             "owner_provider": binding.owner_provider.as_str(),
-            "available_experts": available_experts.iter().map(|agent| json!({
-                "role_id": agent.role_id,
-                "display_name": agent.display_name,
-                "keywords": agent.keywords,
-                "domain_summary": agent.domain_summary,
-                "strengths": agent.strengths,
-                "task_types": agent.task_types,
-                "anti_signals": agent.anti_signals,
-                "provider_hint": agent.provider_hint,
-                "metadata_missing": agent.metadata_missing,
-                "metadata_confidence": agent.metadata_confidence,
-            })).collect::<Vec<_>>(),
         }));
     }
 
@@ -684,16 +670,6 @@ pub async fn start_meeting(
     {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
     }
-    let fixed_participants = match meeting::validate_fixed_participant_role_ids(
-        &primary_provider,
-        &reviewer_provider,
-        body.fixed_participants.as_deref().unwrap_or(&[]),
-    ) {
-        Ok(role_ids) => role_ids,
-        Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
-        }
-    };
 
     match health::start_direct_meeting(
         registry,
@@ -702,7 +678,6 @@ pub async fn start_meeting(
         primary_provider,
         reviewer_provider,
         agenda.to_string(),
-        fixed_participants,
     )
     .await
     {
@@ -822,6 +797,21 @@ pub async fn upsert_meeting(
             participant_names_update_json,
         ],
     ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        );
+    }
+
+    let saved_thread_id: Option<String> = conn
+        .query_row(
+            "SELECT channel_id FROM meetings WHERE id = ?1",
+            [&body.id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    if let Err(e) = persist_meeting_query_hashes(&conn, &body.id, saved_thread_id.as_deref()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
@@ -1018,6 +1008,69 @@ fn build_meeting_start_command(agenda: &str, primary_provider: Option<ProviderKi
     }
 }
 
+fn short_query_hash(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(input.as_bytes());
+    hex::encode(&digest[..6])
+}
+
+fn meeting_query_hash(meeting_id: &str) -> String {
+    format!(
+        "#meeting-{}",
+        short_query_hash(&format!("meeting:{meeting_id}"))
+    )
+}
+
+fn thread_query_hash(thread_id: &str) -> String {
+    format!(
+        "#thread-{}",
+        short_query_hash(&format!("thread:{thread_id}"))
+    )
+}
+
+fn persist_meeting_query_hashes(
+    conn: &rusqlite::Connection,
+    meeting_id: &str,
+    thread_id: Option<&str>,
+) -> rusqlite::Result<()> {
+    let meeting_hash = meeting_query_hash(meeting_id);
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![
+            format!("meeting_query_hash:{meeting_id}"),
+            meeting_hash.clone()
+        ],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![
+            format!("meeting_query_hash_lookup:{meeting_hash}"),
+            meeting_id
+        ],
+    )?;
+
+    if let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) {
+        let thread_hash = thread_query_hash(thread_id);
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                format!("meeting_thread_hash:{meeting_id}"),
+                thread_hash.clone()
+            ],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                format!("meeting_thread_hash_lookup:{thread_hash}"),
+                json!({"meeting_id": meeting_id, "thread_id": thread_id}).to_string()
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
 fn row_optional_timestamp(row: &rusqlite::Row, idx: usize) -> Option<i64> {
     use rusqlite::types::ValueRef;
 
@@ -1045,6 +1098,8 @@ fn row_optional_timestamp(row: &rusqlite::Row, idx: usize) -> Option<i64> {
 }
 
 fn meeting_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
+    let meeting_id = row.get::<_, String>(0)?;
+    let channel_id = row.get::<_, Option<String>>(1)?;
     let title = row.get::<_, Option<String>>(2)?;
     let effective_rounds = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
     let participant_names = row
@@ -1054,9 +1109,12 @@ fn meeting_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Valu
     let started_at = row_optional_timestamp(row, 5).unwrap_or(0);
     let completed_at = row_optional_timestamp(row, 6);
     let created_at = row_optional_timestamp(row, 11).unwrap_or(started_at);
+    let thread_hash = channel_id.as_deref().map(thread_query_hash);
     Ok(json!({
-        "id": row.get::<_, String>(0)?,
-        "channel_id": row.get::<_, Option<String>>(1)?,
+        "id": meeting_id.clone(),
+        "channel_id": channel_id,
+        "meeting_hash": meeting_query_hash(&meeting_id),
+        "thread_hash": thread_hash,
         "title": title,
         "status": row.get::<_, Option<String>>(3)?,
         "effective_rounds": effective_rounds,
@@ -1182,7 +1240,10 @@ mod tests {
     use crate::db::Db;
     use crate::engine::PolicyEngine;
     use crate::services::provider::ProviderKind;
-    use axum::{Json, extract::State};
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
     use std::path::PathBuf;
 
     fn test_db() -> Db {
@@ -1324,7 +1385,6 @@ mod tests {
                 channel_id: Some("999999999999".to_string()),
                 primary_provider: None,
                 reviewer_provider: Some("codex".to_string()),
-                fixed_participants: None,
             }),
         )
         .await;
@@ -1348,7 +1408,6 @@ mod tests {
                 channel_id: Some("999999999999".to_string()),
                 primary_provider: Some("qwen".to_string()),
                 reviewer_provider: Some("codex".to_string()),
-                fixed_participants: None,
             }),
         )
         .await;
@@ -1430,6 +1489,66 @@ mod tests {
         assert_eq!(row.3, Some(222));
         assert_eq!(row.4.as_deref(), Some("요약 갱신"));
         assert_eq!(row.5.as_deref(), Some("[\"Alice\",\"Bob\"]"));
+    }
+
+    #[tokio::test]
+    async fn upsert_meeting_persists_query_hashes_and_returns_them() {
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+
+        let (status, _) = upsert_meeting(
+            State(state.clone()),
+            Json(UpsertMeetingBody {
+                id: "meeting-hash".to_string(),
+                agenda: Some("해시 안건".to_string()),
+                summary: None,
+                status: Some("in_progress".to_string()),
+                primary_provider: Some("qwen".to_string()),
+                reviewer_provider: Some("codex".to_string()),
+                participant_names: Some(vec!["Alice".to_string()]),
+                total_rounds: Some(1),
+                started_at: Some(111),
+                completed_at: None,
+                thread_id: Some("thread-123".to_string()),
+                entries: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let expected_meeting_hash = meeting_query_hash("meeting-hash");
+        let expected_thread_hash = thread_query_hash("thread-123");
+        let (status, body) = get_meeting(State(state), Path("meeting-hash".to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.0["meeting"]["meeting_hash"], expected_meeting_hash);
+        assert_eq!(body.0["meeting"]["thread_hash"], expected_thread_hash);
+
+        let conn = db.lock().unwrap();
+        let stored_meeting_hash: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                ["meeting_query_hash:meeting-hash"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let meeting_lookup: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [format!("meeting_query_hash_lookup:{expected_meeting_hash}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored_thread_hash: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                ["meeting_thread_hash:meeting-hash"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(stored_meeting_hash, expected_meeting_hash);
+        assert_eq!(meeting_lookup, "meeting-hash");
+        assert_eq!(stored_thread_hash, expected_thread_hash);
     }
 
     #[tokio::test]

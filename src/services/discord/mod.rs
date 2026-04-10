@@ -305,11 +305,8 @@ impl DiscordSession {
     }
 
     pub(super) fn restore_provider_session(&mut self, session_id: Option<String>) {
-        if self.session_id == session_id {
-            return;
-        }
         self.session_id = session_id;
-        self.memento_context_loaded = false;
+        self.memento_context_loaded = self.session_id.is_some();
         self.memento_reflected = false;
     }
 

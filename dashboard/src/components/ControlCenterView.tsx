@@ -13,6 +13,8 @@ import { SessionPanel } from "./session-panel/SessionPanel";
 type ControlTab = "agents" | "departments" | "offices" | "settings" | "meetings";
 type AgentsPane = "directory" | "dispatch";
 
+const CONTROL_SECTION_ORDER: readonly ControlTab[] = ["agents", "departments", "offices", "settings", "meetings"];
+
 interface ControlCenterViewProps {
   controlTab: ControlTab;
   onControlTabChange: (tab: ControlTab) => void;
@@ -36,6 +38,7 @@ interface ControlCenterViewProps {
   settings: CompanySettings;
   onSaveSettings: (patch: Record<string, unknown>) => Promise<void>;
   notifications: Notification[];
+  onNotify: (message: string, type?: Notification["type"]) => void;
   onDismissNotification: (id: string) => void;
 }
 
@@ -79,54 +82,58 @@ export default function ControlCenterView({
   settings,
   onSaveSettings,
   notifications,
+  onNotify,
   onDismissNotification,
 }: ControlCenterViewProps) {
   const t = useCallback((ko: string, en: string) => (isKo ? ko : en), [isKo]);
   const recentNotifications = notifications.slice(0, 3);
   const unresolvedMeetings = meetings.filter(hasUnresolvedMeetingIssues).length;
 
-  const sections = useMemo(() => [
-    {
-      id: "agents" as const,
-      labelKo: "에이전트",
-      labelEn: "Agents",
-      descriptionKo: "에이전트 프로필과 파견 세션을 관리합니다.",
-      descriptionEn: "Manage agent profiles and dispatched sessions.",
-      count: agents.length,
-    },
-    {
-      id: "departments" as const,
-      labelKo: "부서",
-      labelEn: "Departments",
-      descriptionKo: "부서 구조, 순서, 테마를 조정합니다.",
-      descriptionEn: "Adjust department structure, order, and theme.",
-      count: departments.length,
-    },
-    {
-      id: "offices" as const,
-      labelKo: "오피스",
-      labelEn: "Offices",
-      descriptionKo: "오피스와 멤버 구성을 한 화면에서 관리합니다.",
-      descriptionEn: "Manage offices and memberships from one place.",
-      count: offices.length,
-    },
-    {
-      id: "settings" as const,
-      labelKo: "설정",
-      labelEn: "Settings",
-      descriptionKo: "일반, 런타임, 시스템 설정을 조정합니다.",
-      descriptionEn: "Tune general, runtime, and system settings.",
-      count: undefined,
-    },
-    {
-      id: "meetings" as const,
-      labelKo: "회의 기록",
-      labelEn: "Meeting Records",
-      descriptionKo: "회의 상세와 후속 일감 상태를 확인합니다.",
-      descriptionEn: "Review meeting details and follow-up issue status.",
-      count: meetings.length,
-    },
-  ], [agents.length, departments.length, meetings.length, offices.length]);
+  const sections = useMemo(() => {
+    const byId = {
+      agents: {
+        id: "agents" as const,
+        labelKo: "에이전트",
+        labelEn: "Agents",
+        descriptionKo: "에이전트 프로필과 파견 세션을 관리합니다.",
+        descriptionEn: "Manage agent profiles and dispatched sessions.",
+        count: agents.length,
+      },
+      departments: {
+        id: "departments" as const,
+        labelKo: "부서",
+        labelEn: "Departments",
+        descriptionKo: "부서 구조, 순서, 테마를 조정합니다.",
+        descriptionEn: "Adjust department structure, order, and theme.",
+        count: departments.length,
+      },
+      offices: {
+        id: "offices" as const,
+        labelKo: "오피스",
+        labelEn: "Offices",
+        descriptionKo: "오피스와 멤버 구성을 한 화면에서 관리합니다.",
+        descriptionEn: "Manage offices and memberships from one place.",
+        count: offices.length,
+      },
+      settings: {
+        id: "settings" as const,
+        labelKo: "설정",
+        labelEn: "Settings",
+        descriptionKo: "일반, 런타임, 시스템 설정을 조정합니다.",
+        descriptionEn: "Tune general, runtime, and system settings.",
+        count: undefined,
+      },
+      meetings: {
+        id: "meetings" as const,
+        labelKo: "회의 기록",
+        labelEn: "Meeting Records",
+        descriptionKo: "회의 상세와 후속 일감 상태를 확인합니다.",
+        descriptionEn: "Review meeting details and follow-up issue status.",
+        count: meetings.length,
+      },
+    };
+    return CONTROL_SECTION_ORDER.map((id) => byId[id]);
+  }, [agents.length, departments.length, meetings.length, offices.length]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -316,7 +323,11 @@ export default function ControlCenterView({
         )}
 
         {controlTab === "meetings" && (
-          <MeetingMinutesView meetings={meetings} onRefresh={onRefreshMeetings} />
+          <MeetingMinutesView
+            meetings={meetings}
+            onRefresh={onRefreshMeetings}
+            onNotify={onNotify}
+          />
         )}
       </div>
     </div>
