@@ -132,6 +132,20 @@ pub(in crate::services::discord) fn should_phase2_recover_message(
     true
 }
 
+pub(in crate::services::discord) fn recovery_known_message_ids(
+    snapshot: &ChannelMailboxSnapshot,
+) -> std::collections::HashSet<u64> {
+    let mut ids = snapshot
+        .intervention_queue
+        .iter()
+        .map(|item| item.message_id.get())
+        .collect::<std::collections::HashSet<_>>();
+    if let Some(active_id) = snapshot.active_user_message_id {
+        ids.insert(active_id.get());
+    }
+    ids
+}
+
 #[cfg(test)]
 pub(in crate::services::discord) use queue_io::channel_has_pending_soft_queue_at;
 pub(in crate::services::discord) use queue_io::schedule_deferred_idle_queue_kickoff;
@@ -1256,14 +1270,7 @@ async fn catch_up_missed_messages(
         };
 
         // Collect existing message IDs in queue for dedup
-        let existing_ids: std::collections::HashSet<u64> = {
-            mailbox_snapshot(shared, channel_id)
-                .await
-                .intervention_queue
-                .into_iter()
-                .map(|i| i.message_id.get())
-                .collect()
-        };
+        let existing_ids = recovery_known_message_ids(&mailbox_snapshot(shared, channel_id).await);
 
         let allowed_bot_ids: Vec<u64> = {
             let settings = shared.settings.read().await;
@@ -1406,14 +1413,8 @@ async fn catch_up_missed_messages(
         };
 
         // Collect existing queue IDs for dedup
-        let mut existing_ids: std::collections::HashSet<u64> = {
-            mailbox_snapshot(shared, channel_id)
-                .await
-                .intervention_queue
-                .into_iter()
-                .map(|i| i.message_id.get())
-                .collect()
-        };
+        let mut existing_ids =
+            recovery_known_message_ids(&mailbox_snapshot(shared, channel_id).await);
         let mut phase2_checkpoint = shared.last_message_ids.get(&channel_id).map(|v| *v);
 
         let mut channel_recovered = 0usize;
@@ -2552,9 +2553,8 @@ pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext
                                 continue;
                             }
                             let snapshot = mailbox_snapshot(&shared_for_tmux2, channel_id).await;
+                            let mut existing_ids = recovery_known_message_ids(&snapshot);
                             let mut queue = snapshot.intervention_queue;
-                            let mut existing_ids: std::collections::HashSet<u64> =
-                                queue.iter().map(|item| item.message_id.get()).collect();
                             for item in items {
                                 if allowed_bot_ids_for_restore.contains(&item.author_id.get())
                                     && !should_process_allowed_bot_turn_text(&item.text)
@@ -4188,7 +4188,7 @@ mod tests {
         DiscordBotSettings, Intervention, InterventionMode, PendingQueueItem,
         allows_nonlocal_session_path, channel_has_pending_soft_queue_at,
         choose_restore_channel_name, discord_gateway_intents, is_allowed_turn_sender,
-        is_synthetic_thread_channel_name, load_pending_queues,
+        is_synthetic_thread_channel_name, load_pending_queues, recovery_known_message_ids,
         requeue_intervention_front_persisted, save_channel_queue, save_pending_queues,
         select_restored_session_path, session_path_is_usable, should_phase2_recover_message,
         synthetic_thread_channel_name, take_next_soft_intervention_persisted, user_is_authorized,
@@ -4316,6 +4316,26 @@ mod tests {
         assert!(!should_phase2_recover_message(200, Some(250), &existing));
         assert!(!should_phase2_recover_message(250, Some(250), &existing));
         assert!(should_phase2_recover_message(251, Some(250), &existing));
+    }
+
+    #[test]
+    fn recovery_known_message_ids_include_active_turn_message() {
+        let snapshot = super::ChannelMailboxSnapshot {
+            active_user_message_id: Some(MessageId::new(200)),
+            intervention_queue: vec![Intervention {
+                author_id: UserId::new(42),
+                message_id: MessageId::new(100),
+                text: "queued".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+            }],
+            ..Default::default()
+        };
+
+        let existing = recovery_known_message_ids(&snapshot);
+        assert!(existing.contains(&100));
+        assert!(existing.contains(&200));
+        assert!(!should_phase2_recover_message(200, None, &existing));
     }
 
     #[test]
