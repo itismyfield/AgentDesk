@@ -440,6 +440,10 @@ pub fn api_router(
         )
         .route("/auto-queue/runs/{id}", patch(auto_queue::update_run))
         .route("/auto-queue/reorder", patch(auto_queue::reorder))
+        .route(
+            "/auto-queue/slots/{agent_id}/{slot_index}/reset-thread",
+            post(auto_queue::reset_slot_thread),
+        )
         .route("/auto-queue/reset", post(auto_queue::reset))
         .route("/auto-queue/pause", post(auto_queue::pause))
         .route("/auto-queue/resume", post(auto_queue::resume_run))

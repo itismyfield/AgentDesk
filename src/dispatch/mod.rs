@@ -1352,150 +1352,19 @@ pub fn query_dispatch_row(
     .map_err(|e| anyhow::anyhow!("Dispatch query error: {e}"))
 }
 
-/// Check whether a dispatch belongs to an active unified-thread auto-queue run.
-///
-/// Returns `true` when:
-/// - The dispatch's kanban card is part of an active/paused auto-queue run
-/// - That run has `unified_thread_id IS NOT NULL`
-/// - The run still has pending or dispatched entries remaining
-///
-/// When `true`, callers should **not** tear down the tmux session because the
-/// same thread will be reused for subsequent queue entries.
-///
-/// Uses a standalone `rusqlite::Connection` opened from the runtime DB path
-/// to avoid lock contention with the main `Db` mutex.
 pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
-    let root = match crate::cli::agentdesk_runtime_root() {
-        Some(r) => r,
-        None => return false,
-    };
-    let db_path = root.join("data/agentdesk.sqlite");
-    let conn = match rusqlite::Connection::open(&db_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    // #145: Direct dispatch→entry→run lookup via auto_queue_entries.dispatch_id.
-    // Eliminates kanban_card_id-based ambiguity when the same card is re-queued.
-    let result: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 \
-             FROM auto_queue_entries e \
-             JOIN auto_queue_runs r ON e.run_id = r.id \
-             WHERE e.run_id = ( \
-                 SELECT e2.run_id FROM auto_queue_entries e2 \
-                 WHERE e2.dispatch_id = ?1 \
-                 ORDER BY CASE e2.status WHEN 'dispatched' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END \
-                 LIMIT 1 \
-             ) \
-             AND r.status IN ('active', 'paused') \
-             AND e.status IN ('pending', 'dispatched') \
-             AND r.unified_thread_id IS NOT NULL",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    let has_slot_table: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'auto_queue_slots'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_slot_table {
-        return result;
-    }
-    let slot_result: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 \
-             FROM auto_queue_entries e \
-             JOIN auto_queue_slots s
-               ON s.agent_id = e.agent_id
-              AND s.slot_index = e.slot_index \
-             WHERE e.dispatch_id = ?1 \
-               AND e.slot_index IS NOT NULL \
-               AND COALESCE(s.thread_id_map, '') != ''",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    result || slot_result
+    let _ = dispatch_id;
+    false
 }
 
-/// Check whether a thread channel belongs to an active unified-thread auto-queue run.
-///
-/// Looks up `auto_queue_runs` by `unified_thread_channel_id` matching the
-/// given Discord channel ID. Also searches within `unified_thread_id` JSON
-/// for parallel runs where each group has its own thread (#140).
-/// Returns `true` when a matching active/paused run still has pending or dispatched entries.
 pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
-    let root = match crate::cli::agentdesk_runtime_root() {
-        Some(r) => r,
-        None => return false,
-    };
-    let db_path = root.join("data/agentdesk.sqlite");
-    let conn = match rusqlite::Connection::open(&db_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let channel_str = channel_id.to_string();
-    let quoted = format!("\"{}\"", channel_str);
-    let has_slot_table: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'auto_queue_slots'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if has_slot_table {
-        let slot_match: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0
-                 FROM auto_queue_slots
-                 WHERE COALESCE(thread_id_map, '') != ''
-                   AND INSTR(thread_id_map, ?1) > 0",
-                [&quoted],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if slot_match {
-            return true;
-        }
-    }
-    // Check scalar unified_thread_channel_id (covers non-parallel and last-written parallel)
-    let scalar_match: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 \
-             FROM auto_queue_entries e \
-             JOIN auto_queue_runs r ON e.run_id = r.id \
-             WHERE r.unified_thread_channel_id = ?1 \
-             AND r.status IN ('active', 'paused') \
-             AND e.status IN ('pending', 'dispatched') \
-             AND r.unified_thread_id IS NOT NULL",
-            [&channel_str],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if scalar_match {
-        return true;
-    }
-    // #140: Also search within unified_thread_id JSON for parallel runs.
-    // Thread IDs stored as quoted string values, so searching for '"thread_id"' is safe.
-    conn.query_row(
-        "SELECT COUNT(*) > 0 \
-         FROM auto_queue_entries e \
-         JOIN auto_queue_runs r ON e.run_id = r.id \
-         WHERE r.status IN ('active', 'paused') \
-         AND e.status IN ('pending', 'dispatched') \
-         AND r.unified_thread_id IS NOT NULL \
-         AND INSTR(r.unified_thread_id, ?1) > 0",
-        [&quoted],
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
+    let _ = channel_id;
+    false
 }
 
 /// Extract thread channel ID from a channel name's `-t{15+digit}` suffix.
 /// Pure parsing — no DB access. Used by both production guards and tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_thread_channel_id(channel_name: &str) -> Option<u64> {
     let pos = channel_name.rfind("-t")?;
     let suffix = &channel_name[pos + 2..];
@@ -1511,45 +1380,12 @@ pub fn extract_thread_channel_id(channel_name: &str) -> Option<u64> {
 /// unified-thread auto-queue run. Extracts the thread channel ID from the
 /// `-t{15+digit}` suffix in the channel name.
 pub fn is_unified_thread_channel_name_active(channel_name: &str) -> bool {
-    let Some(thread_channel_id) = extract_thread_channel_id(channel_name) else {
-        return false;
-    };
-    is_unified_thread_channel_active(thread_channel_id)
+    let _ = channel_name;
+    false
 }
 
-/// Drain `kill_unified_thread:*` kv_meta entries and return the channel names to kill.
-/// Each entry is consumed (deleted from DB) on read.
 pub fn drain_unified_thread_kill_signals() -> Vec<String> {
-    let root = match crate::cli::agentdesk_runtime_root() {
-        Some(r) => r,
-        None => return vec![],
-    };
-    let db_path = root.join("data/agentdesk.sqlite");
-    let conn = match rusqlite::Connection::open(&db_path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-    let mut stmt = match conn
-        .prepare("SELECT key, value FROM kv_meta WHERE key LIKE 'kill_unified_thread:%'")
-    {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    let entries: Vec<(String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
-
-    let mut channels = Vec::new();
-    for (key, _run_id) in &entries {
-        if let Some(ch) = key.strip_prefix("kill_unified_thread:") {
-            channels.push(ch.to_string());
-        }
-        conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
-            .ok();
-    }
-    channels
+    Vec::new()
 }
 
 /// Determine provider from a Discord channel name suffix.
