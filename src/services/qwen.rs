@@ -22,6 +22,10 @@ use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe,
 };
 use crate::services::remote::RemoteProfile;
+use crate::services::session_backend::{
+    insert_process_session, process_session_is_alive, process_session_probe,
+    read_output_file_until_result, remove_process_session, send_process_session_input,
+};
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 #[cfg(unix)]
@@ -1123,7 +1127,7 @@ fn execute_streaming_local_tmux(
         *token.tmux_session.lock().unwrap() = Some(tmux_session_name.to_string());
     }
 
-    let read_result = claude::read_output_file_until_result(
+    let read_result = read_output_file_until_result(
         &output_path,
         0,
         sender.clone(),
@@ -1191,7 +1195,7 @@ fn send_followup_to_tmux(
         *token.tmux_session.lock().unwrap() = Some(tmux_session_name.to_string());
     }
 
-    let read_result = claude::read_output_file_until_result(
+    let read_result = read_output_file_until_result(
         output_path,
         start_offset,
         sender.clone(),
@@ -1226,9 +1230,7 @@ fn execute_streaming_local_process(
     qwen_resolution: &crate::services::platform::BinaryResolution,
     allowed_core_tools: Option<&[String]>,
 ) -> Result<(), String> {
-    use crate::services::session_backend::{
-        ProcessBackend, SessionBackend, SessionConfig, SessionHandle,
-    };
+    use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
     let output_path = format!(
         "{}/agentdesk-{}.jsonl",
@@ -1241,63 +1243,41 @@ fn execute_streaming_local_process(
         session_name
     );
 
-    {
-        let handles = claude::PROCESS_HANDLES.lock().unwrap();
-        if let Some(handle) = handles.get(session_name) {
-            let backend = ProcessBackend::new();
-            if backend.is_alive(handle) {
-                drop(handles);
-                let start_offset = std::fs::metadata(&output_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                let encoded = format!(
-                    "{}{}",
-                    TMUX_PROMPT_B64_PREFIX,
-                    BASE64_STANDARD.encode(prompt.as_bytes())
-                );
-                let handles2 = claude::PROCESS_HANDLES.lock().unwrap();
-                if let Some(handle) = handles2.get(session_name) {
-                    backend.send_input(handle, &encoded)?;
-                }
-                drop(handles2);
-                let read_result = claude::read_output_file_until_result(
-                    &output_path,
-                    start_offset,
-                    sender.clone(),
-                    cancel_token,
-                    SessionProbe::process({
-                        let session_name = session_name.to_string();
-                        move || {
-                            let handles = claude::PROCESS_HANDLES.lock().unwrap();
-                            if let Some(handle) = handles.get(&session_name) {
-                                ProcessBackend::new().is_alive(handle)
-                            } else {
-                                false
-                            }
-                        }
-                    }),
-                )?;
+    if process_session_is_alive(session_name) {
+        let start_offset = std::fs::metadata(&output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let encoded = format!(
+            "{}{}",
+            TMUX_PROMPT_B64_PREFIX,
+            BASE64_STANDARD.encode(prompt.as_bytes())
+        );
+        send_process_session_input(session_name, &encoded)?;
+        let read_result = read_output_file_until_result(
+            &output_path,
+            start_offset,
+            sender.clone(),
+            cancel_token,
+            process_session_probe(session_name),
+        )?;
 
-                match read_result {
-                    ReadOutputResult::Completed { offset }
-                    | ReadOutputResult::Cancelled { offset } => {
-                        let _ = sender.send(StreamMessage::ProcessReady {
-                            output_path: output_path.to_string(),
-                            session_name: session_name.to_string(),
-                            last_offset: offset,
-                        });
-                    }
-                    ReadOutputResult::SessionDied { .. } => {
-                        let _ = sender.send(StreamMessage::Done {
-                            result: "⚠ 세션이 종료되었습니다.".to_string(),
-                            session_id: None,
-                        });
-                        claude::PROCESS_HANDLES.lock().unwrap().remove(session_name);
-                    }
-                }
-                return Ok(());
+        match read_result {
+            ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+                let _ = sender.send(StreamMessage::ProcessReady {
+                    output_path: output_path.to_string(),
+                    session_name: session_name.to_string(),
+                    last_offset: offset,
+                });
+            }
+            ReadOutputResult::SessionDied { .. } => {
+                let _ = sender.send(StreamMessage::Done {
+                    result: "⚠ 세션이 종료되었습니다.".to_string(),
+                    session_id: None,
+                });
+                remove_process_session(session_name);
             }
         }
+        return Ok(());
     }
 
     let _ = std::fs::remove_file(&output_path);
@@ -1347,32 +1327,18 @@ fn execute_streaming_local_process(
     let backend = ProcessBackend::new();
     let handle = backend.create_session(&config)?;
 
-    let SessionHandle::Process { pid, .. } = &handle;
     if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(*pid);
+        *token.child_pid.lock().unwrap() = Some(handle.pid());
     }
 
-    claude::PROCESS_HANDLES
-        .lock()
-        .unwrap()
-        .insert(session_name.to_string(), handle);
+    insert_process_session(session_name.to_string(), handle);
 
-    let read_result = claude::read_output_file_until_result(
+    let read_result = read_output_file_until_result(
         &output_path,
         0,
         sender.clone(),
         cancel_token,
-        SessionProbe::process({
-            let session_name = session_name.to_string();
-            move || {
-                let handles = claude::PROCESS_HANDLES.lock().unwrap();
-                if let Some(handle) = handles.get(&session_name) {
-                    ProcessBackend::new().is_alive(handle)
-                } else {
-                    false
-                }
-            }
-        }),
+        process_session_probe(session_name),
     )?;
 
     match read_result {
@@ -1388,7 +1354,7 @@ fn execute_streaming_local_process(
                 result: "⚠ 프로세스가 종료되었습니다.".to_string(),
                 session_id: None,
             });
-            claude::PROCESS_HANDLES.lock().unwrap().remove(session_name);
+            remove_process_session(session_name);
         }
     }
 

@@ -1198,7 +1198,7 @@ pub(super) async fn restore_inflight_turns(
         let recovery_session_id = state.session_id.clone();
         let retry_channel_id = channel_id.get();
         std::thread::spawn(move || {
-            match claude::read_output_file_until_result(
+            match crate::services::session_backend::read_output_file_until_result(
                 &output_for_reader,
                 start_offset,
                 tx.clone(),
