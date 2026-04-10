@@ -99,6 +99,32 @@ fn load_legacy_bot_settings_json() -> Option<serde_json::Value> {
         .unwrap_or(false);
 
     if !has_runtime_data {
+        // Before retiring, ensure provider fields are persisted to yaml.
+        // bot_settings.json may be the only source of provider for some bots.
+        if let Some(obj) = json.as_object() {
+            for (_key, entry) in obj {
+                let token = match entry.get("token").and_then(|v| v.as_str()) {
+                    Some(t) => t.to_string(),
+                    None => continue,
+                };
+                let legacy_provider = entry
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(provider_str) = legacy_provider {
+                    if let Some(bot) = agentdesk_config::find_discord_bot_by_token(&token) {
+                        if bot.provider.is_none() {
+                            // Merge full settings (yaml + legacy) then persist
+                            let full = load_bot_settings(&token);
+                            let mut merged = full;
+                            merged.provider = ProviderKind::from_str_or_unsupported(&provider_str);
+                            persist_bot_auth_to_yaml(&token, &merged);
+                        }
+                    }
+                }
+            }
+        }
+
         let migrated = path.with_extension("json.migrated");
         if let Err(e) = fs::rename(&path, &migrated) {
             tracing::warn!(
