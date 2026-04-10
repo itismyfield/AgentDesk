@@ -823,6 +823,51 @@ channels:
     }
 
     #[test]
+    fn test_meeting_available_agents_empty_list_falls_back_to_registry() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_org_yaml(
+                temp_home.path(),
+                r#"
+version: 1
+agents:
+  td:
+    display_name: "TD"
+    keywords: ["code"]
+  pd:
+    display_name: "PD"
+    keywords: ["product"]
+  qad:
+    display_name: "QAD"
+    keywords: ["test"]
+meeting:
+  channel_name: "meeting"
+  summary_agent: "td"
+  available_agents: []
+channels:
+  by_id:
+    "300":
+      agent: td
+"#,
+            );
+
+            let config = load_meeting_config().expect("meeting config should load");
+            let role_ids: Vec<&str> = config
+                .available_agents
+                .iter()
+                .map(|agent| agent.role_id.as_str())
+                .collect();
+
+            assert_eq!(config.available_agents.len(), config.agent_registry.len());
+            assert!(role_ids.contains(&"td"), "td should be in available_agents");
+            assert!(role_ids.contains(&"pd"), "pd should be in available_agents");
+            assert!(
+                role_ids.contains(&"qad"),
+                "qad should be in available_agents"
+            );
+        });
+    }
+
+    #[test]
     fn test_prompts_root_auto_derive() {
         with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(

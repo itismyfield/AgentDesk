@@ -7,7 +7,9 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
-use crate::services::process::kill_child_tree;
+use crate::services::process::{
+    configure_child_process_group, kill_child_tree, wait_with_output_timeout,
+};
 use crate::services::provider::{
     CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
     cancel_requested, is_readonly_tool_policy, register_child_pid, run_retrying_stream_attempts,
@@ -68,6 +70,21 @@ fn resolve_gemini_binary() -> crate::services::platform::BinaryResolution {
 }
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
+    execute_command_simple_inner(prompt, None)
+}
+
+pub fn execute_command_simple_with_timeout(
+    prompt: &str,
+    timeout: Duration,
+    label: &str,
+) -> Result<String, String> {
+    execute_command_simple_inner(prompt, Some((timeout, label)))
+}
+
+fn execute_command_simple_inner(
+    prompt: &str,
+    timeout: Option<(Duration, &str)>,
+) -> Result<String, String> {
     let resolution = resolve_gemini_binary();
     let gemini_bin = resolution
         .resolved_path
@@ -76,14 +93,23 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut command = Command::new(&gemini_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    let output = command
+    command
         .args(build_exec_args(prompt, None, None, false))
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("Failed to start Gemini: {}", e))?;
+        .stderr(Stdio::piped());
+    let output = if let Some((timeout, label)) = timeout {
+        configure_child_process_group(&mut command);
+        let child = command
+            .spawn()
+            .map_err(|e| format!("Failed to start Gemini: {}", e))?;
+        wait_with_output_timeout(child, timeout, label)?
+    } else {
+        command
+            .output()
+            .map_err(|e| format!("Failed to start Gemini: {}", e))?
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -188,6 +214,7 @@ fn execute_gemini_streaming_attempt(
 ) -> Result<StreamAttemptResult, String> {
     let mut command = Command::new(gemini_bin);
     crate::services::platform::apply_binary_resolution(&mut command, resolution);
+    configure_child_process_group(&mut command);
     let mut child = command
         .args(build_exec_args(
             prompt,
@@ -203,6 +230,10 @@ fn execute_gemini_streaming_attempt(
         .map_err(|e| format!("Failed to start Gemini: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
+    if cancel_requested(cancel_token.as_deref()) {
+        kill_child_tree(&mut child);
+        return Ok(StreamAttemptResult::Cancelled);
+    }
 
     let stdout = child
         .stdout

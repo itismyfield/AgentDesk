@@ -72,6 +72,57 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
     })
 }
 
+fn parse_meeting_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
+    let obj = value.as_object()?;
+    let role_id = obj
+        .get("role_id")
+        .or_else(|| obj.get("roleId"))?
+        .as_str()?
+        .to_string();
+    let prompt_file = obj
+        .get("prompt_file")
+        .or_else(|| obj.get("promptFile"))
+        .and_then(|v| v.as_str())
+        .map(expand_tilde)?;
+    let provider = obj
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .and_then(ProviderKind::from_str);
+    let model = obj
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let reasoning_effort = obj
+        .get("reasoning_effort")
+        .or_else(|| obj.get("reasoningEffort"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let peer_agents_enabled = obj
+        .get("peer_agents")
+        .or_else(|| obj.get("peerAgents"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let memory_override = obj.get("memory").and_then(|raw| {
+        serde_json::from_value::<MemoryConfigOverride>(raw.clone())
+            .map_err(|err| {
+                eprintln!(
+                    "  [memory] Warning: invalid meeting.available_agents memory block: {err}"
+                );
+                err
+            })
+            .ok()
+    });
+    Some(RoleBinding {
+        role_id,
+        prompt_file,
+        provider,
+        model,
+        reasoning_effort,
+        peer_agents_enabled,
+        memory: resolve_memory_settings(None, memory_override.as_ref()),
+    })
+}
+
 fn parse_meeting_agent_metadata(value: &serde_json::Value) -> Option<ParsedMeetingAgentMetadata> {
     let obj = value.as_object()?;
     let role_id = obj.get("role_id")?.as_str()?.to_string();
@@ -414,6 +465,33 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
             collect_registry_entry(&mut registry, entry, &metadata);
         }
     }
+    for agent in &explicit_agents {
+        if let Some(binding) = parse_meeting_role_binding(agent) {
+            let role_id = binding.role_id.clone();
+            let workspace = agent
+                .get("workspace")
+                .and_then(|v| v.as_str())
+                .map(expand_tilde);
+            if let Some(metadata) = metadata.get(&role_id).cloned() {
+                registry
+                    .entry(role_id.clone())
+                    .or_insert(MeetingAgentConfig {
+                        role_id,
+                        display_name: metadata.display_name,
+                        keywords: metadata.keywords,
+                        domain_summary: metadata.domain_summary,
+                        strengths: metadata.strengths,
+                        task_types: metadata.task_types,
+                        anti_signals: metadata.anti_signals,
+                        provider_hint: metadata.provider_hint,
+                        metadata_missing: metadata.metadata_missing,
+                        metadata_confidence: metadata.metadata_confidence,
+                        binding,
+                        workspace,
+                    });
+            }
+        }
+    }
 
     let agent_registry: Vec<MeetingAgentConfig> = registry.into_values().collect();
     let available_agents = if explicit_agents.is_empty() {
@@ -652,6 +730,93 @@ mod tests {
                     .find(|agent| agent.role_id == "ch-td")
                     .and_then(|agent| agent.workspace.as_deref()),
                 Some(&expand_tilde("~/workspaces/td")[..])
+            );
+        });
+    }
+
+    #[test]
+    fn test_load_meeting_config_empty_available_agents_falls_back_to_registry() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(
+                temp_home.path(),
+                r#"{
+  "byChannelId": {
+    "123": {
+      "roleId": "ch-td",
+      "promptFile": "~/prompts/ch-td.md",
+      "provider": "claude"
+    },
+    "456": {
+      "roleId": "ch-pd",
+      "promptFile": "~/prompts/ch-pd.md",
+      "provider": "codex"
+    }
+  },
+  "meeting": {
+    "channel_name": "meeting-room",
+    "summary_agent": "ch-td",
+    "available_agents": []
+  }
+}"#,
+            );
+
+            let config = load_meeting_config().expect("meeting config should load");
+            let role_ids: Vec<&str> = config
+                .available_agents
+                .iter()
+                .map(|agent| agent.role_id.as_str())
+                .collect();
+
+            assert_eq!(config.available_agents.len(), config.agent_registry.len());
+            assert!(role_ids.contains(&"ch-td"));
+            assert!(role_ids.contains(&"ch-pd"));
+        });
+    }
+
+    #[test]
+    fn test_load_meeting_config_registers_meeting_only_available_agent() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_role_map(
+                temp_home.path(),
+                r#"{
+  "byChannelId": {},
+  "meeting": {
+    "channel_name": "meeting-room",
+    "summary_agent": "standalone",
+    "available_agents": [
+      {
+        "role_id": "standalone",
+        "display_name": "Standalone Expert",
+        "keywords": ["strategy"],
+        "domain_summary": "채널 바인딩 없이 회의에서만 쓰는 전문가",
+        "promptFile": "~/prompts/standalone.md",
+        "provider": "gemini",
+        "workspace": "~/workspaces/standalone"
+      }
+    ]
+  }
+}"#,
+            );
+
+            let config = load_meeting_config().expect("meeting config should load");
+
+            assert_eq!(config.agent_registry.len(), 1);
+            assert_eq!(config.available_agents.len(), 1);
+            let agent = &config.available_agents[0];
+            assert_eq!(agent.role_id, "standalone");
+            assert_eq!(agent.display_name, "Standalone Expert");
+            assert_eq!(
+                agent.domain_summary.as_deref(),
+                Some("채널 바인딩 없이 회의에서만 쓰는 전문가")
+            );
+            assert_eq!(agent.binding.provider, Some(ProviderKind::Gemini));
+            assert_eq!(
+                agent.binding.prompt_file,
+                expand_tilde("~/prompts/standalone.md")
+            );
+            assert_eq!(
+                agent.workspace.as_deref(),
+                Some(&expand_tilde("~/workspaces/standalone")[..])
             );
         });
     }

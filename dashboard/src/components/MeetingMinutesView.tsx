@@ -112,6 +112,17 @@ function expertMatchesQuery(expert: RoundTableMeetingExpertOption, query: string
   );
 }
 
+export function pruneFixedParticipantRoleIdsForLoadedChannel(
+  prev: string[],
+  loadingChannels: boolean,
+  selectedChannel: Pick<RoundTableMeetingChannelOption, "available_experts"> | null,
+) {
+  if (loadingChannels || !selectedChannel) return prev;
+  const availableExpertIds = new Set(selectedChannel.available_experts.map((expert) => expert.role_id));
+  const filtered = prev.filter((roleId) => availableExpertIds.has(roleId));
+  return filtered.length === prev.length ? prev : filtered;
+}
+
 interface Props {
   meetings: RoundTableMeeting[];
   onRefresh: () => void;
@@ -295,7 +306,6 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
   const selectedChannel = meetingChannels.find((channel) => channel.channel_id === channelId) ?? null;
   const availableExperts = selectedChannel?.available_experts ?? [];
-  const availableExpertIds = new Set(availableExperts.map((expert) => expert.role_id));
   const selectedFixedExperts = fixedParticipantRoleIds
     .map((roleId) => availableExperts.find((expert) => expert.role_id === roleId) ?? null)
     .filter((expert): expert is RoundTableMeetingExpertOption => expert !== null);
@@ -323,10 +333,9 @@ export default function MeetingMinutesView({ meetings, onRefresh }: Props) {
 
   useEffect(() => {
     setFixedParticipantRoleIds((prev) => {
-      const filtered = prev.filter((roleId) => availableExpertIds.has(roleId));
-      return filtered.length === prev.length ? prev : filtered;
+      return pruneFixedParticipantRoleIdsForLoadedChannel(prev, loadingChannels, selectedChannel);
     });
-  }, [selectedChannel?.channel_id, availableExperts.map((expert) => expert.role_id).join(",")]);
+  }, [loadingChannels, selectedChannel?.channel_id, availableExperts.map((expert) => expert.role_id).join(",")]);
 
   useEffect(() => {
     if (reviewerOptions.length === 0) {

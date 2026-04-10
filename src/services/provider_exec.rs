@@ -1,9 +1,12 @@
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
-use crate::services::provider::ProviderKind;
+use crate::services::process::kill_pid_tree;
+use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::{claude, codex, gemini, qwen};
 
 pub async fn execute_simple(provider: ProviderKind, prompt: String) -> Result<String, String> {
@@ -48,7 +51,20 @@ pub async fn execute_simple_with_timeout(
     timeout: Duration,
     label: &str,
 ) -> Result<String, String> {
-    await_with_timeout(label, timeout, execute_simple(provider, prompt)).await
+    let label = label.to_string();
+    tokio::task::spawn_blocking(move || match provider {
+        ProviderKind::Claude => {
+            claude::execute_command_simple_with_timeout(&prompt, timeout, &label)
+        }
+        ProviderKind::Codex => codex::execute_command_simple_with_timeout(&prompt, timeout, &label),
+        ProviderKind::Gemini => {
+            gemini::execute_command_simple_with_timeout(&prompt, timeout, &label)
+        }
+        ProviderKind::Qwen => qwen::execute_command_simple_with_timeout(&prompt, timeout, &label),
+        ProviderKind::Unsupported(name) => Err(format!("Provider '{}' is not installed", name)),
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 #[derive(Clone, Debug)]
@@ -75,9 +91,11 @@ pub async fn execute_structured(
     prompt: String,
     request: StructuredExecRequest,
 ) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || execute_structured_blocking(provider, prompt, request))
-        .await
-        .map_err(|e| format!("Task join error: {}", e))?
+    tokio::task::spawn_blocking(move || {
+        execute_structured_blocking(provider, prompt, request, None)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 pub async fn execute_structured_with_timeout(
@@ -87,18 +105,31 @@ pub async fn execute_structured_with_timeout(
     timeout: Duration,
     label: &str,
 ) -> Result<String, String> {
-    await_with_timeout(
-        label,
-        timeout,
-        execute_structured(provider, prompt, request),
-    )
-    .await
+    let label_owned = label.to_string();
+    let cancel_token = Arc::new(CancelToken::new());
+    let execution_token = cancel_token.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        execute_structured_blocking(provider, prompt, request, Some(execution_token))
+    });
+
+    match tokio::time::timeout(timeout, handle).await {
+        Ok(join_result) => join_result.map_err(|e| format!("Task join error: {}", e))?,
+        Err(_) => {
+            cancel_provider_token(&cancel_token);
+            Err(format!(
+                "{} timed out after {}s",
+                label_owned,
+                timeout.as_secs()
+            ))
+        }
+    }
 }
 
 fn execute_structured_blocking(
     provider: ProviderKind,
     prompt: String,
     request: StructuredExecRequest,
+    cancel_token: Option<Arc<CancelToken>>,
 ) -> Result<String, String> {
     let (tx, rx) = mpsc::channel::<StreamMessage>();
     let system_prompt = request.system_prompt.as_deref();
@@ -114,7 +145,7 @@ fn execute_structured_blocking(
             tx,
             system_prompt,
             allowed_tools,
-            None,
+            cancel_token.clone(),
             None,
             None,
             None,
@@ -129,7 +160,7 @@ fn execute_structured_blocking(
             tx,
             system_prompt,
             allowed_tools,
-            None,
+            cancel_token.clone(),
             None,
             None,
             None,
@@ -144,7 +175,7 @@ fn execute_structured_blocking(
             tx,
             system_prompt,
             allowed_tools,
-            None,
+            cancel_token.clone(),
             None,
             None,
             None,
@@ -159,7 +190,7 @@ fn execute_structured_blocking(
             tx,
             system_prompt,
             allowed_tools,
-            None,
+            cancel_token.clone(),
             None,
             None,
             None,
@@ -173,6 +204,14 @@ fn execute_structured_blocking(
     }
 
     collect_stream_output(rx)
+}
+
+fn cancel_provider_token(cancel_token: &CancelToken) {
+    cancel_token.cancelled.store(true, Ordering::Relaxed);
+    if let Some(pid) = cancel_token.child_pid.lock().ok().and_then(|guard| *guard) {
+        kill_pid_tree(pid);
+    }
+    cancel_token.cancel_with_tmux_cleanup();
 }
 
 fn collect_stream_output(rx: mpsc::Receiver<StreamMessage>) -> Result<String, String> {

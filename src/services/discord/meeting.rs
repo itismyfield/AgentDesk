@@ -1181,7 +1181,7 @@ fn build_meeting_participants(
     selected_role_ids: &[String],
     required_role_ids: &[String],
 ) -> Result<Vec<MeetingParticipant>, String> {
-    let normalized_selected = normalize_role_id_list(selected_role_ids);
+    let normalized_selected = merge_required_role_ids(selected_role_ids, required_role_ids);
 
     if normalized_selected.len() < MIN_MEETING_PARTICIPANTS
         || normalized_selected.len() > MAX_MEETING_PARTICIPANTS
@@ -1190,18 +1190,6 @@ fn build_meeting_participants(
             "Invalid participant count after cross-check: {}",
             normalized_selected.len()
         ));
-    }
-
-    for required_role_id in required_role_ids {
-        if !normalized_selected
-            .iter()
-            .any(|role_id| role_id == required_role_id)
-        {
-            return Err(format!(
-                "Fixed participant '{}' is missing from final selection",
-                required_role_id
-            ));
-        }
     }
 
     normalized_selected
@@ -1220,6 +1208,22 @@ fn build_meeting_participants(
             })
         })
         .collect()
+}
+
+fn merge_required_role_ids(
+    selected_role_ids: &[String],
+    required_role_ids: &[String],
+) -> Vec<String> {
+    let mut merged = Vec::new();
+    for role_id in normalize_role_id_list(required_role_ids)
+        .into_iter()
+        .chain(normalize_role_id_list(selected_role_ids))
+    {
+        if !merged.iter().any(|existing| existing == &role_id) {
+            merged.push(role_id);
+        }
+    }
+    merged
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1473,7 +1477,10 @@ async fn select_participants(
         selection_prompt,
     )
     .await?;
-    let initial_selected = parse_selected_role_ids_response(&initial_response)?;
+    let initial_selected = merge_required_role_ids(
+        &parse_selected_role_ids_response(&initial_response)?,
+        &fixed_role_ids,
+    );
 
     let review_prompt = format!(
         r#"당신은 회의 참가자 선정을 비판적으로 검토하는 리뷰어다.
@@ -2671,7 +2678,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_meeting_participants_requires_fixed_invites_to_be_present() {
+    fn test_build_meeting_participants_force_merges_fixed_invites() {
         let agents = vec![
             fixture_agent("td"),
             fixture_agent("pd"),
@@ -2679,17 +2686,19 @@ mod tests {
         ];
         let candidate_pool: Vec<&MeetingAgentConfig> = agents.iter().collect();
 
-        let error = build_meeting_participants(
+        let participants = build_meeting_participants(
             &candidate_pool,
             &["td".to_string(), "pd".to_string()],
             &["uxd".to_string()],
         )
-        .expect_err("missing fixed invite should fail");
+        .expect("missing fixed invite should be merged");
 
-        assert_eq!(
-            error,
-            "Fixed participant 'uxd' is missing from final selection"
-        );
+        let role_ids: Vec<&str> = participants
+            .iter()
+            .map(|participant| participant.role_id.as_str())
+            .collect();
+
+        assert_eq!(role_ids, vec!["uxd", "td", "pd"]);
     }
 
     #[test]
@@ -2722,7 +2731,7 @@ mod tests {
             .collect();
 
         assert_eq!(participants.len(), MAX_MEETING_PARTICIPANTS);
-        assert_eq!(role_ids, vec!["td", "pd", "uxd", "qad", "devops"]);
+        assert_eq!(role_ids, vec!["td", "uxd", "pd", "qad", "devops"]);
     }
 
     #[test]
