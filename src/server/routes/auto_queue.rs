@@ -16,6 +16,7 @@ use super::AppState;
 pub struct GenerateEntryBody {
     pub issue_number: i64,
     pub batch_phase: Option<i64>,
+    pub thread_group: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +403,7 @@ fn assigned_groups_with_pending_entries(
 struct RequestedGenerateEntry {
     issue_number: i64,
     batch_phase: i64,
+    thread_group: Option<i64>,
 }
 
 fn normalize_generate_entries(
@@ -439,6 +441,7 @@ fn normalize_generate_entries(
         normalized.push(RequestedGenerateEntry {
             issue_number: entry.issue_number,
             batch_phase,
+            thread_group: entry.thread_group,
         });
     }
 
@@ -1390,13 +1393,19 @@ pub async fn generate(
                 .collect::<Vec<_>>()
         })
         .or_else(|| body.issue_numbers.clone().filter(|nums| !nums.is_empty()));
-    let requested_entry_meta: HashMap<i64, (usize, i64)> = requested_entries
+    // (index, batch_phase, thread_group)
+    let requested_entry_meta: HashMap<i64, (usize, i64, Option<i64>)> = requested_entries
         .as_ref()
         .map(|entries| {
             entries
                 .iter()
                 .enumerate()
-                .map(|(index, entry)| (entry.issue_number, (index, entry.batch_phase)))
+                .map(|(index, entry)| {
+                    (
+                        entry.issue_number,
+                        (index, entry.batch_phase, entry.thread_group),
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -1577,14 +1586,14 @@ pub async fn generate(
         cards.sort_by_key(|card| {
             card.github_issue_number
                 .and_then(|issue_number| requested_entry_meta.get(&issue_number).copied())
-                .map(|(index, _)| index)
+                .map(|(index, _, _)| index)
                 .unwrap_or(usize::MAX)
         });
         for card in &mut cards {
             card.batch_phase = card
                 .github_issue_number
                 .and_then(|issue_number| requested_entry_meta.get(&issue_number).copied())
-                .map(|(_, batch_phase)| batch_phase)
+                .map(|(_, batch_phase, _)| batch_phase)
                 .unwrap_or(0);
         }
     }
@@ -1800,7 +1809,7 @@ pub async fn generate(
     let auto_group = !force_sequential && mode.enables_auto_grouping(body.parallel);
     let analyzed_plan =
         auto_group.then(|| build_group_plan(&filtered_cards, mode.uses_similarity()));
-    let max_concurrent = match analyzed_plan.as_ref() {
+    let mut max_concurrent = match analyzed_plan.as_ref() {
         Some(plan) => body
             .max_concurrent_threads
             .unwrap_or(plan.recommended_parallel_threads)
@@ -1810,8 +1819,8 @@ pub async fn generate(
     };
 
     let (
-        grouped_entries,
-        thread_group_count,
+        mut grouped_entries,
+        mut thread_group_count,
         recommended_parallel_threads,
         dependency_edges,
         similarity_edges,
@@ -1896,6 +1905,33 @@ pub async fn generate(
         ),
         (GenerateMode::PmAssisted, _, _) => unreachable!("pm-assisted handled above"),
     };
+
+    // Apply explicit thread_group overrides from API entries
+    if !requested_entry_meta.is_empty() {
+        let mut has_explicit_groups = false;
+        for planned in &mut grouped_entries {
+            let card = &filtered_cards[planned.card_idx];
+            if let Some(issue_number) = card.github_issue_number {
+                if let Some(&(_, _, Some(tg))) = requested_entry_meta.get(&issue_number) {
+                    planned.thread_group = tg;
+                    has_explicit_groups = true;
+                }
+            }
+        }
+        if has_explicit_groups {
+            // Recalculate thread_group_count and max_concurrent from explicit groups
+            thread_group_count = grouped_entries
+                .iter()
+                .map(|e| e.thread_group)
+                .collect::<std::collections::HashSet<_>>()
+                .len() as i64;
+            if let Some(requested_max) = body.max_concurrent_threads {
+                max_concurrent = requested_max;
+            } else {
+                max_concurrent = thread_group_count;
+            }
+        }
+    }
 
     // Create run
     let run_id = uuid::Uuid::new_v4().to_string();
