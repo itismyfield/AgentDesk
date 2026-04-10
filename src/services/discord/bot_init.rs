@@ -2092,6 +2092,13 @@ pub(super) async fn auto_restore_session(
     channel_id: ChannelId,
     serenity_ctx: &serenity::prelude::Context,
 ) {
+    if matches!(
+        resolve_runtime_channel_binding_status(&serenity_ctx.http, channel_id).await,
+        RuntimeChannelBindingStatus::Unowned
+    ) {
+        return;
+    }
+
     // Resolve channel/category before taking the lock for mutation
     let (live_ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
     let existing_channel_name = {
