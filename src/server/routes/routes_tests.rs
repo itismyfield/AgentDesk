@@ -2952,6 +2952,10 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
         .unwrap();
 
     assert_eq!(
+        card_status, "requested",
+        "true orphan implementation dispatch must roll the card back to the dispatchable preflight state"
+    );
+    assert_eq!(
         dispatch_status, "failed",
         "true orphan implementation dispatch must be failed when no agent work was observed"
     );
@@ -2960,7 +2964,7 @@ fn on_tick30s_orphan_dispatch_recovers_true_orphan_without_regression() {
             .as_deref()
             .unwrap_or("")
             .contains("orphan_recovery_rollback"),
-        "true orphan recovery must keep the rollback marker"
+        "true orphan recovery must keep the orphan_recovery rollback marker"
     );
     assert_ne!(
         card_status, "review",

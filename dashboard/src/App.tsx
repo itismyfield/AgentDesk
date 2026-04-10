@@ -242,6 +242,7 @@ export default function App() {
           <AppShell
             wsConnected={wsConnected}
             notifications={notifications}
+            pushNotification={pushNotification}
             dismissNotification={dismissNotification}
           />
         </KanbanProvider>
@@ -253,10 +254,11 @@ export default function App() {
 interface AppShellProps {
   wsConnected: boolean;
   notifications: Notification[];
+  pushNotification: (message: string, type?: Notification["type"]) => void;
   dismissNotification: (id: string) => void;
 }
 
-function AppShell({ wsConnected, notifications, dismissNotification }: AppShellProps) {
+function AppShell({ wsConnected, notifications, pushNotification, dismissNotification }: AppShellProps) {
   const [view, setView] = useState<ViewMode>("office");
   const [controlTab, setControlTab] = useState<ControlTab>("agents");
   const [agentsPane, setAgentsPane] = useState<AgentsPane>("directory");
@@ -576,6 +578,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                   refreshAuditLogs();
                 }}
                 notifications={notifications}
+                onNotify={pushNotification}
                 onDismissNotification={dismissNotification}
               />
             )}

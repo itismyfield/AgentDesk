@@ -1147,6 +1147,17 @@ pub(super) fn spawn_turn_bridge(
                     terminal_session_reset_required,
                     should_record_final_turn,
                 ) {
+                    if memory_plan.persist_transcript {
+                        session.history.push(HistoryItem {
+                            item_type: HistoryType::User,
+                            content: user_text_owned.clone(),
+                        });
+                        session.history.push(HistoryItem {
+                            item_type: HistoryType::Assistant,
+                            content: full_response.clone(),
+                        });
+                        should_persist_transcript = true;
+                    }
                     if let Some(reason) = memory_plan.reflect_reason {
                         reflect_request = take_memento_reflect_request(
                             session,
@@ -1161,17 +1172,6 @@ pub(super) fn spawn_turn_bridge(
                         session.clear_provider_session();
                     } else if let Some(sid) = new_session_id.as_ref() {
                         session.restore_provider_session(Some(sid.clone()));
-                    }
-                    if memory_plan.persist_transcript {
-                        session.history.push(HistoryItem {
-                            item_type: HistoryType::User,
-                            content: user_text_owned.clone(),
-                        });
-                        session.history.push(HistoryItem {
-                            item_type: HistoryType::Assistant,
-                            content: full_response.clone(),
-                        });
-                        should_persist_transcript = true;
                     }
                     should_spawn_memory_capture = memory_plan.spawn_capture;
                     session.session_id.clone()

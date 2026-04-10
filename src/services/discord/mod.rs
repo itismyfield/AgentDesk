@@ -305,9 +305,13 @@ impl DiscordSession {
     }
 
     pub(super) fn restore_provider_session(&mut self, session_id: Option<String>) {
+        let same_session =
+            self.session_id.is_some() && self.session_id.as_deref() == session_id.as_deref();
         self.session_id = session_id;
-        self.memento_context_loaded = self.session_id.is_some();
-        self.memento_reflected = false;
+        if !same_session {
+            self.memento_context_loaded = false;
+            self.memento_reflected = false;
+        }
     }
 
     pub(super) fn note_memento_context_loaded(&mut self) {
@@ -756,6 +760,10 @@ async fn mailbox_clear_channel(
         .mailbox(channel_id)
         .clear(queue_persistence_context(shared, provider, channel_id))
         .await
+}
+
+fn mailbox_remove_channel(shared: &SharedData, channel_id: ChannelId) {
+    let _ = shared.mailboxes.remove(channel_id);
 }
 
 async fn mailbox_replace_queue(
@@ -3398,6 +3406,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
                 .global_active
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+        mailbox_remove_channel(shared, *ch);
         shared.api_timestamps.remove(ch);
         shared.tmux_watchers.remove(ch);
     }
@@ -4162,7 +4171,7 @@ fn enrich_role_map_with_channel_ids() {
 mod tests {
     use super::{ChannelId, MessageId, UserId};
     use super::{
-        DiscordBotSettings, Intervention, InterventionMode, PendingQueueItem,
+        DiscordBotSettings, DiscordSession, Intervention, InterventionMode, PendingQueueItem,
         allows_nonlocal_session_path, channel_has_pending_soft_queue_at,
         choose_restore_channel_name, discord_gateway_intents, is_allowed_turn_sender,
         is_synthetic_thread_channel_name, load_pending_queues, recovery_known_message_ids,
@@ -4177,8 +4186,7 @@ mod tests {
     use crate::services::discord::{
         runtime_store::test_env_lock, should_process_allowed_bot_turn_text,
     };
-    use crate::services::provider::CancelToken;
-    use crate::services::provider::ProviderKind;
+    use crate::services::provider::{CancelToken, ProviderKind};
     use poise::serenity_prelude::GatewayIntents;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
@@ -4237,6 +4245,35 @@ mod tests {
         let chosen = choose_restore_channel_name(Some("agentdesk-codex"), None, None, channel_id);
 
         assert_eq!(chosen.as_deref(), Some("agentdesk-codex"));
+    }
+
+    #[test]
+    fn restore_provider_session_preserves_memento_flags_for_same_session() {
+        let mut session = DiscordSession {
+            session_id: Some("same-session".to_string()),
+            memento_context_loaded: true,
+            memento_reflected: true,
+            current_path: None,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            channel_id: None,
+            channel_name: None,
+            category_name: None,
+            remote_profile_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+        };
+
+        session.restore_provider_session(Some("same-session".to_string()));
+        assert!(session.memento_context_loaded);
+        assert!(session.memento_reflected);
+
+        session.restore_provider_session(Some("next-session".to_string()));
+        assert_eq!(session.session_id.as_deref(), Some("next-session"));
+        assert!(!session.memento_context_loaded);
+        assert!(!session.memento_reflected);
     }
 
     #[test]

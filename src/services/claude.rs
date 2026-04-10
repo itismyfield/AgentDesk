@@ -3,12 +3,16 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage, is_valid_session_id};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
+use crate::services::process::{
+    configure_child_process_group, kill_child_tree, kill_pid_tree, shell_escape,
+    wait_with_output_timeout,
+};
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
     fold_read_output_result, register_child_pid,
@@ -339,11 +343,27 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     execute_command_simple_with_model(prompt, None)
 }
 
+pub fn execute_command_simple_with_timeout(
+    prompt: &str,
+    timeout: Duration,
+    label: &str,
+) -> Result<String, String> {
+    execute_command_simple_with_model_and_timeout(prompt, None, Some((timeout, label)))
+}
+
 /// Execute a simple Claude CLI call with optional model override (no tools, text-only response).
 /// This is a blocking function — call from tokio::task::spawn_blocking.
 pub fn execute_command_simple_with_model(
     prompt: &str,
     model_override: Option<&str>,
+) -> Result<String, String> {
+    execute_command_simple_with_model_and_timeout(prompt, model_override, None)
+}
+
+fn execute_command_simple_with_model_and_timeout(
+    prompt: &str,
+    model_override: Option<&str>,
+    timeout: Option<(Duration, &str)>,
 ) -> Result<String, String> {
     let resolution = resolve_claude_binary();
     let claude_bin = resolution
@@ -363,6 +383,9 @@ pub fn execute_command_simple_with_model(
 
     let mut command = Command::new(&claude_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
+    if timeout.is_some() {
+        configure_child_process_group(&mut command);
+    }
     let mut child = command
         .args(&args)
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
@@ -377,9 +400,13 @@ pub fn execute_command_simple_with_model(
         let _ = stdin.write_all(prompt.as_bytes());
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to read output: {}", e))?;
+    let output = if let Some((timeout, label)) = timeout {
+        wait_with_output_timeout(child, timeout, label)?
+    } else {
+        child
+            .wait_with_output()
+            .map_err(|e| format!("Failed to read output: {}", e))?
+    };
 
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -616,6 +643,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     if let Some(pct) = compact_percent.filter(|&p| p > 0) {
         command.env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", pct.to_string());
     }
+    configure_child_process_group(&mut command);
 
     let mut child = command.spawn().map_err(|e| {
         debug_log(&format!(
@@ -633,6 +661,11 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     // Store child PID in cancel token so the caller can kill it externally
     register_child_pid(cancel_token.as_deref(), child.id());
+    if cancel_requested(cancel_token.as_deref()) {
+        debug_log("Cancel detected immediately after spawn — killing child process tree");
+        kill_child_tree(&mut child);
+        return Ok(());
+    }
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {

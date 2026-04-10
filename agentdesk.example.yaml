@@ -19,8 +19,6 @@ discord:
 
 shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
 
-shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
-
 agents:
   - id: ch-td
     name: "TD"

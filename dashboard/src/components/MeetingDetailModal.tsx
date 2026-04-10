@@ -1,9 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { RoundTableMeeting, RoundTableEntry } from "../types";
-import MeetingProviderFlow, {
-  formatProviderFlow,
-  providerFlowCaption,
-} from "./MeetingProviderFlow";
+import MeetingProviderFlow, { formatProviderFlow, providerFlowCaption } from "./MeetingProviderFlow";
 import MarkdownContent from "./common/MarkdownContent";
 import { useI18n } from "../i18n";
 
@@ -92,6 +89,17 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                   {formatProviderFlow(meeting.primary_provider, meeting.reviewer_provider)}
                 </span>
               )}
+              {[meeting.meeting_hash, meeting.thread_hash]
+                .filter((hash): hash is string => Boolean(hash))
+                .map((hash) => (
+                  <span
+                    key={hash}
+                    className="rounded-full px-2 py-0.5 font-mono text-[11px]"
+                    style={{ background: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}
+                  >
+                    {hash}
+                  </span>
+                ))}
             </div>
           </div>
           <button
@@ -131,6 +139,12 @@ export default function MeetingDetailModal({ meeting, onClose }: Props) {
                 minute: "2-digit",
               })}
             />
+            {meeting.meeting_hash && (
+              <MetaCard label={t({ ko: "회의 해시", en: "Meeting Hash" })} value={meeting.meeting_hash} />
+            )}
+            {meeting.thread_hash && (
+              <MetaCard label={t({ ko: "스레드 해시", en: "Thread Hash" })} value={meeting.thread_hash} />
+            )}
           </div>
 
           {meeting.summary ? (

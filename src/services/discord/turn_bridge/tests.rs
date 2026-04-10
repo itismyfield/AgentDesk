@@ -342,6 +342,14 @@ fn memento_reflect_request_handles_local_session_reset_once() {
         ..ResolvedMemorySettings::default()
     };
     let mut session = sample_session();
+    session.history.push(HistoryItem {
+        item_type: HistoryType::User,
+        content: "current user".to_string(),
+    });
+    session.history.push(HistoryItem {
+        item_type: HistoryType::Assistant,
+        content: "current assistant".to_string(),
+    });
 
     let request = take_memento_reflect_request(
         &mut session,
@@ -354,6 +362,12 @@ fn memento_reflect_request_handles_local_session_reset_once() {
     .expect("local session reset should trigger one reflect");
 
     assert_eq!(request.reason, SessionEndReason::LocalSessionReset);
+    assert!(request.transcript.contains("[User]: current user"));
+    assert!(
+        request
+            .transcript
+            .contains("[Assistant]: current assistant")
+    );
     assert!(session.memento_reflected);
 
     let duplicate = take_memento_reflect_request(

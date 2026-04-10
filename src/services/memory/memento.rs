@@ -929,6 +929,7 @@ impl MemoryBackend for MementoBackend {
                 Ok(Ok(result)) => RecallResponse {
                     external_recall: result.external_recall,
                     token_usage: result.token_usage,
+                    memento_context_loaded: true,
                     ..RecallResponse::default()
                 },
                 Ok(Err(err)) => {
@@ -1273,6 +1274,7 @@ mod tests {
         assert!(recall.shared_knowledge.is_none());
         assert!(recall.longterm_catalog.is_none());
         assert!(recall.warnings.is_empty());
+        assert!(recall.memento_context_loaded);
         assert_eq!(
             recall.token_usage,
             crate::services::memory::TokenUsage {
@@ -1308,12 +1310,33 @@ mod tests {
         restore_memento_runtime(previous_root, previous_key, previous_workspace);
 
         assert!(recall.external_recall.is_none());
+        assert!(!recall.memento_context_loaded);
         assert!(
             recall
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("memento recall timed out"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_memento_review_lite_does_not_mark_context_loaded() {
+        let backend = MementoBackend::new(memento_settings());
+
+        let recall = backend
+            .recall(RecallRequest {
+                provider: ProviderKind::Codex,
+                role_id: "project-agentdesk".to_string(),
+                channel_id: 42,
+                session_id: "session-1".to_string(),
+                dispatch_profile: DispatchProfile::ReviewLite,
+                user_text: "Review this quickly".to_string(),
+            })
+            .await;
+
+        assert!(recall.external_recall.is_none());
+        assert!(recall.warnings.is_empty());
+        assert!(!recall.memento_context_loaded);
     }
 
     #[tokio::test]

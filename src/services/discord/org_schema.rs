@@ -242,12 +242,13 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
         .map(expand_tilde)
         .or_else(|| {
             let root = expand_tilde(schema.prompts_root.as_deref()?);
-            let canonical = format!("{}/agents/_shared.prompt.md", root);
-            if std::path::Path::new(&canonical).exists() {
-                return Some(canonical);
+            let root = std::path::Path::new(&root);
+            let canonical = root.join("agents").join("_shared.prompt.md");
+            if canonical.exists() {
+                return Some(canonical.display().to_string());
             }
-            let legacy = format!("{}/_shared.md", root);
-            std::path::Path::new(&legacy).exists().then_some(legacy)
+            let legacy = root.join("_shared.md");
+            legacy.exists().then(|| legacy.display().to_string())
         })
 }
 
@@ -882,18 +883,19 @@ channels:
             fs::create_dir_all(canonical.parent().unwrap()).unwrap();
             fs::write(&canonical, "# shared").unwrap();
             let prompts_root = temp_home.path().join(".adk").join("config");
+            let prompts_root_yaml = prompts_root.display().to_string().replace('\\', "/");
             let yaml = format!(
                 r#"
 version: 1
 prompts_root: "{}"
 agents: {{}}
 "#,
-                prompts_root.display()
+                prompts_root_yaml
             );
             write_org_yaml(temp_home.path(), &yaml);
 
             let shared = load_shared_prompt_path().expect("shared prompt path");
-            assert!(shared.ends_with("/config/agents/_shared.prompt.md"));
+            assert_eq!(std::path::Path::new(&shared), canonical);
         });
     }
 

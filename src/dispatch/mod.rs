@@ -1958,8 +1958,13 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let context =
-            build_review_context(&db, "card-review-provider", "agent-1", &json!({})).unwrap();
+        let context = build_review_context(
+            &db,
+            "card-review-provider",
+            "agent-1",
+            &json!({ "reviewed_commit": "test-commit" }),
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
         assert_eq!(parsed["from_provider"], "claude");
