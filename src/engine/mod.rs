@@ -195,6 +195,15 @@ impl PolicyEngine {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}] 🔄 [startup] draining deferred hooks from DB");
 
+        // Record server boot time for orphan recovery grace period
+        if let Ok(conn) = self.db.separate_conn() {
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_boot_at', datetime('now'))",
+                [],
+            )
+            .ok();
+        }
+
         loop {
             // Read a batch and mark as 'processing' so nested drain in try_fire_hook
             // won't re-read them, but they survive a crash.
