@@ -346,6 +346,9 @@ export interface RoundTableMeetingExpertOption {
 
 export interface RoundTableMeeting {
   id: string;
+  channel_id?: string | null;
+  meeting_hash?: string | null;
+  thread_hash?: string | null;
   agenda: string;
   summary: string | null;
   status: "in_progress" | "completed" | "cancelled";

@@ -22,7 +22,6 @@ import {
 import { FileText, Plus, Trash2, ChevronDown, ChevronUp, Settings2 } from "lucide-react";
 import MeetingDetailModal from "./MeetingDetailModal";
 import MeetingProviderFlow, {
-  formatProviderFlow,
   getProviderMeta,
   providerFlowCaption,
 } from "./MeetingProviderFlow";
@@ -51,68 +50,10 @@ function ownerProviderBadgeStyle(provider: string) {
   } as const;
 }
 
-function normalizeMeetingProvider(raw: string | null): string | null {
-  if (!raw) return null;
-  const normalized = raw.trim().toLowerCase();
-  return MEETING_PROVIDERS.includes(normalized as typeof MEETING_PROVIDERS[number]) ? normalized : null;
-}
-
-function providerLabel(provider: string) {
-  return PROVIDER_LABELS[provider] ?? provider.toUpperCase();
-}
-
-function providerMatchesQuery(provider: string, query: string) {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return true;
-  return (
-    provider.toLowerCase().includes(normalizedQuery)
-    || providerLabel(provider).toLowerCase().includes(normalizedQuery)
-  );
-}
-
-function normalizeRoleIdList(values: string[]) {
-  const deduped = new Set<string>();
-  return values
-    .map((value) => value.trim())
-    .filter((value) => {
-      if (!value || deduped.has(value)) return false;
-      deduped.add(value);
-      return true;
-    });
-}
-
-function parseStoredRoleIds(raw: string | null): string[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return normalizeRoleIdList(parsed.filter((value): value is string => typeof value === "string"));
-  } catch {
-    return [];
-  }
-}
-
-function expertMatchesQuery(expert: RoundTableMeetingExpertOption, query: string) {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return true;
-  const haystacks = [
-    expert.display_name,
-    expert.role_id,
-    ...expert.keywords,
-    expert.domain_summary ?? "",
-    ...(expert.strengths ?? []),
-    ...(expert.task_types ?? []),
-    ...(expert.anti_signals ?? []),
-    expert.provider_hint ?? "",
-  ];
-  return (
-    haystacks.some((value) => value.toLowerCase().includes(normalizedQuery))
-  );
-}
-
 interface Props {
   meetings: RoundTableMeeting[];
   onRefresh: () => void;
+  onNotify?: (message: string, type?: "info" | "success" | "warning" | "error") => void;
 }
 
 function getDefaultIssueRepo(repos: GitHubRepoOption[], viewerLogin: string): string {
@@ -192,25 +133,8 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
   const [showStartForm, setShowStartForm] = useState(false);
   const [agenda, setAgenda] = useState("");
   const [channelId, setChannelId] = useState(() => localStorage.getItem(STORAGE_KEY) || "");
-  const [primaryProvider, setPrimaryProvider] = useState<string>(
-    () => normalizeMeetingProvider(localStorage.getItem(PRIMARY_PROVIDER_STORAGE_KEY)) ?? "claude",
-  );
-  const [primaryProviderQuery, setPrimaryProviderQuery] = useState<string>(
-    () => providerLabel(normalizeMeetingProvider(localStorage.getItem(PRIMARY_PROVIDER_STORAGE_KEY)) ?? "claude"),
-  );
-  const [reviewerProvider, setReviewerProvider] = useState<string>(
-    () => normalizeMeetingProvider(localStorage.getItem(REVIEWER_PROVIDER_STORAGE_KEY)) ?? "",
-  );
-  const [reviewerProviderQuery, setReviewerProviderQuery] = useState<string>(
-    () => {
-      const saved = normalizeMeetingProvider(localStorage.getItem(REVIEWER_PROVIDER_STORAGE_KEY));
-      return saved ? providerLabel(saved) : "";
-    },
-  );
-  const [fixedParticipantRoleIds, setFixedParticipantRoleIds] = useState<string[]>(
-    () => parseStoredRoleIds(localStorage.getItem(FIXED_PARTICIPANTS_STORAGE_KEY)),
-  );
-  const [expertQuery, setExpertQuery] = useState("");
+  const [primaryProvider, setPrimaryProvider] = useState<string>("claude");
+  const [reviewerProvider, setReviewerProvider] = useState<string>("");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [meetingChannels, setMeetingChannels] = useState<RoundTableMeetingChannelOption[]>([]);
@@ -229,32 +153,6 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
   useEffect(() => {
     if (channelId) localStorage.setItem(STORAGE_KEY, channelId);
   }, [channelId]);
-
-  useEffect(() => {
-    localStorage.setItem(PRIMARY_PROVIDER_STORAGE_KEY, primaryProvider);
-    setPrimaryProviderQuery(providerLabel(primaryProvider));
-  }, [primaryProvider]);
-
-  useEffect(() => {
-    if (reviewerProvider) {
-      localStorage.setItem(REVIEWER_PROVIDER_STORAGE_KEY, reviewerProvider);
-      setReviewerProviderQuery(providerLabel(reviewerProvider));
-      return;
-    }
-    localStorage.removeItem(REVIEWER_PROVIDER_STORAGE_KEY);
-    setReviewerProviderQuery("");
-  }, [reviewerProvider]);
-
-  useEffect(() => {
-    if (fixedParticipantRoleIds.length > 0) {
-      localStorage.setItem(
-        FIXED_PARTICIPANTS_STORAGE_KEY,
-        JSON.stringify(fixedParticipantRoleIds),
-      );
-      return;
-    }
-    localStorage.removeItem(FIXED_PARTICIPANTS_STORAGE_KEY);
-  }, [fixedParticipantRoleIds]);
 
   useEffect(() => {
     let cancelled = false;
@@ -325,9 +223,6 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
   const reviewerOptions = MEETING_PROVIDERS.filter(
     (provider) => provider !== primaryProvider && provider !== selectedChannel?.owner_provider,
   );
-  const filteredPrimaryProviders = MEETING_PROVIDERS.filter((provider) => providerMatchesQuery(provider, primaryProviderQuery));
-  const filteredReviewerProviders = reviewerOptions.filter((provider) => providerMatchesQuery(provider, reviewerProviderQuery));
-  const filteredExperts = availableExperts.filter((expert) => expertMatchesQuery(expert, expertQuery));
   const filteredChannels = meetingChannels.filter((channel) => {
     const query = channelQuery.trim().toLowerCase();
     if (!query) return true;
@@ -518,7 +413,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
     setStarting(true);
     setStartError(null);
     try {
-      await startRoundTableMeeting(
+      const result = await startRoundTableMeeting(
         agenda.trim(),
         channelId.trim(),
         primaryProvider,
@@ -531,8 +426,11 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
       );
       setAgenda("");
       setShowStartForm(false);
+      onRefresh();
     } catch (e) {
-      setStartError(e instanceof Error ? e.message : t({ ko: "회의 시작 실패", en: "Failed to start meeting" }));
+      const message = e instanceof Error ? e.message : t({ ko: "회의 시작 실패", en: "Failed to start meeting" });
+      setStartError(message);
+      onNotify?.(message, "error");
     } finally {
       setStarting(false);
     }
@@ -565,7 +463,6 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
   };
 
   const inputStyle = { background: "var(--th-bg-surface)", border: "1px solid var(--th-border)", color: "var(--th-text)" };
-  const formLabelClassName = "text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-28 sm:pt-2";
 
   const getIssueProgress = (meeting: RoundTableMeeting) => {
     const total = meeting.proposed_issues?.length ?? 0;
@@ -630,15 +527,15 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
 
   return (
     <div
-      className="h-full max-w-4xl mx-auto overflow-y-auto overflow-x-hidden p-3 sm:p-6"
-      style={{ paddingBottom: "max(7rem, calc(7rem + env(safe-area-inset-bottom)))" }}
+      className="p-4 sm:p-6 max-w-4xl mx-auto overflow-y-auto overflow-x-hidden h-full pb-40"
+      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
     >
       {/* Header */}
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-3">
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
           <FileText className="text-amber-400" size={24} />
-          <div className="min-w-0">
-            <h1 className="text-xl font-bold break-words" style={{ color: "var(--th-text-heading)" }}>
+          <div>
+            <h1 className="text-xl font-bold" style={{ color: "var(--th-text-heading)" }}>
               {t({ ko: "회의 기록", en: "Meeting Records" })}
             </h1>
             <p className="text-xs mt-0.5" style={{ color: "var(--th-text-muted)" }}>
@@ -651,7 +548,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
         </div>
         <button
           onClick={() => setShowStartForm((v) => !v)}
-          className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-amber-500"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors"
         >
           <Plus size={14} />
           {t({ ko: "새 회의", en: "New Meeting" })}
@@ -661,7 +558,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
       {/* Start meeting form */}
       {showStartForm && (
         <div
-          className="mb-5 space-y-2.5 rounded-2xl border p-3 sm:mb-6 sm:space-y-3 sm:p-5"
+          className="rounded-2xl border p-4 sm:p-5 mb-6 space-y-3"
           style={{ background: "var(--th-surface)", borderColor: "var(--th-border)" }}
         >
           <h3 className="text-sm font-semibold" style={{ color: "var(--th-text)" }}>
@@ -670,7 +567,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
 
           {/* Channel selector */}
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label className={formLabelClassName} style={{ color: "var(--th-text-muted)" }}>
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "채널", en: "Channel" })}
             </label>
             <div className="flex-1 space-y-2">
@@ -703,7 +600,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                 </button>
               </div>
               <div
-                className="max-h-32 overflow-y-auto rounded-xl border p-2 space-y-1 sm:max-h-44"
+                className="max-h-44 overflow-y-auto rounded-xl border p-2 space-y-1"
                 style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)" }}
               >
                 {loadingChannels ? (
@@ -721,7 +618,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                       <button
                         key={channel.channel_id}
                         onClick={() => setChannelId(channel.channel_id)}
-                        className="w-full rounded-lg border px-2.5 py-2 text-left transition-colors sm:px-3"
+                        className="w-full rounded-lg border px-3 py-2 text-left transition-colors"
                         style={{
                           background: isSelected ? "rgba(245,158,11,0.12)" : "transparent",
                           borderColor: isSelected ? "rgba(245,158,11,0.35)" : "var(--th-border)",
@@ -744,6 +641,14 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                   })
                 )}
               </div>
+              {selectedChannel && (
+                <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                  {t({
+                    ko: `선택된 채널: ${selectedChannel.channel_name} (${selectedChannel.channel_id}) · 담당 ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
+                    en: `Selected channel: ${selectedChannel.channel_name} (${selectedChannel.channel_id}) · owner ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
+                  })}
+                </div>
+              )}
               {channelError && (
                 <div className="text-xs px-3 py-1.5 rounded-lg" style={{ background: "rgba(239,68,68,0.1)", color: "#f87171" }}>
                   {channelError}
@@ -754,264 +659,78 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
 
           {/* Agenda input */}
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label className={formLabelClassName} style={{ color: "var(--th-text-muted)" }}>
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20 sm:pt-2" style={{ color: "var(--th-text-muted)" }}>
               {t({ ko: "안건", en: "Agenda" })}
             </label>
-            <textarea
+            <input
+              type="text"
               value={agenda}
               onChange={(e) => setAgenda(e.target.value)}
               placeholder={t({ ko: "회의 안건을 입력하세요", en: "Enter meeting agenda" })}
-              rows={3}
-              className="flex-1 px-3 py-2 rounded-lg text-sm resize-y min-h-[84px] leading-5"
+              className="flex-1 px-3 py-1.5 rounded-lg text-sm"
               style={inputStyle}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) handleStartMeeting(); }}
             />
           </div>
 
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label className={formLabelClassName} style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "진행자", en: "Facilitator" })}
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "진행 모델", en: "Primary" })}
             </label>
-            <div className="flex-1 space-y-2">
-              <input
-                type="text"
-                value={primaryProviderQuery}
-                onChange={(e) => setPrimaryProviderQuery(e.target.value)}
-                placeholder={t({ ko: "진행자 검색", en: "Search facilitator" })}
-                className="w-full px-3 py-1.5 rounded-lg text-sm"
-                style={inputStyle}
-              />
-              <div
-                className="max-h-28 overflow-y-auto rounded-xl border p-2 space-y-1 sm:max-h-36"
-                style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)" }}
-              >
-                {filteredPrimaryProviders.length === 0 ? (
-                  <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "조건에 맞는 진행자가 없습니다", en: "No facilitator matches the filter" })}
-                  </div>
-                ) : (
-                  filteredPrimaryProviders.map((provider) => {
-                    const isSelected = provider === primaryProvider;
-                    return (
-                      <button
-                        key={provider}
-                        onClick={() => setPrimaryProvider(provider)}
-                        className="w-full rounded-lg border px-2.5 py-2 text-left transition-colors sm:px-3"
-                        style={{
-                          background: isSelected ? "rgba(245,158,11,0.12)" : "transparent",
-                          borderColor: isSelected ? "rgba(245,158,11,0.35)" : "var(--th-border)",
-                        }}
-                      >
-                        <div className="flex flex-wrap items-center gap-2 text-sm font-medium" style={{ color: "var(--th-text)" }}>
-                          <span>{providerLabel(provider)}</span>
-                          <span
-                            className="rounded-full px-2 py-0.5 text-xs"
-                            style={ownerProviderBadgeStyle(provider)}
-                          >
-                            {provider}
-                          </span>
-                        </div>
-                      </button>
-                    );
+            <select
+              value={primaryProvider}
+              onChange={(e) => {
+                setPrimaryProvider(e.target.value);
+                setReviewerProvider("");
+              }}
+              className="px-3 py-1.5 rounded-lg text-xs"
+              style={inputStyle}
+            >
+              {MEETING_PROVIDERS.map((p) => (
+                <option key={p} value={p}>{PROVIDER_LABELS[p] ?? p.toUpperCase()}</option>
+              ))}
+            </select>
+            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+              {selectedChannel
+                ? t({
+                    ko: `채널 담당 봇은 ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider} 입니다`,
+                    en: `Channel owner bot is ${PROVIDER_LABELS[selectedChannel.owner_provider] ?? selectedChannel.owner_provider}`,
                   })
-                )}
-              </div>
-            </div>
+                : t({ ko: "등록된 채널을 먼저 선택하세요", en: "Select a registered channel first" })}
+            </span>
           </div>
 
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label className={formLabelClassName} style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "리뷰어", en: "Reviewer" })}
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
+            <label className="text-xs font-semibold uppercase tracking-widest shrink-0 sm:w-20" style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "리뷰 모델", en: "Reviewer" })}
             </label>
-            <div className="flex-1 space-y-2">
-              <input
-                type="text"
-                value={reviewerProviderQuery}
-                onChange={(e) => setReviewerProviderQuery(e.target.value)}
-                placeholder={t({ ko: "리뷰어 검색", en: "Search reviewer" })}
-                className="w-full px-3 py-1.5 rounded-lg text-sm"
-                style={inputStyle}
-                disabled={reviewerOptions.length === 0}
-              />
-              <div
-                className="max-h-28 overflow-y-auto rounded-xl border p-2 space-y-1 sm:max-h-36"
-                style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)" }}
-              >
-                {reviewerOptions.length === 0 ? (
-                  <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "선택 가능한 리뷰어 없음", en: "No reviewer available" })}
-                  </div>
-                ) : filteredReviewerProviders.length === 0 ? (
-                  <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "조건에 맞는 리뷰어가 없습니다", en: "No reviewer matches the filter" })}
-                  </div>
-                ) : (
-                  filteredReviewerProviders.map((provider) => {
-                    const isSelected = provider === reviewerProvider;
-                    return (
-                      <button
-                        key={provider}
-                        onClick={() => setReviewerProvider(provider)}
-                        className="w-full rounded-lg border px-2.5 py-2 text-left transition-colors sm:px-3"
-                        style={{
-                          background: isSelected ? "rgba(245,158,11,0.12)" : "transparent",
-                          borderColor: isSelected ? "rgba(245,158,11,0.35)" : "var(--th-border)",
-                        }}
-                      >
-                        <div className="flex flex-wrap items-center gap-2 text-sm font-medium" style={{ color: "var(--th-text)" }}>
-                          <span>{providerLabel(provider)}</span>
-                          <span
-                            className="rounded-full px-2 py-0.5 text-xs"
-                            style={ownerProviderBadgeStyle(provider)}
-                          >
-                            {provider}
-                          </span>
-                        </div>
-                      </button>
-                    );
+            <select
+              value={reviewerProvider}
+              onChange={(e) => setReviewerProvider(e.target.value)}
+              className="px-3 py-1.5 rounded-lg text-xs"
+              style={inputStyle}
+              disabled={reviewerOptions.length === 0}
+            >
+              {reviewerOptions.length === 0 ? (
+                <option value="">
+                  {t({ ko: "선택 가능한 리뷰 모델 없음", en: "No reviewer available" })}
+                </option>
+              ) : (
+                reviewerOptions.map((provider) => (
+                  <option key={provider} value={provider}>
+                    {PROVIDER_LABELS[provider] ?? provider.toUpperCase()}
+                  </option>
+                ))
+              )}
+            </select>
+            <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+              {selectedChannel
+                ? t({
+                    ko: "리뷰 모델은 채널 담당 provider, 진행 모델과 달라야 합니다",
+                    en: "Reviewer must differ from channel owner provider and primary provider",
                   })
-                )}
-              </div>
-              <div className="space-y-1">
-                {selectedChannel ? null : (
-                  <span className="block text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "채널 선택 후 리뷰어를 정하세요", en: "Pick a reviewer after selecting a channel" })}
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
-            <label className={formLabelClassName} style={{ color: "var(--th-text-muted)" }}>
-              {t({ ko: "고정 전문 에이전트", en: "Pinned Specialist Agents" })}
-            </label>
-            <div className="flex-1 space-y-2">
-              <input
-                type="text"
-                value={expertQuery}
-                onChange={(e) => setExpertQuery(e.target.value)}
-                placeholder={t({ ko: "전문 에이전트 검색 후 고정 선택", en: "Search specialist agents and pin" })}
-                className="w-full px-3 py-1.5 rounded-lg text-sm"
-                style={inputStyle}
-                disabled={!selectedChannel || availableExperts.length === 0}
-              />
-              <div
-                className="max-h-36 overflow-y-auto rounded-xl border p-2 space-y-1 sm:max-h-44"
-                style={{ background: "var(--th-bg-surface)", borderColor: "var(--th-border)" }}
-              >
-                {!selectedChannel ? (
-                  <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "먼저 회의 채널을 선택하세요", en: "Select a meeting channel first" })}
-                  </div>
-                ) : availableExperts.length === 0 ? (
-                  <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "이 채널에 등록된 전문 에이전트가 없습니다", en: "No specialist agents are registered for this channel" })}
-                  </div>
-                ) : filteredExperts.length === 0 ? (
-                  <div className="px-2 py-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {t({ ko: "조건에 맞는 전문 에이전트가 없습니다", en: "No specialist agent matches the filter" })}
-                  </div>
-                ) : (
-                  filteredExperts.map((expert) => {
-                    const isSelected = fixedParticipantRoleIds.includes(expert.role_id);
-                    return (
-                      <button
-                        key={expert.role_id}
-                        onClick={() => toggleFixedParticipant(expert.role_id)}
-                        className="w-full rounded-lg border px-2.5 py-2 text-left transition-colors sm:px-3"
-                        style={{
-                          background: isSelected ? "rgba(99,102,241,0.12)" : "transparent",
-                          borderColor: isSelected ? "rgba(99,102,241,0.35)" : "var(--th-border)",
-                        }}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
-                            {expert.display_name}
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            {isSelected && (
-                              <span
-                                className="rounded-full px-2 py-0.5 text-xs font-semibold"
-                                style={{ background: "rgba(99,102,241,0.18)", color: "#818cf8" }}
-                              >
-                                {t({ ko: "고정", en: "Pinned" })}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        {expert.domain_summary && (
-                          <div className="mt-1 text-xs leading-5" style={{ color: "var(--th-text-muted)" }}>
-                            {expert.domain_summary}
-                          </div>
-                        )}
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs" style={{ color: "var(--th-text-muted)" }}>
-                          <span className="font-mono">{expert.role_id}</span>
-                          {expert.provider_hint && (
-                            <span
-                              className="rounded-full px-2 py-0.5"
-                              style={{ background: "rgba(59,130,246,0.12)", color: "#60a5fa" }}
-                            >
-                              {t({ ko: `권장 ${expert.provider_hint}`, en: `Hint ${expert.provider_hint}` })}
-                            </span>
-                          )}
-                          {expert.keywords.slice(0, 3).map((keyword) => (
-                            <span
-                              key={`${expert.role_id}:${keyword}`}
-                              className="rounded-full px-2 py-0.5"
-                              style={{ background: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}
-                            >
-                              {keyword}
-                            </span>
-                          ))}
-                          {expert.task_types.slice(0, 2).map((taskType) => (
-                            <span
-                              key={`${expert.role_id}:task:${taskType}`}
-                              className="rounded-full px-2 py-0.5"
-                              style={{ background: "rgba(16,185,129,0.12)", color: "#34d399" }}
-                            >
-                              {taskType}
-                            </span>
-                          ))}
-                        </div>
-                        {expert.strengths.length > 0 && (
-                          <div className="mt-1 text-[11px] leading-5" style={{ color: "var(--th-text-muted)" }}>
-                            {t({ ko: "강점", en: "Strengths" })}: {expert.strengths.slice(0, 3).join(", ")}
-                          </div>
-                        )}
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {selectedFixedExperts.length === 0 ? (
-                  <span className="text-xs px-2.5 py-1 rounded-full" style={{ background: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}>
-                    {t({ ko: "고정 없음", en: "No pinned agents" })}
-                  </span>
-                ) : (
-                  selectedFixedExperts.map((expert) => (
-                    <button
-                      key={`selected:${expert.role_id}`}
-                      onClick={() => toggleFixedParticipant(expert.role_id)}
-                      className="text-xs px-2.5 py-1 rounded-full font-medium border transition-colors"
-                      style={{
-                        background: "rgba(99,102,241,0.12)",
-                        borderColor: "rgba(99,102,241,0.28)",
-                        color: "#818cf8",
-                      }}
-                    >
-                      {expert.display_name}
-                    </button>
-                  ))
-                )}
-              </div>
-              <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                {t({
-                  ko: `고정 ${fixedParticipantRoleIds.length}/5, 복수 선택 가능. 진행자는 남은 슬롯만 자동 선정합니다.`,
-                  en: `Pinned ${fixedParticipantRoleIds.length}/5, multi-select enabled. The facilitator auto-selects the remaining slots.`,
-                })}
-              </div>
-            </div>
+                : t({ ko: "채널 선택 후 리뷰 모델을 정하세요", en: "Pick reviewer after selecting a channel" })}
+            </span>
           </div>
 
           <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
@@ -1073,10 +792,10 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
             </div>
           )}
 
-          <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <div className="flex items-center gap-2 justify-end">
             <button
               onClick={() => setShowStartForm(false)}
-              className="min-h-[44px] w-full rounded-lg border px-3 py-2 text-xs font-medium transition-colors hover:bg-surface-subtle sm:w-auto"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-surface-subtle"
               style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
             >
               {t({ ko: "취소", en: "Cancel" })}
@@ -1084,7 +803,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
             <button
               onClick={handleStartMeeting}
               disabled={starting || !agenda.trim() || !channelId.trim() || !reviewerProvider.trim()}
-              className="min-h-[44px] w-full rounded-lg bg-amber-600 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-amber-500 disabled:opacity-40 sm:w-auto"
+              className="px-4 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors disabled:opacity-40"
             >
               {starting ? t({ ko: "시작 중...", en: "Starting..." }) : t({ ko: "회의 시작", en: "Start Meeting" })}
             </button>
@@ -1115,21 +834,23 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
           return (
             <div
               key={m.id}
-              className="min-w-0 max-w-full overflow-hidden rounded-2xl border p-4 sm:p-5 space-y-3"
+              className="min-w-0 overflow-hidden rounded-2xl border p-4 sm:p-5 space-y-3"
               style={{ background: "var(--th-surface)", borderColor: "var(--th-border)" }}
             >
               {/* Top row */}
               <div className="flex min-w-0 items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
-                  <h3 className="text-base font-semibold break-words" style={{ color: "var(--th-text)", overflowWrap: "anywhere" }}>
+                  <h3 className="break-words text-base font-semibold [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
                     {m.agenda}
                   </h3>
                   <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-2">
                     {statusBadge(m.status)}
                     {(m.primary_provider || m.reviewer_provider) && (
-                      <span className="min-w-0 max-w-full rounded-full px-2 py-0.5 text-xs font-medium" style={{ background: "rgba(59,130,246,0.12)", color: "#93c5fd", overflowWrap: "anywhere" }}>
-                        {formatProviderFlow(m.primary_provider, m.reviewer_provider)}
-                      </span>
+                      <MeetingProviderFlow
+                        primaryProvider={m.primary_provider}
+                        reviewerProvider={m.reviewer_provider}
+                        compact
+                      />
                     )}
                     <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                       {new Date(m.started_at).toLocaleDateString(locale)}
@@ -1139,6 +860,17 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                         {m.total_rounds}R
                       </span>
                     )}
+                    {[m.meeting_hash, m.thread_hash]
+                      .filter((hash): hash is string => Boolean(hash))
+                      .map((hash) => (
+                        <span
+                          key={hash}
+                          className="max-w-full break-all rounded-full px-2 py-0.5 font-mono text-[11px]"
+                          style={{ background: "rgba(148,163,184,0.12)", color: "var(--th-text-muted)" }}
+                        >
+                          {hash}
+                        </span>
+                      ))}
                   </div>
                 </div>
                 <button
@@ -1156,8 +888,8 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                 {m.participant_names.map((name) => (
                   <span
                     key={name}
-                    className="max-w-full rounded-full px-2 py-0.5 text-xs font-medium"
-                    style={{ background: "rgba(99,102,241,0.15)", color: "#818cf8", overflowWrap: "anywhere" }}
+                    className="max-w-full break-all rounded-full px-2 py-0.5 text-xs font-medium"
+                    style={{ background: "rgba(99,102,241,0.15)", color: "#818cf8" }}
                   >
                     {name}
                   </span>
@@ -1165,12 +897,12 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
               </div>
 
               {(m.primary_provider || m.reviewer_provider) && (
-                <div className="min-w-0 max-w-full space-y-1.5 overflow-hidden">
+                <div className="min-w-0 space-y-1.5 overflow-hidden">
                   <MeetingProviderFlow
                     primaryProvider={m.primary_provider}
                     reviewerProvider={m.reviewer_provider}
                   />
-                  <div className="text-xs break-words" style={{ color: "var(--th-text-muted)", overflowWrap: "anywhere" }}>
+                  <div className="break-words text-xs [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
                     {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
                   </div>
                 </div>
@@ -1178,7 +910,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
 
               {/* PMD Summary bubble */}
               {m.summary && (
-                <div className="flex min-w-0 max-w-full items-start gap-2.5 overflow-hidden">
+                <div className="flex min-w-0 items-start gap-2.5">
                   <div className="w-7 h-7 rounded-lg overflow-hidden shrink-0" style={{ background: "var(--th-bg-surface)" }}>
                     <img
                       src="/sprites/7-D-1.png"
@@ -1188,41 +920,39 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                     />
                   </div>
                   <div
-                    className="min-w-0 max-w-full flex-1 overflow-hidden rounded-xl rounded-tl-sm px-3 py-2 text-sm"
+                    className="min-w-0 flex-1 overflow-hidden rounded-xl rounded-tl-sm px-3 py-2 text-sm"
                     style={{
                       background: "rgba(99,102,241,0.08)",
                       border: "1px solid rgba(99,102,241,0.15)",
                       color: "var(--th-text)",
                     }}
                   >
-                    <div className="flex items-center justify-between gap-2 mb-1 flex-wrap">
+                    <div className="mb-1 flex min-w-0 flex-wrap items-center justify-between gap-2">
                       <div className="text-xs font-semibold" style={{ color: "#818cf8" }}>{t({ ko: "PMD 요약", en: "PMD Summary" })}</div>
                       {(m.primary_provider || m.reviewer_provider) && (
-                        <div className="min-w-0 text-xs break-words" style={{ color: "var(--th-text-muted)", overflowWrap: "anywhere" }}>
+                        <div className="min-w-0 break-words text-xs [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
                           {providerFlowCaption(m.primary_provider, m.reviewer_provider, t)}
                         </div>
                       )}
                     </div>
-                    <MarkdownContent content={m.summary} className="pcd-markdown-preview" />
+                    <MarkdownContent content={m.summary} />
                   </div>
                 </div>
               )}
 
               {/* Proposed issues preview */}
               {hasProposedIssues && !issueProgress.allCreated && (
-                <div className="min-w-0 max-w-full overflow-hidden">
+                <div className="min-w-0 overflow-hidden">
                   <button
                     onClick={() => toggleIssuePreview(m.id)}
-                    className="flex max-w-full items-center gap-1.5 text-left text-xs font-medium transition-colors hover:opacity-80"
-                    style={{ color: "#34d399", overflowWrap: "anywhere" }}
+                    className="flex min-w-0 items-center gap-1.5 break-words text-left text-xs font-medium transition-colors hover:opacity-80 [overflow-wrap:anywhere]"
+                    style={{ color: "#34d399" }}
                   >
-                    <span className="shrink-0">{issuesExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</span>
-                    <span className="min-w-0 break-words">
-                      {t({ ko: `생성될 일감 미리보기 (${m.proposed_issues!.length}건)`, en: `Preview issues to create (${m.proposed_issues!.length})` })}
-                    </span>
+                    {issuesExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    {t({ ko: `생성될 일감 미리보기 (${m.proposed_issues!.length}건)`, en: `Preview issues to create (${m.proposed_issues!.length})` })}
                   </button>
                   {issuesExpanded && (
-                    <div className="mt-2 max-w-full space-y-1.5 overflow-hidden">
+                    <div className="mt-2 space-y-1.5">
                       {m.proposed_issues!.map((issue, i) => {
                         const issueResult = getMeetingIssueResult(m, issue);
                         const issueState = getMeetingIssueState(issueResult);
@@ -1260,7 +990,7 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                         return (
                           <div
                             key={i}
-                            className="min-w-0 max-w-full overflow-hidden rounded-lg px-3 py-2 text-xs"
+                            className="min-w-0 overflow-hidden rounded-lg px-3 py-2 text-xs"
                             style={{
                               background: statusMeta.bg,
                               border: `1px solid ${statusMeta.border}`,
@@ -1268,14 +998,14 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                           >
                             <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                               <div className="min-w-0 flex-1">
-                                <div className="font-medium break-words" style={{ color: "var(--th-text)", overflowWrap: "anywhere" }}>
+                                <div className="break-words font-medium [overflow-wrap:anywhere]" style={{ color: "var(--th-text)" }}>
                                   [RT] {issue.title}
                                 </div>
-                                <div className="mt-0.5 break-words" style={{ color: "var(--th-text-muted)", overflowWrap: "anywhere" }}>
+                                <div className="mt-0.5 break-words [overflow-wrap:anywhere]" style={{ color: "var(--th-text-muted)" }}>
                                   {t({ ko: `담당: ${issue.assignee}`, en: `Assignee: ${issue.assignee}` })}
                                 </div>
                                 {issueResult?.error && issueState === "failed" && (
-                                  <div className="mt-1 break-words" style={{ color: "#fbbf24", overflowWrap: "anywhere" }}>
+                                  <div className="mt-1 break-words [overflow-wrap:anywhere]" style={{ color: "#fbbf24" }}>
                                     {t({ ko: `실패: ${issueResult.error}`, en: `Failed: ${issueResult.error}` })}
                                   </div>
                                 )}
@@ -1284,14 +1014,14 @@ export default function MeetingMinutesView({ meetings, onRefresh, onNotify }: Pr
                                     href={issueResult.issue_url}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="mt-1 inline-flex max-w-full break-words hover:underline"
-                                    style={{ color: "#34d399", overflowWrap: "anywhere" }}
+                                    className="mt-1 inline-flex max-w-full break-all hover:underline"
+                                    style={{ color: "#34d399" }}
                                   >
                                     {t({ ko: "생성된 이슈 열기", en: "Open created issue" })}
                                   </a>
                                 )}
                               </div>
-                              <div className="flex shrink-0 flex-wrap items-center gap-1.5 sm:justify-end">
+                              <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                                 <span
                                   className="rounded-full px-2 py-0.5 text-xs font-semibold"
                                   style={{ background: statusMeta.bg, color: statusMeta.color }}

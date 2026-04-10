@@ -1,10 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use poise::serenity_prelude as serenity;
-use serde::{Deserialize, Serialize};
 use serenity::{
     AutoArchiveDuration, ChannelId, ChannelType, CreateMessage,
     builder::{CreateThread, EditThread},
@@ -17,36 +15,16 @@ use crate::services::provider_exec;
 use super::agentdesk_config;
 use super::formatting::send_long_message_raw;
 use super::org_schema;
-use super::prompt_builder::DispatchProfile;
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
 use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
 use super::{DispatchProfile, SharedData, rate_limit_wait};
 
 // ─── Data Structures ─────────────────────────────────────────────────────────
 
-const MIN_MEETING_PARTICIPANTS: usize = 2;
-const MAX_MEETING_PARTICIPANTS: usize = 5;
-const MEETING_READONLY_ALLOWED_TOOLS: &[&str] = &["Read"];
-const MEETING_SELECTION_STAGE_TIMEOUT: Duration = Duration::from_secs(45);
-const MEETING_TURN_STAGE_TIMEOUT: Duration = Duration::from_secs(60);
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct MeetingExpertOption {
-    pub role_id: String,
-    pub display_name: String,
-    pub keywords: Vec<String>,
-    pub domain_summary: Option<String>,
-    pub strengths: Vec<String>,
-    pub task_types: Vec<String>,
-    pub anti_signals: Vec<String>,
-    pub provider_hint: Option<String>,
-    pub metadata_missing: bool,
-    pub metadata_confidence: String,
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct MeetingParticipant {
     pub role_id: String,
+    pub prompt_file: String,
     pub display_name: String,
     pub provider: Option<ProviderKind>,
     pub model: Option<String>,
@@ -138,9 +116,9 @@ impl SummaryAgentConfig {
 pub(super) struct MeetingConfig {
     pub channel_name: String,
     pub max_rounds: u32,
+    pub max_participants: usize,
     pub summary_agent: SummaryAgentConfig,
     pub available_agents: Vec<MeetingAgentConfig>,
-    pub agent_registry: Vec<MeetingAgentConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +126,7 @@ pub(super) struct MeetingAgentConfig {
     pub role_id: String,
     pub display_name: String,
     pub keywords: Vec<String>,
+    pub prompt_file: String,
     pub domain_summary: Option<String>,
     pub strengths: Vec<String>,
     pub task_types: Vec<String>,
@@ -191,18 +170,11 @@ impl MeetingParticipant {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct MeetingSelectionResponse {
-    #[serde(default)]
-    selected_role_ids: Vec<String>,
-    #[serde(default)]
-    selected: Vec<MeetingSelectionChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MeetingSelectionChoice {
-    role_id: String,
-}
+const DEFAULT_MAX_PARTICIPANTS: usize = 5;
+const MIN_MEETING_PARTICIPANTS: usize = 2;
+const MEETING_SELECTION_STAGE_TIMEOUT_SECS: u64 = 45;
+const MEETING_TURN_STAGE_TIMEOUT_SECS: u64 = 90;
+const MEETING_SUMMARY_STAGE_TIMEOUT_SECS: u64 = 120;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -673,106 +645,6 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
     load_meeting_config_from_role_map()
 }
 
-pub(crate) fn load_meeting_expert_options() -> Vec<MeetingExpertOption> {
-    load_meeting_config()
-        .map(|config| {
-            config
-                .available_agents
-                .into_iter()
-                .map(|agent| MeetingExpertOption {
-                    role_id: agent.role_id,
-                    display_name: agent.display_name,
-                    keywords: agent.keywords,
-                    domain_summary: agent.domain_summary,
-                    strengths: agent.strengths,
-                    task_types: agent.task_types,
-                    anti_signals: agent.anti_signals,
-                    provider_hint: agent.provider_hint,
-                    metadata_missing: agent.metadata_missing,
-                    metadata_confidence: agent.metadata_confidence,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub(super) fn derive_agent_metadata_quality(
-    domain_summary: Option<&str>,
-    strengths: &[String],
-    task_types: &[String],
-    anti_signals: &[String],
-) -> (bool, String) {
-    let has_domain_summary = domain_summary
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some();
-    let has_strengths = !strengths.is_empty();
-    let has_task_types = !task_types.is_empty();
-    let has_anti_signals = !anti_signals.is_empty();
-
-    let core_count =
-        usize::from(has_domain_summary) + usize::from(has_strengths) + usize::from(has_task_types);
-
-    let metadata_confidence = if core_count == 3 && has_anti_signals {
-        "high"
-    } else if core_count >= 2 {
-        "medium"
-    } else {
-        "low"
-    };
-
-    (
-        metadata_confidence != "high",
-        metadata_confidence.to_string(),
-    )
-}
-
-fn normalize_role_id_list(values: &[String]) -> Vec<String> {
-    let mut normalized = Vec::new();
-    let mut seen = HashSet::new();
-
-    for value in values {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if seen.insert(trimmed.to_string()) {
-            normalized.push(trimmed.to_string());
-        }
-    }
-
-    normalized
-}
-
-pub(crate) fn validate_fixed_participant_role_ids(
-    primary_provider: &ProviderKind,
-    reviewer_provider: &ProviderKind,
-    requested_role_ids: &[String],
-) -> Result<Vec<String>, String> {
-    let normalized = normalize_role_id_list(requested_role_ids);
-    if normalized.len() > MAX_MEETING_PARTICIPANTS {
-        return Err(format!(
-            "fixed_participants cannot exceed {} experts",
-            MAX_MEETING_PARTICIPANTS
-        ));
-    }
-
-    let config =
-        load_meeting_config().ok_or("Meeting config not found in org.yaml or role_map.json")?;
-    let candidate_pool = canonical_candidate_pool(&config, primary_provider, reviewer_provider);
-
-    for role_id in &normalized {
-        if !candidate_pool.iter().any(|agent| agent.role_id == *role_id) {
-            return Err(format!(
-                "fixed participant '{}' is not available for meetings",
-                role_id
-            ));
-        }
-    }
-
-    Ok(normalized)
-}
-
 /// Check if a channel name matches the configured meeting channel
 #[allow(dead_code)]
 pub(super) fn is_meeting_channel(channel_name: &str) -> bool {
@@ -865,20 +737,28 @@ pub(crate) async fn start_meeting_with_reviewer(
         }
     };
 
+    let meeting_hash = meeting_query_hash(&meeting_id);
+    let thread_hash = if msg_channel != channel_id {
+        Some(thread_query_hash(&msg_channel.get().to_string()))
+    } else {
+        None
+    };
+    let thread_hash_line = thread_hash
+        .as_deref()
+        .map(|hash| format!("\n스레드 해시: {hash}"))
+        .unwrap_or_default();
+
     rate_limit_wait(shared, msg_channel).await;
     let _ = msg_channel
         .send_message(
             http,
             CreateMessage::new().content(format!(
-                "📋 **라운드 테이블 회의 시작**\n안건: {}\n진행자: {}\n리뷰어: {}\n{}\n전문 에이전트 선정 중...",
+                "📋 **라운드 테이블 회의 시작**\n안건: {}\n회의 해시: {}{}\n진행 모델: {} / 교차검증: {}\n참여자 선정 중...",
                 agenda,
+                meeting_hash,
+                thread_hash_line,
                 primary_provider.display_name(),
-                reviewer_provider.display_name(),
-                if fixed_participants.is_empty() {
-                    "고정: 없음".to_string()
-                } else {
-                    format!("고정: {}", fixed_participants.join(", "))
-                }
+                reviewer_provider.display_name()
             )),
         )
         .await;
@@ -920,7 +800,7 @@ pub(crate) async fn start_meeting_with_reviewer(
         .send_message(
             http,
             CreateMessage::new().content(format!(
-                "👥 **전문 에이전트 확정** ({}명)\n{}",
+                "👥 **참여자 확정** ({}명)\n{}",
                 participants.len(),
                 participant_list.join("\n")
             )),
@@ -1011,6 +891,14 @@ pub(crate) async fn start_meeting_with_reviewer(
         cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
         return Ok(None);
     }
+    rate_limit_wait(shared, msg_channel).await;
+    let _ = msg_channel
+        .send_message(
+            http,
+            CreateMessage::new()
+                .content("💾 **회의록 저장 완료.** memory write/capture는 자동 실행하지 않으며, 후처리는 승인 기반으로만 진행합니다."),
+        )
+        .await;
 
     // Archive the meeting thread if one was created
     if msg_channel != channel_id {
@@ -1107,7 +995,7 @@ pub(super) async fn cancel_meeting(
             .send_message(
                 http,
                 CreateMessage::new()
-                    .content("🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐어."),
+                    .content("🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐고, memory write/capture는 자동 실행하지 않았어."),
             )
             .await;
         Ok(())
@@ -1156,7 +1044,7 @@ pub(super) async fn meeting_status(
                 .send_message(
                     http,
                     CreateMessage::new().content(format!(
-                        "📊 **회의 현황**\n안건: {}\n상태: {}\n진행자: {} / 리뷰어: {}\n라운드: {}/{}\n전문 에이전트: {}명\n발언: {}개",
+                        "📊 **회의 현황**\n안건: {}\n상태: {}\n진행 모델: {} / 교차검증: {}\n라운드: {}/{}\n참여자: {}명\n발언: {}개",
                         agenda,
                         status_str,
                         primary.display_name(),
@@ -1180,431 +1068,8 @@ pub(super) async fn meeting_status(
 
 // ─── Internal Functions ──────────────────────────────────────────────────────
 
-#[derive(Debug)]
-struct MeetingExpertRuntime {
-    provider: ProviderKind,
-    request: provider_exec::StructuredExecRequest,
-}
-
-fn meeting_readonly_tools() -> Vec<String> {
-    MEETING_READONLY_ALLOWED_TOOLS
-        .iter()
-        .map(|tool| (*tool).to_string())
-        .collect()
-}
-
-fn default_meeting_working_dir() -> String {
-    std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "/".to_string())
-}
-
-fn build_meeting_memory_context(
-    shared_knowledge: Option<&str>,
-    external_recall: Option<&str>,
-    longterm_catalog: Option<&str>,
-) -> String {
-    let mut sections = Vec::new();
-
-    if let Some(shared_knowledge) = shared_knowledge
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        sections.push(format!("[Shared Knowledge]\n{}", shared_knowledge));
-    }
-
-    if let Some(external_recall) = external_recall
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        sections.push(format!("[Recall]\n{}", external_recall));
-    }
-
-    if let Some(longterm_catalog) = longterm_catalog
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        sections.push(format!("[Long-term Memory Catalog]\n{}", longterm_catalog));
-    }
-
-    sections.join("\n\n")
-}
-
-fn build_meeting_expert_system_prompt(
-    participant: &MeetingParticipant,
-    role_context: &str,
-    memory_context: &str,
-) -> String {
-    let mut sections = vec![format!(
-        "당신은 라운드 테이블 회의에 참여하는 전문 에이전트 `{}` ({})이다.\n\
-         - 당신은 회의 운영자(진행자/리뷰어)가 아니라 실제 참가자다.\n\
-         - 회의 중에는 `meeting_readonly` 정책을 따른다.\n\
-         - memory write, capture, 파일 수정, 외부 상태 변경, 자동 저장은 금지다.\n\
-         - 제공된 역할 프롬프트와 recall을 근거로만 발언하라.\n\
-         - 답변은 한국어로 작성하라.",
-        participant.display_name, participant.role_id
-    )];
-
-    if !role_context.trim().is_empty() {
-        sections.push(format!("[Role Prompt]\n{}", role_context.trim()));
-    }
-
-    if !memory_context.trim().is_empty() {
-        sections.push(memory_context.trim().to_string());
-    }
-
-    sections.join("\n\n")
-}
-
-async fn build_meeting_expert_runtime(
-    participant: &MeetingParticipant,
-    channel_id: ChannelId,
-    meeting_id: &str,
-    agenda: &str,
-    round: u32,
-    transcript: &str,
-    fallback_provider: &ProviderKind,
-) -> MeetingExpertRuntime {
-    let provider = participant
-        .binding
-        .provider
-        .clone()
-        .unwrap_or_else(|| fallback_provider.clone());
-
-    let role_context = load_role_prompt(&participant.binding).unwrap_or_default();
-    let (_, memory_backend) = build_memory_backend(Some(&participant.binding));
-    let memory_recall = memory_backend
-        .recall(RecallRequest {
-            provider: provider.clone(),
-            role_id: participant.role_id.clone(),
-            channel_id: channel_id.get(),
-            session_id: meeting_id.to_string(),
-            dispatch_profile: DispatchProfile::Full,
-            user_text: format!(
-                "안건: {agenda}\n현재 라운드: {round}\n이전 발언 기록:\n{transcript}",
-                agenda = agenda,
-                round = round,
-                transcript = if transcript.is_empty() {
-                    "(아직 발언 없음)"
-                } else {
-                    transcript
-                },
-            ),
-        })
-        .await;
-
-    for warning in &memory_recall.warnings {
-        tracing::warn!(
-            "[meeting] recall warning for participant {}: {}",
-            participant.role_id,
-            warning
-        );
-    }
-
-    let longterm_catalog = memory_recall
-        .longterm_catalog
-        .clone()
-        .or_else(|| load_longterm_memory_catalog(&participant.role_id));
-    let memory_context = build_meeting_memory_context(
-        memory_recall.shared_knowledge.as_deref(),
-        memory_recall.external_recall.as_deref(),
-        longterm_catalog.as_deref(),
-    );
-
-    let mut request = provider_exec::StructuredExecRequest::new(
-        participant
-            .workspace
-            .clone()
-            .unwrap_or_else(default_meeting_working_dir),
-    );
-    request.system_prompt = Some(build_meeting_expert_system_prompt(
-        participant,
-        &role_context,
-        &memory_context,
-    ));
-    request.allowed_tools = meeting_readonly_tools();
-    request.model = participant.binding.model.clone();
-
-    MeetingExpertRuntime { provider, request }
-}
-
-async fn execute_meeting_expert_prompt(
-    participant: &MeetingParticipant,
-    channel_id: ChannelId,
-    meeting_id: &str,
-    agenda: &str,
-    round: u32,
-    transcript: &str,
-    fallback_provider: &ProviderKind,
-    stage_key: &str,
-    prompt: String,
-) -> Result<String, String> {
-    let runtime = build_meeting_expert_runtime(
-        participant,
-        channel_id,
-        meeting_id,
-        agenda,
-        round,
-        transcript,
-        fallback_provider,
-    )
-    .await;
-
-    provider_exec::execute_structured_with_timeout(
-        runtime.provider,
-        prompt,
-        runtime.request,
-        MEETING_TURN_STAGE_TIMEOUT,
-        &format!(
-            "meeting turn stage `{}` for participant `{}`",
-            stage_key, participant.role_id
-        ),
-    )
-    .await
-    .map(|text| truncate_for_meeting(&text, 1500))
-}
-
-fn canonical_candidate_pool<'a>(
-    config: &'a MeetingConfig,
-    primary_provider: &ProviderKind,
-    reviewer_provider: &ProviderKind,
-) -> Vec<&'a MeetingAgentConfig> {
-    let primary_role_id = primary_provider.as_str();
-    let reviewer_role_id = reviewer_provider.as_str();
-
-    config
-        .available_agents
-        .iter()
-        .filter(|agent| agent.role_id != primary_role_id && agent.role_id != reviewer_role_id)
-        .collect()
-}
-
-fn join_or_none(values: &[String]) -> String {
-    if values.is_empty() {
-        "없음".to_string()
-    } else {
-        values.join(", ")
-    }
-}
-
-fn format_optional_or_none(value: Option<&str>) -> String {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("없음")
-        .to_string()
-}
-
-fn build_selection_candidate_card(agent: &MeetingAgentConfig, fixed: bool) -> String {
-    let bound_provider = agent
-        .binding
-        .provider
-        .as_ref()
-        .map(ProviderKind::as_str)
-        .unwrap_or("unspecified");
-
-    format!(
-        "- role_id: {role_id}\n  display_name: {display_name}\n  fixed: {fixed}\n  bound_provider: {bound_provider}\n  provider_hint: {provider_hint}\n  metadata_missing: {metadata_missing}\n  metadata_confidence: {metadata_confidence}\n  keywords: {keywords}\n  domain_summary: {domain_summary}\n  strengths: {strengths}\n  task_types: {task_types}\n  anti_signals: {anti_signals}",
-        role_id = agent.role_id,
-        display_name = agent.display_name,
-        fixed = if fixed { "yes" } else { "no" },
-        bound_provider = bound_provider,
-        provider_hint = format_optional_or_none(agent.provider_hint.as_deref()),
-        metadata_missing = if agent.metadata_missing { "yes" } else { "no" },
-        metadata_confidence = agent.metadata_confidence,
-        keywords = join_or_none(&agent.keywords),
-        domain_summary = format_optional_or_none(agent.domain_summary.as_deref()),
-        strengths = join_or_none(&agent.strengths),
-        task_types = join_or_none(&agent.task_types),
-        anti_signals = join_or_none(&agent.anti_signals),
-    )
-}
-
-fn build_meeting_participants(
-    candidate_pool: &[&MeetingAgentConfig],
-    selected_role_ids: &[String],
-    required_role_ids: &[String],
-) -> Result<Vec<MeetingParticipant>, String> {
-    let normalized_selected = normalize_role_id_list(selected_role_ids);
-
-    if normalized_selected.len() < MIN_MEETING_PARTICIPANTS
-        || normalized_selected.len() > MAX_MEETING_PARTICIPANTS
-    {
-        return Err(format!(
-            "Invalid participant count after cross-check: {}",
-            normalized_selected.len()
-        ));
-    }
-
-    for required_role_id in required_role_ids {
-        if !normalized_selected
-            .iter()
-            .any(|role_id| role_id == required_role_id)
-        {
-            return Err(format!(
-                "Fixed participant '{}' is missing from final selection",
-                required_role_id
-            ));
-        }
-    }
-
-    normalized_selected
-        .into_iter()
-        .map(|role_id| {
-            let agent = candidate_pool
-                .iter()
-                .find(|candidate| candidate.role_id == role_id)
-                .ok_or_else(|| format!("Unknown meeting participant '{}'", role_id))?;
-
-            Ok(MeetingParticipant {
-                role_id: agent.role_id.clone(),
-                display_name: agent.display_name.clone(),
-                binding: agent.binding.clone(),
-                workspace: agent.workspace.clone(),
-            })
-        })
-        .collect()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SelectionResolution {
-    selected_role_ids: Vec<String>,
-    warning_message: Option<String>,
-}
-
-fn fallback_to_initial_selection(
-    initial_selected: &[String],
-    stage_label: &str,
-    error: &str,
-) -> SelectionResolution {
-    SelectionResolution {
-        selected_role_ids: normalize_role_id_list(initial_selected),
-        warning_message: Some(format!(
-            "⚠️ **{} 실패**\nreason: {}\n1차 선정안으로 계속 진행합니다.",
-            stage_label, error
-        )),
-    }
-}
-
-fn resolve_final_selection(
-    initial_selected: &[String],
-    final_response: Result<String, String>,
-) -> SelectionResolution {
-    match final_response {
-        Ok(text) => match parse_selected_role_ids_response(&text) {
-            Ok(selected_role_ids) => SelectionResolution {
-                selected_role_ids,
-                warning_message: None,
-            },
-            Err(error) => fallback_to_initial_selection(
-                initial_selected,
-                "전문 에이전트 최종 확정",
-                &format!("응답 파싱 실패: {}", error),
-            ),
-        },
-        Err(error) => {
-            fallback_to_initial_selection(initial_selected, "전문 에이전트 최종 확정", &error)
-        }
-    }
-}
-
-fn fallback_to_valid_turn_draft(draft: &str) -> String {
-    draft.to_string()
-}
-
-fn resolve_turn_final_response(draft: &str, final_response: Result<String, String>) -> String {
-    match final_response {
-        Ok(content) => content,
-        Err(_) => fallback_to_valid_turn_draft(draft),
-    }
-}
-
-async fn send_meeting_selection_status(
-    http: &serenity::Http,
-    shared: &Arc<SharedData>,
-    msg_channel: ChannelId,
-    content: impl Into<String>,
-) {
-    rate_limit_wait(shared, msg_channel).await;
-    let _ = msg_channel
-        .send_message(http, CreateMessage::new().content(content.into()))
-        .await;
-}
-
-async fn execute_selection_stage(
-    http: &serenity::Http,
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    msg_channel: ChannelId,
-    meeting_id: &str,
-    provider: ProviderKind,
-    stage_key: &str,
-    stage_label: &str,
-    prompt: String,
-) -> Result<String, String> {
-    tracing::info!(
-        "[meeting] selection stage start meeting_id={} channel_id={} stage={} provider={}",
-        meeting_id,
-        channel_id.get(),
-        stage_key,
-        provider.as_str()
-    );
-    send_meeting_selection_status(
-        http,
-        shared,
-        msg_channel,
-        format!(
-            "⏳ **{}**\nprovider: {}",
-            stage_label,
-            provider.display_name()
-        ),
-    )
-    .await;
-
-    let started_at = Instant::now();
-    let response = provider_exec::execute_simple_with_timeout(
-        provider.clone(),
-        prompt,
-        MEETING_SELECTION_STAGE_TIMEOUT,
-        &format!("meeting selection stage `{}`", stage_key),
-    )
-    .await;
-    let elapsed_ms = started_at.elapsed().as_millis();
-
-    match response {
-        Ok(text) => {
-            tracing::info!(
-                "[meeting] selection stage completed meeting_id={} channel_id={} stage={} provider={} elapsed_ms={}",
-                meeting_id,
-                channel_id.get(),
-                stage_key,
-                provider.as_str(),
-                elapsed_ms
-            );
-            Ok(text)
-        }
-        Err(error) => {
-            tracing::error!(
-                "[meeting] selection stage failed meeting_id={} channel_id={} stage={} provider={} elapsed_ms={} error={}",
-                meeting_id,
-                channel_id.get(),
-                stage_key,
-                provider.as_str(),
-                elapsed_ms,
-                error
-            );
-            Err(format!("{} 실패: {}", stage_label, error))
-        }
-    }
-}
-
 /// Select participants using primary provider + reviewer micro cross-check.
 async fn select_participants(
-    http: &serenity::Http,
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    msg_channel: ChannelId,
-    meeting_id: &str,
     config: &MeetingConfig,
     agenda: &str,
     primary_provider: ProviderKind,
@@ -1616,14 +1081,7 @@ async fn select_participants(
     let agents_desc: Vec<String> = config
         .available_agents
         .iter()
-        .map(|agent| {
-            build_selection_candidate_card(
-                agent,
-                fixed_role_ids
-                    .iter()
-                    .any(|role_id| role_id == &agent.role_id),
-            )
-        })
+        .map(agent_metadata_card)
         .collect();
     let fixed_prompt = fixed_participant_prompt_lines(&fixed_participants);
 
@@ -1637,8 +1095,11 @@ async fn select_participants(
 후보 메타데이터 카드:
 {}
 
-사용 가능한 전문 에이전트:
-{}
+선정 절차:
+1. 안건 요약: 안건을 1문장으로 압축한다.
+2. 필요 전문성 축: 필요한 전문성 축을 2~5개로 나눈다.
+3. 후보별 적합성 비교: domain_summary, strengths, task_types, anti_signals, provider_hint, metadata_missing을 함께 비교한다.
+4. 최종 선정 JSON: 최종 role_id만 고른다.
 
 규칙:
 - {}~{}명 선정
@@ -1655,29 +1116,21 @@ async fn select_participants(
         max_participants,
     );
 
-    let initial_response = execute_selection_stage(
-        http,
-        shared,
-        channel_id,
-        msg_channel,
-        meeting_id,
+    let initial_response = execute_provider_stage(
         primary_provider.clone(),
-        "initial_selection",
-        "전문 에이전트 1차 선정",
+        "participant initial selection",
         selection_prompt,
+        MEETING_SELECTION_STAGE_TIMEOUT_SECS,
     )
     .await?;
-    let initial_selected = parse_selected_role_ids_response(&initial_response)?;
+    let initial_selected = parse_json_array_fragment(&initial_response)?;
 
     let review_prompt = format!(
         r#"당신은 회의 참가자 선정을 비판적으로 검토하는 리뷰어다.
 
 안건: {agenda}
 
-반드시 포함해야 하는 고정 전문 에이전트:
-{fixed}
-
-사용 가능한 전문 에이전트:
+사용 가능한 에이전트:
 {agents}
 
 현재 선정안:
@@ -1690,48 +1143,25 @@ async fn select_participants(
 - 빠진 역할, 중복 역할, 안건과의 부적합만 짚어라
 - 고정 전문 에이전트가 누락되면 반드시 지적하라
 - 4개 이하 bullet만 사용하라
+- metadata_missing, anti_signals, task_types mismatch가 있으면 명시하라
 - 전체를 다시 쓰지 말고, 비판적으로만 검토하라
 - 도구나 명령 실행은 하지 마라"#,
         agenda = agenda,
-        fixed = fixed_desc,
         agents = agents_desc.join("\n"),
         current = serde_json::to_string(&initial_selected).unwrap_or_else(|_| "[]".to_string()),
         fixed = fixed_participants.join(", "),
     );
 
-    let review_notes = execute_selection_stage(
-        http,
-        shared,
-        channel_id,
-        msg_channel,
-        meeting_id,
+    let review_notes = match execute_provider_stage(
         reviewer_provider.clone(),
-        "selection_review",
-        "전문 에이전트 선정 리뷰",
+        "participant selection review",
         review_prompt,
+        MEETING_SELECTION_STAGE_TIMEOUT_SECS,
     )
-    .await;
-
-    let review_notes = match review_notes {
-        Ok(text) => text,
-        Err(error) => {
-            let fallback =
-                fallback_to_initial_selection(&initial_selected, "전문 에이전트 선정 리뷰", &error);
-            tracing::warn!(
-                "[meeting] selection review fallback meeting_id={} channel_id={} warning={}",
-                meeting_id,
-                channel_id.get(),
-                fallback.warning_message.as_deref().unwrap_or_default()
-            );
-            if let Some(warning) = fallback.warning_message.as_deref() {
-                send_meeting_selection_status(http, shared, msg_channel, warning).await;
-            }
-            return build_meeting_participants(
-                &candidate_pool,
-                &fallback.selected_role_ids,
-                &fixed_role_ids,
-            );
-        }
+    .await
+    {
+        Ok(notes) => notes,
+        Err(err) => format!("- 리뷰 실패: {err}. 초기 선정안을 유지하고 최종 검증만 수행한다."),
     };
 
     let finalize_prompt = format!(
@@ -1739,10 +1169,7 @@ async fn select_participants(
 
 안건: {agenda}
 
-반드시 포함해야 하는 고정 전문 에이전트:
-{fixed}
-
-사용 가능한 전문 에이전트:
+사용 가능한 에이전트:
 {agents}
 
 초기 선정안:
@@ -1762,28 +1189,25 @@ async fn select_participants(
 - JSON 배열로만 응답하라
 - 형식: ["role_id1", "role_id2", ...]"#,
         agenda = agenda,
-        fixed = fixed_desc,
         agents = agents_desc.join("\n"),
         initial = serde_json::to_string(&initial_selected).unwrap_or_else(|_| "[]".to_string()),
         fixed = fixed_participants.join(", "),
         review = review_notes.trim(),
+        min_participants = MIN_MEETING_PARTICIPANTS,
+        max_participants = max_participants,
     );
 
-    let final_resolution = resolve_final_selection(
-        &initial_selected,
-        execute_selection_stage(
-            http,
-            shared,
-            channel_id,
-            msg_channel,
-            meeting_id,
-            primary_provider.clone(),
-            "selection_finalize",
-            "전문 에이전트 최종 확정",
-            finalize_prompt,
-        )
-        .await,
-    );
+    let selected = match execute_provider_stage(
+        primary_provider.clone(),
+        "participant final selection",
+        finalize_prompt,
+        MEETING_SELECTION_STAGE_TIMEOUT_SECS,
+    )
+    .await
+    {
+        Ok(final_response) => parse_json_array_fragment(&final_response)?,
+        Err(_) => initial_selected,
+    };
 
     merge_selected_participants(config, &selected, &fixed_participants, max_participants)
 }
@@ -1820,15 +1244,6 @@ async fn run_meeting_round(
             return Ok(None);
         }
 
-        tracing::info!(
-            "[meeting] participant turn start meeting_id={} channel_id={} round={} role_id={}",
-            meeting_id,
-            channel_id.get(),
-            round,
-            participant.role_id
-        );
-        let turn_started_at = Instant::now();
-
         // Get current transcript for context
         let transcript_text = {
             let core = shared.core.lock().await;
@@ -1844,8 +1259,6 @@ async fn run_meeting_round(
 
         // Execute agent turn
         match execute_agent_turn(
-            channel_id,
-            meeting_id,
             participant,
             &agenda,
             channel_id.get(),
@@ -1858,14 +1271,6 @@ async fn run_meeting_round(
         .await
         {
             Ok(response) => {
-                tracing::info!(
-                    "[meeting] participant turn completed meeting_id={} channel_id={} round={} role_id={} elapsed_ms={}",
-                    meeting_id,
-                    channel_id.get(),
-                    round,
-                    participant.role_id,
-                    turn_started_at.elapsed().as_millis()
-                );
                 if active_meeting_state(shared, channel_id, meeting_id).await
                     != ActiveMeetingSlot::Active
                 {
@@ -1896,15 +1301,6 @@ async fn run_meeting_round(
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    "[meeting] participant turn failed meeting_id={} channel_id={} round={} role_id={} elapsed_ms={} error={}",
-                    meeting_id,
-                    channel_id.get(),
-                    round,
-                    participant.role_id,
-                    turn_started_at.elapsed().as_millis(),
-                    e
-                );
                 // Skip this agent, post error to thread
                 rate_limit_wait(shared, msg_channel).await;
                 let _ = msg_channel
@@ -2039,8 +1435,6 @@ Authoritative execution mode: `meeting_readonly`.
 
 /// Execute a single agent turn using specialist draft/final -> reviewer critique.
 async fn execute_agent_turn(
-    channel_id: ChannelId,
-    meeting_id: &str,
     participant: &MeetingParticipant,
     agenda: &str,
     channel_id: u64,
@@ -2072,7 +1466,11 @@ async fn execute_agent_turn(
     let working_dir = participant_working_dir(participant);
 
     let draft_prompt = format!(
-        r#"## 회의 안건
+        r#"당신은 라운드 테이블 회의에 참여한 {name}입니다.
+
+{role_context}
+
+## 회의 안건
 {agenda}
 
 ## 현재 라운드: {round}
@@ -2081,7 +1479,7 @@ async fn execute_agent_turn(
 {transcript}
 
 ## 지시사항
-- 당신의 전문 분야 관점과 memory/recall 근거를 바탕으로 안건에 대해 의견을 제시하세요
+- 당신의 전문 분야 관점에서 안건에 대해 의견을 제시하세요
 - 이전 발언자들의 의견을 참고하고 필요시 반론/보충하세요
 - 답변은 300자 이내로 간결하게 작성하세요
 - 합의에 도달했다고 판단되면, 반드시 "CONSENSUS:" 로 시작하는 한 줄 요약을 마지막에 추가하세요
@@ -2112,13 +1510,15 @@ async fn execute_agent_turn(
         MEETING_TURN_STAGE_TIMEOUT_SECS,
         "meeting turn draft",
     )
-    .await
-    .map_err(|error| format!("초안 생성 실패: {}", error))?;
+    .await?;
 
     let critique_prompt = format!(
         r#"당신은 회의 발언 초안을 비판적으로 검토하는 리뷰어다.
 
 발언 역할: {name}
+
+역할 컨텍스트:
+{role_context}
 
 회의 안건:
 {agenda}
@@ -2137,6 +1537,11 @@ async fn execute_agent_turn(
 - 초안을 통째로 다시 쓰지 마라
 - 도구나 명령 실행은 하지 마라"#,
         name = participant.display_name,
+        role_context = if role_context.is_empty() {
+            "(역할 컨텍스트 없음)".to_string()
+        } else {
+            role_context.clone()
+        },
         agenda = agenda,
         round = round,
         transcript = if transcript.is_empty() {
@@ -2146,33 +1551,24 @@ async fn execute_agent_turn(
         },
         draft = draft.trim(),
     );
-    let critique = match provider_exec::execute_simple_with_timeout(
-        reviewer_provider.clone(),
+    let critique = match execute_provider_stage(
+        reviewer_provider,
+        "meeting turn critique",
         critique_prompt,
-        MEETING_TURN_STAGE_TIMEOUT,
-        &format!(
-            "meeting turn stage `turn_review` for participant `{}`",
-            participant.role_id
-        ),
+        MEETING_TURN_STAGE_TIMEOUT_SECS,
     )
     .await
     {
         Ok(text) => text,
-        Err(error) => {
-            tracing::warn!(
-                "[meeting] participant review fallback meeting_id={} channel_id={} round={} role_id={} stage=turn_review error={}",
-                meeting_id,
-                channel_id.get(),
-                round,
-                participant.role_id,
-                error
-            );
-            return Ok(fallback_to_valid_turn_draft(&draft));
-        }
+        Err(_) => return Ok(truncate_for_meeting(&draft, 1500)),
     };
 
     let final_prompt = format!(
-        r#"회의 안건:
+        r#"당신은 라운드 테이블 회의에 참여한 {name}입니다.
+
+{role_context}
+
+회의 안건:
 {agenda}
 
 현재 라운드: {round}
@@ -2192,6 +1588,12 @@ async fn execute_agent_turn(
 - 합의에 도달했다고 판단되면, 반드시 "CONSENSUS:" 로 시작하는 한 줄 요약을 마지막에 추가하세요
 - 리뷰에서 중요한 이견이 남아 있다고 판단되면 마지막 줄에 `이견:` 한 줄로 짧게 남겨라
 - 도구나 명령 실행 없이 최종 발언만 작성하라"#,
+        name = participant.display_name,
+        role_context = if role_context.is_empty() {
+            String::new()
+        } else {
+            format!("## 역할 컨텍스트\n{}", role_context)
+        },
         agenda = agenda,
         round = round,
         transcript = if transcript.is_empty() {
@@ -2213,20 +1615,11 @@ async fn execute_agent_turn(
         MEETING_TURN_STAGE_TIMEOUT_SECS,
         "meeting turn final",
     )
-    .await;
-
-    if let Err(error) = &final_response {
-        tracing::warn!(
-            "[meeting] participant final fallback meeting_id={} channel_id={} round={} role_id={} stage=turn_finalize error={}",
-            meeting_id,
-            channel_id.get(),
-            round,
-            participant.role_id,
-            error
-        );
+    .await
+    {
+        Ok(text) => Ok(truncate_for_meeting(&text, 1500)),
+        Err(_) => Ok(truncate_for_meeting(&draft, 1500)),
     }
-
-    Ok(resolve_turn_final_response(&draft, final_response))
 }
 
 /// Check if majority of participants in a given round used CONSENSUS: keyword
@@ -2291,29 +1684,7 @@ async fn conclude_meeting(
 
     // Resolve summary agent dynamically based on agenda
     let resolved_summary_agent = config.summary_agent.resolve(&agenda);
-
-    // Find summary agent's prompt file
-    let summary_prompt_file = config
-        .agent_registry
-        .iter()
-        .find(|a| a.role_id == resolved_summary_agent)
-        .map(|a| a.binding.prompt_file.clone())
-        .unwrap_or_default();
-
-    let summary_role_context = if !summary_prompt_file.is_empty() {
-        load_role_prompt(&RoleBinding {
-            role_id: resolved_summary_agent.clone(),
-            prompt_file: summary_prompt_file,
-            provider: None,
-            model: None,
-            reasoning_effort: None,
-            peer_agents_enabled: true,
-            memory: Default::default(),
-        })
-        .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let summary_role_context = summary_agent_context(config, &resolved_summary_agent);
 
     let draft_prompt = format!(
         r#"당신은 회의록을 작성하는 {agent}입니다.
@@ -2368,7 +1739,13 @@ async fn conclude_meeting(
         )
         .await;
 
-    let draft = provider_exec::execute_simple(primary_provider.clone(), draft_prompt).await;
+    let draft = execute_provider_stage(
+        primary_provider.clone(),
+        "meeting summary draft",
+        draft_prompt,
+        MEETING_SUMMARY_STAGE_TIMEOUT_SECS,
+    )
+    .await;
 
     let summary_text = match draft {
         Ok(draft_text) => {
@@ -2393,7 +1770,13 @@ async fn conclude_meeting(
                 participants = participants_list,
                 draft = draft_text.trim(),
             );
-            let critique = provider_exec::execute_simple(reviewer_provider, critique_prompt).await;
+            let critique = execute_provider_stage(
+                reviewer_provider,
+                "meeting summary critique",
+                critique_prompt,
+                MEETING_SUMMARY_STAGE_TIMEOUT_SECS,
+            )
+            .await;
             let final_prompt = format!(
                 r#"당신은 회의록을 작성하는 {agent}입니다.
 
@@ -2434,7 +1817,14 @@ async fn conclude_meeting(
                     Err(err) => format!("- 리뷰 실패: {}", err),
                 },
             );
-            match provider_exec::execute_simple(primary_provider, final_prompt).await {
+            match execute_provider_stage(
+                primary_provider,
+                "meeting summary final",
+                final_prompt,
+                MEETING_SUMMARY_STAGE_TIMEOUT_SECS,
+            )
+            .await
+            {
                 Ok(text) => {
                     let trimmed = text.trim().to_string();
                     if active_meeting_state(shared, channel_id, meeting_id).await
@@ -2524,6 +1914,15 @@ async fn save_meeting_record(
     Ok(true)
 }
 
+fn memory_postprocessing_policy() -> serde_json::Value {
+    serde_json::json!({
+        "auto_memory_write": false,
+        "auto_memory_capture": false,
+        "policy": "approval_required",
+        "note": "Meeting records are saved only; memory write/capture is not run automatically.",
+    })
+}
+
 /// Build ADK API payload from meeting
 fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
     let status_str = match &m.status {
@@ -2558,6 +1957,10 @@ fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
     let started_at = chrono::DateTime::parse_from_rfc3339(&m.started_at)
         .map(|dt| dt.timestamp_millis())
         .unwrap_or_else(|_| chrono::Local::now().timestamp_millis());
+    let meeting_hash = meeting_query_hash(&m.id);
+    let thread_hash = m
+        .thread_id
+        .map(|thread_id| thread_query_hash(&thread_id.to_string()));
 
     Some(serde_json::json!({
         "id": m.id,
@@ -2573,6 +1976,8 @@ fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
         "started_at": started_at,
         "completed_at": if m.status == MeetingStatus::Completed { serde_json::Value::from(chrono::Local::now().timestamp_millis()) } else { serde_json::Value::Null },
         "thread_id": m.thread_id.map(|t| t.to_string()),
+        "thread_hash": thread_hash,
+        "memory_postprocessing": memory_postprocessing_policy(),
         "entries": entries,
     }))
 }
@@ -2632,14 +2037,32 @@ fn build_meeting_markdown(m: &Meeting) -> String {
         .summary
         .clone()
         .unwrap_or_else(|| "_회의록이 작성되지 않았습니다._".to_string());
+    let meeting_hash = meeting_query_hash(&m.id);
+    let thread_id = m
+        .thread_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let thread_hash_display = m
+        .thread_id
+        .map(|id| thread_query_hash(&id.to_string()))
+        .unwrap_or_else(|| "-".to_string());
+    let thread_hash_frontmatter = if thread_hash_display == "-" {
+        "null".to_string()
+    } else {
+        format!("\"{thread_hash_display}\"")
+    };
 
     format!(
-        "---\ntags: [meeting, cookingheart]\ndate: {date}\nstatus: {status}\nparticipants: [{participants}]\nagenda: \"{agenda}\"\nmeeting_id: {id}\nprimary_provider: {primary_provider}\nreviewer_provider: {reviewer_provider}\n---\n\n# 회의록: {agenda}\n\n> **날짜**: {datetime}\n> **참여 전문 에이전트**: {participants}\n> **라운드**: {rounds}/{max_rounds}\n> **상태**: {status}\n> **진행자**: {primary_provider}\n> **리뷰어**: {reviewer_provider}\n\n---\n\n## 요약\n\n{summary}\n\n---\n\n## 전체 발언 기록\n\n{transcript}\n",
+        "---\ntags: [meeting, cookingheart]\ndate: {date}\nstatus: {status}\nparticipants: [{participants}]\nagenda: \"{agenda}\"\nmeeting_id: {id}\nmeeting_hash: \"{meeting_hash}\"\nthread_id: {thread_id}\nthread_hash: {thread_hash_frontmatter}\nprimary_provider: {primary_provider}\nreviewer_provider: {reviewer_provider}\nauto_memory_write: false\nauto_memory_capture: false\nmemory_postprocessing_policy: approval_required\n---\n\n# 회의록: {agenda}\n\n> **날짜**: {datetime}\n> **참여자**: {participants}\n> **라운드**: {rounds}/{max_rounds}\n> **상태**: {status}\n> **회의 해시**: {meeting_hash}\n> **스레드 해시**: {thread_hash_display}\n> **진행 모델**: {primary_provider}\n> **교차검증**: {reviewer_provider}\n> **메모리 후처리**: 자동 memory write/capture 비활성화, 승인 기반만 허용\n\n---\n\n## 요약\n\n{summary}\n\n---\n\n## 전체 발언 기록\n\n{transcript}\n",
         date = date_str,
         status = status_str,
         participants = participants_inline,
         agenda = m.agenda,
         id = m.id,
+        meeting_hash = meeting_hash,
+        thread_id = thread_id,
+        thread_hash_frontmatter = thread_hash_frontmatter,
+        thread_hash_display = thread_hash_display,
         primary_provider = m.primary_provider.as_str(),
         reviewer_provider = m.reviewer_provider.as_str(),
         datetime = datetime_str,
@@ -2772,7 +2195,6 @@ mod tests {
         effective_round_count, meeting_query_hash, meeting_slot_state, parse_meeting_start_text,
         summary_agent_context, thread_query_hash,
     };
-    use crate::services::discord::settings::RoleBinding;
     use serde_json::json;
 
     #[test]
@@ -2945,6 +2367,7 @@ mod tests {
     fn test_build_meeting_status_payload_uses_effective_round_count() {
         let mut meeting = fixture_meeting("mtg-a", MeetingStatus::Cancelled);
         meeting.current_round = 0;
+        meeting.thread_id = Some(123);
         meeting.transcript.push(MeetingUtterance {
             role_id: "ch-td".to_string(),
             display_name: "TD".to_string(),
@@ -2954,224 +2377,30 @@ mod tests {
 
         let payload = build_meeting_status_payload(&meeting).expect("payload");
         assert_eq!(payload.get("total_rounds"), Some(&json!(1)));
-    }
-
-    #[test]
-    fn test_meeting_readonly_tools_only_allow_read() {
-        assert_eq!(meeting_readonly_tools(), vec!["Read".to_string()]);
-    }
-
-    #[test]
-    fn test_derive_agent_metadata_quality_marks_full_metadata_high() {
-        let (missing, confidence) = derive_agent_metadata_quality(
-            Some("구현 품질과 아키텍처 리스크를 본다"),
-            &["리뷰".to_string()],
-            &["설계".to_string()],
-            &["브랜딩 단독 담당".to_string()],
-        );
-
-        assert!(!missing);
-        assert_eq!(confidence, "high");
-    }
-
-    fn fixture_agent(role_id: &str) -> MeetingAgentConfig {
-        MeetingAgentConfig {
-            role_id: role_id.to_string(),
-            display_name: role_id.to_uppercase(),
-            keywords: Vec::new(),
-            domain_summary: None,
-            strengths: Vec::new(),
-            task_types: Vec::new(),
-            anti_signals: Vec::new(),
-            provider_hint: None,
-            metadata_missing: true,
-            metadata_confidence: "low".to_string(),
-            binding: RoleBinding {
-                role_id: role_id.to_string(),
-                prompt_file: String::new(),
-                provider: None,
-                model: None,
-                reasoning_effort: None,
-                peer_agents_enabled: true,
-                memory: Default::default(),
-            },
-            workspace: None,
-        }
-    }
-
-    #[test]
-    fn test_canonical_candidate_pool_excludes_operator_role_ids() {
-        let config = MeetingConfig {
-            channel_name: "meeting-room".to_string(),
-            max_rounds: 3,
-            summary_agent: SummaryAgentConfig::Static("td".to_string()),
-            available_agents: vec![
-                fixture_agent("claude"),
-                fixture_agent("td"),
-                fixture_agent("codex"),
-                fixture_agent("pd"),
-            ],
-            agent_registry: vec![
-                fixture_agent("claude"),
-                fixture_agent("td"),
-                fixture_agent("codex"),
-                fixture_agent("pd"),
-            ],
-        };
-
-        let candidates =
-            canonical_candidate_pool(&config, &ProviderKind::Claude, &ProviderKind::Codex);
-        let role_ids: Vec<&str> = candidates
-            .iter()
-            .map(|agent| agent.role_id.as_str())
-            .collect();
-
-        assert_eq!(role_ids, vec!["td", "pd"]);
-        assert!(role_ids.len() >= MIN_MEETING_PARTICIPANTS);
-        assert!(role_ids.len() <= MAX_MEETING_PARTICIPANTS);
-    }
-
-    #[test]
-    fn test_build_meeting_participants_requires_fixed_invites_to_be_present() {
-        let agents = vec![
-            fixture_agent("td"),
-            fixture_agent("pd"),
-            fixture_agent("uxd"),
-        ];
-        let candidate_pool: Vec<&MeetingAgentConfig> = agents.iter().collect();
-
-        let error = build_meeting_participants(
-            &candidate_pool,
-            &["td".to_string(), "pd".to_string()],
-            &["uxd".to_string()],
-        )
-        .expect_err("missing fixed invite should fail");
-
         assert_eq!(
-            error,
-            "Fixed participant 'uxd' is missing from final selection"
-        );
-    }
-
-    #[test]
-    fn test_build_meeting_participants_accepts_five_experts_with_fixed_invites() {
-        let agents = vec![
-            fixture_agent("td"),
-            fixture_agent("pd"),
-            fixture_agent("uxd"),
-            fixture_agent("qad"),
-            fixture_agent("devops"),
-        ];
-        let candidate_pool: Vec<&MeetingAgentConfig> = agents.iter().collect();
-
-        let participants = build_meeting_participants(
-            &candidate_pool,
-            &[
-                "td".to_string(),
-                "pd".to_string(),
-                "uxd".to_string(),
-                "qad".to_string(),
-                "devops".to_string(),
-            ],
-            &["td".to_string(), "uxd".to_string()],
-        )
-        .expect("five experts should be allowed");
-
-        let role_ids: Vec<&str> = participants
-            .iter()
-            .map(|participant| participant.role_id.as_str())
-            .collect();
-
-        assert_eq!(participants.len(), MAX_MEETING_PARTICIPANTS);
-        assert_eq!(role_ids, vec!["td", "pd", "uxd", "qad", "devops"]);
-    }
-
-    #[test]
-    fn test_parse_selected_role_ids_response_accepts_structured_json() {
-        let parsed = parse_selected_role_ids_response(
-            r#"{
-  "selected_role_ids": ["td", "pd"],
-  "required_axes": ["기획", "구현"],
-  "selection_notes": ["축 균형 유지"]
-}"#,
-        )
-        .expect("structured response should parse");
-
-        assert_eq!(parsed, vec!["td".to_string(), "pd".to_string()]);
-    }
-
-    #[test]
-    fn test_parse_selected_role_ids_response_accepts_spec_selected_shape() {
-        let parsed = parse_selected_role_ids_response(
-            r#"{
-  "agenda_summary": "요약",
-  "required_axes": [{"axis":"설계","reason":"핵심","priority":"high"}],
-  "selected": [
-    {"role_id":"ch-td","why_selected":"설계 검토","covers_axes":["설계"],"fixed":false,"confidence":"high"},
-    {"role_id":"ch-pd","why_selected":"제품 판단","covers_axes":["제품"],"fixed":false,"confidence":"medium"}
-  ],
-  "rejected": [],
-  "selection_gaps": []
-}"#,
-        )
-        .expect("selected shape should parse");
-
-        assert_eq!(parsed, vec!["ch-td".to_string(), "ch-pd".to_string()]);
-    }
-
-    #[test]
-    fn test_fallback_to_initial_selection_keeps_initial_ids_and_warning() {
-        let resolution = fallback_to_initial_selection(
-            &["td".to_string(), "pd".to_string()],
-            "전문 에이전트 선정 리뷰",
-            "meeting selection stage `selection_review` timed out after 45s",
-        );
-
-        assert_eq!(
-            resolution.selected_role_ids,
-            vec!["td".to_string(), "pd".to_string()]
+            payload.get("meeting_hash"),
+            Some(&json!(meeting_query_hash("mtg-a")))
         );
         assert_eq!(
-            resolution.warning_message,
-            Some(
-                "⚠️ **전문 에이전트 선정 리뷰 실패**\nreason: meeting selection stage `selection_review` timed out after 45s\n1차 선정안으로 계속 진행합니다.".to_string()
-            )
+            payload.get("thread_hash"),
+            Some(&json!(thread_query_hash("123")))
         );
     }
 
     #[test]
-    fn test_resolve_final_selection_falls_back_to_initial_when_final_response_is_invalid() {
-        let resolution = resolve_final_selection(
-            &["td".to_string(), "pd".to_string()],
-            Ok("not json".to_string()),
-        );
+    fn test_build_meeting_markdown_includes_query_hashes() {
+        let mut meeting = fixture_meeting("mtg-a", MeetingStatus::Completed);
+        meeting.thread_id = Some(123);
 
-        assert_eq!(
-            resolution.selected_role_ids,
-            vec!["td".to_string(), "pd".to_string()]
-        );
-        assert!(
-            resolution
-                .warning_message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("응답 파싱 실패")
-        );
-    }
+        let md = build_meeting_markdown(&meeting);
 
-    #[test]
-    fn test_fallback_to_valid_turn_draft_keeps_existing_draft() {
-        assert_eq!(
-            fallback_to_valid_turn_draft("초안 응답"),
-            "초안 응답".to_string()
-        );
-    }
-
-    #[test]
-    fn test_resolve_turn_final_response_uses_draft_when_final_stage_fails() {
-        assert_eq!(
-            resolve_turn_final_response("초안 응답", Err("timeout".to_string())),
-            "초안 응답".to_string()
-        );
+        assert!(md.contains(&format!(
+            "meeting_hash: \"{}\"",
+            meeting_query_hash("mtg-a")
+        )));
+        assert!(md.contains("thread_id: 123"));
+        assert!(md.contains(&format!("thread_hash: \"{}\"", thread_query_hash("123"))));
+        assert!(md.contains(&format!("> **회의 해시**: {}", meeting_query_hash("mtg-a"))));
+        assert!(md.contains(&format!("> **스레드 해시**: {}", thread_query_hash("123"))));
     }
 }

@@ -674,16 +674,6 @@ pub async fn start_meeting(
     {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
     }
-    let fixed_participants = match meeting::validate_fixed_participant_role_ids(
-        &primary_provider,
-        &reviewer_provider,
-        body.fixed_participants.as_deref().unwrap_or(&[]),
-    ) {
-        Ok(role_ids) => role_ids,
-        Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
-        }
-    };
 
     match health::start_direct_meeting(
         registry,
@@ -1025,6 +1015,69 @@ fn build_meeting_start_command(agenda: &str, primary_provider: Option<ProviderKi
     }
 }
 
+fn short_query_hash(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(input.as_bytes());
+    hex::encode(&digest[..6])
+}
+
+fn meeting_query_hash(meeting_id: &str) -> String {
+    format!(
+        "#meeting-{}",
+        short_query_hash(&format!("meeting:{meeting_id}"))
+    )
+}
+
+fn thread_query_hash(thread_id: &str) -> String {
+    format!(
+        "#thread-{}",
+        short_query_hash(&format!("thread:{thread_id}"))
+    )
+}
+
+fn persist_meeting_query_hashes(
+    conn: &rusqlite::Connection,
+    meeting_id: &str,
+    thread_id: Option<&str>,
+) -> rusqlite::Result<()> {
+    let meeting_hash = meeting_query_hash(meeting_id);
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![
+            format!("meeting_query_hash:{meeting_id}"),
+            meeting_hash.clone()
+        ],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![
+            format!("meeting_query_hash_lookup:{meeting_hash}"),
+            meeting_id
+        ],
+    )?;
+
+    if let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) {
+        let thread_hash = thread_query_hash(thread_id);
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                format!("meeting_thread_hash:{meeting_id}"),
+                thread_hash.clone()
+            ],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                format!("meeting_thread_hash_lookup:{thread_hash}"),
+                json!({"meeting_id": meeting_id, "thread_id": thread_id}).to_string()
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
 fn row_optional_timestamp(row: &rusqlite::Row, idx: usize) -> Option<i64> {
     use rusqlite::types::ValueRef;
 
@@ -1196,7 +1249,10 @@ mod tests {
     use crate::db::Db;
     use crate::engine::PolicyEngine;
     use crate::services::provider::ProviderKind;
-    use axum::{Json, extract::State};
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
     use std::path::PathBuf;
 
     fn test_db() -> Db {

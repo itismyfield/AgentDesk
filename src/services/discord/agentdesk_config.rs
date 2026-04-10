@@ -2,10 +2,7 @@ use std::collections::HashSet;
 
 use poise::serenity_prelude::ChannelId;
 
-use super::meeting::{
-    MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule,
-    derive_agent_metadata_quality,
-};
+use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::settings::{PeerAgentInfo, RoleBinding, resolve_memory_settings};
 use crate::config::{AgentChannel, Config, MeetingAgentEntry, MeetingSummaryAgentDef};
 use crate::services::provider::ProviderKind;
@@ -176,63 +173,6 @@ fn role_binding_from_channel(
     }
 }
 
-fn meeting_agent_config_from_parts(
-    role_id: String,
-    display_name: String,
-    keywords: Vec<String>,
-    prompt_file: String,
-    provider_hint: Option<String>,
-    workspace: Option<String>,
-) -> MeetingAgentConfig {
-    let domain_summary = None;
-    let strengths = Vec::new();
-    let task_types = Vec::new();
-    let anti_signals = Vec::new();
-    let (metadata_missing, metadata_confidence) = derive_agent_metadata_quality(
-        domain_summary.as_deref(),
-        &strengths,
-        &task_types,
-        &anti_signals,
-    );
-    let provider = provider_hint
-        .as_deref()
-        .and_then(crate::services::provider::ProviderKind::from_str);
-
-    MeetingAgentConfig {
-        role_id: role_id.clone(),
-        display_name,
-        keywords,
-        domain_summary,
-        strengths,
-        task_types,
-        anti_signals,
-        provider_hint,
-        metadata_missing,
-        metadata_confidence,
-        binding: RoleBinding {
-            role_id,
-            prompt_file,
-            provider,
-            model: None,
-            reasoning_effort: None,
-            peer_agents_enabled: true,
-            memory: resolve_memory_settings(None, None),
-        },
-        workspace,
-    }
-}
-
-fn meeting_agent_from_agent(agent: &crate::config::AgentDef) -> MeetingAgentConfig {
-    meeting_agent_config_from_parts(
-        agent.id.clone(),
-        agent_display_name(agent),
-        agent.keywords.clone(),
-        default_prompt_path(&agent.id).unwrap_or_default(),
-        Some(agent.provider.clone()),
-        default_workspace(&agent.id),
-    )
-}
-
 fn meeting_agent_from_entry(
     config: &Config,
     entry: &MeetingAgentEntry,
@@ -240,12 +180,12 @@ fn meeting_agent_from_entry(
     match entry {
         MeetingAgentEntry::RoleId(role_id) => {
             let agent = config.agents.iter().find(|agent| agent.id == *role_id);
-            Some(meeting_agent_config_from_parts(
-                role_id.clone(),
-                agent
+            Some(MeetingAgentConfig {
+                role_id: role_id.clone(),
+                display_name: agent
                     .map(agent_display_name)
                     .unwrap_or_else(|| role_id.clone()),
-                agent
+                keywords: agent
                     .map(|agent| agent.keywords.clone())
                     .unwrap_or_default(),
                 prompt_file: default_prompt_path(role_id).unwrap_or_default(),
@@ -264,22 +204,23 @@ fn meeting_agent_from_entry(
         }
         MeetingAgentEntry::Detailed(def) => {
             let agent = config.agents.iter().find(|agent| agent.id == def.role_id);
-            let role_id = def.role_id.clone();
-            Some(meeting_agent_config_from_parts(
-                role_id.clone(),
-                def.display_name
+            Some(MeetingAgentConfig {
+                role_id: def.role_id.clone(),
+                display_name: def
+                    .display_name
                     .clone()
                     .filter(|value| !value.trim().is_empty())
                     .or_else(|| agent.map(agent_display_name))
                     .unwrap_or_else(|| def.role_id.clone()),
-                if def.keywords.is_empty() {
+                keywords: if def.keywords.is_empty() {
                     agent
                         .map(|agent| agent.keywords.clone())
                         .unwrap_or_default()
                 } else {
                     def.keywords.clone()
                 },
-                def.prompt_file
+                prompt_file: def
+                    .prompt_file
                     .as_deref()
                     .map(expand_tilde)
                     .or_else(|| default_prompt_path(&def.role_id))
@@ -453,12 +394,6 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         },
     };
 
-    let agent_registry = config
-        .agents
-        .iter()
-        .map(meeting_agent_from_agent)
-        .collect::<Vec<_>>();
-
     let available_agents = if meeting.available_agents.is_empty() {
         config
             .agents
@@ -492,9 +427,9 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
     Some(MeetingConfig {
         channel_name: meeting.channel_name.clone(),
         max_rounds: meeting.max_rounds.unwrap_or(3),
+        max_participants: meeting.max_participants.unwrap_or(5).clamp(2, 5),
         summary_agent,
         available_agents,
-        agent_registry,
     })
 }
 
