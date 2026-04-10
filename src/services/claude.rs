@@ -14,6 +14,12 @@ use crate::services::provider::{
     fold_read_output_result, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
+use crate::services::session_backend::{
+    insert_process_session, parse_assistant_extra_tool_uses, parse_stream_message,
+    process_session_is_alive, process_session_pid, process_session_probe,
+    read_output_file_until_result, remove_process_session, send_process_session_input,
+    terminate_process_handle,
+};
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
     record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
@@ -1010,30 +1016,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
     Ok(())
 }
 
-/// Shared state for processing stream-json lines from Claude.
-/// Used by both local and remote execution paths.
-pub struct StreamLineState {
-    pub last_session_id: Option<String>,
-    pub last_model: Option<String>,
-    pub accum_input_tokens: u64,
-    pub accum_output_tokens: u64,
-    pub final_result: Option<String>,
-    pub stdout_error: Option<(String, String)>,
-}
-
-impl StreamLineState {
-    pub fn new() -> Self {
-        Self {
-            last_session_id: None,
-            last_model: None,
-            accum_input_tokens: 0,
-            accum_output_tokens: 0,
-            final_result: None,
-            stdout_error: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ClaudeFollowupResult {
     Delivered,
@@ -1074,143 +1056,6 @@ fn emit_followup_restart_suppressed_notice(sender: &Sender<StreamMessage>, notic
     });
 }
 
-/// Process a single stream-json line. Returns false if the sender channel is disconnected.
-/// Sets `stdout_error` in state for error messages (these are deferred until process exit).
-pub(crate) fn process_stream_line(
-    line: &str,
-    sender: &Sender<StreamMessage>,
-    state: &mut StreamLineState,
-) -> bool {
-    if line.trim().is_empty() {
-        return true;
-    }
-
-    let json = match serde_json::from_str::<Value>(line) {
-        Ok(j) => j,
-        Err(_) => return true,
-    };
-
-    let msg_type = json
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-
-    // Extract model name and token usage from assistant messages
-    if msg_type == "assistant" {
-        if let Some(msg_obj) = json.get("message") {
-            if let Some(model) = msg_obj.get("model").and_then(|v| v.as_str()) {
-                state.last_model = Some(model.to_string());
-            }
-            if let Some(usage) = msg_obj.get("usage") {
-                // Include cache tokens in input total for accurate context occupancy
-                let inp = usage
-                    .get("input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let cache_read = usage
-                    .get("cache_read_input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let cache_creation = usage
-                    .get("cache_creation_input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                state.accum_input_tokens += inp + cache_read + cache_creation;
-                if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                    state.accum_output_tokens += out;
-                }
-            }
-        }
-    }
-
-    // Extract statusline info from result events
-    if msg_type == "result" {
-        // Prefer result event's own usage field over accumulated message values.
-        // The result event usage reflects the LAST API call's context window,
-        // while accumulated values overcount for multi-call turns (tool use loops).
-        if let Some(usage) = json.get("usage") {
-            let inp = usage
-                .get("input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let cache_read = usage
-                .get("cache_read_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let cache_creation = usage
-                .get("cache_creation_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let out = usage
-                .get("output_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            state.accum_input_tokens = inp + cache_read + cache_creation;
-            state.accum_output_tokens = out;
-        }
-
-        let cost_usd = json.get("cost_usd").and_then(|v| v.as_f64());
-        let total_cost_usd = json.get("total_cost_usd").and_then(|v| v.as_f64());
-        let duration_ms = json.get("duration_ms").and_then(|v| v.as_u64());
-        let num_turns = json
-            .get("num_turns")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        if cost_usd.is_some() || total_cost_usd.is_some() || state.last_model.is_some() {
-            let _ = sender.send(StreamMessage::StatusUpdate {
-                model: state.last_model.clone(),
-                cost_usd,
-                total_cost_usd,
-                duration_ms,
-                num_turns,
-                input_tokens: if state.accum_input_tokens > 0 {
-                    Some(state.accum_input_tokens)
-                } else {
-                    None
-                },
-                output_tokens: if state.accum_output_tokens > 0 {
-                    Some(state.accum_output_tokens)
-                } else {
-                    None
-                },
-            });
-        }
-    }
-
-    if let Some(msg) = parse_stream_message(&json) {
-        // Track session_id and final result
-        match &msg {
-            StreamMessage::Init { session_id } => {
-                state.last_session_id = Some(session_id.clone());
-            }
-            StreamMessage::Done { result, session_id } => {
-                state.final_result = Some(result.clone());
-                if session_id.is_some() {
-                    state.last_session_id = session_id.clone();
-                }
-            }
-            StreamMessage::Error { message, .. } => {
-                state.stdout_error = Some((message.clone(), line.to_string()));
-                return true; // don't send yet; will combine with stderr after process exits
-            }
-            _ => {}
-        }
-
-        if sender.send(msg).is_err() {
-            return false; // channel disconnected
-        }
-
-        // Send any extra tool_use messages from the same content array.
-        for extra in parse_assistant_extra_tool_uses(&json) {
-            if sender.send(extra).is_err() {
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
 /// Execute claude command on a remote host via SSH, streaming stdout lines
 /// back through the sender channel.
 /// NOTE: Remote SSH execution is not available in AgentDesk — always returns Err.
@@ -1223,237 +1068,6 @@ fn execute_streaming_remote(
     _cancel_token: Option<std::sync::Arc<CancelToken>>,
 ) -> Result<(), String> {
     Err("Remote SSH execution is not available in AgentDesk".to_string())
-}
-
-/// Parse a stream-json line into a StreamMessage
-fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
-    let msg_type = json.get("type")?.as_str()?;
-
-    match msg_type {
-        "system" => {
-            // {"type":"system","subtype":"init","session_id":"..."}
-            // {"type":"system","subtype":"task_notification","task_id":"...","status":"...","summary":"..."}
-            let subtype = json.get("subtype").and_then(|v| v.as_str())?;
-            match subtype {
-                "init" => {
-                    let session_id = json.get("session_id")?.as_str()?.to_string();
-                    Some(StreamMessage::Init { session_id })
-                }
-                "task_notification" => {
-                    let task_id = json
-                        .get("task_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let status = json
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let summary = json
-                        .get("summary")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    Some(StreamMessage::TaskNotification {
-                        task_id,
-                        status,
-                        summary,
-                    })
-                }
-                _ => None,
-            }
-        }
-        "assistant" => {
-            // {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
-            // or {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{...}}]}}
-            // Content array may contain [thinking, text] or [thinking, tool_use].
-            // We prioritize text/tool_use over thinking to avoid losing actual content.
-            let content = json.get("message")?.get("content")?.as_array()?;
-
-            let mut has_thinking = false;
-            let mut thinking_summary: Option<String> = None;
-            for item in content {
-                let item_type = match item.get("type").and_then(|v| v.as_str()) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                match item_type {
-                    "text" => {
-                        let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                        if !text.is_empty() {
-                            return Some(StreamMessage::Text {
-                                content: text.to_string(),
-                            });
-                        }
-                    }
-                    "tool_use" => {
-                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                        if !name.is_empty() {
-                            let input = item
-                                .get("input")
-                                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                                .unwrap_or_default();
-                            return Some(StreamMessage::ToolUse {
-                                name: name.to_string(),
-                                input,
-                            });
-                        }
-                    }
-                    "thinking" => {
-                        has_thinking = true;
-                        // Extract full thinking text
-                        thinking_summary = item
-                            .get("thinking")
-                            .and_then(|v| v.as_str())
-                            .map(|t| t.trim().to_string())
-                            .filter(|t| !t.is_empty());
-                    }
-                    _ => {}
-                }
-            }
-            // Only emit Thinking if no text/tool_use was found in the same message.
-            if has_thinking {
-                return Some(StreamMessage::Thinking {
-                    summary: thinking_summary,
-                });
-            }
-            None
-        }
-        "user" => {
-            // {"type":"user","message":{"content":[{"type":"tool_result","content":"..." or [array]}]}}
-            let content = json.get("message")?.get("content")?.as_array()?;
-
-            for item in content {
-                let item_type = item.get("type")?.as_str()?;
-                if item_type == "tool_result" {
-                    // content can be a string or an array of text items
-                    let content_text = if let Some(s) = item.get("content").and_then(|v| v.as_str())
-                    {
-                        s.to_string()
-                    } else if let Some(arr) = item.get("content").and_then(|v| v.as_array()) {
-                        // Extract text from array: [{"type":"text","text":"..."},...]
-                        arr.iter()
-                            .filter_map(|v| v.get("text").and_then(|t| t.as_str()))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    } else {
-                        String::new()
-                    };
-                    let is_error = item
-                        .get("is_error")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    return Some(StreamMessage::ToolResult {
-                        content: content_text,
-                        is_error,
-                    });
-                }
-            }
-            None
-        }
-        "result" => {
-            // {"type":"result","subtype":"error_during_execution","is_error":true,"errors":["..."]}
-            // {"type":"result","subtype":"success","result":"...","session_id":"..."}
-            let is_error = json
-                .get("is_error")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if is_error {
-                let errors_raw = json.get("errors");
-                let result_raw = json.get("result").and_then(|v| v.as_str());
-                // Try "errors" array first, then fall back to "result" field
-                let error_msg = errors_raw
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str())
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    })
-                    .or_else(|| result_raw.map(|s| s.to_string()))
-                    .unwrap_or_else(|| "Unknown error".to_string());
-                return Some(StreamMessage::Error {
-                    message: error_msg,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: None,
-                });
-            }
-            let result = json
-                .get("result")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let session_id = json
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            Some(StreamMessage::Done { result, session_id })
-        }
-        _ => None,
-    }
-}
-
-/// Extract additional tool_use messages from an assistant event whose content
-/// array contains both text and tool_use blocks.
-///
-/// `parse_stream_message` returns only the first text block it finds, silently
-/// dropping any tool_use blocks that follow in the same content array.  This
-/// causes the `any_tool_used` / `has_post_tool_text` tracking in `turn_bridge`
-/// to be incorrect when text and tool_use coexist (the common case for
-/// intermediate narration like "이슈를 생성합니다" followed by a tool call).
-///
-/// Call this **after** `parse_stream_message` on the same JSON line and forward
-/// the returned messages through the channel so the bridge sees the ToolUse events.
-fn parse_assistant_extra_tool_uses(json: &Value) -> Vec<StreamMessage> {
-    if json.get("type").and_then(|v| v.as_str()) != Some("assistant") {
-        return Vec::new();
-    }
-    let content = match json
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_array())
-    {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-    // Only emit extras when the primary parse_stream_message returned a Text
-    // (i.e. the first actionable block was text).  Detect this by checking
-    // whether a text block appears before any tool_use in iteration order.
-    let mut saw_text_first = false;
-    let mut extras = Vec::new();
-    for item in content {
-        let item_type = match item.get("type").and_then(|v| v.as_str()) {
-            Some(t) => t,
-            None => continue,
-        };
-        match item_type {
-            "text" if extras.is_empty() => {
-                // A text block before any tool_use — matches what
-                // parse_stream_message would have returned.
-                let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                if !text.is_empty() {
-                    saw_text_first = true;
-                }
-            }
-            "tool_use" if saw_text_first => {
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                if !name.is_empty() {
-                    let input = item
-                        .get("input")
-                        .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                        .unwrap_or_default();
-                    extras.push(StreamMessage::ToolUse {
-                        name: name.to_string(),
-                        input,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    extras
 }
 
 /// Check if tmux is available on the system
@@ -1887,70 +1501,6 @@ fn send_followup_to_tmux(
 
 /// Poll-read the output file from a given offset until a "result" event is received.
 /// Uses raw File::read to handle growing file (not BufReader which caches EOF).
-/// Returns ReadOutputResult indicating how the read ended.
-///
-/// The `probe` parameter abstracts session status checks, enabling both
-/// tmux-based and process-based backends to share this function.
-pub(crate) fn read_output_file_until_result(
-    output_path: &str,
-    start_offset: u64,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<std::sync::Arc<CancelToken>>,
-    probe: SessionProbe,
-) -> Result<ReadOutputResult, String> {
-    debug_log(&format!(
-        "=== read_output_file_until_result: offset={} ===",
-        start_offset
-    ));
-
-    let mut state = StreamLineState::new();
-    let SessionProbe {
-        is_alive,
-        is_ready_for_input,
-    } = probe;
-    let offset_sender = sender.clone();
-    let line_sender = sender.clone();
-    let synthetic_sender = sender.clone();
-    let error_sender = sender.clone();
-
-    let result = crate::services::provider::poll_output_file_until_result(
-        output_path,
-        start_offset,
-        cancel_token,
-        &mut state,
-        move || is_alive(),
-        move || is_ready_for_input(),
-        move |offset| {
-            let _ = offset_sender.send(StreamMessage::OutputOffset { offset });
-        },
-        move |line, state| process_stream_line(line, &line_sender, state),
-        |state| state.final_result.is_some(),
-        move |state| {
-            let synthetic = StreamMessage::Done {
-                result: String::new(),
-                session_id: state.last_session_id.clone(),
-            };
-            synthetic_sender.send(synthetic).is_ok()
-        },
-        move |state| {
-            if let Some((message, stdout_raw)) = &state.stdout_error {
-                let _ = error_sender.send(StreamMessage::Error {
-                    message: message.clone(),
-                    stdout: stdout_raw.clone(),
-                    stderr: String::new(),
-                    exit_code: None,
-                });
-            }
-        },
-    );
-
-    if let Ok(ReadOutputResult::SessionDied { .. }) = &result {
-        debug_log("=== read_output_file_until_result END (session died) ===");
-    }
-
-    result
-}
-
 // ─── ProcessBackend execution path ────────────────────────────────────────────
 
 /// Execute Claude via ProcessBackend (direct child process, no tmux).
@@ -1964,9 +1514,7 @@ pub(crate) fn execute_streaming_local_process(
     session_name: &str,
     compact_percent: Option<u64>,
 ) -> Result<(), String> {
-    use crate::services::session_backend::{
-        ProcessBackend, SessionBackend, SessionConfig, SessionHandle,
-    };
+    use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
     debug_log(&format!(
         "=== execute_streaming_local_process START: {} ===",
@@ -1986,60 +1534,35 @@ pub(crate) fn execute_streaming_local_process(
 
     // Check for existing process session (follow-up)
     // ProcessBackend sessions don't persist across restarts, so we track via static map
-    {
-        let handles = PROCESS_HANDLES.lock().unwrap();
-        if let Some(handle) = handles.get(session_name) {
-            let backend = ProcessBackend::new();
-            if backend.is_alive(handle) {
-                debug_log("Existing process session found — sending follow-up");
-                drop(handles);
-                match send_followup_to_process(
-                    prompt,
-                    &output_path,
-                    session_name,
-                    sender.clone(),
-                    cancel_token.clone(),
-                )? {
-                    ClaudeFollowupResult::Delivered => return Ok(()),
-                    ClaudeFollowupResult::RecreateSession { error } => {
-                        debug_log(&format!(
-                            "Process follow-up failed, recreating session: {}",
-                            error
-                        ));
-                        // Kill existing process and clean up handle
-                        if let Some(handle) = PROCESS_HANDLES.lock().unwrap().remove(session_name) {
-                            let crate::services::session_backend::SessionHandle::Process {
-                                child,
-                                ..
-                            } = handle;
-                            let mut child_guard = child.lock().unwrap();
-                            if let Some(ref mut c) = *child_guard {
-                                let _ = c.kill();
-                                let _ = c.wait();
-                            }
-                        }
-                        // Fall through to new session creation below
-                    }
-                    ClaudeFollowupResult::FinalizeWithNotice { error, notice } => {
-                        debug_log(&format!(
-                            "Process follow-up streamed partial output before session death — suppressing replay: {}",
-                            error
-                        ));
-                        if let Some(handle) = PROCESS_HANDLES.lock().unwrap().remove(session_name) {
-                            let crate::services::session_backend::SessionHandle::Process {
-                                child,
-                                ..
-                            } = handle;
-                            let mut child_guard = child.lock().unwrap();
-                            if let Some(ref mut c) = *child_guard {
-                                let _ = c.kill();
-                                let _ = c.wait();
-                            }
-                        }
-                        emit_followup_restart_suppressed_notice(&sender, &notice);
-                        return Ok(());
-                    }
+    if process_session_is_alive(session_name) {
+        debug_log("Existing process session found — sending follow-up");
+        match send_followup_to_process(
+            prompt,
+            &output_path,
+            session_name,
+            sender.clone(),
+            cancel_token.clone(),
+        )? {
+            ClaudeFollowupResult::Delivered => return Ok(()),
+            ClaudeFollowupResult::RecreateSession { error } => {
+                debug_log(&format!(
+                    "Process follow-up failed, recreating session: {}",
+                    error
+                ));
+                if let Some(handle) = remove_process_session(session_name) {
+                    terminate_process_handle(handle);
                 }
+            }
+            ClaudeFollowupResult::FinalizeWithNotice { error, notice } => {
+                debug_log(&format!(
+                    "Process follow-up streamed partial output before session death — suppressing replay: {}",
+                    error
+                ));
+                if let Some(handle) = remove_process_session(session_name) {
+                    terminate_process_handle(handle);
+                }
+                emit_followup_restart_suppressed_notice(&sender, &notice);
+                return Ok(());
             }
         }
     }
@@ -2091,16 +1614,12 @@ pub(crate) fn execute_streaming_local_process(
     let handle = backend.create_session(&config)?;
 
     // Store child PID in cancel token
-    let SessionHandle::Process { pid, .. } = &handle;
     if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(*pid);
+        *token.child_pid.lock().unwrap() = Some(handle.pid());
     }
 
     // Store handle for follow-up messages
-    PROCESS_HANDLES
-        .lock()
-        .unwrap()
-        .insert(session_name.to_string(), handle);
+    insert_process_session(session_name.to_string(), handle);
 
     // Poll output file until result
     let read_result = read_output_file_until_result(
@@ -2108,18 +1627,7 @@ pub(crate) fn execute_streaming_local_process(
         0,
         sender.clone(),
         cancel_token,
-        SessionProbe::process({
-            let session_name = session_name.to_string();
-            move || {
-                let handles = PROCESS_HANDLES.lock().unwrap();
-                if let Some(handle) = handles.get(&session_name) {
-                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
-                    ProcessBackend::new().is_alive(handle)
-                } else {
-                    false
-                }
-            }
-        }),
+        process_session_probe(session_name),
     )?;
 
     fold_read_output_result(
@@ -2137,7 +1645,7 @@ pub(crate) fn execute_streaming_local_process(
                     .to_string(),
                 session_id: None,
             });
-            PROCESS_HANDLES.lock().unwrap().remove(session_name);
+            remove_process_session(session_name);
         },
     );
 
@@ -2153,7 +1661,6 @@ fn send_followup_to_process(
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
 ) -> Result<ClaudeFollowupResult, String> {
-    use crate::services::session_backend::{ProcessBackend, SessionBackend};
     use crate::services::tmux_diagnostics::should_recreate_session_after_stdin_error;
 
     debug_log(&format!(
@@ -2172,32 +1679,21 @@ fn send_followup_to_process(
         }
     });
 
-    let handles = PROCESS_HANDLES.lock().unwrap();
-    if let Some(handle) = handles.get(session_name) {
-        let backend = ProcessBackend::new();
-        if let Err(e) = backend.send_input(handle, &msg.to_string()) {
-            drop(handles);
-            if should_recreate_session_after_stdin_error(&e) {
-                debug_log(&format!(
-                    "stdin pipe error triggers session recreation: {}",
-                    e
-                ));
-                return Ok(ClaudeFollowupResult::RecreateSession { error: e });
-            }
-            return Err(e);
+    if let Err(e) = send_process_session_input(session_name, &msg.to_string()) {
+        if should_recreate_session_after_stdin_error(&e) {
+            debug_log(&format!(
+                "stdin pipe error triggers session recreation: {}",
+                e
+            ));
+            return Ok(ClaudeFollowupResult::RecreateSession { error: e });
         }
-    } else {
-        return Err("No process handle found for session".to_string());
+        return Err(e);
     }
-    drop(handles);
 
     // Store session in cancel token
     if let Some(ref token) = cancel_token {
-        let handles = PROCESS_HANDLES.lock().unwrap();
-        if let Some(crate::services::session_backend::SessionHandle::Process { pid, .. }) =
-            handles.get(session_name)
-        {
-            *token.child_pid.lock().unwrap() = Some(*pid);
+        if let Some(pid) = process_session_pid(session_name) {
+            *token.child_pid.lock().unwrap() = Some(pid);
         }
     }
 
@@ -2206,18 +1702,7 @@ fn send_followup_to_process(
         start_offset,
         sender.clone(),
         cancel_token,
-        SessionProbe::process({
-            let session_name = session_name.to_string();
-            move || {
-                let handles = PROCESS_HANDLES.lock().unwrap();
-                if let Some(handle) = handles.get(&session_name) {
-                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
-                    ProcessBackend::new().is_alive(handle)
-                } else {
-                    false
-                }
-            }
-        }),
+        process_session_probe(session_name),
     )?;
 
     let outcome = classify_followup_result(
@@ -2238,27 +1723,19 @@ fn send_followup_to_process(
         debug_log(
             "process session died during follow-up before new output — requesting recreation",
         );
-        PROCESS_HANDLES.lock().unwrap().remove(session_name);
+        remove_process_session(session_name);
     } else {
         debug_log(
             "process session died after streaming partial follow-up output — suppress replay",
         );
-        PROCESS_HANDLES.lock().unwrap().remove(session_name);
+        remove_process_session(session_name);
     }
     Ok(outcome)
 }
 
-/// Global storage for ProcessBackend session handles.
-/// Keyed by session name, stores the SessionHandle for follow-up messages.
-pub(crate) static PROCESS_HANDLES: std::sync::LazyLock<
-    std::sync::Mutex<
-        std::collections::HashMap<String, crate::services::session_backend::SessionHandle>,
-    >,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
 pub fn terminate_local_session(session_name: &str) {
-    if let Some(handle) = PROCESS_HANDLES.lock().unwrap().remove(session_name) {
-        let crate::services::session_backend::SessionHandle::Process { pid, .. } = handle;
+    if let Some(pid) = process_session_pid(session_name) {
+        remove_process_session(session_name);
         kill_pid_tree(pid);
     }
 
