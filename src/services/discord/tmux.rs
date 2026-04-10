@@ -4,8 +4,8 @@ use std::sync::{Arc, LazyLock};
 use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
-use crate::services::claude;
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
+use crate::services::session_backend::StreamLineState;
 use crate::services::tmux_diagnostics::{
     build_tmux_death_diagnostic, read_tmux_exit_reason, record_tmux_exit_reason,
     tmux_session_exists, tmux_session_has_live_pane,
@@ -563,7 +563,6 @@ pub(super) async fn tmux_output_watcher(
     pause_epoch: Arc<std::sync::atomic::AtomicU64>,
     turn_delivered: Arc<std::sync::atomic::AtomicBool>,
 ) {
-    use claude::StreamLineState;
     use std::io::{Read, Seek, SeekFrom};
 
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1681,7 +1680,7 @@ impl WatcherToolState {
 /// Returns true if a "result" event was found.
 pub(super) fn process_watcher_lines(
     buffer: &mut String,
-    state: &mut claude::StreamLineState,
+    state: &mut StreamLineState,
     full_response: &mut String,
     tool_state: &mut WatcherToolState,
 ) -> WatcherLineOutcome {
@@ -2648,9 +2647,9 @@ mod tests {
         process_watcher_lines, provider_overload_fingerprint, provider_overload_retry_delay,
         record_provider_overload_retry, resolve_restart_handoff_scope,
     };
-    use crate::services::claude::StreamLineState;
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
+    use crate::services::session_backend::StreamLineState;
     use poise::serenity_prelude::ChannelId;
 
     fn sample_inflight_state() -> InflightTurnState {

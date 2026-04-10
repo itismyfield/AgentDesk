@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
-use crate::services::claude::{self, read_output_file_until_result};
+use crate::services::claude;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
@@ -16,6 +16,10 @@ use crate::services::provider::{
     fold_read_output_result, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
+use crate::services::session_backend::{
+    insert_process_session, process_session_is_alive, process_session_probe,
+    read_output_file_until_result, remove_process_session, send_process_session_input,
+};
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{
     record_tmux_exit_reason, should_recreate_session_after_followup_fifo_error,
@@ -660,9 +664,7 @@ fn execute_streaming_local_process_codex(
     session_name: &str,
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
-    use crate::services::session_backend::{
-        ProcessBackend, SessionBackend, SessionConfig, SessionHandle,
-    };
+    use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
     let output_path = format!(
         "{}/agentdesk-{}.jsonl",
@@ -676,71 +678,46 @@ fn execute_streaming_local_process_codex(
     );
 
     // Check for existing process session
-    {
-        let handles = claude::PROCESS_HANDLES.lock().unwrap();
-        if let Some(handle) = handles.get(session_name) {
-            let backend = ProcessBackend::new();
-            if backend.is_alive(handle) {
-                drop(handles);
-                // Snapshot file length BEFORE sending input to avoid race:
-                // Codex wrapper appends JSONL immediately on stdin, so a fast
-                // response could be written before we read the offset.
-                let start_offset = std::fs::metadata(&output_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+    if process_session_is_alive(session_name) {
+        // Snapshot file length BEFORE sending input to avoid race:
+        // Codex wrapper appends JSONL immediately on stdin, so a fast
+        // response could be written before we read the offset.
+        let start_offset = std::fs::metadata(&output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
 
-                // For codex follow-up, encode prompt in the expected format
-                let encoded = format!(
-                    "{}{}",
-                    TMUX_PROMPT_B64_PREFIX,
-                    BASE64_STANDARD.encode(prompt.as_bytes())
-                );
-                let handles2 = claude::PROCESS_HANDLES.lock().unwrap();
-                if let Some(handle) = handles2.get(session_name) {
-                    backend.send_input(handle, &encoded)?;
-                }
-                drop(handles2);
-                let read_result = read_output_file_until_result(
-                    &output_path,
-                    start_offset,
-                    sender.clone(),
-                    cancel_token,
-                    SessionProbe::process({
-                        let session_name = session_name.to_string();
-                        move || {
-                            let handles = claude::PROCESS_HANDLES.lock().unwrap();
-                            if let Some(handle) = handles.get(&session_name) {
-                                use crate::services::session_backend::{
-                                    ProcessBackend, SessionBackend,
-                                };
-                                ProcessBackend::new().is_alive(handle)
-                            } else {
-                                false
-                            }
-                        }
-                    }),
-                )?;
+        let encoded = format!(
+            "{}{}",
+            TMUX_PROMPT_B64_PREFIX,
+            BASE64_STANDARD.encode(prompt.as_bytes())
+        );
+        send_process_session_input(session_name, &encoded)?;
+        let read_result = read_output_file_until_result(
+            &output_path,
+            start_offset,
+            sender.clone(),
+            cancel_token,
+            process_session_probe(session_name),
+        )?;
 
-                fold_read_output_result(
-                    read_result,
-                    |offset| {
-                        let _ = sender.send(StreamMessage::ProcessReady {
-                            output_path: output_path.to_string(),
-                            session_name: session_name.to_string(),
-                            last_offset: offset,
-                        });
-                    },
-                    |_| {
-                        let _ = sender.send(StreamMessage::Done {
-                            result: "⚠ 세션이 종료되었습니다.".to_string(),
-                            session_id: None,
-                        });
-                        claude::PROCESS_HANDLES.lock().unwrap().remove(session_name);
-                    },
-                );
-                return Ok(());
-            }
-        }
+        fold_read_output_result(
+            read_result,
+            |offset| {
+                let _ = sender.send(StreamMessage::ProcessReady {
+                    output_path: output_path.to_string(),
+                    session_name: session_name.to_string(),
+                    last_offset: offset,
+                });
+            },
+            |_| {
+                let _ = sender.send(StreamMessage::Done {
+                    result: "⚠ 세션이 종료되었습니다.".to_string(),
+                    session_id: None,
+                });
+                remove_process_session(session_name);
+            },
+        );
+        return Ok(());
     }
 
     // Clean up and create new session
@@ -796,33 +773,18 @@ fn execute_streaming_local_process_codex(
     let backend = ProcessBackend::new();
     let handle = backend.create_session(&config)?;
 
-    let SessionHandle::Process { pid, .. } = &handle;
     if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap() = Some(*pid);
+        *token.child_pid.lock().unwrap() = Some(handle.pid());
     }
 
-    claude::PROCESS_HANDLES
-        .lock()
-        .unwrap()
-        .insert(session_name.to_string(), handle);
+    insert_process_session(session_name.to_string(), handle);
 
     let read_result = read_output_file_until_result(
         &output_path,
         0,
         sender.clone(),
         cancel_token,
-        SessionProbe::process({
-            let session_name = session_name.to_string();
-            move || {
-                let handles = claude::PROCESS_HANDLES.lock().unwrap();
-                if let Some(handle) = handles.get(&session_name) {
-                    use crate::services::session_backend::{ProcessBackend, SessionBackend};
-                    ProcessBackend::new().is_alive(handle)
-                } else {
-                    false
-                }
-            }
-        }),
+        process_session_probe(session_name),
     )?;
 
     fold_read_output_result(
@@ -839,7 +801,7 @@ fn execute_streaming_local_process_codex(
                 result: "⚠ 프로세스가 종료되었습니다.".to_string(),
                 session_id: None,
             });
-            claude::PROCESS_HANDLES.lock().unwrap().remove(session_name);
+            remove_process_session(session_name);
         },
     );
 
