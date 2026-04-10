@@ -25,8 +25,8 @@ git clone https://github.com/itismyfield/AgentDesk.git
 cd AgentDesk
 cargo build --release
 
-# Build the dashboard
-cd dashboard && npm install && npm run build && cd ..
+# Verify the dashboard with the same command CI uses (Node >=22)
+./scripts/verify-dashboard.sh
 
 # Initialize
 ./target/release/agentdesk --init

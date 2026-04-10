@@ -52,32 +52,13 @@ if [ ! -f "$BINARY" ]; then
 fi
 echo "  Binary: $(ls -lh "$BINARY" | awk '{print $5}')"
 
-# ── 2. Build dashboard ───────────────────────────────────────────────────────
+# ── 2. Verify + build dashboard ──────────────────────────────────────────────
 if [ "$SKIP_DASHBOARD" = true ]; then
   echo "[2/3] Dashboard skipped (--skip-dashboard)"
 else
-  echo "[2/3] Building dashboard..."
+  echo "[2/3] Verifying dashboard (install + build + test)..."
   if [ -d "dashboard" ] && [ -f "dashboard/package.json" ]; then
-    cd dashboard
-    if command -v pnpm &>/dev/null; then
-      pnpm install --frozen-lockfile 2>/dev/null || pnpm install
-      pnpm build
-    elif [ -f "pnpm-lock.yaml" ] && command -v corepack &>/dev/null; then
-      echo "  Using corepack pnpm (pnpm-lock.yaml detected)"
-      corepack pnpm install --frozen-lockfile 2>/dev/null || corepack pnpm install
-      corepack pnpm build
-    elif command -v npm &>/dev/null; then
-      if [ -f "pnpm-lock.yaml" ] && [ ! -f "package-lock.json" ]; then
-        echo "  Error: pnpm-lock.yaml present but pnpm is unavailable. Install pnpm or enable corepack."
-        exit 1
-      fi
-      npm ci --silent 2>/dev/null || npm install --silent
-      npm run build
-    else
-      echo "  Error: No package manager (npm or pnpm)"
-      exit 1
-    fi
-    cd "$PROJECT_DIR"
+    "$PROJECT_DIR/scripts/verify-dashboard.sh"
     echo "  Dashboard: $(du -sh dashboard/dist/ | cut -f1)"
   else
     echo "  [SKIP] No dashboard directory"

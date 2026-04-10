@@ -26,8 +26,9 @@ cargo build --release
 cargo run
 
 # Dashboard (React frontend)
-cd dashboard && npm install && npm run dev    # dev server
-cd dashboard && npm run build                 # production build → dist/
+./scripts/verify-dashboard.sh                # CI-aligned install + build + test (Node >=22)
+cd dashboard && npm install && npm run dev   # dev server
+cd dashboard && npm run build                # production build → dist/
 
 # Dashboard deploy (IMPORTANT: server serves from dashboard/dist/, NOT dashboard/)
 scripts/deploy-dashboard.sh release           # build + deploy to ~/.adk/release/dashboard/dist/

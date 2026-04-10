@@ -133,35 +133,36 @@ impl RuntimeSupervisor {
         if let Some(candidate) = candidate {
             chosen_action = SupervisorAction::Resume;
 
-            let review_target = {
-                let conn = self
-                    .db
-                    .separate_conn()
-                    .map_err(|e| format!("db connection: {e}"))?;
-                crate::pipeline::ensure_loaded();
-                let effective = crate::pipeline::resolve_for_card(
-                    &conn,
-                    candidate.repo_id.as_deref(),
-                    candidate.assigned_agent_id.as_deref(),
-                );
-                effective
-                    .next_gated_target(&candidate.card_status)
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        format!(
-                            "card {} in status {} has no gated successor",
-                            candidate.card_id, candidate.card_status
-                        )
-                    })?
-            };
-
-            let completion_result = self.mark_dispatch_completed(&dispatch_id)?;
-            if completion_result == 0 {
+            // Orphan recovery: fail the dispatch and return card to ready.
+            // The dispatch had no active session, so no work was done.
+            // Completing it would falsely advance the card through review → done.
+            let fail_result = self.mark_dispatch_failed(&dispatch_id)?;
+            if fail_result == 0 {
                 note = Some("dispatch already terminal or missing".to_string());
                 chosen_action = SupervisorAction::Probe;
             } else {
                 #[cfg(test)]
                 self.apply_orphan_fault_injection(&dispatch_id, &candidate.card_id);
+
+                // Return card to ready for re-dispatch instead of advancing to review
+                let ready_target = {
+                    let conn = self
+                        .db
+                        .separate_conn()
+                        .map_err(|e| format!("db connection: {e}"))?;
+                    crate::pipeline::ensure_loaded();
+                    let effective = crate::pipeline::resolve_for_card(
+                        &conn,
+                        candidate.repo_id.as_deref(),
+                        candidate.assigned_agent_id.as_deref(),
+                    );
+                    // Use the dispatchable state (ready) as target
+                    effective
+                        .dispatchable_states()
+                        .first()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "ready".to_string())
+                };
 
                 let current = self.current_card_head(&candidate.card_id)?;
                 if current
@@ -175,13 +176,13 @@ impl RuntimeSupervisor {
                         &self.db,
                         &self.engine,
                         &candidate.card_id,
-                        &review_target,
+                        &ready_target,
                         SUPERVISOR_ACTOR,
                         true,
                     ) {
                         Ok(_) => {
                             executed = true;
-                            self.notify_orphan_recovery(&candidate, &review_target);
+                            self.notify_orphan_recovery(&candidate, &ready_target);
                         }
                         Err(e) => {
                             note = Some(format!("resume transition skipped: {e}"));
@@ -264,6 +265,7 @@ impl RuntimeSupervisor {
         .map_err(|e| format!("load orphan candidate: {e}"))
     }
 
+    #[allow(dead_code)]
     fn mark_dispatch_completed(&self, dispatch_id: &str) -> Result<usize, String> {
         let conn = self
             .db
@@ -286,6 +288,30 @@ impl RuntimeSupervisor {
             ],
         )
         .map_err(|e| format!("mark dispatch completed: {e}"))
+    }
+
+    fn mark_dispatch_failed(&self, dispatch_id: &str) -> Result<usize, String> {
+        let conn = self
+            .db
+            .separate_conn()
+            .map_err(|e| format!("db connection: {e}"))?;
+        conn.execute(
+            "UPDATE task_dispatches
+             SET status = 'failed',
+                 result = ?1,
+                 updated_at = datetime('now')
+             WHERE id = ?2
+               AND status IN ('pending', 'dispatched')",
+            rusqlite::params![
+                json!({
+                    "orphan_failed": true,
+                    "completion_source": "orphan_recovery_rollback"
+                })
+                .to_string(),
+                dispatch_id,
+            ],
+        )
+        .map_err(|e| format!("mark dispatch failed: {e}"))
     }
 
     fn current_card_head(&self, card_id: &str) -> Result<Option<(String, Option<String>)>, String> {
