@@ -733,6 +733,7 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             dispatch_id     TEXT,
             slot_index      INTEGER,
             thread_group    INTEGER DEFAULT 0,
+            batch_phase     INTEGER DEFAULT 0,
             created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
             dispatched_at   DATETIME,
             completed_at    DATETIME
@@ -772,6 +773,12 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
         "auto_queue_entries",
         "thread_group",
         "ALTER TABLE auto_queue_entries ADD COLUMN thread_group INTEGER DEFAULT 0;",
+    )?;
+    ensure_auto_queue_column(
+        conn,
+        "auto_queue_entries",
+        "batch_phase",
+        "ALTER TABLE auto_queue_entries ADD COLUMN batch_phase INTEGER DEFAULT 0;",
     )?;
     ensure_auto_queue_column(
         conn,

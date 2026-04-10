@@ -1173,6 +1173,7 @@ export interface DispatchQueueEntry {
   github_issue_number?: number | null;
   github_repo?: string | null;
   thread_group?: number;
+  batch_phase?: number;
 }
 
 export interface ThreadGroupStatus {

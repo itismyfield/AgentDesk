@@ -13,10 +13,17 @@ use super::AppState;
 // ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+pub struct GenerateEntryBody {
+    pub issue_number: i64,
+    pub batch_phase: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct GenerateBody {
     pub repo: Option<String>,
     pub agent_id: Option<String>,
     pub issue_numbers: Option<Vec<i64>>,
+    pub entries: Option<Vec<GenerateEntryBody>>,
     pub mode: Option<String>, // "priority-sort" (default), "dependency-aware", "similarity-aware", or "pm-assisted"
     pub unified_thread: Option<bool>,
     pub parallel: Option<bool>,
@@ -77,6 +84,7 @@ struct GenerateCandidate {
     description: Option<String>,
     metadata: Option<String>,
     github_issue_number: Option<i64>,
+    batch_phase: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -246,10 +254,104 @@ fn release_run_slots(conn: &rusqlite::Connection, run_id: &str) {
     .ok();
 }
 
-fn assigned_groups_with_pending_entries(conn: &rusqlite::Connection, run_id: &str) -> Vec<i64> {
+fn current_batch_phase(conn: &rusqlite::Connection, run_id: &str) -> Option<i64> {
+    conn.query_row(
+        "SELECT MIN(COALESCE(batch_phase, 0))
+         FROM auto_queue_entries
+         WHERE run_id = ?1
+           AND status IN ('pending', 'dispatched')
+           AND COALESCE(batch_phase, 0) > 0",
+        [run_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+fn batch_phase_is_eligible(batch_phase: i64, current_phase: Option<i64>) -> bool {
+    if batch_phase == 0 {
+        return true;
+    }
+    match current_phase {
+        Some(phase) => batch_phase == phase,
+        None => true,
+    }
+}
+
+fn group_has_pending_entries(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    thread_group: i64,
+    current_phase: Option<i64>,
+) -> bool {
     let mut stmt = match conn.prepare(
-        "SELECT DISTINCT s.assigned_thread_group
+        "SELECT COALESCE(batch_phase, 0)
+         FROM auto_queue_entries
+         WHERE run_id = ?1
+           AND COALESCE(thread_group, 0) = ?2
+           AND status = 'pending'
+         ORDER BY priority_rank ASC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return false,
+    };
+    stmt.query_map(rusqlite::params![run_id, thread_group], |row| {
+        row.get::<_, i64>(0)
+    })
+    .ok()
+    .map(|rows| {
+        rows.filter_map(|row| row.ok())
+            .any(|batch_phase| batch_phase_is_eligible(batch_phase, current_phase))
+    })
+    .unwrap_or(false)
+}
+
+fn first_pending_entry_for_group(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    thread_group: i64,
+    current_phase: Option<i64>,
+) -> Option<(String, String, String)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.id, e.kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)
+             FROM auto_queue_entries e
+             WHERE e.run_id = ?1
+               AND COALESCE(e.thread_group, 0) = ?2
+               AND e.status = 'pending'
+             ORDER BY e.priority_rank ASC",
+        )
+        .ok()?;
+    stmt.query_map(rusqlite::params![run_id, thread_group], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })
+    .ok()
+    .and_then(|rows| {
+        rows.filter_map(|row| row.ok())
+            .find_map(|(entry_id, card_id, agent_id, batch_phase)| {
+                batch_phase_is_eligible(batch_phase, current_phase)
+                    .then_some((entry_id, card_id, agent_id))
+            })
+    })
+}
+
+fn assigned_groups_with_pending_entries(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    current_phase: Option<i64>,
+) -> Vec<i64> {
+    let mut stmt = match conn.prepare(
+        "SELECT DISTINCT s.assigned_thread_group, COALESCE(e.batch_phase, 0)
          FROM auto_queue_slots s
+         JOIN auto_queue_entries e
+           ON e.run_id = ?1
+          AND e.agent_id = s.agent_id
+          AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
          WHERE s.assigned_run_id = ?1
            AND s.assigned_thread_group IS NOT NULL
            AND EXISTS (
@@ -268,15 +370,72 @@ fn assigned_groups_with_pending_entries(conn: &rusqlite::Connection, run_id: &st
                  AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
                  AND e.status = 'dispatched'
            )
-         ORDER BY s.assigned_thread_group ASC, s.slot_index ASC",
+         ORDER BY s.assigned_thread_group ASC, s.slot_index ASC, COALESCE(e.batch_phase, 0) ASC",
     ) {
         Ok(stmt) => stmt,
         Err(_) => return Vec::new(),
     };
-    stmt.query_map([run_id], |row| row.get::<_, i64>(0))
-        .ok()
-        .map(|rows| rows.filter_map(|row| row.ok()).collect())
-        .unwrap_or_default()
+    let mut seen = HashSet::new();
+    stmt.query_map([run_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })
+    .ok()
+    .map(|rows| {
+        rows.filter_map(|row| row.ok())
+            .filter_map(|(thread_group, batch_phase)| {
+                (batch_phase_is_eligible(batch_phase, current_phase) && seen.insert(thread_group))
+                    .then_some(thread_group)
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestedGenerateEntry {
+    issue_number: i64,
+    batch_phase: i64,
+}
+
+fn normalize_generate_entries(
+    body: &GenerateBody,
+) -> Result<Option<Vec<RequestedGenerateEntry>>, String> {
+    if body
+        .entries
+        .as_ref()
+        .is_some_and(|entries| !entries.is_empty())
+        && body
+            .issue_numbers
+            .as_ref()
+            .is_some_and(|issue_numbers| !issue_numbers.is_empty())
+    {
+        return Err("use either issue_numbers or entries, not both".to_string());
+    }
+
+    let Some(entries) = body.entries.as_ref().filter(|entries| !entries.is_empty()) else {
+        return Ok(None);
+    };
+
+    let mut normalized = Vec::with_capacity(entries.len());
+    let mut seen = HashSet::new();
+    for entry in entries {
+        let batch_phase = entry.batch_phase.unwrap_or(0);
+        if batch_phase < 0 {
+            return Err("batch_phase must be >= 0".to_string());
+        }
+        if !seen.insert(entry.issue_number) {
+            return Err(format!(
+                "duplicate issue_number in entries payload: {}",
+                entry.issue_number
+            ));
+        }
+        normalized.push(RequestedGenerateEntry {
+            issue_number: entry.issue_number,
+            batch_phase,
+        });
+    }
+
+    Ok(Some(normalized))
 }
 
 fn allocate_slot_for_group_agent(
@@ -955,7 +1114,8 @@ fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Val
                 CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
                 kc.title, kc.github_issue_number, kc.github_issue_url,
                 COALESCE(e.thread_group, 0),
-                e.slot_index
+                e.slot_index,
+                COALESCE(e.batch_phase, 0)
          FROM auto_queue_entries e
          LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
          WHERE e.id = ?1",
@@ -976,6 +1136,7 @@ fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Val
                 "github_repo": row.get::<_, Option<String>>(11)?,
                 "thread_group": row.get::<_, i64>(12)?,
                 "slot_index": row.get::<_, Option<i64>>(13)?,
+                "batch_phase": row.get::<_, i64>(14)?,
             }))
         },
     )
@@ -1095,7 +1256,36 @@ pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(issue_numbers) = body.issue_numbers.as_ref().filter(|nums| !nums.is_empty()) {
+    let requested_entries = match normalize_generate_entries(&body) {
+        Ok(entries) => entries,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
+        }
+    };
+    let requested_issue_numbers = requested_entries
+        .as_ref()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry.issue_number)
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| body.issue_numbers.clone().filter(|nums| !nums.is_empty()));
+    let requested_entry_meta: HashMap<i64, (usize, i64)> = requested_entries
+        .as_ref()
+        .map(|entries| {
+            entries
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| (entry.issue_number, (index, entry.batch_phase)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(issue_numbers) = requested_issue_numbers
+        .as_ref()
+        .filter(|nums| !nums.is_empty())
+    {
         let conn = match state.db.separate_conn() {
             Ok(c) => c,
             Err(e) => {
@@ -1214,7 +1404,7 @@ pub async fn generate(
         "kc",
         body.repo.as_ref(),
         body.agent_id.as_ref(),
-        body.issue_numbers.as_ref(),
+        requested_issue_numbers.as_ref(),
     );
     conditions.insert(0, format!("kc.status IN ({})", enqueueable));
 
@@ -1256,11 +1446,29 @@ pub async fn generate(
                 description: row.get::<_, Option<String>>(3)?,
                 metadata: row.get::<_, Option<String>>(4)?,
                 github_issue_number: row.get::<_, Option<i64>>(5)?,
+                batch_phase: 0,
             })
         })
         .ok()
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
+    let mut cards = cards;
+
+    if !requested_entry_meta.is_empty() {
+        cards.sort_by_key(|card| {
+            card.github_issue_number
+                .and_then(|issue_number| requested_entry_meta.get(&issue_number).copied())
+                .map(|(index, _)| index)
+                .unwrap_or(usize::MAX)
+        });
+        for card in &mut cards {
+            card.batch_phase = card
+                .github_issue_number
+                .and_then(|issue_number| requested_entry_meta.get(&issue_number).copied())
+                .map(|(_, batch_phase)| batch_phase)
+                .unwrap_or(0);
+        }
+    }
 
     if cards.is_empty() {
         // Provide context: how many cards are in backlog vs other statuses
@@ -1611,8 +1819,8 @@ pub async fn generate(
             card.agent_id.as_str()
         };
         conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, reason, batch_phase)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 entry_id,
                 run_id,
@@ -1620,7 +1828,8 @@ pub async fn generate(
                 agent,
                 planned.priority_rank,
                 planned.thread_group,
-                planned.reason
+                planned.reason,
+                card.batch_phase
             ],
         )
         .ok();
@@ -1811,6 +2020,7 @@ pub async fn activate(
             |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
         )
         .unwrap_or((1, 1, false));
+    let current_phase = current_batch_phase(&conn, &run_id);
 
     // Count currently active groups (groups with at least one 'dispatched' entry)
     let active_groups: Vec<i64> = {
@@ -1833,19 +2043,28 @@ pub async fn activate(
         let active_set: HashSet<i64> = active_groups.iter().copied().collect();
         let mut stmt = conn
             .prepare(
-                "SELECT DISTINCT COALESCE(thread_group, 0) FROM auto_queue_entries \
-                 WHERE run_id = ?1 AND status = 'pending' \
-                 ORDER BY thread_group ASC",
+                "SELECT DISTINCT COALESCE(thread_group, 0), COALESCE(batch_phase, 0)
+                 FROM auto_queue_entries
+                 WHERE run_id = ?1 AND status = 'pending'
+                 ORDER BY thread_group ASC, batch_phase ASC",
             )
             .unwrap();
-        stmt.query_map([&run_id], |row| row.get::<_, i64>(0))
-            .ok()
-            .map(|rows| {
-                rows.filter_map(|r| r.ok())
-                    .filter(|g| !active_set.contains(g))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let mut seen = HashSet::new();
+        stmt.query_map([&run_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .ok()
+        .map(|rows| {
+            rows.filter_map(|r| r.ok())
+                .filter_map(|(thread_group, batch_phase)| {
+                    (!active_set.contains(&thread_group)
+                        && batch_phase_is_eligible(batch_phase, current_phase)
+                        && seen.insert(thread_group))
+                    .then_some(thread_group)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     };
 
     drop(conn);
@@ -1856,17 +2075,7 @@ pub async fn activate(
 
     if let Some(group) = preferred_group {
         let conn = state.db.separate_conn().unwrap();
-        let has_pending: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0
-                 FROM auto_queue_entries
-                 WHERE run_id = ?1
-                   AND COALESCE(thread_group, 0) = ?2
-                   AND status = 'pending'",
-                rusqlite::params![run_id, group],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
+        let has_pending = group_has_pending_entries(&conn, &run_id, group, current_phase);
         let has_dispatched: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0
@@ -1885,7 +2094,7 @@ pub async fn activate(
 
     if unified_thread_enabled {
         let conn = state.db.separate_conn().unwrap();
-        for group in assigned_groups_with_pending_entries(&conn, &run_id) {
+        for group in assigned_groups_with_pending_entries(&conn, &run_id, current_phase) {
             if !groups_to_dispatch.contains(&group) {
                 groups_to_dispatch.push(group);
             }
@@ -1897,14 +2106,7 @@ pub async fn activate(
     {
         let conn = state.db.separate_conn().unwrap();
         for &grp in &active_groups {
-            let has_pending: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM auto_queue_entries \
-                     WHERE run_id = ?1 AND COALESCE(thread_group, 0) = ?2 AND status = 'pending'",
-                    rusqlite::params![run_id, grp],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
+            let has_pending = group_has_pending_entries(&conn, &run_id, grp, current_phase);
             let has_dispatched: bool = conn
                 .query_row(
                     "SELECT COUNT(*) > 0 FROM auto_queue_entries \
@@ -1936,22 +2138,7 @@ pub async fn activate(
     for group in &groups_to_dispatch {
         // Get first pending entry in this group
         let conn = state.db.separate_conn().unwrap();
-        let entry: Option<(String, String, String)> = conn
-            .query_row(
-                "SELECT e.id, e.kanban_card_id, e.agent_id \
-                 FROM auto_queue_entries e \
-                 WHERE e.run_id = ?1 AND COALESCE(e.thread_group, 0) = ?2 AND e.status = 'pending' \
-                 ORDER BY e.priority_rank ASC LIMIT 1",
-                rusqlite::params![run_id, group],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .ok();
+        let entry = first_pending_entry_for_group(&conn, &run_id, *group, current_phase);
         drop(conn);
 
         let Some((entry_id, card_id, agent_id)) = entry else {
@@ -2445,6 +2632,7 @@ pub async fn status(
                     "card_id": entry["card_id"],
                     "status": entry_status,
                     "github_issue_number": entry["github_issue_number"],
+                    "batch_phase": entry["batch_phase"],
                 }));
             }
         }
