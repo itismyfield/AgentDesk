@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { CompanySettings, DashboardStats, WSEvent } from "../types";
-import type { UiLanguage } from "../i18n";
+import { I18nProvider, type UiLanguage } from "../i18n";
 import * as api from "../api/client";
 import { useOffice } from "./OfficeContext";
 
@@ -90,7 +90,7 @@ export function SettingsProvider({ initialSettings, initialStats, children }: Se
 
   return (
     <SettingsContext.Provider value={{ settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr }}>
-      {children}
+      <I18nProvider language={settings.language}>{children}</I18nProvider>
     </SettingsContext.Provider>
   );
 }
