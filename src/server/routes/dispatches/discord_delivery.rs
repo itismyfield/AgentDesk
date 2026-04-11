@@ -298,8 +298,19 @@ async fn reset_stale_slot_thread_if_needed(
         total_message_sent,
         age_limit_hit,
     );
-    reset_slot_thread_bindings(db, &slot_binding.agent_id, slot_binding.slot_index).await?;
-    Ok(true)
+    match reset_slot_thread_bindings(db, &slot_binding.agent_id, slot_binding.slot_index).await {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            tracing::warn!(
+                "[dispatch] stale slot thread reset failed for dispatch {}: agent={} slot={} error={}",
+                dispatch_id,
+                slot_binding.agent_id,
+                slot_binding.slot_index,
+                err
+            );
+            Ok(false)
+        }
+    }
 }
 
 fn build_slot_thread_name(

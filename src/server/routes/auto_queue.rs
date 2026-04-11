@@ -706,8 +706,12 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
         return Ok(0);
     }
 
-    let token = crate::credential::read_bot_token("announce")
-        .ok_or_else(|| "no announce bot token".to_string())?;
+    let Some(token) = crate::credential::read_bot_token("announce") else {
+        tracing::warn!(
+            "[auto-queue] slot thread archive skipped because announce bot token is missing"
+        );
+        return Ok(0);
+    };
     let client = reqwest::Client::new();
     let mut archived = 0usize;
 
@@ -726,14 +730,19 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                return Err(format!(
-                    "failed to archive slot thread {thread_channel_id}: {status} {body}"
-                ));
+                tracing::warn!(
+                    "[auto-queue] failed to archive slot thread {}: {} {}",
+                    thread_channel_id,
+                    status,
+                    body
+                );
             }
             Err(err) => {
-                return Err(format!(
-                    "failed to archive slot thread {thread_channel_id}: {err}"
-                ));
+                tracing::warn!(
+                    "[auto-queue] failed to archive slot thread {}: {}",
+                    thread_channel_id,
+                    err
+                );
             }
         }
     }
@@ -762,6 +771,11 @@ pub(crate) async fn reset_slot_thread_bindings(
     let conn = db
         .separate_conn()
         .map_err(|err| format!("db reopen failed for slot reset: {err}"))?;
+    if slot_has_active_dispatch(&conn, agent_id, slot_index) {
+        return Err(format!(
+            "slot {slot_index} for agent {agent_id} has active dispatch after reset recheck"
+        ));
+    }
     let cleared_sessions = clear_slot_sessions_db(&conn, &target.thread_channel_ids);
     let cleared_bindings = clear_slot_thread_map(&conn, agent_id, slot_index);
     drop(conn);

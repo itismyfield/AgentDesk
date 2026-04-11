@@ -293,18 +293,21 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
     let Some(json) = load_role_map_json() else {
         return Vec::new();
     };
-    let agents = json
+    let agents = match json
         .get("meeting")
         .and_then(|meeting| meeting.get("available_agents"))
-        .and_then(|v| v.as_array())
-        .and_then(|available| {
-            let parsed = available
-                .iter()
-                .filter_map(meeting_agent_from_json)
-                .collect::<Vec<_>>();
-            (!parsed.is_empty()).then_some(parsed)
-        })
-        .unwrap_or_else(|| collect_role_map_binding_agents(&json));
+    {
+        Some(value) => value
+            .as_array()
+            .map(|available| {
+                available
+                    .iter()
+                    .filter_map(meeting_agent_from_json)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        None => collect_role_map_binding_agents(&json),
+    };
 
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
@@ -372,17 +375,18 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
         .unwrap_or(5) as usize;
     let summary_agent = parse_summary_agent_config(meeting.get("summary_agent")?)?;
 
-    let available_agents = meeting
-        .get("available_agents")
-        .and_then(|v| v.as_array())
-        .and_then(|agents_arr| {
-            let parsed = agents_arr
-                .iter()
-                .filter_map(meeting_agent_from_json)
-                .collect::<Vec<_>>();
-            (!parsed.is_empty()).then_some(parsed)
-        })
-        .unwrap_or_else(|| collect_role_map_binding_agents(&json));
+    let available_agents = match meeting.get("available_agents") {
+        Some(value) => value
+            .as_array()
+            .map(|agents_arr| {
+                agents_arr
+                    .iter()
+                    .filter_map(meeting_agent_from_json)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        None => collect_role_map_binding_agents(&json),
+    };
 
     Some(MeetingConfig {
         channel_name,
@@ -624,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_meeting_config_empty_available_agents_falls_back_to_channel_bindings() {
+    fn test_load_meeting_config_empty_available_agents_stays_empty() {
         with_temp_root(|temp_home: &TempDir| {
             write_role_map(
                 temp_home.path(),
@@ -646,12 +650,7 @@ mod tests {
             );
 
             let config = load_meeting_config().expect("meeting config should load");
-            assert_eq!(config.available_agents.len(), 1);
-            assert_eq!(config.available_agents[0].role_id, "gemini");
-            assert_eq!(
-                config.available_agents[0].provider_hint.as_deref(),
-                Some("gemini")
-            );
+            assert!(config.available_agents.is_empty());
         });
     }
 }

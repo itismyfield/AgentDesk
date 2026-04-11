@@ -32,6 +32,37 @@ pub async fn execute_simple(provider: ProviderKind, prompt: String) -> Result<St
     }
 }
 
+pub async fn execute_simple_with_timeout(
+    provider: ProviderKind,
+    prompt: String,
+    timeout: Duration,
+    stage_label: String,
+) -> Result<String, String> {
+    match provider {
+        ProviderKind::Claude => tokio::task::spawn_blocking(move || {
+            claude::execute_command_simple_with_timeout(&prompt, timeout, &stage_label)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?,
+        ProviderKind::Codex => tokio::task::spawn_blocking(move || {
+            codex::execute_command_simple_with_timeout(&prompt, timeout, &stage_label)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?,
+        ProviderKind::Gemini => tokio::task::spawn_blocking(move || {
+            gemini::execute_command_simple_with_timeout(&prompt, timeout, &stage_label)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?,
+        ProviderKind::Qwen => tokio::task::spawn_blocking(move || {
+            qwen::execute_command_simple_with_timeout(&prompt, timeout, &stage_label)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?,
+        ProviderKind::Unsupported(name) => Err(format!("Provider '{}' is not installed", name)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_structured(
     provider: ProviderKind,

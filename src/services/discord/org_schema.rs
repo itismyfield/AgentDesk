@@ -305,13 +305,10 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
     };
 
     let prompts_root = schema.prompts_root.as_deref().map(expand_tilde);
-    // Use explicit meeting.available_agents if set, otherwise all agents
+    // Use explicit meeting.available_agents as-is when present. Only absence
+    // falls back to the full registry.
     let eligible_agents: Box<dyn Iterator<Item = (&String, &AgentDef)>> =
-        if let Some(explicit_list) = meeting_def
-            .available_agents
-            .as_ref()
-            .filter(|list| !list.is_empty())
-        {
+        if let Some(explicit_list) = meeting_def.available_agents.as_ref() {
             Box::new(
                 schema
                     .agents
@@ -811,7 +808,7 @@ channels:
     }
 
     #[test]
-    fn test_meeting_empty_available_agents_falls_back_to_all_agents() {
+    fn test_meeting_empty_available_agents_stays_empty() {
         with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(
                 temp_home.path(),
@@ -830,14 +827,7 @@ meeting:
             );
 
             let config = load_meeting_config().expect("meeting config should load");
-            let role_ids: Vec<&str> = config
-                .available_agents
-                .iter()
-                .map(|agent| agent.role_id.as_str())
-                .collect();
-            assert_eq!(role_ids.len(), 2);
-            assert!(role_ids.contains(&"td"));
-            assert!(role_ids.contains(&"pd"));
+            assert!(config.available_agents.is_empty());
         });
     }
 

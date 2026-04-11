@@ -4,13 +4,16 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::claude;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{kill_child_tree, shell_escape};
+use crate::services::process::{
+    configure_child_process_group, kill_child_tree, shell_escape, wait_with_output_timeout,
+};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
     fold_read_output_result, is_readonly_tool_policy, register_child_pid,
@@ -80,6 +83,21 @@ fn build_tmux_launch_env_lines(
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
+    execute_command_simple_inner(prompt, None)
+}
+
+pub fn execute_command_simple_with_timeout(
+    prompt: &str,
+    timeout: Duration,
+    label: &str,
+) -> Result<String, String> {
+    execute_command_simple_inner(prompt, Some((timeout, label)))
+}
+
+fn execute_command_simple_inner(
+    prompt: &str,
+    timeout: Option<(Duration, &str)>,
+) -> Result<String, String> {
     let resolution = resolve_codex_binary();
     let codex_bin = resolution
         .resolved_path
@@ -90,14 +108,23 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
 
     let mut command = Command::new(&codex_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    let output = command
+    command
         .args(&args)
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("Failed to start Codex: {}", e))?;
+        .stderr(Stdio::piped());
+    let output = if let Some((timeout, label)) = timeout {
+        configure_child_process_group(&mut command);
+        let child = command
+            .spawn()
+            .map_err(|e| format!("Failed to start Codex: {}", e))?;
+        wait_with_output_timeout(child, timeout, label)?
+    } else {
+        command
+            .output()
+            .map_err(|e| format!("Failed to start Codex: {}", e))?
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

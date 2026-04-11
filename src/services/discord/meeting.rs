@@ -372,15 +372,14 @@ async fn execute_provider_stage(
     prompt: String,
     timeout_secs: u64,
 ) -> Result<String, String> {
-    match tokio::time::timeout(
+    provider_exec::execute_simple_with_timeout(
+        provider,
+        prompt,
         std::time::Duration::from_secs(timeout_secs),
-        provider_exec::execute_simple(provider, prompt),
+        stage_label.to_string(),
     )
     .await
-    {
-        Ok(result) => result.map(|text| text.trim().to_string()),
-        Err(_) => Err(format!("{stage_label} timeout after {timeout_secs}s")),
-    }
+    .map(|text| text.trim().to_string())
 }
 
 /// Create a Discord thread (without a parent message) for a meeting.
@@ -973,7 +972,8 @@ pub(crate) async fn spawn_direct_start(
 
     let config = load_meeting_config()
         .ok_or_else(|| "Meeting config not found in org.yaml or role_map.json".to_string())?;
-    validate_fixed_participants(&config, &fixed_participants, config.max_participants)?;
+    let max_participants = clamp_max_participants(config.max_participants);
+    validate_fixed_participants(&config, &fixed_participants, max_participants)?;
 
     {
         let core = shared.core.lock().await;
@@ -1124,6 +1124,14 @@ async fn select_participants(
     fixed_participants: Vec<String>,
 ) -> Result<Vec<MeetingParticipant>, String> {
     let max_participants = clamp_max_participants(config.max_participants);
+    validate_fixed_participants(config, &fixed_participants, max_participants)?;
+    if config.available_agents.len() < MIN_MEETING_PARTICIPANTS {
+        return Err(format!(
+            "Meeting candidate pool has {} agents; at least {} are required. Check meeting.available_agents configuration.",
+            config.available_agents.len(),
+            MIN_MEETING_PARTICIPANTS
+        ));
+    }
     let fixed_participants = normalize_role_ids(&fixed_participants);
     let agents_desc: Vec<String> = config
         .available_agents
@@ -2241,8 +2249,9 @@ mod tests {
         ActiveMeetingSlot, Meeting, MeetingAgentConfig, MeetingConfig, MeetingStatus,
         MeetingUtterance, ProviderKind, ResolvedMemorySettings, SummaryAgentConfig,
         agent_metadata_card, build_meeting_markdown, build_meeting_status_payload,
-        display_query_hash, effective_round_count, meeting_query_hash, meeting_slot_state,
-        parse_meeting_start_text, summary_agent_context, thread_query_hash,
+        clamp_max_participants, display_query_hash, effective_round_count, meeting_query_hash,
+        meeting_slot_state, parse_meeting_start_text, summary_agent_context, thread_query_hash,
+        validate_fixed_participants,
     };
     use serde_json::json;
 
@@ -2369,6 +2378,53 @@ mod tests {
         assert!(legacy_card.contains("metadata_missing: [keywords, domain_summary"));
         assert!(rich_card.contains("domain_summary: Deep reasoning"));
         assert!(rich_card.contains("metadata_missing: []"));
+    }
+
+    #[test]
+    fn test_validate_fixed_participants_uses_clamped_max_participants() {
+        let make_agent = |role_id: &str| MeetingAgentConfig {
+            role_id: role_id.to_string(),
+            display_name: role_id.to_string(),
+            keywords: Vec::new(),
+            prompt_file: String::new(),
+            domain_summary: None,
+            strengths: Vec::new(),
+            task_types: Vec::new(),
+            anti_signals: Vec::new(),
+            provider_hint: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            workspace: None,
+            peer_agents_enabled: true,
+            memory: ResolvedMemorySettings::default(),
+        };
+        let config = MeetingConfig {
+            channel_name: "meeting".to_string(),
+            max_rounds: 3,
+            max_participants: 99,
+            summary_agent: SummaryAgentConfig::Static("pmd".to_string()),
+            available_agents: vec![
+                make_agent("a"),
+                make_agent("b"),
+                make_agent("c"),
+                make_agent("d"),
+                make_agent("e"),
+                make_agent("f"),
+            ],
+        };
+
+        let err = validate_fixed_participants(
+            &config,
+            &["a", "b", "c", "d", "e", "f"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+            clamp_max_participants(config.max_participants),
+        )
+        .expect_err("clamped max participants should reject six fixed members");
+
+        assert!(err.contains("Too many fixed participants: 6 (max 5)"));
     }
 
     #[test]
