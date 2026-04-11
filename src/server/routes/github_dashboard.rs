@@ -138,7 +138,7 @@ pub async fn close_issue(
         );
     }
 
-    match github::run_gh(&["issue", "close", &number.to_string(), "--repo", &full_repo]) {
+    match github::close_issue(&full_repo, number as i64) {
         Ok(_) => (
             StatusCode::OK,
             Json(json!({

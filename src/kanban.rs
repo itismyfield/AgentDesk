@@ -692,22 +692,10 @@ fn github_sync_on_transition(
     let Some(num) = issue_number else { return };
 
     if is_terminal {
-        let _ = std::process::Command::new("gh")
-            .args(["issue", "close", &num.to_string(), "--repo", &repo])
-            .output();
+        let _ = crate::github::close_issue(&repo, num);
     } else if is_review_enter {
         let comment = "🔍 칸반 상태: **review** (카운터모델 리뷰 진행 중)";
-        let _ = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "comment",
-                &num.to_string(),
-                "--repo",
-                &repo,
-                "--body",
-                comment,
-            ])
-            .output();
+        let _ = crate::github::comment_issue(&repo, num, comment);
     }
 }
 
