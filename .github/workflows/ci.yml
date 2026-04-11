@@ -182,5 +182,5 @@ jobs:
 
           exit $FAIL
 
-      - name: Generated docs drift check
+      - name: Generated docs and architecture drift check
         run: python3 scripts/generate_inventory_docs.py --check
