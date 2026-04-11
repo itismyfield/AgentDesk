@@ -1013,7 +1013,13 @@ pub fn handle_dcserver(token: Option<String>) {
     // Also kill any stale processes (e.g. orphaned without lock)
     kill_existing_dcserver_processes();
 
-    if let Some(root) = agentdesk_runtime_root() {
+    let runtime_root = agentdesk_runtime_root();
+    let legacy_scan = runtime_root
+        .as_ref()
+        .map(|root| crate::services::discord::config_audit::scan_legacy_sources(root))
+        .unwrap_or_default();
+
+    if let Some(root) = runtime_root.as_ref() {
         match crate::runtime_layout::ensure_runtime_layout(&root) {
             Ok(report) => {
                 if report.migrated {
@@ -1068,12 +1074,30 @@ pub fn handle_dcserver(token: Option<String>) {
     println!();
     println!("  ▸ Status : Connecting...");
 
-    rt.block_on(async {
+    rt.block_on(async move {
         println!();
 
         // ── AgentDesk HTTP server ──────────────────────────────────
         // Load agentdesk.yaml (graceful: use defaults if missing)
-        let ad_config = config::load_graceful();
+        let loaded = if let Some(root) = runtime_root.as_ref() {
+            match crate::services::discord::config_audit::load_runtime_config(root) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    eprintln!("  ✖ Failed to load config after layout prep: {error}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            let fallback_path = settings_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("config").join("agentdesk.yaml"));
+            crate::services::discord::config_audit::LoadedRuntimeConfig {
+                config: config::load_graceful(),
+                existed: fallback_path.is_file(),
+                path: fallback_path,
+            }
+        };
+        let mut ad_config = loaded.config;
 
         // ── Workspace branch guard (#181) ──────────────────────────
         // Ensure no workspace repo is checked out on a wt/* worktree branch.
@@ -1166,15 +1190,34 @@ pub fn handle_dcserver(token: Option<String>) {
         match db::init(&ad_config) {
             Ok(ad_db) => {
                 crate::services::termination_audit::init_audit_db(ad_db.clone());
-                // Sync agents from config → DB
-                let agent_count = ad_config.agents.len();
-                if agent_count > 0 {
-                    match db::agents::sync_agents_from_config(&ad_db, &ad_config.agents) {
-                        Ok(result) => println!(
-                            "  ▸ Agents : {} synced from config ({} pruned, {} skipped)",
-                            result.upserted, result.pruned, result.skipped_prune
-                        ),
-                        Err(e) => eprintln!("  ⚠ Agent sync failed: {e}"),
+                if let Some(root) = runtime_root.as_ref() {
+                    match crate::services::discord::config_audit::audit_and_reconcile(
+                        root,
+                        ad_config,
+                        loaded.path,
+                        loaded.existed,
+                        &ad_db,
+                        &legacy_scan,
+                        false,
+                    ) {
+                        Ok(outcome) => {
+                            if outcome.report.warnings_count == 0 {
+                                println!("  ▸ Config audit : clean");
+                            } else {
+                                println!(
+                                    "  ▸ Config audit : {} warning(s)",
+                                    outcome.report.warnings_count
+                                );
+                            }
+                            if let Some(synced_agents) = outcome.report.db.synced_agents {
+                                println!("  ▸ Agents : {synced_agents} synced from config");
+                            }
+                            ad_config = outcome.config;
+                        }
+                        Err(error) => {
+                            eprintln!("  ✖ Config audit failed: {error}");
+                            std::process::exit(1);
+                        }
                     }
                 }
 

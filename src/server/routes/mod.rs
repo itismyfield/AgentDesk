@@ -10,6 +10,7 @@ pub mod dispatched_sessions;
 pub mod dispatches;
 pub mod dm_reply;
 pub mod docs;
+pub mod escalation;
 pub mod github;
 pub mod github_dashboard;
 pub mod health_api;
@@ -54,12 +55,20 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
+        crate::services::auto_queue::AutoQueueService::new(self.db.clone())
+    }
+
     pub fn dispatch_service(&self) -> crate::services::dispatches::DispatchService {
         crate::services::dispatches::DispatchService::new(self.db.clone(), self.engine.clone())
     }
 
+    pub fn kanban_service(&self) -> crate::services::kanban::KanbanService {
+        crate::services::kanban::KanbanService::new(self.db.clone())
+    }
+
     pub fn queue_service(&self) -> crate::services::queue::QueueService {
-        crate::services::queue::QueueService::new(self.db.clone())
+        crate::services::queue::QueueService::new(self.db.clone(), self.health_registry.clone())
     }
 
     pub fn settings_service(&self) -> crate::services::settings::SettingsService {
@@ -112,7 +121,6 @@ pub fn api_router(
         .route("/health", get(health_api::health_handler))
         .route("/send", post(health_api::send_handler))
         .route("/senddm", post(health_api::senddm_handler))
-        .route("/session/start", post(health_api::session_start_handler))
         .route(
             "/agents",
             get(agents_crud::list_agents).post(agents_crud::create_agent),
@@ -142,7 +150,6 @@ pub fn api_router(
             "/onboarding/generate-prompt",
             post(onboarding::generate_prompt),
         )
-        .route("/agent-channels", get(agents::agent_channels))
         .route("/agents/{id}/offices", get(agents::agent_offices))
         .route("/agents/{id}/signal", post(agents::agent_signal))
         .route("/agents/{id}/cron", get(cron_api::agent_cron_jobs))
@@ -155,10 +162,6 @@ pub fn api_router(
         .route("/agents/{id}/turn/stop", post(agents::stop_agent_turn))
         .route("/agents/{id}/timeline", get(agents::agent_timeline))
         .route("/sessions", get(agents_crud::list_sessions))
-        .route(
-            "/sessions/search",
-            get(dispatched_sessions::search_session_transcripts),
-        )
         .route("/policies", get(agents_crud::list_policies))
         // Auth
         .route("/auth/session", get(auth::get_session))
@@ -232,7 +235,6 @@ pub fn api_router(
             "/dispatches/{id}",
             get(dispatches::get_dispatch).patch(dispatches::update_dispatch),
         )
-        .route("/dispatch-cancel/{id}", post(dispatches::cancel_dispatch))
         .route(
             "/internal/link-dispatch-thread",
             post(dispatches::link_dispatch_thread),
@@ -242,12 +244,6 @@ pub fn api_router(
             "/internal/pending-dispatch-for-thread",
             get(dispatches::get_pending_dispatch_for_thread),
         )
-        // Pipeline stages (legacy path)
-        .route(
-            "/pipeline-stages",
-            get(pipeline::list_stages).post(pipeline::create_stage),
-        )
-        .route("/pipeline-stages/{id}", delete(pipeline::delete_stage))
         // Pipeline stages (dashboard v2 path)
         .route(
             "/pipeline/stages",
@@ -338,6 +334,14 @@ pub fn api_router(
         .route(
             "/settings/runtime-config",
             get(settings::get_runtime_config).put(settings::put_runtime_config),
+        )
+        .route(
+            "/settings/escalation",
+            get(escalation::get_escalation_settings).put(escalation::put_escalation_settings),
+        )
+        .route(
+            "/internal/escalation/emit",
+            post(escalation::emit_escalation),
         )
         // Dispatched sessions
         .route(
@@ -436,8 +440,10 @@ pub fn api_router(
         .route("/cron-jobs", get(cron_api::list_cron_jobs))
         // Auto-queue
         .route("/auto-queue/generate", post(auto_queue::generate))
+        .route("/auto-queue/dispatch", post(auto_queue::dispatch))
         .route("/auto-queue/activate", post(auto_queue::activate))
         .route("/auto-queue/status", get(auto_queue::status))
+        .route("/auto-queue/entries/{id}", patch(auto_queue::update_entry))
         .route(
             "/auto-queue/entries/{id}/skip",
             patch(auto_queue::skip_entry),
@@ -472,7 +478,6 @@ pub fn api_router(
             "/auto-queue/runs/{id}/order",
             post(auto_queue::submit_order),
         )
-        .route("/auto-queue/enqueue", post(auto_queue::enqueue))
         // Analytics
         .route("/streaks", get(analytics::streaks))
         .route("/achievements", get(analytics::achievements))
@@ -483,7 +488,9 @@ pub fn api_router(
         .route("/receipt", get(receipt::get_receipt))
         .route("/skills-trend", get(analytics::skills_trend))
         // Docs
+        .route("/help", get(docs::api_help))
         .route("/docs", get(docs::api_docs))
+        .route("/docs/{category}", get(docs::api_docs_category))
         // Review verdict
         .route("/review-verdict", post(review_verdict::submit_verdict))
         .route(

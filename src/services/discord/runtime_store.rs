@@ -49,7 +49,7 @@ pub(super) fn discord_restart_reports_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_restart_reports"))
 }
 
-pub(super) fn discord_pending_queue_root() -> Option<PathBuf> {
+pub(crate) fn discord_pending_queue_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_pending_queue"))
 }
 
@@ -129,7 +129,7 @@ pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
-pub(super) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }

@@ -1,4 +1,5 @@
 use crate::db::Db;
+use std::{fs, path::PathBuf};
 
 use super::{register_globals, review_state_sync, review_state_sync_on_conn};
 
@@ -63,6 +64,91 @@ fn test_engine_db_execute_op() {
         .query_row("SELECT name FROM agents WHERE id = 'b1'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(name, "Bot1");
+}
+
+#[test]
+fn test_engine_db_execute_warns_and_blocks_core_table_sql() {
+    let db = test_db();
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+        let result: String = ctx
+            .eval(
+                r#"
+                    (function() {
+                        var warnings = [];
+                        agentdesk.log.warn = function(msg) { warnings.push(msg); };
+                        var outcome;
+                        try {
+                            agentdesk.db.execute("DELETE FROM task_dispatches WHERE id = ?", ["dispatch-1"]);
+                            outcome = "unexpected_success";
+                        } catch (e) {
+                            outcome = e.message;
+                        }
+                        return JSON.stringify({
+                            outcome: outcome,
+                            warning: warnings[0] || null
+                        });
+                    })()
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            parsed["outcome"]
+                .as_str()
+                .unwrap_or("")
+                .contains("task_dispatches"),
+            "blocked error must mention task_dispatches: {parsed}"
+        );
+        let warning = parsed["warning"].as_str().unwrap_or("");
+        assert!(
+            warning.contains("[policy-sql-guard]"),
+            "warning log must include guard prefix: {warning}"
+        );
+        assert!(
+            warning.contains("task_dispatches"),
+            "warning log must name the guarded table: {warning}"
+        );
+    });
+}
+
+#[test]
+fn test_engine_db_query_raw_returns_unified_error_json() {
+    let db = test_db();
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+
+        let raw: String = ctx
+            .eval(r#"agentdesk.db.__query_raw("SELECT nope FROM missing_table", "[]")"#)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["code"], "database");
+        assert_eq!(value["context"]["operation"], "agentdesk.db.query.prepare");
+
+        let err_text: String = ctx
+            .eval(
+                r#"
+                (() => {
+                    try {
+                        agentdesk.db.query("SELECT nope FROM missing_table");
+                        return "no-error";
+                    } catch (error) {
+                        return String(error);
+                    }
+                })()
+                "#,
+            )
+            .unwrap();
+        assert!(
+            err_text.contains("missing_table") || err_text.contains("no such table"),
+            "db.query should surface the database failure, got: {err_text}"
+        );
+    });
 }
 
 #[test]
@@ -271,6 +357,69 @@ fn test_review_get_verdict_facade() {
 }
 
 #[test]
+fn test_review_entry_context_and_record_entry_facade() {
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id, discord_channel_cc, discord_channel_cdx) \
+             VALUES ('ag-review-entry', 'Review Bot', 'codex', 'idle', '111', '222', '333')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, review_round, created_at, updated_at) \
+             VALUES ('card-review-entry', 'Review Entry Card', 'review', 'ag-review-entry', 1, datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, completed_at, updated_at) \
+             VALUES ('impl-review-entry', 'card-review-entry', 'ag-review-entry', 'implementation', 'completed', 'Implementation', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, completed_at, updated_at) \
+             VALUES ('rework-review-entry', 'card-review-entry', 'ag-review-entry', 'rework', 'completed', 'Rework', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+        let result: String = ctx
+            .eval(
+                r#"
+                (function() {
+                    var entry = agentdesk.review.entryContext("card-review-entry");
+                    agentdesk.review.recordEntry("card-review-entry", {
+                        review_round: entry.next_round,
+                        exclude_status: "done"
+                    });
+                    var updated = agentdesk.cards.get("card-review-entry");
+                    return JSON.stringify({
+                        current_round: entry.current_round,
+                        completed_work_count: entry.completed_work_count,
+                        should_advance_round: entry.should_advance_round,
+                        next_round: entry.next_round,
+                        stored_round: updated.review_round
+                    });
+                })()
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            r#"{"current_round":1,"completed_work_count":2,"should_advance_round":true,"next_round":2,"stored_round":2}"#
+        );
+    });
+}
+
+#[test]
 fn test_queue_status_facade() {
     let db = test_db();
     {
@@ -341,6 +490,25 @@ fn test_queue_status_facade() {
             r#"{"pending_dispatches":1,"pending_messages":1,"failed_dispatch_outbox":1,"active_runs":1,"pending_entries":1}"#
         );
     });
+}
+
+#[test]
+fn test_review_entry_slice_blocks_raw_db_reintroduction() {
+    let policy_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies/review-automation.js");
+    let policy =
+        fs::read_to_string(&policy_path).expect("review-automation policy must be readable");
+    let start = policy
+        .find("// typed-facade-slice:start review-entry")
+        .expect("review-entry slice start marker must exist");
+    let end = policy
+        .find("// typed-facade-slice:end review-entry")
+        .expect("review-entry slice end marker must exist");
+    let slice = &policy[start..end];
+    assert!(
+        !slice.contains("agentdesk.db."),
+        "review-entry slice must stay on typed facades: {policy_path:?}"
+    );
 }
 
 /// #128: JS setStatus("in_progress") sets started_at.

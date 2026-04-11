@@ -15,5 +15,5 @@ pub use binary_resolver::{
 pub use dump_tool::capture_process_dump;
 pub use shell::{
     find_latest_commit_for_issue, find_worktree_for_issue, git_head_commit, hostname_short,
-    resolve_repo_dir,
+    resolve_repo_dir, resolve_repo_dir_for_id,
 };

@@ -164,15 +164,13 @@ _sync_dev_credentials() {
         return 0
     fi
 
-    if [ -e "$dev_credential_dir" ] && [ ! -L "$dev_credential_dir" ]; then
-        local backup_dir
-        backup_dir="${dev_credential_dir}.bak.$(date '+%Y%m%d-%H%M%S')"
-        mv "$dev_credential_dir" "$backup_dir"
-        echo "▸ Backed up stale dev credential dir to $backup_dir"
-    else
-        rm -f "$dev_credential_dir"
+    if [ -d "$dev_credential_dir" ] && [ ! -L "$dev_credential_dir" ]; then
+        # Independent credential directory — don't overwrite with symlink.
+        echo "▸ Dev credential is an independent directory — keeping as-is"
+        return 0
     fi
 
+    rm -f "$dev_credential_dir"
     ln -sfn "$shared_credential_dir" "$dev_credential_dir"
     echo "▸ Linked dev credential -> $shared_credential_dir"
 }

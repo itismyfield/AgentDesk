@@ -15,56 +15,20 @@ function sendDiscordReview(target, content, bot) {
 }
 
 function notifyPmdPendingDecision(cardId, reason) {
-  // #267: Queue to canonical pm_pending buffer (flushed by timeouts.js)
-  var cards = agentdesk.db.query(
-    "SELECT title, github_issue_number FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  var title = (cards.length > 0) ? ("#" + (cards[0].github_issue_number || "?") + " " + cards[0].title) : cardId;
-  var pendingKey = "pm_pending:" + cardId;
-  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
-  var entry;
-  if (existing.length > 0) {
-    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
-  }
-  if (!entry) {
-    entry = { title: title, reasons: [] };
-  }
-  if (entry.reasons.indexOf(reason) === -1) {
-    entry.reasons.push(reason);
-  }
-  agentdesk.db.execute(
-    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+600 seconds'))",
-    [pendingKey, JSON.stringify(entry)]
-  );
-}
-
-function countCompletedReviewWork(cardId) {
-  var rows = agentdesk.db.query(
-    "SELECT COUNT(*) AS completed_count FROM task_dispatches " +
-    "WHERE kanban_card_id = ? AND dispatch_type IN ('implementation', 'rework') " +
-    "AND status = 'completed'",
-    [cardId]
-  );
-  if (rows.length === 0) return 0;
-  var raw = rows[0].completed_count;
-  if (typeof raw === "number") return raw;
-  var parsed = parseInt(raw, 10);
-  return isNaN(parsed) ? 0 : parsed;
+  escalate(cardId, reason);
 }
 
 var reviewAutomation = {
   name: "review-automation",
   priority: 50,
 
+  // typed-facade-slice:start review-entry
   // ── Review Enter — counter-model review trigger ───────────
   onReviewEnter: function(payload) {
-    var cards = agentdesk.db.query(
-      "SELECT id, repo_id, assigned_agent_id, review_round, review_status, deferred_dod_json FROM kanban_cards WHERE id = ?",
-      [payload.card_id]
-    );
-    if (cards.length === 0) return;
-    var card = cards[0];
+    var card = agentdesk.cards.get(payload.card_id);
+    if (!card) return;
+    var entry = agentdesk.review.entryContext(card.id);
+    if (!entry) return;
     var cfg = agentdesk.pipeline.resolveForCard(card.id);
     var terminalState = agentdesk.pipeline.terminalState(cfg);
     var pendingState = agentdesk.pipeline.forceOnlyTargets(agentdesk.pipeline.nextGatedTarget(agentdesk.pipeline.kickoffState(cfg), cfg), cfg)[0];
@@ -80,10 +44,7 @@ var reviewAutomation = {
     var reviewEnabled = agentdesk.config.get("review_enabled");
     if (reviewEnabled === "false" || reviewEnabled === false) {
       agentdesk.kanban.setStatus(card.id, terminalState, true);
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = ?",
-        [card.id]
-      );
+      agentdesk.kanban.setReviewStatus(card.id, null, {blocked_reason: null});
       agentdesk.log.info("[review] Review disabled, card " + card.id + " → " + terminalState);
       return;
     }
@@ -92,10 +53,7 @@ var reviewAutomation = {
     var counterModelEnabled = agentdesk.config.get("counter_model_review_enabled");
     if (counterModelEnabled === false || counterModelEnabled === "false") {
       agentdesk.kanban.setStatus(card.id, terminalState, true);
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET blocked_reason = NULL WHERE id = ?",
-        [card.id]
-      );
+      agentdesk.kanban.setReviewStatus(card.id, null, {blocked_reason: null});
       agentdesk.log.info("[review] Counter-model disabled, card " + card.id + " → " + terminalState);
       return;
     }
@@ -103,21 +61,17 @@ var reviewAutomation = {
     // #335: Only advance review_round when new implementation/rework actually
     // finished since the previous round. Reopen loops without fresh work should
     // reuse the existing round instead of consuming it.
-    var currentRound = Number(card.review_round || 0);
-    var completedWorkCount = countCompletedReviewWork(card.id);
-    var shouldAdvanceRound = currentRound === 0 || completedWorkCount > currentRound;
-    var newRound = currentRound;
-    if (shouldAdvanceRound) {
-      newRound = currentRound + 1;
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET review_round = ?, updated_at = datetime('now') WHERE id = ? AND status != ?",
-        [newRound, card.id, terminalState]
-      );
-    } else {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET updated_at = datetime('now') WHERE id = ? AND status != ?",
-        [card.id, terminalState]
-      );
+    var currentRound = Number(entry.current_round || 0);
+    var completedWorkCount = Number(entry.completed_work_count || 0);
+    var shouldAdvanceRound = !!entry.should_advance_round;
+    var newRound = Number(entry.next_round || currentRound);
+    agentdesk.review.recordEntry(
+      card.id,
+      shouldAdvanceRound
+        ? {review_round: newRound, exclude_status: terminalState}
+        : {exclude_status: terminalState}
+    );
+    if (!shouldAdvanceRound) {
       agentdesk.log.info(
         "[review] Reusing review round R" + currentRound + " for " + card.id +
         " (completed work dispatches=" + completedWorkCount + ")"
@@ -147,13 +101,10 @@ var reviewAutomation = {
     if (!counterChannelId) {
       // No counter-model channel → PM decision (not silent done skip)
       agentdesk.kanban.setStatus(card.id, pendingState);
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET blocked_reason = 'No counter-model channel for review — PM decision needed' WHERE id = ?",
-        [card.id]
-      );
-      agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null});
-      // #117: sync canonical review state
-      agentdesk.reviewState.sync(card.id, "idle");
+      agentdesk.kanban.setReviewStatus(card.id, null, {
+        suggestion_pending_at: null,
+        blocked_reason: "No counter-model channel for review — PM decision needed"
+      });
       agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + " → " + pendingState);
       notifyPmdPendingDecision(card.id, "카운터모델 채널 없음 — PM 판단 필요");
       return;
@@ -176,6 +127,7 @@ var reviewAutomation = {
       agentdesk.log.warn("[review] Review dispatch failed: " + e);
     }
   },
+  // typed-facade-slice:end review-entry
 
   // ── Dispatch Completed — review/decision verdict ──────────
   onDispatchCompleted: function(payload) {
@@ -390,6 +342,26 @@ function findingsSimilar(textA, textB) {
   var similarity = unionSize > 0 ? intersection / unionSize : 0;
   agentdesk.log.info("[review] #118 Finding similarity: " + similarity.toFixed(3) + " (threshold: 0.5)");
   return similarity >= 0.5;
+}
+
+function summarizeFindingForPrompt(text) {
+  var clean = (text || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "(없음)";
+  if (clean.length > 280) return clean.slice(0, 277) + "...";
+  return clean;
+}
+
+function buildSessionResetPrompt(issueNum, cardTitle, approachChangeRound, currentRound, prevNotes, newNotes) {
+  return "[Session Reset R" + currentRound + "] #" + issueNum + " " + cardTitle +
+    "\n\n접근 전환 후에도 동일 finding이 반복되었습니다. 이번 rework는 반드시 새 세션에서 시작합니다." +
+    "\n이전에 기존 수정 접근과 R" + approachChangeRound + "의 접근 전환을 시도했지만 같은 문제를 해결하지 못했습니다." +
+    "\n\n이전 실패 이력 요약:" +
+    "\n- 기존 접근: 기존 구현/수정 흐름으로 대응했으나 동일 finding 반복" +
+    "\n- 접근 전환 시도: R" + approachChangeRound + "에서 다른 접근을 요청했지만 R" + currentRound + "에서 같은 finding 재발" +
+    "\n- 직전 리뷰 피드백: " + summarizeFindingForPrompt(prevNotes) +
+    "\n- 현재 리뷰 피드백: " + summarizeFindingForPrompt(newNotes) +
+    "\n\n세션이 새로 시작되므로 기존 해법을 답습하지 말고, 필요한 맥락을 다시 재구성한 뒤 완전히 다른 방향으로 접근하세요." +
+    "\n반복된 finding:\n" + newNotes;
 }
 
 // #118: Normal suggestion_pending flow — extracted to avoid duplication
@@ -681,8 +653,15 @@ function processVerdict(cardId, verdict, result) {
           var issueNum = prCardInfo[0].github_issue_number || "?";
           try {
             agentdesk.dispatch.create(
-              cardId, agentId, "create-pr",
-              "[PR 생성] #" + issueNum + " " + prCardInfo[0].title
+              cardId,
+              agentId,
+              "create-pr",
+              "[PR 생성] #" + issueNum + " " + prCardInfo[0].title,
+              {
+                worktree_path: latestWorkTarget.worktree_path,
+                worktree_branch: latestWorkTarget.branch,
+                branch: latestWorkTarget.branch
+              }
             );
             prDispatched = true;
             agentdesk.log.info("[review] Create-PR dispatch created for tracked worktree card " + cardId);
@@ -715,13 +694,14 @@ function processVerdict(cardId, verdict, result) {
     // switch approach instead of repeating the same rework.
     var cardInfo118 = agentdesk.db.query(
       "SELECT c.review_notes, c.review_round, c.assigned_agent_id, c.title, c.github_issue_number, " +
-      "rs.approach_change_round FROM kanban_cards c " +
+      "rs.approach_change_round, rs.session_reset_round FROM kanban_cards c " +
       "LEFT JOIN card_review_state rs ON rs.card_id = c.id WHERE c.id = ?",
       [cardId]
     );
     var prevNotes = (cardInfo118.length > 0) ? (cardInfo118[0].review_notes || "") : "";
     var currentRound = (cardInfo118.length > 0) ? (cardInfo118[0].review_round || 0) : 0;
     var approachChangeRound = (cardInfo118.length > 0) ? cardInfo118[0].approach_change_round : null;
+    var sessionResetRound = (cardInfo118.length > 0) ? cardInfo118[0].session_reset_round : null;
     var assignedAgent = (cardInfo118.length > 0) ? cardInfo118[0].assigned_agent_id : null;
     var cardTitle = (cardInfo118.length > 0) ? cardInfo118[0].title : "";
     var issueNum = (cardInfo118.length > 0) ? (cardInfo118[0].github_issue_number || "?") : "?";
@@ -768,14 +748,52 @@ function processVerdict(cardId, verdict, result) {
     }
 
     if (repeatedFindings && assignedAgent) {
-      // Already tried approach change → escalate to PM
-      if (approachChangeRound) {
-        agentdesk.log.warn("[review] #118 Approach change already attempted at R" + approachChangeRound +
+      // Already tried session reset after approach change → escalate to PM
+      if (sessionResetRound) {
+        agentdesk.log.warn("[review] #420 Session reset already attempted at R" + sessionResetRound +
           ", findings still repeat at R" + currentRound + " → " + pendingState);
         agentdesk.kanban.setStatus(cardId, pendingState);
-        agentdesk.kanban.setReviewStatus(cardId, "dilemma_pending", {blocked_reason: "접근 전환 후에도 동일 finding 반복 (R" + approachChangeRound + "→R" + currentRound + ") — PM 판단 필요"});
+        agentdesk.kanban.setReviewStatus(cardId, "dilemma_pending", {blocked_reason: "세션 리셋 후에도 동일 finding 반복 (R" + sessionResetRound + "→R" + currentRound + ") — PM 판단 필요"});
         agentdesk.reviewState.sync(cardId, "dilemma_pending", { last_verdict: verdict });
-        notifyPmdPendingDecision(cardId, "접근 전환 후에도 동일 finding 반복 — R" + approachChangeRound + "에서 접근 전환했으나 R" + currentRound + "에서 같은 문제 재발");
+        notifyPmdPendingDecision(cardId, "세션 리셋 후에도 동일 finding 반복 — R" + sessionResetRound + "에서 세션 리셋을 시도했으나 R" + currentRound + "에서 같은 문제 재발");
+        return;
+      }
+
+      // Repeated again after approach change → force a fresh provider session
+      if (approachChangeRound) {
+        agentdesk.log.info("[review] #420 Approach change at R" + approachChangeRound +
+          " still repeated at R" + currentRound + " — triggering session reset rework");
+
+        var resetPrompt = buildSessionResetPrompt(
+          issueNum,
+          cardTitle,
+          approachChangeRound,
+          currentRound,
+          prevNotes,
+          newNotes
+        );
+
+        try {
+          var resetDispatchId = agentdesk.dispatch.create(
+            cardId,
+            assignedAgent,
+            "rework",
+            resetPrompt,
+            { force_new_session: true }
+          );
+          agentdesk.log.info("[review] #420 Session-reset rework dispatch created: " + resetDispatchId);
+
+          agentdesk.reviewState.sync(cardId, "rework_pending", {
+            last_verdict: verdict,
+            session_reset_round: currentRound
+          });
+
+          agentdesk.kanban.setReviewStatus(cardId, "rework_pending", {exclude_status: terminalState});
+          agentdesk.kanban.setStatus(cardId, reviewReworkTarget);
+        } catch (e) {
+          agentdesk.log.warn("[review] #420 Session-reset dispatch failed: " + e + " — falling back to suggestion_pending");
+          setNormalSuggestionPending(cardId, verdict);
+        }
         return;
       }
 

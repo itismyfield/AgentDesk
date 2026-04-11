@@ -1,11 +1,14 @@
 use super::super::model_picker_interaction::build_model_picker_close_response;
 use super::super::should_process_allowed_bot_turn_text;
-use super::intake_gate::{is_model_picker_component_custom_id, should_process_turn_message};
+use super::intake_gate::{
+    RemovedControlReaction, classify_removed_control_reaction, is_model_picker_component_custom_id,
+    should_process_turn_message,
+};
 use super::message_handler::{TextStopLookup, lookup_text_stop_token};
 use crate::services::provider::CancelToken;
 use poise::serenity_prelude::ChannelId;
 use serde_json::json;
-use serenity::model::channel::MessageType;
+use serenity::model::channel::{MessageType, ReactionType};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -66,18 +69,20 @@ fn unregistered_human_slash_messages_fall_through() {
 }
 
 #[test]
-fn allowed_bot_turn_text_only_accepts_work_dispatches() {
+fn allowed_bot_turn_text_accepts_all_messages() {
     assert!(should_process_allowed_bot_turn_text(
         "DISPATCH:550e8400-e29b-41d4-a716-446655440000 [implementation] - Fix login bug"
     ));
     assert!(should_process_allowed_bot_turn_text(
         "DISPATCH:550e8400-e29b-41d4-a716-446655440000 [review-decision] - Feedback follow-up\n⛔ 코드 리뷰 금지"
     ));
-    assert!(!should_process_allowed_bot_turn_text(
+    // Review dispatches must also trigger turns — the agent reads and judges
+    assert!(should_process_allowed_bot_turn_text(
         "DISPATCH:550e8400-e29b-41d4-a716-446655440000 [review] - Review this\n⚠️ 검토 전용 — 작업 착수 금지"
     ));
-    assert!(!should_process_allowed_bot_turn_text(
-        "⚠️ 검토 전용 — 작업 착수 금지"
+    // Agent-to-agent messages without DISPATCH: also trigger turns
+    assert!(should_process_allowed_bot_turn_text(
+        "completion_guard 수정에 OUTCOME: noop 처리도 포함해줘."
     ));
 }
 
@@ -119,6 +124,22 @@ fn text_stop_lookup_detects_inflight_cancellation() {
         lookup_text_stop_token(&cancel_tokens, channel_id),
         TextStopLookup::AlreadyStopping
     ));
+}
+
+#[test]
+fn classify_removed_control_reaction_only_matches_queue_and_stop_emojis() {
+    assert_eq!(
+        classify_removed_control_reaction(&ReactionType::Unicode("📬".to_string())),
+        Some(RemovedControlReaction::CancelQueuedTurn)
+    );
+    assert_eq!(
+        classify_removed_control_reaction(&ReactionType::Unicode("⏳".to_string())),
+        Some(RemovedControlReaction::StopActiveTurn)
+    );
+    assert_eq!(
+        classify_removed_control_reaction(&ReactionType::Unicode("✅".to_string())),
+        None
+    );
 }
 
 /// mid:* cleanup should use the longer MSG_DEDUP_TTL (60s),

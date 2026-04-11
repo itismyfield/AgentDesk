@@ -61,6 +61,12 @@ const ENTRY_STATUS_STYLE: Record<
     label: "완료",
     labelEn: "Done",
   },
+  completed: {
+    bg: "rgba(34,197,94,0.22)",
+    text: "#4ade80",
+    label: "완료",
+    labelEn: "Done",
+  },
   skipped: {
     bg: "rgba(107,114,128,0.18)",
     text: "#9ca3af",
@@ -129,7 +135,7 @@ function batchPhaseLabel(phase: number): string {
 }
 
 function isCompletedEntry(entry: DispatchQueueEntryType): boolean {
-  return entry.status === "done" || entry.status === "skipped";
+  return entry.status === "done" || entry.status === "completed" || entry.status === "skipped";
 }
 
 function sortEntriesForDisplay(entries: DispatchQueueEntryType[]): DispatchQueueEntryType[] {
@@ -755,7 +761,11 @@ export default function AutoQueuePanel({
               ? tr("현재 phase", "Current phase")
               : phase <= 0
                 ? tr("즉시 가능", "Always eligible")
-                : tr("대기 phase", "Queued phase")}
+                : doneInPhase === phaseEntries.length
+                  ? tr("완료", "Completed")
+                  : currentBatchPhase != null && phase < currentBatchPhase
+                    ? tr("완료", "Completed")
+                    : tr("대기 phase", "Queued phase")}
           </span>
           <div
             className="flex-1 h-px"

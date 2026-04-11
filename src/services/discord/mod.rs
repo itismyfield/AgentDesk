@@ -1,30 +1,39 @@
 mod adk_session;
 pub(crate) mod agentdesk_config;
-mod channel_mailbox;
 mod commands;
+pub(crate) mod config_audit;
+mod discord_io;
 mod formatting;
 mod gateway;
 mod handoff;
 pub(crate) mod health;
 mod inflight;
-pub(crate) mod meeting;
+pub(crate) mod internal_api;
+pub(crate) mod meeting_orchestrator;
 mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
-pub(crate) mod org_schema;
+mod org_schema;
 pub(crate) mod org_writer;
 mod prompt_builder;
 mod queue_io;
-mod recovery;
+mod recovery_engine;
 pub(crate) mod restart_report;
 mod role_map;
 mod router;
+mod runtime_bootstrap;
 pub mod runtime_store;
+mod session_runtime;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 #[cfg(unix)]
 mod tmux;
+#[cfg(unix)]
+mod tmux_reaper;
 mod turn_bridge;
+
+pub(crate) use meeting_orchestrator as meeting;
+pub(in crate::services::discord) use recovery_engine as recovery;
 
 use std::collections::HashMap;
 use std::fs;
@@ -37,7 +46,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateAttachment, CreateMessage, EditMessage, MessageId, UserId};
+use serenity::{ChannelId, EditMessage, MessageId, UserId};
 
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
@@ -47,13 +56,11 @@ use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
 use crate::services::qwen;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
 
+use crate::services::turn_orchestrator::ChannelMailboxHandle;
+use crate::services::turn_orchestrator::HasPendingSoftQueueResult;
 use adk_session::{
     build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
     lookup_pending_dispatch_for_thread, parse_dispatch_id, post_adk_session_status,
-};
-use channel_mailbox::{
-    CancelActiveTurnResult, ChannelMailboxRegistry, ChannelMailboxSnapshot, ClearChannelResult,
-    FinishTurnResult, QueuePersistenceContext, RecoveryKickoffResult,
 };
 use formatting::{
     BUILTIN_SKILLS, extract_skill_description, format_for_discord, format_skills_notice,
@@ -63,34 +70,46 @@ use handoff::{clear_handoff, load_handoffs, update_handoff_state};
 use inflight::{
     InflightTurnState, clear_inflight_state, load_inflight_states, save_inflight_state,
 };
-pub(crate) use prompt_builder::DispatchProfile;
 use prompt_builder::build_system_prompt;
-use recovery::restore_inflight_turns;
+use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use router::handle_event;
-use runtime_store::worktrees_root;
 use settings::{
     RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings,
     load_last_remote_profile, load_last_session_path, resolve_role_binding, save_bot_settings,
     validate_bot_channel_routing_with_provider_channel,
 };
 #[cfg(unix)]
-use tmux::{
-    cleanup_orphan_tmux_sessions, reap_dead_tmux_sessions, restore_tmux_watchers,
-    tmux_output_watcher,
-};
+use tmux::{restore_tmux_watchers, tmux_output_watcher};
+#[cfg(unix)]
+use tmux_reaper::{cleanup_orphan_tmux_sessions, reap_dead_tmux_sessions};
 use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};
 
-pub(in crate::services::discord) use self::settings::validate_bot_channel_routing;
+pub(crate) use prompt_builder::DispatchProfile;
+pub(crate) use runtime_bootstrap::RunBotContext;
+pub(crate) use runtime_bootstrap::run_bot;
+pub(crate) use crate::services::turn_orchestrator::has_soft_intervention_at;
+
+use crate::services::turn_orchestrator::{
+    CancelActiveTurnResult, ChannelMailboxSnapshot, ClearChannelResult, FinishTurnResult,
+    QueuePersistenceContext, RecoveryKickoffResult, load_pending_queues,
+    warn_legacy_pending_queue_files,
+};
+pub(super) use crate::services::turn_orchestrator::{
+    ChannelMailboxRegistry, INTERVENTION_TTL, Intervention, InterventionMode,
+    MAX_INTERVENTIONS_PER_CHANNEL, PendingQueueItem,
+};
+pub use discord_io::{
+    retry_failed_dm_notifications, send_file_to_channel, send_message_to_channel,
+    send_message_to_user,
+};
+pub(crate) use inflight::latest_request_owner_user_id_for_channel;
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };
 
 /// Discord message length limit
 pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
-const MAX_INTERVENTIONS_PER_CHANNEL: usize = 30;
-const INTERVENTION_TTL: Duration = Duration::from_secs(10 * 60);
-const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
@@ -99,11 +118,12 @@ const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minut
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
-pub(super) fn should_process_allowed_bot_turn_text(text: &str) -> bool {
-    let trimmed = text.trim();
-    parse_dispatch_id(trimmed).is_some()
-        && !trimmed.contains("검토 전용")
-        && !trimmed.contains("작업 착수 금지")
+pub(super) fn should_process_allowed_bot_turn_text(_text: &str) -> bool {
+    // All announce bot messages trigger turns — dispatches, agent-to-agent
+    // communication, review instructions, and deadlock alerts all need
+    // processing.  "검토 전용" / "작업 착수 금지" are instructions for the
+    // agent's behavior during the turn, not reasons to skip the turn.
+    true
 }
 
 pub(in crate::services::discord) fn is_allowed_turn_sender(
@@ -146,11 +166,7 @@ pub(in crate::services::discord) fn recovery_known_message_ids(
     ids
 }
 
-#[cfg(test)]
-pub(in crate::services::discord) use queue_io::channel_has_pending_soft_queue_at;
 pub(in crate::services::discord) use queue_io::schedule_deferred_idle_queue_kickoff;
-#[cfg(test)]
-pub(in crate::services::discord) use queue_io::watcher_should_kickoff_idle_queue;
 /// Minimum interval between Discord placeholder edits for progress status.
 /// Configurable via AGENTDESK_STATUS_INTERVAL_SECS env var. Default: 5 seconds.
 pub(super) fn status_update_interval() -> Duration {
@@ -196,6 +212,10 @@ pub(super) async fn clear_watchdog_deadline_override(channel_id: u64) {
     if let Some(handle) = ChannelMailboxRegistry::global_handle(ChannelId::new(channel_id)) {
         handle.clear_timeout_override().await;
     }
+}
+
+pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
+    inflight::clear_inflight_by_tmux_name(provider, tmux_name)
 }
 /// Check if a deferred restart has been requested and no active or finalizing turns remain
 /// **across all providers**.
@@ -253,114 +273,13 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
     }
 }
 
-/// Per-channel session state
-#[derive(Clone)]
-pub(super) struct DiscordSession {
-    pub(super) session_id: Option<String>,
-    pub(super) memento_context_loaded: bool,
-    pub(super) memento_reflected: bool,
-    pub(super) current_path: Option<String>,
-    pub(super) history: Vec<HistoryItem>,
-    pub(super) pending_uploads: Vec<String>,
-    pub(super) cleared: bool,
-    /// Remote profile name for SSH execution (None = local)
-    pub(super) remote_profile_name: Option<String>,
-    pub(super) channel_id: Option<u64>,
-    pub(super) channel_name: Option<String>,
-    pub(super) category_name: Option<String>,
-    /// Last time this session was actively used (for TTL cleanup)
-    pub(super) last_active: tokio::time::Instant,
-    /// If this session runs in a git worktree, store the info here
-    pub(super) worktree: Option<WorktreeInfo>,
-    /// Restart generation at which this session was created/restored.
-    #[allow(dead_code)]
-    pub(super) born_generation: u64,
-}
-
-fn allows_nonlocal_session_path(remote_profile_name: Option<&str>) -> bool {
-    remote_profile_name.is_some_and(|name| !name.trim().is_empty())
-}
-
-fn session_path_is_usable(current_path: &str, remote_profile_name: Option<&str>) -> bool {
-    allows_nonlocal_session_path(remote_profile_name) || std::path::Path::new(current_path).is_dir()
-}
-
-pub(super) fn select_restored_session_path(
-    configured_path: Option<String>,
-    db_cwd: Option<String>,
-    yaml_path: Option<String>,
-    remote_profile_name: Option<&str>,
-) -> Option<String> {
-    configured_path
-        .filter(|path| session_path_is_usable(path, remote_profile_name))
-        .or_else(|| db_cwd.filter(|path| session_path_is_usable(path, remote_profile_name)))
-        .or_else(|| yaml_path.filter(|path| session_path_is_usable(path, remote_profile_name)))
-}
-
-impl DiscordSession {
-    pub(super) fn clear_provider_session(&mut self) {
-        self.session_id = None;
-        self.memento_context_loaded = false;
-        self.memento_reflected = false;
-    }
-
-    pub(super) fn restore_provider_session(&mut self, session_id: Option<String>) {
-        let same_session =
-            self.session_id.is_some() && self.session_id.as_deref() == session_id.as_deref();
-        self.session_id = session_id;
-        if !same_session {
-            self.memento_context_loaded = false;
-            self.memento_reflected = false;
-        }
-    }
-
-    pub(super) fn note_memento_context_loaded(&mut self) {
-        self.memento_context_loaded = true;
-        self.memento_reflected = false;
-    }
-
-    /// Validate `current_path` and return it if it exists on disk.
-    /// If the path is stale (deleted), clear `current_path` and `worktree`, log, and return `None`.
-    pub(super) fn validated_path(&mut self, channel_id: impl std::fmt::Display) -> Option<String> {
-        let current_path = self.current_path.as_ref()?;
-        if session_path_is_usable(current_path, self.remote_profile_name.as_deref()) {
-            return Some(current_path.clone());
-        }
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] ⚠ Ignoring stale local session path for channel {}: {}",
-            channel_id, current_path
-        );
-        self.current_path = None;
-        self.worktree = None;
-        None
-    }
-}
-
-/// Worktree info for sessions that were auto-redirected to avoid conflicts
-#[derive(Clone, Debug)]
-pub(super) struct WorktreeInfo {
-    /// The original repo path that was conflicted
-    pub original_path: String,
-    /// The worktree directory path
-    pub worktree_path: String,
-    /// The branch name created for this worktree
-    pub branch_name: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InterventionMode {
-    Soft,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct Intervention {
-    author_id: UserId,
-    message_id: MessageId,
-    text: String,
-    mode: InterventionMode,
-    created_at: Instant,
-}
+use session_runtime::{
+    DiscordSession, RuntimeChannelBindingStatus, WorktreeInfo, auto_restore_session,
+    bootstrap_thread_session, cleanup_git_worktree, create_git_worktree, detect_worktree_conflict,
+    provider_handles_channel, resolve_channel_category, resolve_runtime_channel_binding_status,
+    resolve_thread_parent, select_restored_session_path, synthetic_thread_channel_name,
+    validate_live_channel_routing, validate_live_channel_routing_with_dm_hint,
+};
 
 /// Bot-level settings persisted to disk
 #[derive(Clone)]
@@ -419,36 +338,6 @@ pub(super) struct TmuxWatcherHandle {
     /// Watcher checks this before relay to avoid duplicate messages.
     pub(super) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
 }
-
-pub(super) fn synthetic_thread_channel_name(parent_name: &str, channel_id: ChannelId) -> String {
-    format!("{parent_name}-t{}", channel_id.get())
-}
-
-fn is_synthetic_thread_channel_name(channel_name: &str, channel_id: ChannelId) -> bool {
-    channel_name.ends_with(&format!("-t{}", channel_id.get()))
-}
-
-fn choose_restore_channel_name(
-    existing_channel_name: Option<&str>,
-    live_channel_name: Option<&str>,
-    thread_parent: Option<(ChannelId, Option<String>)>,
-    channel_id: ChannelId,
-) -> Option<String> {
-    if let Some(existing_name) = existing_channel_name {
-        if is_synthetic_thread_channel_name(existing_name, channel_id) {
-            return Some(existing_name.to_string());
-        }
-    }
-
-    if let Some((parent_id, parent_name)) = thread_parent {
-        let parent_name = parent_name.unwrap_or_else(|| parent_id.get().to_string());
-        return Some(synthetic_thread_channel_name(&parent_name, channel_id));
-    }
-
-    live_channel_name
-        .or(existing_channel_name)
-        .map(ToOwned::to_owned)
-}
 #[derive(Clone)]
 pub(super) struct ModelPickerPendingState {
     pub(super) owner_user_id: UserId,
@@ -460,7 +349,7 @@ pub(super) struct ModelPickerPendingState {
 /// Core state that requires atomic multi-field access (always locked together)
 pub(super) struct CoreState {
     /// Per-channel sessions (each Discord channel can have its own Claude Code session)
-    pub(super) sessions: HashMap<ChannelId, DiscordSession>,
+    pub(in crate::services::discord) sessions: HashMap<ChannelId, DiscordSession>,
     /// Per-channel active meeting (one meeting per channel)
     active_meetings: HashMap<ChannelId, meeting::Meeting>,
 }
@@ -567,7 +456,7 @@ pub(super) struct SharedData {
 }
 
 impl SharedData {
-    fn mailbox(&self, channel_id: ChannelId) -> channel_mailbox::ChannelMailboxHandle {
+    fn mailbox(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
         self.mailboxes.handle(channel_id)
     }
 }
@@ -707,7 +596,7 @@ async fn mailbox_has_pending_soft_queue(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> channel_mailbox::HasPendingSoftQueueResult {
+) -> HasPendingSoftQueueResult {
     shared
         .mailbox(channel_id)
         .has_pending_soft_queue(queue_persistence_context(shared, provider, channel_id))
@@ -740,6 +629,21 @@ async fn mailbox_requeue_intervention_front(
         .await;
 }
 
+async fn mailbox_cancel_soft_intervention(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) -> Option<Intervention> {
+    shared
+        .mailbox(channel_id)
+        .cancel_queued_message(
+            message_id,
+            queue_persistence_context(shared, provider, channel_id),
+        )
+        .await
+}
+
 async fn mailbox_finish_turn(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -760,10 +664,6 @@ async fn mailbox_clear_channel(
         .mailbox(channel_id)
         .clear(queue_persistence_context(shared, provider, channel_id))
         .await
-}
-
-fn mailbox_remove_channel(shared: &SharedData, channel_id: ChannelId) {
-    let _ = shared.mailboxes.remove(channel_id);
 }
 
 async fn mailbox_replace_queue(
@@ -815,16 +715,6 @@ pub(super) struct Data {
     pub(super) provider: ProviderKind,
 }
 
-pub(crate) struct RunBotContext {
-    pub(crate) global_active: Arc<std::sync::atomic::AtomicUsize>,
-    pub(crate) global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
-    pub(crate) shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
-    pub(crate) health_registry: Arc<health::HealthRegistry>,
-    pub(crate) api_port: u16,
-    pub(crate) db: Option<crate::db::Db>,
-    pub(crate) engine: Option<crate::engine::PolicyEngine>,
-}
-
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {
     let duration_ms = shared.recovery_started_at.elapsed().as_millis();
     let duration_ms = duration_ms.min(u64::MAX as u128) as u64;
@@ -838,338 +728,9 @@ pub(super) fn mark_reconcile_complete(shared: &SharedData) {
         .reconcile_done
         .store(true, std::sync::atomic::Ordering::Release);
 }
+
 pub(super) type Error = Box<dyn std::error::Error + Send + Sync>;
 pub(super) type Context<'a> = poise::Context<'a, Data, Error>;
-
-fn prune_interventions_at(queue: &mut Vec<Intervention>, now: Instant) {
-    queue.retain(|i| now.saturating_duration_since(i.created_at) <= INTERVENTION_TTL);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
-        queue.drain(0..overflow);
-    }
-}
-
-fn prune_interventions(queue: &mut Vec<Intervention>) {
-    prune_interventions_at(queue, Instant::now());
-}
-
-pub(super) fn enqueue_intervention(
-    queue: &mut Vec<Intervention>,
-    intervention: Intervention,
-) -> bool {
-    prune_interventions(queue);
-
-    if let Some(last) = queue.last() {
-        if last.author_id == intervention.author_id
-            && last.text == intervention.text
-            && intervention.created_at.duration_since(last.created_at) <= INTERVENTION_DEDUP_WINDOW
-        {
-            return false;
-        }
-    }
-
-    queue.push(intervention);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
-        queue.drain(0..overflow);
-    }
-    true
-}
-
-pub(super) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> bool {
-    has_soft_intervention_at(queue, Instant::now())
-}
-
-pub(super) fn has_soft_intervention_at(queue: &mut Vec<Intervention>, now: Instant) -> bool {
-    prune_interventions_at(queue, now);
-    queue.iter().any(|item| item.mode == InterventionMode::Soft)
-}
-
-pub(super) fn dequeue_next_soft_intervention(
-    queue: &mut Vec<Intervention>,
-) -> Option<Intervention> {
-    prune_interventions(queue);
-    let index = queue
-        .iter()
-        .position(|item| item.mode == InterventionMode::Soft)?;
-    Some(queue.remove(index))
-}
-
-pub(super) fn requeue_intervention_front(
-    queue: &mut Vec<Intervention>,
-    intervention: Intervention,
-) {
-    prune_interventions(queue);
-    queue.insert(0, intervention);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        queue.truncate(MAX_INTERVENTIONS_PER_CHANNEL);
-    }
-}
-
-#[cfg(test)]
-pub(super) fn take_next_soft_intervention_persisted(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
-    dispatch_role_overrides: &dashmap::DashMap<ChannelId, ChannelId>,
-) -> Option<(Intervention, bool)> {
-    let mut remove_queue = false;
-    let (next, has_more) = if let Some(queue) = intervention_queue.get_mut(&channel_id) {
-        let next = dequeue_next_soft_intervention(queue);
-        let has_more = has_soft_intervention(queue);
-        remove_queue = queue.is_empty();
-        (next, has_more)
-    } else {
-        (None, false)
-    };
-
-    if next.is_none() {
-        if remove_queue {
-            intervention_queue.remove(&channel_id);
-            dispatch_role_overrides.remove(&channel_id);
-            save_channel_queue(provider, token_hash, channel_id, &[], None);
-        }
-        return None;
-    }
-
-    let intervention = next.unwrap();
-
-    if remove_queue {
-        intervention_queue.remove(&channel_id);
-        dispatch_role_overrides.remove(&channel_id);
-        save_channel_queue(provider, token_hash, channel_id, &[], None);
-    } else if let Some(queue) = intervention_queue.get(&channel_id) {
-        save_channel_queue(
-            provider,
-            token_hash,
-            channel_id,
-            queue,
-            dispatch_role_overrides
-                .get(&channel_id)
-                .map(|override_id| override_id.value().get()),
-        );
-    }
-
-    Some((intervention, has_more))
-}
-
-#[cfg(test)]
-pub(super) fn requeue_intervention_front_persisted(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    intervention_queue: &mut HashMap<ChannelId, Vec<Intervention>>,
-    dispatch_role_overrides: &dashmap::DashMap<ChannelId, ChannelId>,
-    intervention: Intervention,
-) {
-    let queue = intervention_queue.entry(channel_id).or_default();
-    requeue_intervention_front(queue, intervention);
-    save_channel_queue(
-        provider,
-        token_hash,
-        channel_id,
-        queue,
-        dispatch_role_overrides
-            .get(&channel_id)
-            .map(|override_id| override_id.value().get()),
-    );
-}
-
-// ─── Pending queue persistence (write-through + SIGTERM) ─────────────────────
-
-/// Serializable form of a queued intervention for disk persistence.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(super) struct PendingQueueItem {
-    pub(super) author_id: u64,
-    pub(super) message_id: u64,
-    pub(super) text: String,
-    /// Channel this item belongs to (routing snapshot — used by the kickoff guard).
-    #[serde(default)]
-    pub(super) channel_id: Option<u64>,
-    /// Human-readable channel name at save time (best-effort, may be None).
-    #[serde(default)]
-    pub(super) channel_name: Option<String>,
-    /// Active dispatch role override at save time (lost on restart; stored for diagnostics).
-    #[serde(default)]
-    pub(super) override_channel_id: Option<u64>,
-}
-
-/// Write-through: save a single channel's queue to disk.
-/// If the queue is empty the file is removed.
-/// This is designed to be called from `tokio::spawn` after every enqueue/dequeue.
-///
-/// Queue path: `discord_pending_queue/{provider}/{token_hash}/{channel_id}.json`
-/// The `token_hash` namespace prevents multi-bot queue cross-contamination on restart.
-/// `dispatch_role_override`: if `dispatch_role_overrides[channel_id]` is set, pass it here
-/// so it survives restart and can be restored to `SharedData.dispatch_role_overrides`.
-pub(super) fn save_channel_queue(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    queue: &[Intervention],
-    dispatch_role_override: Option<u64>,
-) {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return;
-    };
-    let dir = root.join(provider.as_str()).join(token_hash);
-    let path = dir.join(format!("{}.json", channel_id.get()));
-    if queue.is_empty() {
-        let _ = fs::remove_file(&path);
-        return;
-    }
-    let _ = fs::create_dir_all(&dir);
-    let items: Vec<PendingQueueItem> = queue
-        .iter()
-        .map(|i| PendingQueueItem {
-            author_id: i.author_id.get(),
-            message_id: i.message_id.get(),
-            text: i.text.clone(),
-            channel_id: Some(channel_id.get()),
-            channel_name: None,
-            override_channel_id: dispatch_role_override,
-        })
-        .collect();
-    if let Ok(json) = serde_json::to_string_pretty(&items) {
-        let _ = runtime_store::atomic_write(&path, &json);
-    }
-}
-
-/// Save all non-empty intervention queues to `discord_pending_queue/{provider}/{token_hash}/`.
-/// `dispatch_role_overrides` is snapshotted per channel so that `override_channel_id` survives
-/// restart and can be restored to `SharedData.dispatch_role_overrides`.
-#[cfg(test)]
-fn save_pending_queues(
-    provider: &ProviderKind,
-    token_hash: &str,
-    queues: &HashMap<ChannelId, Vec<Intervention>>,
-    dispatch_role_overrides: &dashmap::DashMap<ChannelId, ChannelId>,
-) {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return;
-    };
-    let dir = root.join(provider.as_str()).join(token_hash);
-    let _ = fs::create_dir_all(&dir);
-    // Clean stale files first (within this bot's namespace)
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-    for (channel_id, queue) in queues {
-        if queue.is_empty() {
-            continue;
-        }
-        let override_id = dispatch_role_overrides
-            .get(channel_id)
-            .map(|r| r.value().get());
-        let items: Vec<PendingQueueItem> = queue
-            .iter()
-            .map(|i| PendingQueueItem {
-                author_id: i.author_id.get(),
-                message_id: i.message_id.get(),
-                text: i.text.clone(),
-                channel_id: Some(channel_id.get()),
-                channel_name: None,
-                override_channel_id: override_id,
-            })
-            .collect();
-        if let Ok(json) = serde_json::to_string_pretty(&items) {
-            let path = dir.join(format!("{}.json", channel_id.get()));
-            let _ = runtime_store::atomic_write(&path, &json);
-        }
-    }
-}
-
-/// Load persisted pending queues from `discord_pending_queue/{provider}/{token_hash}/` and delete the files.
-/// Only reads files in this bot's token-namespaced subdirectory.
-/// Returns `(queues, dispatch_role_overrides)` so the caller can restore both.
-fn load_pending_queues(
-    provider: &ProviderKind,
-    token_hash: &str,
-) -> (
-    HashMap<ChannelId, Vec<Intervention>>,
-    HashMap<ChannelId, ChannelId>,
-) {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return (HashMap::new(), HashMap::new());
-    };
-    let dir = root.join(provider.as_str()).join(token_hash);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return (HashMap::new(), HashMap::new());
-    };
-    let now = Instant::now();
-    let mut result: HashMap<ChannelId, Vec<Intervention>> = HashMap::new();
-    let mut restored_overrides: HashMap<ChannelId, ChannelId> = HashMap::new();
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let channel_id: u64 = match path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse().ok())
-        {
-            Some(id) => id,
-            None => continue,
-        };
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(items) = serde_json::from_str::<Vec<PendingQueueItem>>(&content) else {
-            let _ = fs::remove_file(&path);
-            continue;
-        };
-        // Restore dispatch_role_override from snapshot (first non-None value wins)
-        if let Some(override_id) = items.iter().find_map(|item| item.override_channel_id) {
-            restored_overrides.insert(ChannelId::new(channel_id), ChannelId::new(override_id));
-        }
-        let interventions: Vec<Intervention> = items
-            .into_iter()
-            .map(|item| Intervention {
-                author_id: UserId::new(item.author_id),
-                message_id: MessageId::new(item.message_id),
-                text: item.text,
-                mode: InterventionMode::Soft,
-                created_at: now,
-            })
-            .collect();
-        if !interventions.is_empty() {
-            result.insert(ChannelId::new(channel_id), interventions);
-        }
-        let _ = fs::remove_file(&path);
-    }
-    (result, restored_overrides)
-}
-
-/// P1-2: Log a structured warning for legacy pending queue files at the old flat
-/// `discord_pending_queue/{provider}/` path (not in a token_hash subdirectory).
-/// These files were written before P0 namespacing and cannot be safely restored.
-/// Called once at startup after `load_pending_queues`.
-fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
-    let Some(root) = runtime_store::discord_pending_queue_root() else {
-        return;
-    };
-    let dir = root.join(provider.as_str());
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Warn only about flat JSON files directly under {provider}/ (not subdirectories)
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("json") {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] ⚠ LEGACY-QUEUE: found legacy pending queue file '{}' — \
-                predates bot-identity namespacing and will NOT be restored. \
-                Remove manually if no longer needed.",
-                path.display()
-            );
-        }
-    }
-}
 
 /// Startup catch-up polling: fetch messages that arrived during the restart gap.
 /// Uses saved last_message_ids to query Discord REST API for missed messages,
@@ -1187,12 +748,36 @@ async fn catch_up_missed_messages(
         return;
     }
 
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
     let mut total_recovered = 0usize;
     let now = Instant::now();
     let max_age = std::time::Duration::from_secs(300); // Only catch up messages within 5 minutes
+
+    // #429: prune stale checkpoints before iterating — files older than
+    // max_checkpoint_age were written by sessions that ended long before this
+    // restart, so catch-up is pointless and the API calls are wasted.
+    let max_checkpoint_age = std::time::Duration::from_secs(600); // 10 minutes
+    let mut pruned = 0usize;
+    if let Ok(prune_entries) = fs::read_dir(&dir) {
+        for entry in prune_entries.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = path.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if modified.elapsed().unwrap_or_default() > max_checkpoint_age {
+                        let _ = fs::remove_file(&path);
+                        pruned += 1;
+                    }
+                }
+            }
+        }
+    }
+    if pruned > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!("  [{ts}] 🧹 catch-up: pruned {pruned} stale checkpoint(s) (>10min old)");
+    }
+
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -1211,6 +796,16 @@ async fn catch_up_missed_messages(
 
         let channel_id = ChannelId::new(channel_id_raw);
         let after_msg = MessageId::new(last_id);
+
+        // #429: skip channels this bot cannot access.  Utility bots
+        // (notify/announce) share the claude provider checkpoint dir but
+        // have no channel read permissions → every API call fails slowly.
+        {
+            let settings = shared.settings.read().await;
+            if !settings::bot_settings_allow_channel(&settings, channel_id, false) {
+                continue;
+            }
+        }
 
         match resolve_runtime_channel_binding_status(http, channel_id).await {
             RuntimeChannelBindingStatus::Owned => {}
@@ -1240,9 +835,14 @@ async fn catch_up_missed_messages(
             Ok(msgs) => msgs,
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
+                let msg = e.to_string();
                 eprintln!(
                     "  [{ts}] ⚠ catch-up: failed to fetch messages for channel {channel_id}: {e}"
                 );
+                // #429: permanent errors — remove checkpoint to avoid retrying every restart
+                if msg.contains("Missing Access") || msg.contains("Unknown Channel") {
+                    let _ = fs::remove_file(&path);
+                }
                 continue;
             }
         };
@@ -1364,6 +964,13 @@ async fn catch_up_missed_messages(
         };
         let channel_id = ChannelId::new(channel_id_raw);
 
+        {
+            let settings = shared.settings.read().await;
+            if !settings::bot_settings_allow_channel(&settings, channel_id, false) {
+                continue;
+            }
+        }
+
         match resolve_runtime_channel_binding_status(http, channel_id).await {
             RuntimeChannelBindingStatus::Owned => {}
             RuntimeChannelBindingStatus::Unowned | RuntimeChannelBindingStatus::Unknown => continue,
@@ -1377,9 +984,13 @@ async fn catch_up_missed_messages(
             Ok(msgs) => msgs,
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
+                let msg = e.to_string();
                 eprintln!(
                     "  [{ts}] ⚠ catch-up phase2: failed to fetch recent messages for channel {channel_id}: {e}"
                 );
+                if msg.contains("Missing Access") || msg.contains("Unknown Channel") {
+                    let _ = fs::remove_file(&path);
+                }
                 continue;
             }
         };
@@ -1471,344 +1082,6 @@ async fn catch_up_missed_messages(
             "  [{ts}] 🔍 CATCH-UP phase2: total {phase2_recovered} unanswered message(s) recovered"
         );
     }
-}
-
-/// Execute durable handoff turns saved before a restart.
-/// Runs after tmux watcher restore and pending queue restore, but before
-/// restart report flush. Skips channels that already have pending queue messages
-/// (user intent takes priority over automatic follow-up).
-async fn execute_handoff_turns(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-) {
-    let handoffs = load_handoffs(provider);
-    if handoffs.is_empty() {
-        return;
-    }
-    let settings_snapshot = shared.settings.read().await.clone();
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
-        "  [{ts}] 📎 Found {} handoff record(s) to process",
-        handoffs.len()
-    );
-
-    let current_gen = runtime_store::load_generation();
-
-    for record in handoffs {
-        let channel_id = ChannelId::new(record.channel_id);
-        let ts = chrono::Local::now().format("%H:%M:%S");
-
-        // Skip if from a different generation (stale)
-        if record.born_generation > current_gen {
-            println!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (future generation {})",
-                record.channel_id, record.born_generation
-            );
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        // Skip if already executed/skipped/failed
-        if record.state != "created" {
-            println!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (state={})",
-                record.channel_id, record.state
-            );
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        let is_dm = matches!(
-            channel_id.to_channel(http).await,
-            Ok(serenity::model::channel::Channel::Private(_))
-        );
-        let (allowlist_channel_id, provider_channel_name) =
-            if let Some((pid, pname)) = resolve_thread_parent(http, channel_id).await {
-                (pid, pname.or(record.channel_name.clone()))
-            } else {
-                (channel_id, record.channel_name.clone())
-            };
-        if let Err(reason) = validate_bot_channel_routing_with_provider_channel(
-            &settings_snapshot,
-            provider,
-            allowlist_channel_id,
-            record.channel_name.as_deref(),
-            provider_channel_name.as_deref(),
-            is_dm,
-        ) {
-            println!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} — {reason}",
-                record.channel_id
-            );
-            continue;
-        }
-
-        // Skip if pending queue messages exist (user intent takes priority)
-        let has_pending = !mailbox_snapshot(shared, channel_id)
-            .await
-            .intervention_queue
-            .is_empty();
-        if has_pending {
-            println!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (pending queue has messages)",
-                record.channel_id
-            );
-            let _ = update_handoff_state(provider, record.channel_id, "skipped");
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        // Skip if an active turn is already running
-        let has_active = mailbox_has_active_turn(shared, channel_id).await;
-        if has_active {
-            println!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (active turn running)",
-                record.channel_id
-            );
-            let _ = update_handoff_state(provider, record.channel_id, "skipped");
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        // Check session/path readiness
-        let has_session = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&channel_id)
-                .and_then(|s| s.current_path.as_ref())
-                .is_some()
-        };
-        if !has_session {
-            println!(
-                "  [{ts}] ⏭ Skipping handoff for channel {} (no active session)",
-                record.channel_id
-            );
-            let _ = update_handoff_state(provider, record.channel_id, "skipped");
-            clear_handoff(provider, record.channel_id);
-            continue;
-        }
-
-        // Mark as executing
-        let _ = update_handoff_state(provider, record.channel_id, "executing");
-        println!(
-            "  [{ts}] ▶ Executing handoff for channel {} — {}",
-            record.channel_id, record.intent
-        );
-
-        // Send a placeholder message in the channel
-        let handoff_prompt = format!(
-            "dcserver가 재시작되었습니다. 재시작 전 작업의 후속 조치를 이어서 진행해주세요.\n\n\
-             ## 재시작 전 컨텍스트\n{}\n\n\
-             ## 요청 사항\n{}",
-            record.context, record.intent
-        );
-
-        let placeholder = match channel_id
-            .send_message(
-                http,
-                serenity::CreateMessage::new().content(
-                    "📎 **Post-restart handoff** — 재시작 후속 작업을 자동으로 이어받습니다.",
-                ),
-            )
-            .await
-        {
-            Ok(msg) => msg,
-            Err(e) => {
-                println!(
-                    "  [{ts}] ❌ Failed to send handoff placeholder for channel {}: {}",
-                    record.channel_id, e
-                );
-                let _ = update_handoff_state(provider, record.channel_id, "failed");
-                clear_handoff(provider, record.channel_id);
-                continue;
-            }
-        };
-
-        // Inject as an intervention so the next turn picks it up.
-        mailbox_enqueue_intervention(
-            shared,
-            provider,
-            channel_id,
-            Intervention {
-                author_id: serenity::UserId::new(1), // system-generated sentinel
-                message_id: placeholder.id,
-                text: handoff_prompt,
-                mode: InterventionMode::Soft,
-                created_at: Instant::now(),
-            },
-        )
-        .await;
-
-        let _ = update_handoff_state(provider, record.channel_id, "completed");
-        clear_handoff(provider, record.channel_id);
-        println!(
-            "  [{ts}] ✓ Handoff queued for channel {} (injected as intervention)",
-            record.channel_id
-        );
-    }
-}
-
-/// #164: Re-deliver orphan pending dispatches after dcserver restart.
-///
-/// After a restart, dispatches in `pending` status may have been Discord-notified
-/// but the in-memory intervention_queue was lost. Or the notification was interrupted
-/// mid-flight. This function identifies truly orphan dispatches and re-delivers them.
-///
-/// **Safety**:
-/// - Process-global once guard via `std::sync::Once` — safe across multiple provider instances
-/// - Startup boot timestamp from dcserver.pid mtime — not wall clock
-/// - Newer-dispatch check uses rowid (monotonic) instead of created_at (second-granularity)
-/// - Five AND conditions must ALL be met before re-delivery (see issue #164)
-async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
-    // Process-global once guard: prevents duplicate execution when multiple
-    // provider instances (Claude + Codex) call this from their own setup paths.
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    let mut should_run = false;
-    ONCE.call_once(|| should_run = true);
-    if !should_run {
-        return;
-    }
-
-    let db = match shared.db.as_ref() {
-        Some(d) => d,
-        None => return,
-    };
-
-    // Boot timestamp from dcserver.pid mtime — represents actual process start,
-    // not a wall-clock offset that could mis-classify old pending dispatches.
-    let boot_time: String = {
-        let pid_path =
-            crate::cli::agentdesk_runtime_root().map(|r| r.join("runtime").join("dcserver.pid"));
-        let mtime = pid_path
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
-        match mtime {
-            Some(t) => {
-                let dt: chrono::DateTime<chrono::Utc> = t.into();
-                dt.format("%Y-%m-%d %H:%M:%S").to_string()
-            }
-            None => {
-                // No pid file — cannot determine boot time safely, skip recovery
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ⚠ #164: No dcserver.pid — skipping orphan dispatch recovery");
-                return;
-            }
-        }
-    };
-
-    // Query orphan pending dispatches with all 5 safety conditions:
-    // 1. status = 'pending'
-    // 2. card is assigned to the dispatch target agent
-    // 3. agent has NO working session (idle)
-    // 4. created_at < boot_time (pre-restart, using pid mtime)
-    // 5. no newer dispatch for the same card (using rowid for monotonic ordering,
-    //    avoids same-second ambiguity with created_at)
-    let orphans: Vec<(String, String, String, String, String)> = {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let mut stmt = match conn.prepare(
-            "SELECT d.id, d.to_agent_id, d.kanban_card_id, d.title, d.dispatch_type
-             FROM task_dispatches d
-             JOIN kanban_cards kc ON kc.id = d.kanban_card_id
-             WHERE d.status = 'pending'
-               AND d.created_at < ?1
-               AND kc.assigned_agent_id = d.to_agent_id
-               AND NOT EXISTS (
-                 SELECT 1 FROM sessions s
-                 WHERE s.agent_id = d.to_agent_id
-                   AND s.status = 'working'
-               )
-               AND NOT EXISTS (
-                 SELECT 1 FROM task_dispatches d2
-                 WHERE d2.kanban_card_id = d.kanban_card_id
-                   AND d2.rowid > d.rowid
-                   AND d2.status NOT IN ('cancelled', 'failed')
-               )",
-        ) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        stmt.query_map([&boot_time], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
-    };
-
-    if orphans.is_empty() {
-        return;
-    }
-
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
-        "  [{ts}] 🔄 #164: Found {} orphan pending dispatch(es) to re-deliver",
-        orphans.len()
-    );
-
-    let mut delivered = 0usize;
-    for (dispatch_id, agent_id, card_id, title, dtype) in &orphans {
-        // Clear any existing dispatch_notified marker — the 5-condition query already
-        // validated this dispatch is truly orphan, so the marker (if any) is stale.
-        {
-            let conn = match db.lock() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            conn.execute(
-                "DELETE FROM kv_meta WHERE key = ?1",
-                [&format!("dispatch_notified:{dispatch_id}")],
-            )
-            .ok();
-        }
-
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}]   ↻ Re-delivering {dtype} dispatch {id} → {agent} (card {card})",
-            id = &dispatch_id[..8],
-            agent = agent_id,
-            card = &card_id[..8.min(card_id.len())],
-        );
-
-        // send_dispatch_to_discord handles its own two-phase delivery guard
-        // (reserving → send → notified), so no manual marker management needed here.
-        match crate::server::routes::dispatches::send_dispatch_to_discord(
-            db,
-            agent_id,
-            title,
-            card_id,
-            dispatch_id,
-        )
-        .await
-        {
-            Ok(()) => {
-                delivered += 1;
-            }
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}]   ⚠ Recovery delivery failed for {id}: {e}",
-                    id = &dispatch_id[..8],
-                );
-            }
-        }
-    }
-
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
-        "  [{ts}] ✓ #164: Re-delivered {delivered}/{} orphan dispatch(es)",
-        orphans.len()
-    );
 }
 
 /// Kick off turns for channels that have queued interventions but no active
@@ -2174,1177 +1447,11 @@ fn resolve_codex_skill_file(path: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
-fn discord_gateway_intents() -> serenity::GatewayIntents {
-    serenity::GatewayIntents::GUILDS
-        | serenity::GatewayIntents::GUILD_MESSAGES
-        | serenity::GatewayIntents::DIRECT_MESSAGES
-        | serenity::GatewayIntents::MESSAGE_CONTENT
-}
-
-fn should_skip_agent_runtime_launch(token: &str) -> Option<String> {
-    let bot = agentdesk_config::find_discord_bot_by_token(token)?;
-    let agent_bot_names = agentdesk_config::collect_agent_bot_names();
-    if !agent_bot_names.is_empty() && !agent_bot_names.contains(&bot.name) {
-        return Some(bot.name);
-    }
-    None
-}
-
-/// Entry point: start the Discord bot
-pub async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext) {
-    let RunBotContext {
-        global_active,
-        global_finalizing,
-        shutdown_remaining,
-        health_registry,
-        api_port,
-        db,
-        engine,
-    } = context;
-
-    if let Some(bot_name) = should_skip_agent_runtime_launch(token) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] ⏭ BOT-LAUNCH: skipping utility bot '{}' in run_bot() — not mapped to any agent channel",
-            bot_name
-        );
-        shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
-        return;
-    }
-
-    // Initialize debug logging from environment variable
-    claude::init_debug_from_env();
-
-    let mut bot_settings = load_bot_settings(token);
-    bot_settings.provider = provider.clone();
-
-    match bot_settings.owner_user_id {
-        Some(owner_id) => println!("  ✓ Owner: {owner_id}"),
-        None => println!("  ⚠ No owner registered — first user will be registered as owner"),
-    }
-
-    let initial_skills = scan_skills(&provider, None);
-    let skill_count = initial_skills.len();
-    println!(
-        "  ✓ {} bot ready — Skills loaded: {}",
-        provider.display_name(),
-        skill_count
-    );
-
-    // Cleanup stale Discord uploads on process start
-    cleanup_old_uploads(UPLOAD_MAX_AGE);
-
-    let provider_for_shutdown = provider.clone();
-    let provider_for_error = provider.clone();
-
-    let restored_model_overrides: Vec<(ChannelId, String)> = bot_settings
-        .channel_model_overrides
-        .iter()
-        .filter_map(|(channel_id, model)| {
-            channel_id
-                .parse::<u64>()
-                .ok()
-                .map(|id| (ChannelId::new(id), model.clone()))
-        })
-        .collect();
-
-    let shared = Arc::new(SharedData {
-        core: Mutex::new(CoreState {
-            sessions: HashMap::new(),
-            active_meetings: HashMap::new(),
-        }),
-        mailboxes: ChannelMailboxRegistry::default(),
-        settings: tokio::sync::RwLock::new(bot_settings),
-        api_timestamps: dashmap::DashMap::new(),
-        skills_cache: tokio::sync::RwLock::new(initial_skills),
-        tmux_watchers: dashmap::DashMap::new(),
-        recovering_channels: dashmap::DashMap::new(),
-        shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        current_generation: runtime_store::load_generation(),
-        restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),
-        recovery_started_at: std::time::Instant::now(),
-        recovery_duration_ms: std::sync::atomic::AtomicU64::new(0),
-        global_active,
-        global_finalizing,
-        shutdown_remaining,
-        shutdown_counted: std::sync::atomic::AtomicBool::new(false),
-        intake_dedup: dashmap::DashMap::new(),
-        dispatch_thread_parents: dashmap::DashMap::new(),
-        bot_connected: std::sync::atomic::AtomicBool::new(false),
-        last_turn_at: std::sync::Mutex::new(None),
-        model_overrides: {
-            let map = dashmap::DashMap::new();
-            for (channel_id, model) in &restored_model_overrides {
-                map.insert(*channel_id, model.clone());
-            }
-            map
-        },
-        model_session_reset_pending: {
-            let set = dashmap::DashSet::new();
-            for (channel_id, _) in &restored_model_overrides {
-                set.insert(*channel_id);
-            }
-            set
-        },
-        model_picker_pending: dashmap::DashMap::new(),
-        dispatch_role_overrides: dashmap::DashMap::new(),
-        last_message_ids: dashmap::DashMap::new(),
-        turn_start_times: dashmap::DashMap::new(),
-        cached_serenity_ctx: tokio::sync::OnceCell::new(),
-        cached_bot_token: tokio::sync::OnceCell::new(),
-        token_hash: settings::discord_token_hash(token),
-        api_port,
-        db,
-        engine,
-        known_slash_commands: tokio::sync::OnceCell::new(),
-    });
-
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] 🔑 dcserver generation: {}",
-            shared.current_generation
-        );
-        if !restored_model_overrides.is_empty() {
-            println!(
-                "  [{ts}] 🧩 restored model overrides: {} channel(s)",
-                restored_model_overrides.len()
-            );
-        }
-    }
-
-    // Register this provider with the health check registry
-    health_registry
-        .register(provider.as_str().to_string(), shared.clone())
-        .await;
-
-    let token_owned = token.to_string();
-    let shared_clone = shared.clone();
-
-    let framework = poise::Framework::builder()
-        .options(poise::FrameworkOptions {
-            commands: vec![
-                commands::cmd_start(),
-                commands::cmd_pwd(),
-                commands::cmd_status(),
-                commands::cmd_inflight(),
-                commands::cmd_clear(),
-                commands::cmd_stop(),
-                commands::cmd_down(),
-                commands::cmd_shell(),
-                commands::cmd_cc(),
-                commands::cmd_metrics(),
-                commands::cmd_model(),
-                commands::cmd_queue(),
-                commands::cmd_health(),
-                commands::cmd_allowedtools(),
-                commands::cmd_allowed(),
-                commands::cmd_debug(),
-                commands::cmd_allowall(),
-                commands::cmd_adduser(),
-                commands::cmd_removeuser(),
-                commands::cmd_receipt(),
-                commands::cmd_help(),
-                commands::cmd_meeting(),
-            ],
-            command_check: Some(|ctx| {
-                Box::pin(async move {
-                    let settings_snapshot = { ctx.data().shared.settings.read().await.clone() };
-                    let allowed = provider_handles_channel(
-                        ctx.serenity_context(),
-                        &ctx.data().provider,
-                        &settings_snapshot,
-                        ctx.channel_id(),
-                    )
-                    .await;
-                    if !allowed {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
-                            "  [{ts}] ⏭ CMD-GUARD: skipping /{} in channel {} for provider {}",
-                            ctx.command().name,
-                            ctx.channel_id(),
-                            ctx.data().provider.as_str()
-                        );
-                    }
-                    Ok(allowed)
-                })
-            }),
-            event_handler: |ctx, event, _framework, data| Box::pin(handle_event(ctx, event, data)),
-            ..Default::default()
-        })
-        .setup(move |ctx, _ready, framework| {
-            let shared_for_migrate = shared_clone.clone();
-            let health_registry_for_setup = health_registry.clone();
-            let provider_for_setup = provider.clone();
-            let token_for_ready = token_owned.clone();
-            Box::pin(async move {
-                // Register in each guild for instant slash command propagation
-                // (register_globally can take up to 1 hour)
-                let commands = &framework.options().commands;
-                // Populate known slash command names for router fallback logic
-                let cmd_names: std::collections::HashSet<String> = commands
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect();
-                let _ = shared_for_migrate.known_slash_commands.set(cmd_names);
-                for guild in &_ready.guilds {
-                    if let Err(e) =
-                        poise::builtins::register_in_guild(ctx, commands, guild.id).await
-                    {
-                        eprintln!(
-                            "  ⚠ Failed to register commands in guild {}: {}",
-                            guild.id, e
-                        );
-                    }
-                }
-                println!(
-                    "  ✓ Bot connected — Registered commands in {} guild(s)",
-                    _ready.guilds.len()
-                );
-                shared_for_migrate.bot_connected.store(true, std::sync::atomic::Ordering::SeqCst);
-                let _ = shared_for_migrate.cached_serenity_ctx.set(ctx.clone());
-                let _ = shared_for_migrate.cached_bot_token.set(token_for_ready.clone());
-                health_registry_for_setup.register_http(provider_for_setup.as_str().to_string(), ctx.http.clone()).await;
-
-                // Enrich role_map.json with channelId for reliable name→ID resolution
-                enrich_role_map_with_channel_ids();
-
-                let shared_for_tmux = shared_for_migrate.clone();
-
-                // Background: poll for deferred restart marker when idle
-                let shared_for_deferred = shared_for_tmux.clone();
-                let provider_for_deferred = provider.clone();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(DEFERRED_RESTART_POLL_INTERVAL).await;
-                        // Detect restart_pending marker and set the in-memory flag
-                        // so the router queues new messages instead of starting turns.
-                        if !shared_for_deferred.restart_pending.load(Ordering::Relaxed) {
-                            if let Some(root) = crate::agentdesk_runtime_root() {
-                                if root.join("restart_pending").exists() {
-                                    shared_for_deferred.restart_pending.store(true, Ordering::SeqCst);
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!("  [{ts}] ⏸ DRAIN: restart_pending detected, entering drain mode — new turns blocked");
-                                }
-                            }
-                        }
-                        // Use process-global counters so we wait for ALL providers
-                        let g_active = shared_for_deferred.global_active.load(Ordering::Relaxed);
-                        let g_finalizing = shared_for_deferred.global_finalizing.load(Ordering::Relaxed);
-                        if g_active == 0 && g_finalizing == 0 && shared_for_deferred.restart_pending.load(Ordering::Relaxed) {
-                            let queue_count =
-                                mailbox_restart_drain_all(&shared_for_deferred, &provider_for_deferred)
-                                    .await;
-                            if queue_count > 0 {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}] 📋 DRAIN: mailbox persisted {queue_count} pending queue item(s) before deferred restart");
-                            }
-                            check_deferred_restart(&shared_for_deferred);
-                            // This provider has saved and decremented — stop polling
-                            return;
-                        }
-                    }
-                });
-
-                // Background: hot-reload skills on file changes (30s polling)
-                // Scans home-level AND all active project-level skill directories.
-                let shared_for_skills = shared_for_tmux.clone();
-                let provider_for_skills = provider.clone();
-                tokio::spawn(async move {
-                    let mut last_fingerprint: (usize, u64) = (0, 0); // (file_count, max_mtime_epoch)
-                    loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                        // Collect unique project paths from active sessions
-                        let project_paths: Vec<String> = {
-                            let data = shared_for_skills.core.lock().await;
-                            let mut paths: Vec<String> = data.sessions.values()
-                                .filter_map(|s| s.current_path.clone())
-                                .collect();
-                            paths.sort();
-                            paths.dedup();
-                            paths
-                        };
-                        let fp = skill_dir_fingerprint_with_projects(&provider_for_skills, &project_paths);
-                        if fp != last_fingerprint && last_fingerprint != (0, 0) {
-                            // Merge home + all project skills (scan_skills deduplicates by name)
-                            let mut merged = scan_skills(&provider_for_skills, None);
-                            let mut seen: std::collections::HashSet<String> =
-                                merged.iter().map(|(n, _)| n.clone()).collect();
-                            for path in &project_paths {
-                                for skill in scan_skills(&provider_for_skills, Some(path)) {
-                                    if seen.insert(skill.0.clone()) {
-                                        merged.push(skill);
-                                    }
-                                }
-                            }
-                            merged.sort_by(|a, b| a.0.cmp(&b.0));
-                            let count = merged.len();
-                            *shared_for_skills.skills_cache.write().await = merged;
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!("  [{ts}] 🔄 Skills hot-reloaded: {count} skill(s) ({} files, mtime Δ)", fp.0);
-                        }
-                        last_fingerprint = fp;
-                    }
-                });
-
-                // Restore inflight turns FIRST, then flush restart reports.
-                // Recovery skips channels that have a pending restart report,
-                // so the report must still be on disk when recovery runs.
-                // After recovery completes, the flush loop starts and delivers/clears reports.
-                let http_for_tmux = ctx.http.clone();
-                let shared_for_tmux2 = shared_for_tmux.clone();
-                let http_for_restart_reports = ctx.http.clone();
-                let ctx_for_kickoff = ctx.clone();
-                let token_for_kickoff = token_owned.clone();
-                let shared_for_restart_reports = shared_for_tmux.clone();
-                let provider_for_restore = provider.clone();
-                tokio::spawn(async move {
-                    gc_stale_fixed_working_sessions(&shared_for_tmux2).await;
-
-                    // #429: catch-up FIRST to minimize message loss window.
-                    catch_up_missed_messages(
-                        &http_for_tmux,
-                        &shared_for_tmux2,
-                        &provider_for_restore,
-                    ).await;
-
-                    restore_inflight_turns(&http_for_tmux, &shared_for_tmux2, &provider_for_restore).await;
-
-                    // Restore pending intervention queues saved during previous SIGTERM
-                    let (restored_queues, restored_overrides) = load_pending_queues(&provider_for_restore, &shared_for_tmux2.token_hash);
-                    let allowed_bot_ids_for_restore: Vec<u64> = {
-                        let settings = shared_for_tmux2.settings.read().await;
-                        settings.allowed_bot_ids.clone()
-                    };
-                    // P1-1: Restore dispatch_role_overrides from queue snapshots
-                    for (thread_channel_id, alt_channel_id) in &restored_overrides {
-                        if !matches!(
-                            resolve_runtime_channel_binding_status(&http_for_tmux, *thread_channel_id)
-                                .await,
-                            RuntimeChannelBindingStatus::Owned
-                        ) {
-                            continue;
-                        }
-                        shared_for_tmux2.dispatch_role_overrides.insert(*thread_channel_id, *alt_channel_id);
-                    }
-                    if !restored_overrides.is_empty() {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] 📋 FLUSH: restored {} dispatch_role_override(s) from queue snapshots", restored_overrides.len());
-                    }
-                    if !restored_queues.is_empty() {
-                        let mut added = 0usize;
-                        let mut skipped = 0usize;
-                        for (channel_id, items) in restored_queues {
-                            if !matches!(
-                                resolve_runtime_channel_binding_status(&http_for_tmux, channel_id)
-                                    .await,
-                                RuntimeChannelBindingStatus::Owned
-                            ) {
-                                skipped += items.len();
-                                continue;
-                            }
-                            let snapshot = mailbox_snapshot(&shared_for_tmux2, channel_id).await;
-                            let mut existing_ids = recovery_known_message_ids(&snapshot);
-                            let mut queue = snapshot.intervention_queue;
-                            for item in items {
-                                if allowed_bot_ids_for_restore.contains(&item.author_id.get())
-                                    && !should_process_allowed_bot_turn_text(&item.text)
-                                {
-                                    skipped += 1;
-                                    continue;
-                                }
-                                if existing_ids.insert(item.message_id.get()) {
-                                    queue.push(item);
-                                    added += 1;
-                                } else {
-                                    skipped += 1;
-                                }
-                            }
-                            mailbox_replace_queue(
-                                &shared_for_tmux2,
-                                &provider_for_restore,
-                                channel_id,
-                                queue,
-                            )
-                            .await;
-                        }
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped} duplicates)");
-                    }
-
-                    // P1-2: Warn about legacy queue files that cannot be restored
-                    warn_legacy_pending_queue_files(&provider_for_restore);
-
-                    // #429: thread-map validation in background — non-blocking
-                    if let Some(ref db) = shared_for_tmux2.db {
-                        let db_bg = db.clone();
-                        let token_bg = token_for_kickoff.clone();
-                        tokio::spawn(async move {
-                            let (checked, cleared) =
-                                crate::server::routes::dispatches::validate_channel_thread_maps_on_startup(
-                                    &db_bg,
-                                    &token_bg,
-                                )
-                                .await;
-                            if checked > 0 || cleared > 0 {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!(
-                                    "  [{ts}] 🧹 THREAD-MAP: validated {checked} mapping(s), cleared {cleared} stale binding(s)"
-                                );
-                            }
-                        });
-                    }
-
-                    // #226: Collect channels that recovery already handled (spawned + ended watchers).
-                    // restore_tmux_watchers must skip these to prevent duplicate watcher creation.
-                    // The issue: recovery watcher starts → session ends quickly → watcher removes
-                    // itself from DashMap → restore_tmux_watchers sees empty slot → creates second watcher.
-                    #[cfg(unix)]
-                    {
-                        // Mark all channels that recovery touched as "recently handled"
-                        // by inserting a recovery_handled marker in kv_meta.
-                        // restore_tmux_watchers checks this and skips those channels.
-                        if let Some(ref db) = shared_for_tmux2.db {
-                            if let Ok(conn) = db.lock() {
-                                let recovery_channels: Vec<u64> = shared_for_tmux2
-                                    .recovering_channels
-                                    .iter()
-                                    .map(|entry| entry.key().get())
-                                    .collect();
-                                for ch in &recovery_channels {
-                                    conn.execute(
-                                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                                        rusqlite::params![
-                                            format!("recovery_handled_channel:{ch}"),
-                                            chrono::Utc::now().timestamp().to_string(),
-                                        ],
-                                    )
-                                    .ok();
-                                }
-                            }
-                        }
-
-                        restore_tmux_watchers(&http_for_tmux, &shared_for_tmux2).await;
-                        cleanup_orphan_tmux_sessions(&shared_for_tmux2).await;
-
-                        // Clean up recovery markers
-                        if let Some(ref db) = shared_for_tmux2.db {
-                            if let Ok(conn) = db.lock() {
-                                conn.execute(
-                                    "DELETE FROM kv_meta WHERE key LIKE 'recovery_handled_channel:%'",
-                                    [],
-                                )
-                                .ok();
-                            }
-                        }
-                    }
-
-                    // Execute durable handoffs (post-restart follow-up work)
-                    execute_handoff_turns(
-                        &http_for_restart_reports,
-                        &shared_for_restart_reports,
-                        &provider_for_restore,
-                    )
-                    .await;
-
-                    // #164: Re-deliver orphan pending dispatches from before restart
-                    recover_orphan_pending_dispatches(&shared_for_restart_reports).await;
-
-                    // Kick off turns for channels that have queued messages but no
-                    // active turn. Without this, restored pending queues and handoff
-                    // injections sit idle until the next user message arrives.
-                    kickoff_idle_queues(
-                        &ctx_for_kickoff,
-                        &shared_for_restart_reports,
-                        &token_for_kickoff,
-                        &provider_for_restore,
-                    )
-                    .await;
-
-                    // #122: Reconcile phase complete — open intake
-                    mark_reconcile_complete(&shared_for_restart_reports);
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ✓ Reconcile complete — intake open");
-
-                    // Kick off again to drain messages queued during reconcile window
-                    kickoff_idle_queues(
-                        &ctx_for_kickoff,
-                        &shared_for_restart_reports,
-                        &token_for_kickoff,
-                        &provider_for_restore,
-                    )
-                    .await;
-
-                    // NOW flush restart reports (recovery is done, safe to delete them)
-                    flush_restart_reports(
-                        &http_for_restart_reports,
-                        &shared_for_restart_reports,
-                        &provider_for_restore,
-                    )
-                    .await;
-                    // Continue flushing in a loop for any reports created later
-                    loop {
-                        tokio::time::sleep(RESTART_REPORT_FLUSH_INTERVAL).await;
-                        flush_restart_reports(
-                            &http_for_restart_reports,
-                            &shared_for_restart_reports,
-                            &provider_for_restore,
-                        )
-                        .await;
-                    }
-                });
-
-                // Background: periodic cleanup for stale Discord upload files
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(UPLOAD_CLEANUP_INTERVAL).await;
-                        cleanup_old_uploads(UPLOAD_MAX_AGE);
-                    }
-                });
-
-                // Background: periodic reaper for dead tmux sessions that
-                // still show as working in the DB (catches watcher gaps)
-                #[cfg(unix)]
-                {
-                    let shared_for_reaper = shared_clone.clone();
-                    tokio::spawn(async move {
-                        // Initial delay: let startup recovery finish first
-                        tokio::time::sleep(tokio::time::Duration::from_secs(90)).await;
-                        loop {
-                            reap_dead_tmux_sessions(&shared_for_reaper).await;
-                            tokio::time::sleep(DEAD_SESSION_REAP_INTERVAL).await;
-                        }
-                    });
-                }
-
-                // Background: periodic GC for stale thread sessions in DB
-                // (idle/disconnected thread sessions older than 1 hour)
-                {
-                    let api_port = shared_clone.api_port;
-                    let shared_for_session_gc = shared_clone.clone();
-                    tokio::spawn(async move {
-                        // Run every 10 minutes, initial delay 2 minutes
-                        tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
-                        loop {
-                            gc_stale_fixed_working_sessions(&shared_for_session_gc).await;
-                            gc_stale_thread_sessions_via_api(api_port).await;
-                            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
-                        }
-                    });
-                }
-
-                Ok(Data {
-                    shared: shared_clone,
-                    token: token_owned,
-                    provider,
-                })
-            })
-        })
-        .build();
-
-    let intents = discord_gateway_intents();
-
-    let mut client = serenity::ClientBuilder::new(token, intents)
-        .framework(framework)
-        .await
-        .expect("Failed to create Discord client");
-
-    // Graceful shutdown: on SIGTERM, cancel all tmux watchers before dying
-    let shared_for_signal = shared.clone();
-    let token_for_signal = token.to_string();
-    tokio::spawn(async move {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
-                sigterm.recv().await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] 🛑 SIGTERM received — graceful shutdown");
-
-                // Set global shutdown flag
-                shared_for_signal
-                    .shutting_down
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-
-                // Block dequeue and put router into drain mode so no new
-                // queue/checkpoint mutations occur during shutdown.
-                shared_for_signal
-                    .restart_pending
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-
-                // Cancel all active tmux watchers (quiet exit, no "session ended" messages)
-                for entry in shared_for_signal.tmux_watchers.iter() {
-                    entry
-                        .value()
-                        .cancel
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-
-                // Grace period for watchers to see cancel flag and exit cleanly.
-                // Active turns may also finish during this window.
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-                // ── Critical state persistence (MUST run before any I/O) ──
-                // Save pending queues and last_message_ids FIRST, before any
-                // network calls that might block/timeout and prevent saving.
-
-                let queue_count =
-                    mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
-                if queue_count > 0 {
-                    let ts3 = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts3}] 📋 mailbox persisted {queue_count} pending queue item(s)");
-                }
-
-                // Persist last_message_ids for catch-up polling after restart
-                {
-                    let ids: std::collections::HashMap<u64, u64> = shared_for_signal
-                        .last_message_ids
-                        .iter()
-                        .map(|entry| (entry.key().get(), *entry.value()))
-                        .collect();
-                    if !ids.is_empty() {
-                        runtime_store::save_all_last_message_ids(
-                            provider_for_shutdown.as_str(),
-                            &ids,
-                        );
-                    }
-                }
-
-                // ── Inflight state, restart reports & placeholder updates ──
-                let inflight_states = inflight::load_inflight_states(&provider_for_shutdown);
-
-                // Save restart reports FIRST (disk-only, guaranteed to complete)
-                // before any HTTP calls that might hang/timeout.
-                for state in &inflight_states {
-                    let existing = restart_report::load_restart_report(
-                        &provider_for_shutdown,
-                        state.channel_id,
-                    );
-                    if existing.as_ref().map(|r| r.status.as_str()) == Some("pending") {
-                        continue;
-                    }
-                    let mut report = restart_report::RestartCompletionReport::new(
-                        provider_for_shutdown.clone(),
-                        state.channel_id,
-                        "sigterm",
-                        "dcserver가 SIGTERM으로 종료되었습니다. 재시작 후 작업을 이어받습니다.",
-                    );
-                    report.current_msg_id = Some(state.current_msg_id);
-                    report.channel_name = state.channel_name.clone();
-                    report.user_msg_id = Some(state.user_msg_id);
-                    if let Err(e) = restart_report::save_restart_report(&report) {
-                        eprintln!(
-                            "  ⚠ failed to save restart report for channel {}: {e}",
-                            state.channel_id
-                        );
-                    }
-                }
-                if !inflight_states.is_empty() {
-                    let ts2 = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts2}] 📝 saved {} restart report(s) for inflight channels",
-                        inflight_states.len()
-                    );
-                }
-
-                // Best-effort: update placeholder messages with restart notice.
-                // Each edit gets a 3-second timeout to avoid blocking shutdown.
-                if !inflight_states.is_empty() {
-                    let http = serenity::Http::new(&token_for_signal);
-                    for state in &inflight_states {
-                        let channel = ChannelId::new(state.channel_id);
-                        let msg_id = MessageId::new(state.current_msg_id);
-                        let restart_notice = if state.full_response.trim().is_empty() {
-                            "⚠️ dcserver 재시작으로 중단됨 — 곧 복원됩니다".to_string()
-                        } else {
-                            let partial = formatting::format_for_discord_with_provider(
-                                state.full_response.trim(),
-                                &provider_for_shutdown,
-                            );
-                            format!("{partial}\n\n⚠️ dcserver 재시작으로 중단됨 — 곧 복원됩니다")
-                        };
-                        let edit_fut = channel.edit_message(
-                            &http,
-                            msg_id,
-                            EditMessage::new().content(&restart_notice),
-                        );
-                        match tokio::time::timeout(tokio::time::Duration::from_secs(3), edit_fut)
-                            .await
-                        {
-                            Ok(Ok(_)) => {
-                                let ts_ok = chrono::Local::now().format("%H:%M:%S");
-                                println!(
-                                    "  [{ts_ok}] ✓ Updated placeholder msg {} in channel {}",
-                                    state.current_msg_id, state.channel_id
-                                );
-                            }
-                            Ok(Err(e)) => {
-                                eprintln!(
-                                    "  ⚠ Failed to update placeholder msg {} in channel {}: {e}",
-                                    state.current_msg_id, state.channel_id
-                                );
-                            }
-                            Err(_) => {
-                                eprintln!(
-                                    "  ⚠ Timeout updating placeholder msg {} in channel {}",
-                                    state.current_msg_id, state.channel_id
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // ── Final state snapshot (belt-and-suspenders) ──
-                // During the HTTP placeholder edits above, active turns may have
-                // finished and mutated queues/last_message_ids. Re-save to capture
-                // any changes that occurred after the initial save.
-                {
-                    let queue_count =
-                        mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
-                    if queue_count > 0 {
-                        let ts4 = chrono::Local::now().format("%H:%M:%S");
-                        println!(
-                            "  [{ts4}] 📋 mailbox final drain: {queue_count} pending queue item(s)"
-                        );
-                    }
-                }
-                {
-                    let ids: std::collections::HashMap<u64, u64> = shared_for_signal
-                        .last_message_ids
-                        .iter()
-                        .map(|entry| (entry.key().get(), *entry.value()))
-                        .collect();
-                    if !ids.is_empty() {
-                        runtime_store::save_all_last_message_ids(
-                            provider_for_shutdown.as_str(),
-                            &ids,
-                        );
-                    }
-                }
-
-                // Wait for all providers to finish saving before exiting.
-                // CAS guard: skip if this provider already decremented via deferred restart path.
-                if shared_for_signal
-                    .shutdown_counted
-                    .compare_exchange(
-                        false,
-                        true,
-                        std::sync::atomic::Ordering::AcqRel,
-                        std::sync::atomic::Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    if shared_for_signal
-                        .shutdown_remaining
-                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
-                        == 1
-                    {
-                        std::process::exit(0);
-                    }
-                }
-            }
-        }
-    });
-
-    if let Err(e) = client.start().await {
-        eprintln!("  ✗ {} bot error: {e}", provider_for_error.display_name());
-    }
-}
-
-/// Check if a user is authorized (owner or allowed user)
-/// Returns true if authorized, false if rejected.
-/// On first use, registers the user as owner.
-pub(super) async fn check_auth(
-    user_id: UserId,
-    user_name: &str,
-    shared: &Arc<SharedData>,
-    token: &str,
-) -> bool {
-    let mut settings = shared.settings.write().await;
-    match settings.owner_user_id {
-        None => {
-            // Imprint: register first user as owner
-            settings.owner_user_id = Some(user_id.get());
-            save_bot_settings(token, &settings);
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ★ Owner registered: {user_name} (id:{})",
-                user_id.get()
-            );
-            true
-        }
-        Some(_) => {
-            let uid = user_id.get();
-            if user_is_authorized(&settings, uid) {
-                true
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ✗ Rejected: {user_name} (id:{})", uid);
-                false
-            }
-        }
-    }
-}
-
-fn user_is_authorized(settings: &DiscordBotSettings, user_id: u64) -> bool {
-    settings.allow_all_users
-        || settings.owner_user_id == Some(user_id)
-        || settings.allowed_user_ids.contains(&user_id)
-}
-
-/// Check if a user is the owner (not just allowed)
-pub(super) async fn check_owner(user_id: UserId, shared: &Arc<SharedData>) -> bool {
-    let settings = shared.settings.read().await;
-    settings.owner_user_id == Some(user_id.get())
-}
-
-/// Check for pending DM replies and consume them. The answer text is stored
-/// in the consumed row's context (as `_answer`), and a notification is sent
-/// to the source agent's Discord channel so its session can process the reply.
-pub(super) async fn try_handle_pending_dm_reply(
-    db: &crate::db::Db,
-    msg: &serenity::Message,
-) -> bool {
-    if msg.author.bot || msg.guild_id.is_some() {
-        return false;
-    }
-    let answer = msg.content.trim();
-    if answer.is_empty() {
-        return false;
-    }
-    let user_id_str = msg.author.id.get().to_string();
-    let username = msg.author.name.clone();
-    let db = db.clone();
-    let answer_owned = answer.to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        consume_pending_dm_reply(&db, &user_id_str, &answer_owned)
-    })
-    .await;
-    match result {
-        Ok(Some(info)) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ✉️ DM reply consumed: user={} agent={} id={}",
-                msg.author.id.get(),
-                info.source_agent,
-                info.id
-            );
-
-            // Notify the source agent's Discord channel (inline, not fire-and-forget)
-            if let Err(e) = notify_source_agent(
-                &info.db,
-                &info.source_agent,
-                info.id,
-                info.channel_id.as_deref(),
-                &username,
-                &info.answer,
-            )
-            .await
-            {
-                eprintln!("  [dm-reply] notify source agent failed: {e}");
-                // Record failure in context so readConsumed can detect it
-                let db3 = info.db.clone();
-                let reply_id = info.id;
-                let err_msg = format!("{e}");
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(conn) = db3.separate_conn() {
-                        let _ = conn.execute(
-                            "UPDATE pending_dm_replies SET context = \
-                             json_set(context, '$._notify_failed', json('true'), '$._notify_error', ?1) \
-                             WHERE id = ?2",
-                            rusqlite::params![err_msg, reply_id],
-                        );
-                    }
-                })
-                .await;
-            }
-
-            true
-        }
-        Ok(None) => false,
-        Err(e) => {
-            eprintln!("  [dm-reply] consume task error: {e}");
-            false
-        }
-    }
-}
-
-/// Send a notification to the source agent's Discord channel about the DM reply.
-/// Prefers the stored `channel_id` from the pending row (alt/thread channels);
-/// falls back to `agents.discord_channel_id` only if none was stored.
-async fn notify_source_agent(
-    db: &crate::db::Db,
-    source_agent: &str,
-    reply_id: i64,
-    stored_channel_id: Option<&str>,
-    username: &str,
-    answer: &str,
-) -> Result<(), String> {
-    let token =
-        crate::credential::read_bot_token("announce").ok_or("no announce bot token configured")?;
-
-    // Prefer the stored channel_id from the pending row (supports alt/thread channels)
-    let channel_id: u64 = if let Some(ch) = stored_channel_id {
-        resolve_channel_to_u64(ch)?
-    } else {
-        // Fall back to the agent's primary discord_channel_id
-        let db = db.clone();
-        let agent_name = source_agent.to_string();
-        let ch_opt: Option<String> = tokio::task::spawn_blocking(move || {
-            let conn = db.separate_conn().map_err(|e| format!("{e}"))?;
-            crate::db::agents::resolve_agent_primary_channel_on_conn(&conn, &agent_name)
-                .map_err(|e| format!("{e}"))
-        })
-        .await
-        .map_err(|e| format!("join: {e}"))??;
-        let raw = ch_opt.ok_or("agent has no discord_channel_id")?;
-        resolve_channel_to_u64(&raw)?
-    };
-
-    let message = format!("DM_REPLY:{reply_id} from {username}: {answer}");
-    send_message_to_channel(&token, channel_id, &message)
-        .await
-        .map_err(|e| format!("{e}"))?;
-    Ok(())
-}
-
-/// Parse a channel identifier — numeric ID or name alias (e.g. "윤호네비서") → u64.
-fn resolve_channel_to_u64(raw: &str) -> Result<u64, String> {
-    raw.parse::<u64>().or_else(|_| {
-        crate::server::routes::dispatches::resolve_channel_alias_pub(raw)
-            .ok_or_else(|| format!("cannot resolve channel '{raw}'"))
-    })
-}
-
-/// Retry DM reply notifications that previously failed (`_notify_failed` in context).
-/// Called from the 5-min tick loop.
-pub async fn retry_failed_dm_notifications(db: &crate::db::Db) {
-    let db2 = db.clone();
-    let entries: Vec<(i64, String, String, Option<String>)> =
-        match tokio::task::spawn_blocking(move || {
-            let conn = db2.separate_conn().map_err(|e| format!("{e}"))?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
-                     WHERE status = 'consumed' AND json_extract(context, '$._notify_failed') IS NOT NULL \
-                     LIMIT 10",
-                )
-                .map_err(|e| format!("{e}"))?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .map_err(|e| format!("{e}"))?
-                .filter_map(|r| r.ok())
-                .collect::<Vec<_>>();
-            Ok::<_, String>(rows)
-        })
-        .await
-        {
-            Ok(Ok(v)) => v,
-            _ => return,
-        };
-
-    if entries.is_empty() {
-        return;
-    }
-
-    for (id, source_agent, context_str, channel_id) in entries {
-        let ctx: serde_json::Value =
-            serde_json::from_str(&context_str).unwrap_or(serde_json::json!({}));
-        let answer = ctx
-            .get("_answer")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if answer.is_empty() {
-            continue;
-        }
-
-        match notify_source_agent(
-            db,
-            &source_agent,
-            id,
-            channel_id.as_deref(),
-            "(retry)",
-            &answer,
-        )
-        .await
-        {
-            Ok(()) => {
-                // Clear _notify_failed on success
-                let db3 = db.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(conn) = db3.separate_conn() {
-                        let _ = conn.execute(
-                            "UPDATE pending_dm_replies SET context = \
-                             json_remove(context, '$._notify_failed', '$._notify_error') \
-                             WHERE id = ?1",
-                            rusqlite::params![id],
-                        );
-                    }
-                })
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ✉️ DM reply retry OK: id={id} agent={source_agent}");
-            }
-            Err(e) => {
-                eprintln!("  [dm-reply] retry still failing id={id}: {e}");
-            }
-        }
-    }
-}
-
-struct ConsumedDmReply {
-    id: i64,
-    source_agent: String,
-    answer: String,
-    channel_id: Option<String>,
-    db: crate::db::Db,
-}
-
-fn consume_pending_dm_reply(
-    db: &crate::db::Db,
-    user_id: &str,
-    answer: &str,
-) -> Option<ConsumedDmReply> {
-    let conn = db.separate_conn().ok()?;
-    // FIFO: consume oldest non-expired pending entry
-    let row: Result<(i64, String, String, Option<String>), _> = conn.query_row(
-        "SELECT id, source_agent, context, channel_id FROM pending_dm_replies \
-         WHERE user_id = ?1 AND status = 'pending' \
-         AND (expires_at IS NULL OR expires_at > datetime('now')) \
-         ORDER BY created_at ASC LIMIT 1",
-        rusqlite::params![user_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    );
-    let (id, source_agent, context_str, channel_id) = row.ok()?;
-
-    // Merge the answer into the context JSON
-    let mut context: serde_json::Value =
-        serde_json::from_str(&context_str).unwrap_or(serde_json::json!({}));
-    context["_answer"] = serde_json::Value::String(answer.to_string());
-    let updated_context = serde_json::to_string(&context).unwrap_or_default();
-
-    // CAS: only mark consumed if still pending (guards against race)
-    let updated = conn.execute(
-        "UPDATE pending_dm_replies SET status = 'consumed', consumed_at = datetime('now'), \
-         context = ?1 WHERE id = ?2 AND status = 'pending'",
-        rusqlite::params![updated_context, id],
-    );
-    match updated {
-        Ok(0) => return None, // already consumed by another path
-        Err(_) => return None,
-        _ => {}
-    }
-
-    Some(ConsumedDmReply {
-        id,
-        source_agent,
-        answer: answer.to_string(),
-        channel_id,
-        db: db.clone(),
-    })
-}
-
-/// Rate limit helper — ensures minimum 1s gap between API calls per channel
-pub(super) async fn rate_limit_wait(shared: &Arc<SharedData>, channel_id: ChannelId) {
-    let min_gap = tokio::time::Duration::from_millis(1000);
-    let sleep_until = {
-        let now = tokio::time::Instant::now();
-        let default_ts = now - tokio::time::Duration::from_secs(10);
-        let last_ts = shared
-            .api_timestamps
-            .get(&channel_id)
-            .map(|r| *r.value())
-            .unwrap_or(default_ts);
-        let earliest_next = last_ts + min_gap;
-        let target = if earliest_next > now {
-            earliest_next
-        } else {
-            now
-        };
-        shared.api_timestamps.insert(channel_id, target);
-        target
-    };
-    tokio::time::sleep_until(sleep_until).await;
-}
-
-/// Add a reaction to a message
-async fn add_reaction(
-    ctx: &serenity::Context,
-    channel_id: ChannelId,
-    message_id: MessageId,
-    emoji: char,
-) {
-    let reaction = serenity::ReactionType::Unicode(emoji.to_string());
-    if let Err(e) = channel_id
-        .create_reaction(&ctx.http, message_id, reaction)
-        .await
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!(
-            "  [{ts}] ⚠ Failed to add reaction '{emoji}' to msg {message_id} in channel {channel_id}: {e}"
-        );
-    }
-}
+use discord_io::{
+    add_reaction, check_auth, check_owner, rate_limit_wait, try_handle_pending_dm_reply,
+};
 
 // ─── Event handler ───────────────────────────────────────────────────────────
-
-/// Periodic GC: delete stale idle/disconnected thread sessions from DB via cleanup API.
-async fn gc_stale_thread_sessions_via_api(api_port: u16) {
-    let url = crate::config::local_api_url(api_port, "/api/dispatched-sessions/gc-threads");
-    match reqwest::Client::new().delete(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                let gc = body.get("gc_threads").and_then(|v| v.as_u64()).unwrap_or(0);
-                if gc > 0 {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
-                }
-            }
-        }
-        Ok(resp) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] ⚠ Thread session GC failed: HTTP {}",
-                resp.status()
-            );
-        }
-        Err(e) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ Thread session GC error: {e}");
-        }
-    }
-}
-
-/// Periodic GC: disconnect stale fixed-channel working sessions from the DB so
-/// restart recovery cannot restore dead provider session IDs.
-async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
-    let Some(db) = &shared.db else {
-        return;
-    };
-
-    let cleared = {
-        let conn = match db.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ Fixed-session GC lock error: {e}");
-                return;
-            }
-        };
-        crate::server::routes::dispatched_sessions::gc_stale_fixed_working_sessions_db(&conn)
-    };
-
-    if cleared > 0 {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] 🧹 GC: disconnected {cleared} stale fixed-channel working session(s)");
-    }
-}
 
 /// Periodically clean up idle sessions and their associated data.
 /// Called from handle_event; uses a static Mutex to track the last cleanup time.
@@ -3413,7 +1520,6 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
                 .global_active
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
-        mailbox_remove_channel(shared, *ch);
         shared.api_timestamps.remove(ch);
         shared.tmux_watchers.remove(ch);
     }
@@ -3441,625 +1547,6 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
 // bootstrap_thread_session, resolve_channel_category, and other non-command functions.
 
 // ─── Text message → Claude AI ───────────────────────────────────────────────
-
-/// Handle regular text messages — send to the active provider.
-/// Check if a path is a git repo and if another channel already uses it.
-/// Returns the conflicting channel's name if found.
-pub(super) fn detect_worktree_conflict(
-    sessions: &HashMap<ChannelId, DiscordSession>,
-    path: &str,
-    my_channel: ChannelId,
-) -> Option<String> {
-    let norm = path.trim_end_matches('/');
-    for (cid, session) in sessions {
-        if *cid == my_channel {
-            continue;
-        }
-        let other_path = if let Some(ref wt) = session.worktree {
-            &wt.original_path
-        } else {
-            match &session.current_path {
-                Some(p) => p.as_str(),
-                None => continue,
-            }
-        };
-        if other_path.trim_end_matches('/') == norm {
-            return session
-                .channel_name
-                .clone()
-                .or_else(|| Some(cid.get().to_string()));
-        }
-    }
-    None
-}
-
-/// Create a git worktree for the given repo path.
-/// Returns (worktree_path, branch_name) on success.
-pub(super) fn create_git_worktree(
-    repo_path: &str,
-    channel_name: &str,
-    provider: &str,
-) -> Result<(String, String), String> {
-    let git_check = std::process::Command::new("git")
-        .args(["-C", repo_path, "rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map_err(|e| format!("git check failed: {}", e))?;
-    if !git_check.status.success() {
-        return Err(format!("{} is not a git repository", repo_path));
-    }
-
-    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let safe_name = channel_name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let branch = format!("wt/{}-{}-{}", provider, safe_name, ts);
-
-    let wt_base = worktrees_root().ok_or("Cannot determine worktree root")?;
-    std::fs::create_dir_all(&wt_base)
-        .map_err(|e| format!("Failed to create worktree base dir: {}", e))?;
-    let wt_dir = wt_base.join(format!("{}-{}-{}", provider, safe_name, ts));
-    let wt_path = wt_dir.display().to_string();
-
-    let output = std::process::Command::new("git")
-        .args(["-C", repo_path, "worktree", "add", &wt_path, "-b", &branch])
-        .output()
-        .map_err(|e| format!("git worktree add failed: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git worktree add failed: {}", stderr));
-    }
-
-    let ts_log = chrono::Local::now().format("%H:%M:%S");
-    println!(
-        "  [{ts_log}] 🌿 Created worktree: {} (branch: {})",
-        wt_path, branch
-    );
-    Ok((wt_path, branch))
-}
-
-/// Clean up a git worktree after session ends.
-fn cleanup_git_worktree(wt_info: &WorktreeInfo) {
-    let ts = chrono::Local::now().format("%H:%M:%S");
-
-    let status = std::process::Command::new("git")
-        .args(["-C", &wt_info.worktree_path, "status", "--porcelain"])
-        .output();
-    let has_changes = match &status {
-        Ok(out) => !out.stdout.is_empty(),
-        Err(_) => false,
-    };
-
-    // Check if branch has new commits
-    let diff = std::process::Command::new("git")
-        .args([
-            "-C",
-            &wt_info.original_path,
-            "log",
-            "--oneline",
-            &format!("HEAD..{}", wt_info.branch_name),
-        ])
-        .output();
-    let has_commits = match &diff {
-        Ok(out) => !out.stdout.is_empty(),
-        Err(_) => false,
-    };
-
-    if has_changes || has_commits {
-        println!(
-            "  [{ts}] 🌿 Worktree {} has changes/commits — keeping for manual merge",
-            wt_info.worktree_path
-        );
-        println!(
-            "  [{ts}] 🌿 Branch: {} | Original: {}",
-            wt_info.branch_name, wt_info.original_path
-        );
-    } else {
-        let _ = std::process::Command::new("git")
-            .args([
-                "-C",
-                &wt_info.original_path,
-                "worktree",
-                "remove",
-                &wt_info.worktree_path,
-            ])
-            .output();
-        let _ = std::process::Command::new("git")
-            .args([
-                "-C",
-                &wt_info.original_path,
-                "branch",
-                "-d",
-                &wt_info.branch_name,
-            ])
-            .output();
-        println!(
-            "  [{ts}] 🌿 Cleaned up worktree: {} (no changes)",
-            wt_info.worktree_path
-        );
-    }
-}
-
-// ─── File upload handling ────────────────────────────────────────────────────
-
-// ─── Sendfile (CLI) ──────────────────────────────────────────────────────────
-
-/// Send a file to a Discord channel (called from CLI --discord-sendfile)
-pub async fn send_file_to_channel(
-    token: &str,
-    channel_id: u64,
-    file_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let path = Path::new(file_path);
-    if !path.exists() {
-        return Err(format!("File not found: {}", file_path).into());
-    }
-
-    let http = serenity::Http::new(token);
-
-    let channel = ChannelId::new(channel_id);
-    let attachment = CreateAttachment::path(path).await?;
-
-    channel
-        .send_message(
-            &http,
-            CreateMessage::new()
-                .content(format!(
-                    "📎 {}",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                ))
-                .add_file(attachment),
-        )
-        .await?;
-
-    Ok(())
-}
-
-/// Send a text message to a Discord channel (called from CLI --discord-sendmessage)
-pub async fn send_message_to_channel(
-    token: &str,
-    channel_id: u64,
-    message: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let http = serenity::Http::new(token);
-    let channel = ChannelId::new(channel_id);
-
-    channel
-        .send_message(&http, CreateMessage::new().content(message))
-        .await?;
-
-    Ok(())
-}
-
-/// Send a text message to a Discord user DM (called from CLI --discord-senddm)
-pub async fn send_message_to_user(
-    token: &str,
-    user_id: u64,
-    message: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let http = serenity::Http::new(token);
-    let dm_channel = UserId::new(user_id).create_dm_channel(&http).await?;
-
-    dm_channel
-        .id
-        .send_message(&http, CreateMessage::new().content(message))
-        .await?;
-
-    Ok(())
-}
-
-// ─── Session persistence ─────────────────────────────────────────────────────
-
-/// Auto-restore session from bot_settings.json if not in memory
-pub(super) async fn auto_restore_session(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    serenity_ctx: &serenity::prelude::Context,
-) {
-    if matches!(
-        resolve_runtime_channel_binding_status(&serenity_ctx.http, channel_id).await,
-        RuntimeChannelBindingStatus::Unowned
-    ) {
-        return;
-    }
-
-    // Resolve channel/category before taking the lock for mutation
-    let (live_ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
-    let existing_channel_name = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.channel_name.clone())
-    };
-    let restore_ch_name = choose_restore_channel_name(
-        existing_channel_name.as_deref(),
-        live_ch_name.as_deref(),
-        resolve_thread_parent(&serenity_ctx.http, channel_id).await,
-        channel_id,
-    );
-
-    // Read settings first to get provider and runtime restore metadata.
-    let (last_path, saved_remote, provider) = {
-        let settings = shared.settings.read().await;
-        let provider = settings.provider.clone();
-        let configured_path = settings::resolve_workspace(channel_id, restore_ch_name.as_deref());
-        let saved_remote =
-            load_last_remote_profile(shared.db.as_ref(), &shared.token_hash, channel_id.get());
-
-        // Use the effective tmux channel name here so restart recovery keeps
-        // looking up the same session key for thread sessions that intentionally
-        // use a synthetic "{parent}-t{thread_id}" channel name.
-        let db_cwd: Option<String> = restore_ch_name.as_ref().and_then(|ch| {
-            let tmux_name = provider.build_tmux_session_name(ch);
-            let session_keys =
-                build_session_key_candidates(&shared.token_hash, &provider, &tmux_name);
-            shared.db.as_ref().and_then(|db| {
-                db.lock().ok().and_then(|conn| {
-                    session_keys.iter().find_map(|session_key| {
-                        conn.query_row(
-                            "SELECT cwd FROM sessions WHERE session_key = ?1",
-                            [session_key],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .ok()
-                        .filter(|p| {
-                            !p.is_empty() && session_path_is_usable(p, saved_remote.as_deref())
-                        })
-                    })
-                })
-            })
-        });
-        let persisted_path =
-            load_last_session_path(shared.db.as_ref(), &shared.token_hash, channel_id.get());
-
-        if let (Some(configured), Some(restored)) = (configured_path.as_ref(), db_cwd.as_ref()) {
-            if configured != restored {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ⚠ Ignoring restored DB cwd for channel {}: {} (configured workspace: {})",
-                    channel_id, restored, configured
-                );
-            }
-        }
-
-        let last_path = select_restored_session_path(
-            configured_path,
-            db_cwd,
-            persisted_path,
-            saved_remote.as_deref(),
-        );
-
-        (last_path, saved_remote, provider)
-    };
-
-    let mut data = shared.core.lock().await;
-    if let Some(session) = data.sessions.get_mut(&channel_id) {
-        session.channel_id = Some(channel_id.get());
-        session.last_active = tokio::time::Instant::now();
-        session.channel_name = restore_ch_name.clone();
-        session.category_name = cat_name.clone();
-        if session.remote_profile_name.is_none() {
-            session.remote_profile_name = saved_remote.clone();
-        }
-        if session.current_path.is_some() || last_path.is_none() {
-            return;
-        }
-    }
-
-    if let Some(last_path) = last_path {
-        if session_path_is_usable(&last_path, saved_remote.as_deref()) {
-            // Session ID is restored from DB (sessions.claude_session_id column)
-            // which is already loaded into DiscordSession.session_id at startup.
-            let session = data
-                .sessions
-                .entry(channel_id)
-                .or_insert_with(|| DiscordSession {
-                    session_id: None,
-                    memento_context_loaded: false,
-                    memento_reflected: false,
-                    current_path: None,
-                    history: Vec::new(),
-                    pending_uploads: Vec::new(),
-                    cleared: false,
-                    channel_id: Some(channel_id.get()),
-                    channel_name: restore_ch_name.clone(),
-                    category_name: cat_name.clone(),
-                    remote_profile_name: saved_remote.clone(),
-
-                    last_active: tokio::time::Instant::now(),
-                    worktree: None,
-
-                    born_generation: runtime_store::load_generation(),
-                });
-            session.channel_id = Some(channel_id.get());
-            session.last_active = tokio::time::Instant::now();
-            session.channel_name = restore_ch_name.clone();
-            session.category_name = cat_name.clone();
-            if session.remote_profile_name.is_none() {
-                session.remote_profile_name = saved_remote.clone();
-            }
-            session.current_path = Some(last_path.clone());
-            drop(data);
-
-            // Rescan skills with project path
-            let new_skills = scan_skills(&provider, Some(&last_path));
-            *shared.skills_cache.write().await = new_skills;
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            let remote_info = saved_remote
-                .as_ref()
-                .map(|n| format!(" (remote: {})", n))
-                .unwrap_or_default();
-            println!("  [{ts}] ↻ Auto-restored session: {last_path}{remote_info}");
-        }
-    }
-}
-
-/// Create a lightweight session for a thread, bootstrapped from the parent channel's path.
-/// The session's `channel_name` uses `{parent_channel}-t{thread_id}` so the derived
-/// tmux session name stays short and unique instead of using the full thread title.
-async fn bootstrap_thread_session(
-    shared: &Arc<SharedData>,
-    thread_channel_id: ChannelId,
-    parent_path: &str,
-    serenity_ctx: &serenity::prelude::Context,
-) {
-    let (_thread_title, cat_name) = resolve_channel_category(serenity_ctx, thread_channel_id).await;
-    // Build a short, stable channel_name: "{parent_channel}-t{thread_id}"
-    let parent_info = resolve_thread_parent(&serenity_ctx.http, thread_channel_id).await;
-    let ch_name = if let Some((_parent_id, parent_name)) = parent_info {
-        let parent = parent_name.unwrap_or_else(|| format!("{}", _parent_id));
-        Some(synthetic_thread_channel_name(&parent, thread_channel_id))
-    } else {
-        // Not a thread (shouldn't happen here) — fall back to resolved name
-        _thread_title
-    };
-    let mut data = shared.core.lock().await;
-    if data.sessions.contains_key(&thread_channel_id) {
-        return;
-    }
-
-    // Session ID comes from DB (sessions.claude_session_id), not from file.
-    let session = data
-        .sessions
-        .entry(thread_channel_id)
-        .or_insert_with(|| DiscordSession {
-            session_id: None,
-            memento_context_loaded: false,
-            memento_reflected: false,
-            current_path: None,
-            history: Vec::new(),
-            pending_uploads: Vec::new(),
-            cleared: false,
-            channel_id: Some(thread_channel_id.get()),
-            channel_name: ch_name,
-            category_name: cat_name,
-            remote_profile_name: None,
-            last_active: tokio::time::Instant::now(),
-            worktree: None,
-            born_generation: runtime_store::load_generation(),
-        });
-    // Always create a worktree for thread sessions to isolate concurrent work.
-    let effective_path = {
-        let ch = session.channel_name.as_deref().unwrap_or("unknown");
-        let provider_str = shared.settings.read().await.provider.as_str().to_string();
-        match create_git_worktree(parent_path, ch, &provider_str) {
-            Ok((wt_path, branch)) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] 🌿 Thread worktree created: {} (branch: {})",
-                    wt_path, branch
-                );
-                session.worktree = Some(WorktreeInfo {
-                    original_path: parent_path.to_string(),
-                    worktree_path: wt_path.clone(),
-                    branch_name: branch,
-                });
-                wt_path
-            }
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
-                    "  [{ts}] ⚠ Thread worktree creation failed: {e}, falling back to parent path"
-                );
-                parent_path.to_string()
-            }
-        }
-    };
-    session.current_path = Some(effective_path.clone());
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ↻ Bootstrapped thread session: {effective_path}");
-}
-
-/// Resolve the channel name and parent category name for a Discord channel.
-pub(super) async fn resolve_channel_category(
-    ctx: &serenity::prelude::Context,
-    channel_id: serenity::model::id::ChannelId,
-) -> (Option<String>, Option<String>) {
-    let Ok(channel) = channel_id.to_channel(&ctx.http).await else {
-        return (None, None);
-    };
-    let serenity::model::channel::Channel::Guild(gc) = channel else {
-        return (None, None);
-    };
-    let ch_name = Some(gc.name.clone());
-    let cat_name = if let Some(parent_id) = gc.parent_id {
-        let cached_cat_name = ctx.cache.guild(gc.guild_id).and_then(|guild| {
-            guild
-                .channels
-                .get(&parent_id)
-                .map(|parent_ch| parent_ch.name.clone())
-        });
-
-        if let Some(cat_name) = cached_cat_name {
-            Some(cat_name)
-        } else if let Ok(parent_ch) = parent_id.to_channel(&ctx.http).await {
-            match parent_ch {
-                serenity::model::channel::Channel::Guild(cat) => Some(cat.name.clone()),
-                _ => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ⚠ Category channel {parent_id} is not a Guild channel for #{}",
-                        gc.name
-                    );
-                    None
-                }
-            }
-        } else {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⚠ Failed to resolve category {parent_id} for #{}",
-                gc.name
-            );
-            None
-        }
-    } else {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] ⚠ No parent_id for #{}", gc.name);
-        None
-    };
-    (ch_name, cat_name)
-}
-
-pub(in crate::services::discord) async fn validate_live_channel_routing_with_dm_hint(
-    ctx: &serenity::prelude::Context,
-    provider: &ProviderKind,
-    settings: &DiscordBotSettings,
-    channel_id: serenity::model::id::ChannelId,
-    is_dm_hint: Option<bool>,
-) -> Result<(), settings::BotChannelRoutingGuardFailure> {
-    let is_dm = match is_dm_hint {
-        Some(is_dm) => is_dm,
-        None => matches!(
-            channel_id.to_channel(&ctx.http).await,
-            Ok(serenity::model::channel::Channel::Private(_))
-        ),
-    };
-    let (channel_name, _) = resolve_channel_category(ctx, channel_id).await;
-    let (allowlist_channel_id, provider_channel_name) = if let Some((parent_id, parent_name)) =
-        resolve_thread_parent(&ctx.http, channel_id).await
-    {
-        (parent_id, parent_name.or(channel_name.clone()))
-    } else {
-        (channel_id, channel_name.clone())
-    };
-    validate_bot_channel_routing_with_provider_channel(
-        settings,
-        provider,
-        allowlist_channel_id,
-        channel_name.as_deref(),
-        provider_channel_name.as_deref(),
-        is_dm,
-    )
-}
-
-pub(in crate::services::discord) async fn validate_live_channel_routing(
-    ctx: &serenity::prelude::Context,
-    provider: &ProviderKind,
-    settings: &DiscordBotSettings,
-    channel_id: serenity::model::id::ChannelId,
-) -> Result<(), settings::BotChannelRoutingGuardFailure> {
-    validate_live_channel_routing_with_dm_hint(ctx, provider, settings, channel_id, None).await
-}
-
-pub(super) async fn provider_handles_channel(
-    ctx: &serenity::prelude::Context,
-    provider: &ProviderKind,
-    settings: &DiscordBotSettings,
-    channel_id: serenity::model::id::ChannelId,
-) -> bool {
-    validate_live_channel_routing(ctx, provider, settings, channel_id)
-        .await
-        .is_ok()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RuntimeChannelBindingStatus {
-    Owned,
-    Unowned,
-    Unknown,
-}
-
-pub(super) async fn resolve_runtime_channel_binding_status(
-    http: &Arc<serenity::Http>,
-    channel_id: serenity::model::id::ChannelId,
-) -> RuntimeChannelBindingStatus {
-    if settings::has_configured_channel_binding(channel_id, None) {
-        return RuntimeChannelBindingStatus::Owned;
-    }
-
-    let Ok(channel) = channel_id.to_channel(http).await else {
-        return RuntimeChannelBindingStatus::Unknown;
-    };
-
-    match channel {
-        serenity::model::channel::Channel::Private(_) => RuntimeChannelBindingStatus::Owned,
-        serenity::model::channel::Channel::Guild(gc) => {
-            use serenity::model::channel::ChannelType;
-            match gc.kind {
-                ChannelType::PublicThread | ChannelType::PrivateThread => {
-                    let Some(parent_id) = gc.parent_id else {
-                        return RuntimeChannelBindingStatus::Unowned;
-                    };
-                    let parent_name = match parent_id.to_channel(http).await {
-                        Ok(serenity::model::channel::Channel::Guild(parent)) => {
-                            Some(parent.name.clone())
-                        }
-                        Ok(_) => None,
-                        Err(_) => None,
-                    };
-                    if settings::has_configured_channel_binding(parent_id, parent_name.as_deref()) {
-                        RuntimeChannelBindingStatus::Owned
-                    } else {
-                        RuntimeChannelBindingStatus::Unowned
-                    }
-                }
-                _ => {
-                    if settings::has_configured_channel_binding(channel_id, Some(&gc.name)) {
-                        RuntimeChannelBindingStatus::Owned
-                    } else {
-                        RuntimeChannelBindingStatus::Unowned
-                    }
-                }
-            }
-        }
-        _ => RuntimeChannelBindingStatus::Unowned,
-    }
-}
-
-/// If `channel_id` is a Discord thread, return the parent channel ID and name.
-/// For non-thread channels, returns `None`.
-pub(super) async fn resolve_thread_parent(
-    http: &Arc<serenity::Http>,
-    channel_id: serenity::model::id::ChannelId,
-) -> Option<(serenity::model::id::ChannelId, Option<String>)> {
-    let channel = channel_id.to_channel(http).await.ok()?;
-    let serenity::model::channel::Channel::Guild(gc) = channel else {
-        return None;
-    };
-    use serenity::model::channel::ChannelType;
-    match gc.kind {
-        ChannelType::PublicThread | ChannelType::PrivateThread => {
-            let parent_id = gc.parent_id?;
-            let parent_name = if let Ok(parent_ch) = parent_id.to_channel(http).await {
-                match parent_ch {
-                    serenity::model::channel::Channel::Guild(pg) => Some(pg.name.clone()),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            Some((parent_id, parent_name))
-        }
-        _ => None,
-    }
-}
 
 /// Enrich role_map.json's byChannelName entries with channelId from byChannelId.
 /// This enables reliable channel name → ID resolution without provider inference hacks.
@@ -4176,146 +1663,41 @@ fn enrich_role_map_with_channel_ids() {
 
 #[cfg(test)]
 mod tests {
+    use super::runtime_bootstrap::discord_gateway_intents;
     use super::{ChannelId, MessageId, UserId};
     use super::{
-        DiscordBotSettings, DiscordSession, Intervention, InterventionMode, PendingQueueItem,
-        allows_nonlocal_session_path, channel_has_pending_soft_queue_at,
-        choose_restore_channel_name, discord_gateway_intents, is_allowed_turn_sender,
-        is_synthetic_thread_channel_name, load_pending_queues, recovery_known_message_ids,
-        requeue_intervention_front_persisted, save_channel_queue, save_pending_queues,
-        select_restored_session_path, session_path_is_usable, should_phase2_recover_message,
-        synthetic_thread_channel_name, take_next_soft_intervention_persisted, user_is_authorized,
-        watcher_should_kickoff_idle_queue,
+        DiscordBotSettings, Intervention, InterventionMode, is_allowed_turn_sender,
+        recovery_known_message_ids, should_phase2_recover_message,
     };
     use crate::services::discord::settings::{
         BotChannelRoutingGuardFailure, validate_bot_channel_routing,
     };
-    use crate::services::discord::{
-        runtime_store::test_env_lock, should_process_allowed_bot_turn_text,
-    };
-    use crate::services::provider::{CancelToken, ProviderKind};
+    use crate::services::discord::should_process_allowed_bot_turn_text;
+    use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::GatewayIntents;
-    use std::collections::{HashMap, HashSet};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::collections::HashSet;
+    use std::time::Instant;
 
     #[test]
-    fn discord_gateway_intents_do_not_include_reaction_events() {
+    fn discord_gateway_intents_include_reaction_events() {
         let intents = discord_gateway_intents();
 
-        assert!(!intents.contains(GatewayIntents::GUILD_MESSAGE_REACTIONS));
-        assert!(!intents.contains(GatewayIntents::DIRECT_MESSAGE_REACTIONS));
+        assert!(intents.contains(GatewayIntents::GUILD_MESSAGE_REACTIONS));
+        assert!(intents.contains(GatewayIntents::DIRECT_MESSAGE_REACTIONS));
     }
 
     #[test]
-    fn synthetic_thread_channel_name_round_trips() {
-        let channel_id = ChannelId::new(12345);
-        let synthetic = synthetic_thread_channel_name("agentdesk-codex", channel_id);
-
-        assert_eq!(synthetic, "agentdesk-codex-t12345");
-        assert!(is_synthetic_thread_channel_name(&synthetic, channel_id));
-        assert!(!is_synthetic_thread_channel_name(
-            "agentdesk-codex",
-            channel_id
-        ));
-    }
-
-    #[test]
-    fn choose_restore_channel_name_prefers_existing_synthetic_thread_name() {
-        let channel_id = ChannelId::new(12345);
-        let chosen = choose_restore_channel_name(
-            Some("agentdesk-codex-t12345"),
-            Some("새 스레드 제목"),
-            Some((ChannelId::new(777), Some("agentdesk-codex".to_string()))),
-            channel_id,
-        );
-
-        assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
-    }
-
-    #[test]
-    fn choose_restore_channel_name_builds_synthetic_name_for_threads() {
-        let channel_id = ChannelId::new(12345);
-        let chosen = choose_restore_channel_name(
-            None,
-            Some("새 스레드 제목"),
-            Some((ChannelId::new(777), Some("agentdesk-codex".to_string()))),
-            channel_id,
-        );
-
-        assert_eq!(chosen.as_deref(), Some("agentdesk-codex-t12345"));
-    }
-
-    #[test]
-    fn choose_restore_channel_name_keeps_existing_name_when_live_metadata_missing() {
-        let channel_id = ChannelId::new(12345);
-        let chosen = choose_restore_channel_name(Some("agentdesk-codex"), None, None, channel_id);
-
-        assert_eq!(chosen.as_deref(), Some("agentdesk-codex"));
-    }
-
-    #[test]
-    fn restore_provider_session_preserves_memento_flags_for_same_session() {
-        let mut session = DiscordSession {
-            session_id: Some("same-session".to_string()),
-            memento_context_loaded: true,
-            memento_reflected: true,
-            current_path: None,
-            history: Vec::new(),
-            pending_uploads: Vec::new(),
-            cleared: false,
-            channel_id: None,
-            channel_name: None,
-            category_name: None,
-            remote_profile_name: None,
-            last_active: tokio::time::Instant::now(),
-            worktree: None,
-            born_generation: 0,
-        };
-
-        session.restore_provider_session(Some("same-session".to_string()));
-        assert!(session.memento_context_loaded);
-        assert!(session.memento_reflected);
-
-        session.restore_provider_session(Some("next-session".to_string()));
-        assert_eq!(session.session_id.as_deref(), Some("next-session"));
-        assert!(!session.memento_context_loaded);
-        assert!(!session.memento_reflected);
-    }
-
-    #[test]
-    fn user_is_authorized_allows_owner_and_explicit_users() {
-        let settings = DiscordBotSettings {
-            owner_user_id: Some(42),
-            allowed_user_ids: vec![7],
-            ..Default::default()
-        };
-
-        assert!(user_is_authorized(&settings, 42));
-        assert!(user_is_authorized(&settings, 7));
-        assert!(!user_is_authorized(&settings, 99));
-    }
-
-    #[test]
-    fn user_is_authorized_allows_everyone_when_flag_enabled() {
-        let settings = DiscordBotSettings {
-            owner_user_id: Some(42),
-            allow_all_users: true,
-            ..Default::default()
-        };
-
-        assert!(user_is_authorized(&settings, 42));
-        assert!(user_is_authorized(&settings, 99));
-    }
-
-    #[test]
-    fn allowed_bot_review_only_text_is_rejected_even_without_bot_flag() {
+    fn allowed_bot_all_messages_accepted() {
         let allowed_bot_ids = vec![123];
         let review_only = "⚠️ 검토 전용 — 작업 착수 금지";
         let dispatch = "DISPATCH: abc123\n작업 시작";
+        let agent_msg = "completion_guard 수정해줘";
 
-        assert!(!should_process_allowed_bot_turn_text(review_only));
-        assert!(!is_allowed_turn_sender(
+        // All announce bot messages trigger turns
+        assert!(should_process_allowed_bot_turn_text(review_only));
+        assert!(should_process_allowed_bot_turn_text(dispatch));
+        assert!(should_process_allowed_bot_turn_text(agent_msg));
+        assert!(is_allowed_turn_sender(
             &allowed_bot_ids,
             123,
             false,
@@ -4326,6 +1708,12 @@ mod tests {
             123,
             false,
             dispatch
+        ));
+        assert!(is_allowed_turn_sender(
+            &allowed_bot_ids,
+            123,
+            false,
+            agent_msg
         ));
     }
 
@@ -4360,96 +1748,6 @@ mod tests {
     }
 
     #[test]
-    fn allows_nonlocal_session_path_requires_remote_profile_name() {
-        assert!(allows_nonlocal_session_path(Some("mac-mini")));
-        assert!(!allows_nonlocal_session_path(Some("")));
-        assert!(!allows_nonlocal_session_path(None));
-    }
-
-    #[test]
-    fn session_path_is_usable_for_remote_nonlocal_path() {
-        assert!(session_path_is_usable("~/repo", Some("mac-mini")));
-    }
-
-    #[test]
-    fn channel_has_pending_soft_queue_detects_live_backlog() {
-        let channel_id = ChannelId::new(12345);
-        let created_at = Instant::now();
-        let mut queues = HashMap::new();
-        queues.insert(
-            channel_id,
-            vec![Intervention {
-                author_id: UserId::new(42),
-                message_id: MessageId::new(7),
-                text: "pending".to_string(),
-                mode: InterventionMode::Soft,
-                created_at,
-            }],
-        );
-
-        assert!(channel_has_pending_soft_queue_at(
-            &mut queues,
-            channel_id,
-            created_at
-        ));
-        assert!(queues.contains_key(&channel_id));
-    }
-
-    #[test]
-    fn channel_has_pending_soft_queue_prunes_expired_entries() {
-        let channel_id = ChannelId::new(12345);
-        let created_at = Instant::now();
-        let mut queues = HashMap::new();
-        queues.insert(
-            channel_id,
-            vec![Intervention {
-                author_id: UserId::new(42),
-                message_id: MessageId::new(7),
-                text: "stale".to_string(),
-                mode: InterventionMode::Soft,
-                created_at,
-            }],
-        );
-
-        assert!(!channel_has_pending_soft_queue_at(
-            &mut queues,
-            channel_id,
-            created_at + super::INTERVENTION_TTL + Duration::from_secs(1)
-        ));
-        assert!(!queues.contains_key(&channel_id));
-    }
-
-    #[test]
-    fn watcher_should_kickoff_idle_queue_requires_idle_channel() {
-        let channel_id = ChannelId::new(12345);
-        let mut queues = HashMap::new();
-        queues.insert(
-            channel_id,
-            vec![Intervention {
-                author_id: UserId::new(42),
-                message_id: MessageId::new(7),
-                text: "pending".to_string(),
-                mode: InterventionMode::Soft,
-                created_at: Instant::now(),
-            }],
-        );
-
-        assert!(watcher_should_kickoff_idle_queue(
-            false,
-            &mut queues,
-            channel_id
-        ));
-
-        let mut busy_cancel_tokens = HashMap::new();
-        busy_cancel_tokens.insert(channel_id, Arc::new(CancelToken::new()));
-        assert!(!watcher_should_kickoff_idle_queue(
-            busy_cancel_tokens.contains_key(&channel_id),
-            &mut queues,
-            channel_id
-        ));
-    }
-
-    #[test]
     fn handoff_routing_guard_rejects_wrong_agent_settings() {
         let settings = DiscordBotSettings {
             provider: ProviderKind::Codex,
@@ -4470,392 +1768,48 @@ mod tests {
     }
 
     #[test]
-    fn select_restored_session_path_prefers_configured_workspace() {
-        let selected = select_restored_session_path(
-            Some("/new/workspace".to_string()),
-            Some("/old/workspace".to_string()),
-            Some("/yaml/workspace".to_string()),
-            Some("remote"),
-        );
+    fn startup_recovery_source_prioritizes_catch_up_and_backgrounds_thread_map_validation() {
+        let source = include_str!("runtime_bootstrap.rs");
+        let start = source
+            .find("// Restore inflight turns FIRST, then flush restart reports.")
+            .expect("startup recovery block comment missing");
+        let end = source[start..]
+            .find("// Background: periodic cleanup for stale Discord upload files")
+            .map(|offset| start + offset)
+            .expect("startup recovery block terminator missing");
+        let startup_block = &source[start..end];
 
-        assert_eq!(selected.as_deref(), Some("/new/workspace"));
-    }
+        let catch_up = startup_block
+            .find("catch_up_missed_messages(")
+            .expect("catch-up call missing");
+        let gc = startup_block
+            .find("gc_stale_fixed_working_sessions(&shared_for_tmux2).await;")
+            .expect("gc call missing");
+        let restore = startup_block
+            .find("restore_inflight_turns(")
+            .expect("restore_inflight_turns call missing");
+        let intake_open = startup_block
+            .find("✓ Reconcile complete — intake open")
+            .expect("reconcile completion log missing");
+        let background_validation = startup_block
+            .find("spawn_startup_thread_map_validation(db, token_for_kickoff.clone());")
+            .expect("background thread-map validation spawn missing");
 
-    #[test]
-    fn select_restored_session_path_falls_back_when_configured_missing() {
-        let selected = select_restored_session_path(
-            None,
-            Some("/db/workspace".to_string()),
-            Some("/yaml/workspace".to_string()),
-            Some("remote"),
-        );
-
-        assert_eq!(selected.as_deref(), Some("/db/workspace"));
-    }
-
-    // ─── Pending queue isolation tests ───────────────────────────────────────
-    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
-
-    fn make_intervention(text: &str) -> Intervention {
-        Intervention {
-            author_id: UserId::new(1),
-            message_id: MessageId::new(100),
-            text: text.to_string(),
-            mode: InterventionMode::Soft,
-            created_at: Instant::now(),
-        }
-    }
-
-    fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
-        test_env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Queue files must land under `{provider}/{token_hash}/` — not the legacy flat path.
-    #[test]
-    fn pending_queue_path_uses_token_hash() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "abc123";
-        let channel_id = ChannelId::new(999);
-
-        let queue = vec![make_intervention("hello")];
-        save_channel_queue(&provider, token_hash, channel_id, &queue, None);
-
-        // File must exist under token_hash subdirectory
-        let expected = tmp
-            .path()
-            .join("runtime")
-            .join("discord_pending_queue")
-            .join("claude")
-            .join(token_hash)
-            .join(format!("{}.json", channel_id.get()));
         assert!(
-            expected.exists(),
-            "queue file not found at expected path: {expected:?}"
+            catch_up < gc,
+            "catch-up must run before stale fixed-working-session cleanup"
         );
-
-        // Legacy flat path must NOT exist
-        let legacy = tmp
-            .path()
-            .join("runtime")
-            .join("discord_pending_queue")
-            .join("claude")
-            .join(format!("{}.json", channel_id.get()));
         assert!(
-            !legacy.exists(),
-            "queue file must not be written to legacy flat path"
+            catch_up < restore,
+            "catch-up must run before inflight restore so restart-gap messages queue immediately"
         );
-
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
-    }
-
-    /// Bot A writes a queue; Bot B (different token_hash) must not see it on load.
-    #[test]
-    fn load_pending_queues_only_reads_own_namespace() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-
-        let provider = ProviderKind::Claude;
-        let channel_id = ChannelId::new(42);
-
-        // Bot A saves
-        save_channel_queue(
-            &provider,
-            "hash_bot_a",
-            channel_id,
-            &[make_intervention("from A")],
-            None,
-        );
-
-        // Bot B loads — must get nothing
-        let (result, _overrides) = load_pending_queues(&provider, "hash_bot_b");
-        assert!(result.is_empty(), "bot B must not restore bot A's queue");
-
-        // Bot A loads — must get its own item
-        let (result, _overrides) = load_pending_queues(&provider, "hash_bot_a");
-        assert_eq!(result.len(), 1, "bot A must restore its own queue");
-        assert_eq!(result[&channel_id][0].text, "from A");
-
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
-    }
-
-    /// save_pending_queues + load_pending_queues round-trip with token_hash namespacing.
-    #[test]
-    fn save_pending_queues_roundtrip() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "roundtrip_hash";
-        let ch1 = ChannelId::new(1);
-        let ch2 = ChannelId::new(2);
-
-        let mut queues = std::collections::HashMap::new();
-        queues.insert(ch1, vec![make_intervention("msg1")]);
-        queues.insert(
-            ch2,
-            vec![make_intervention("msg2a"), make_intervention("msg2b")],
-        );
-
-        save_pending_queues(&provider, token_hash, &queues, &dashmap::DashMap::new());
-
-        // load_pending_queues deletes files after reading
-        let (restored, _restored_overrides) = load_pending_queues(&provider, token_hash);
-        assert_eq!(restored.get(&ch1).map(|v| v.len()), Some(1));
-        assert_eq!(restored.get(&ch2).map(|v| v.len()), Some(2));
-
-        // Files should be gone after load
-        let dir = tmp
-            .path()
-            .join("runtime")
-            .join("discord_pending_queue")
-            .join("claude")
-            .join(token_hash);
-        let remaining: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert!(
-            remaining.is_empty(),
-            "load must delete queue files after reading"
+            background_validation > intake_open,
+            "thread-map validation must not block reconcile completion or kickoff"
         );
-
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
-    }
-
-    #[test]
-    fn persisted_queue_helpers_keep_remaining_items_and_restore_requeued_item() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "preserve_roundtrip";
-        let channel_id = ChannelId::new(41);
-        let alt_channel = ChannelId::new(99);
-
-        let mut queues = std::collections::HashMap::new();
-        queues.insert(
-            channel_id,
-            vec![make_intervention("first"), make_intervention("second")],
-        );
-        let overrides: dashmap::DashMap<ChannelId, ChannelId> = dashmap::DashMap::new();
-        overrides.insert(channel_id, alt_channel);
-        save_pending_queues(&provider, token_hash, &queues, &overrides);
-
-        let (popped, has_more) = take_next_soft_intervention_persisted(
-            &provider,
-            token_hash,
-            channel_id,
-            &mut queues,
-            &overrides,
-        )
-        .expect("queue item should be popped");
-        assert_eq!(popped.text, "first");
-        assert!(has_more);
-        assert_eq!(queues.get(&channel_id).map(|items| items.len()), Some(1));
-
-        let file = tmp
-            .path()
-            .join("runtime")
-            .join("discord_pending_queue")
-            .join("claude")
-            .join(token_hash)
-            .join(format!("{}.json", channel_id.get()));
-        let content = std::fs::read_to_string(&file).unwrap();
-        let items: Vec<PendingQueueItem> = serde_json::from_str(&content).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].text, "second");
-        assert_eq!(items[0].override_channel_id, Some(alt_channel.get()));
-
-        requeue_intervention_front_persisted(
-            &provider,
-            token_hash,
-            channel_id,
-            &mut queues,
-            &overrides,
-            popped,
-        );
-
-        let content = std::fs::read_to_string(&file).unwrap();
-        let items: Vec<PendingQueueItem> = serde_json::from_str(&content).unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].text, "first");
-        assert_eq!(items[1].text, "second");
-        assert_eq!(items[0].override_channel_id, Some(alt_channel.get()));
-        assert_eq!(items[1].override_channel_id, Some(alt_channel.get()));
-
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
-    }
-
-    /// PendingQueueItem serializes routing snapshot fields and deserializes with defaults for old format.
-    #[test]
-    fn pending_queue_item_serde_backward_compatible() {
-        // Old format (no routing snapshot fields)
-        let old_json = r#"[{"author_id":1,"message_id":100,"text":"hello"}]"#;
-        let items: Vec<PendingQueueItem> = serde_json::from_str(old_json).unwrap();
-        assert_eq!(items[0].text, "hello");
-        assert!(items[0].channel_id.is_none());
-        assert!(items[0].channel_name.is_none());
-        assert!(items[0].override_channel_id.is_none());
-
-        // New format (with routing snapshot)
-        let new_item = PendingQueueItem {
-            author_id: 1,
-            message_id: 100,
-            text: "hello".to_string(),
-            channel_id: Some(42),
-            channel_name: Some("test-channel".to_string()),
-            override_channel_id: None,
-        };
-        let json = serde_json::to_string(&new_item).unwrap();
-        let parsed: PendingQueueItem = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.channel_id, Some(42));
-        assert_eq!(parsed.channel_name.as_deref(), Some("test-channel"));
-    }
-
-    // ─── P2: Regression tests ─────────────────────────────────────────────────
-
-    /// P2: Two bots with empty or duplicate `agent` labels but different token hashes
-    /// must not collide — the namespace key is token_hash, not agent.
-    #[test]
-    fn agent_empty_or_duplicate_does_not_collide_namespace() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-
-        let provider = ProviderKind::Claude;
-        let ch = ChannelId::new(77);
-
-        // Both bots have the same agent label (or empty), different token hashes
-        save_channel_queue(&provider, "hash_x", ch, &[make_intervention("bot-x")], None);
-        save_channel_queue(&provider, "hash_y", ch, &[make_intervention("bot-y")], None);
-
-        // Each bot must only see its own queue
-        let (result_x, _) = load_pending_queues(&provider, "hash_x");
-        let (result_y, _) = load_pending_queues(&provider, "hash_y");
-
-        assert_eq!(result_x.get(&ch).map(|v| v[0].text.as_str()), Some("bot-x"));
-        assert_eq!(result_y.get(&ch).map(|v| v[0].text.as_str()), Some("bot-y"));
-
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
-    }
-
-    /// P2: review/reused thread override_channel_id survives a save/load round-trip.
-    /// This ensures dispatch_role_overrides are not lost on restart.
-    #[test]
-    fn review_thread_override_preserved_across_restart() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "review_hash";
-        let thread_channel = ChannelId::new(500);
-        let alt_channel = ChannelId::new(501);
-
-        // Save queue with override_channel_id set (simulating a review thread)
-        save_channel_queue(
-            &provider,
-            token_hash,
-            thread_channel,
-            &[make_intervention("review msg")],
-            Some(alt_channel.get()),
-        );
-
-        // Load and verify override is restored
-        let (queues, overrides) = load_pending_queues(&provider, token_hash);
-        assert_eq!(queues.get(&thread_channel).map(|v| v.len()), Some(1));
-        assert_eq!(
-            overrides.get(&thread_channel).copied(),
-            Some(alt_channel),
-            "override_channel_id must be restored from queue snapshot"
-        );
-
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
-    }
-
-    /// P2: save_pending_queues captures dispatch_role_overrides into override_channel_id.
-    #[test]
-    fn save_pending_queues_captures_dispatch_role_overrides() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-
-        let provider = ProviderKind::Claude;
-        let token_hash = "override_test";
-        let ch = ChannelId::new(300);
-        let alt_ch = ChannelId::new(301);
-
-        let mut queues = std::collections::HashMap::new();
-        queues.insert(ch, vec![make_intervention("queued msg")]);
-
-        let overrides: dashmap::DashMap<ChannelId, ChannelId> = dashmap::DashMap::new();
-        overrides.insert(ch, alt_ch);
-
-        save_pending_queues(&provider, token_hash, &queues, &overrides);
-
-        // Verify the file contains override_channel_id
-        let dir = tmp
-            .path()
-            .join("runtime")
-            .join("discord_pending_queue")
-            .join("claude")
-            .join(token_hash);
-        let file = dir.join(format!("{}.json", ch.get()));
-        let content = std::fs::read_to_string(&file).unwrap();
-        let items: Vec<PendingQueueItem> = serde_json::from_str(&content).unwrap();
-        assert_eq!(items[0].override_channel_id, Some(alt_ch.get()));
-
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
-    }
-
-    /// P2: Legacy flat queue files (old path without token_hash) are NOT loaded
-    /// by load_pending_queues, which only reads from the token_hash subdirectory.
-    #[test]
-    fn legacy_flat_queue_file_is_not_restored() {
-        let _lock = lock_test_env();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-
-        let provider = ProviderKind::Claude;
-        let ch = ChannelId::new(999);
-
-        // Write a legacy flat file directly under {provider}/ (no token_hash dir)
-        let legacy_dir = tmp
-            .path()
-            .join("runtime")
-            .join("discord_pending_queue")
-            .join("claude");
-        std::fs::create_dir_all(&legacy_dir).unwrap();
-        let legacy_file = legacy_dir.join(format!("{}.json", ch.get()));
-        let item = PendingQueueItem {
-            author_id: 1,
-            message_id: 100,
-            text: "legacy msg".to_string(),
-            channel_id: None,
-            channel_name: None,
-            override_channel_id: None,
-        };
-        std::fs::write(&legacy_file, serde_json::to_string(&vec![item]).unwrap()).unwrap();
-
-        // load_pending_queues with any token_hash must NOT see the legacy file
-        let (result, _) = load_pending_queues(&provider, "any_hash");
         assert!(
-            result.is_empty(),
-            "legacy flat file must not be restored by load_pending_queues"
+            !startup_block.contains("validate_channel_thread_maps_on_startup("),
+            "startup critical path must not await thread-map validation directly"
         );
-
-        // Legacy file must still exist (load_pending_queues must not delete files outside its dir)
-        assert!(
-            legacy_file.exists(),
-            "load_pending_queues must not delete legacy files"
-        );
-
-        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
     }
 }

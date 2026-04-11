@@ -50,6 +50,9 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         .as_ref()
         .map(|stats| stats.oldest_pending_age)
         .unwrap_or(0);
+    let config_audit_report =
+        crate::services::discord::config_audit::load_persisted_report(&state.db)
+            .and_then(|report| serde_json::to_value(report).ok());
 
     if let Some(ref registry) = state.health_registry {
         let discord_snapshot = health::build_health_snapshot(registry).await;
@@ -82,6 +85,9 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         if let Some(stats) = outbox_json {
             json["dispatch_outbox"] = stats;
         }
+        if let Some(report) = config_audit_report.clone() {
+            json["config_audit"] = report;
+        }
 
         let http_status = if status.is_http_ready() {
             StatusCode::OK
@@ -109,6 +115,9 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
         });
         if let Some(stats) = outbox_json {
             json["dispatch_outbox"] = stats;
+        }
+        if let Some(report) = config_audit_report {
+            json["config_audit"] = report;
         }
         (status, Json(json)).into_response()
     }
@@ -144,24 +153,6 @@ pub async fn senddm_handler(State(state): State<AppState>, body: Bytes) -> Respo
 
     let body_str = String::from_utf8_lossy(&body);
     let (status_str, response_body) = health::handle_senddm(registry, &body_str).await;
-    let status = parse_status_code(status_str);
-    let json: serde_json::Value =
-        serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
-    (status, Json(json)).into_response()
-}
-
-/// POST /api/session/start — start a session via API.
-pub async fn session_start_handler(State(state): State<AppState>, body: Bytes) -> Response {
-    let Some(ref registry) = state.health_registry else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"ok": false, "error": "Discord not available (standalone mode)"})),
-        )
-            .into_response();
-    };
-
-    let body_str = String::from_utf8_lossy(&body);
-    let (status_str, response_body) = health::handle_session_start(registry, &body_str).await;
     let status = parse_status_code(status_str);
     let json: serde_json::Value =
         serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));

@@ -333,6 +333,35 @@ rm -rf "$SKILLS_STAGED"
 mkdir -p "$SKILLS_STAGED"
 rsync -a --delete "$REPO/skills/" "$SKILLS_STAGED/"
 
+# Wait for active turns to finish before stopping the server.
+# Without this, the SIGTERM interrupts mid-response, cutting off output.
+REL_PORT="${AGENTDESK_REL_PORT:-8791}"
+TURN_WAIT_MAX=120
+TURN_WAIT=0
+_health_busy_count() {
+    local health_json
+    health_json=$(curl -sf "http://127.0.0.1:${REL_PORT}/api/health" 2>/dev/null) || { echo "0"; return; }
+    local active finalizing queue_depth
+    active=$(echo "$health_json" | grep -o '"global_active":[0-9]*' | cut -d: -f2 || echo "0")
+    finalizing=$(echo "$health_json" | grep -o '"global_finalizing":[0-9]*' | cut -d: -f2 || echo "0")
+    queue_depth=$(echo "$health_json" | grep -o '"queue_depth":[0-9]*' | cut -d: -f2 || echo "0")
+    echo $(( ${active:-0} + ${finalizing:-0} + ${queue_depth:-0} ))
+}
+BUSY=$(_health_busy_count)
+if [ "${BUSY}" -gt 0 ]; then
+    echo "▸ Waiting for active/finalizing turns and queued interventions to drain (${BUSY} pending)..."
+    while [ "${BUSY}" -gt 0 ] && [ "$TURN_WAIT" -lt "$TURN_WAIT_MAX" ]; do
+        sleep 2
+        TURN_WAIT=$((TURN_WAIT + 2))
+        BUSY=$(_health_busy_count)
+    done
+    if [ "${BUSY}" -gt 0 ]; then
+        echo "  ⚠ ${BUSY} pending item(s) remain after ${TURN_WAIT_MAX}s — proceeding anyway"
+    else
+        echo "  ✓ Active turns and queued interventions drained (${TURN_WAIT}s)"
+    fi
+fi
+
 # Stop release — wait for process to actually die (flock release)
 echo "▸ Stopping release..."
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"

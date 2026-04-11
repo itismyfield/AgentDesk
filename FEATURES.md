@@ -86,7 +86,6 @@ Two tables manage the auto-queue:
 | `/api/auto-queue/generate` | POST | Manual generation trigger |
 | `/api/auto-queue/activate` | POST | Manual activation trigger |
 | `/api/auto-queue/status` | GET | Current queue status |
-| `/api/auto-queue/enqueue` | POST | Manual card enqueue |
 | `/api/auto-queue/entries/{id}/skip` | PATCH | Skip queue entry |
 | `/api/auto-queue/runs/{id}` | PATCH | Update run |
 | `/api/auto-queue/reorder` | PATCH | Reorder queue |

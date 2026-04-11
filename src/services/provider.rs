@@ -26,7 +26,7 @@ pub enum ProviderKind {
     Unsupported(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderCapabilities {
     pub binary_name: &'static str,
     pub supports_structured_output: bool,
@@ -50,7 +50,123 @@ pub struct ProviderDefaultBehavior {
     pub source_label: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderRegistryEntry {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub cli_init_label: &'static str,
+    pub channel_suffix: Option<&'static str>,
+    pub default_channel_provider: bool,
+    pub counterpart_provider_ids: &'static [&'static str],
+    pub capabilities: ProviderCapabilities,
+    pub default_behavior: ProviderDefaultBehavior,
+    pub default_context_window: u64,
+    pub managed_tmux_backend: bool,
+}
+
+const CLAUDE_COUNTERPARTS: &[&str] = &["codex", "gemini", "qwen"];
+const CODEX_COUNTERPARTS: &[&str] = &["claude", "gemini", "qwen"];
+const GEMINI_COUNTERPARTS: &[&str] = &["codex", "claude", "qwen"];
+const QWEN_COUNTERPARTS: &[&str] = &["codex", "claude", "gemini"];
+
+const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
+    ProviderRegistryEntry {
+        id: "claude",
+        display_name: "Claude",
+        cli_init_label: "claude (Anthropic)",
+        channel_suffix: Some("-cc"),
+        default_channel_provider: true,
+        counterpart_provider_ids: CLAUDE_COUNTERPARTS,
+        capabilities: ProviderCapabilities {
+            binary_name: "claude",
+            supports_structured_output: true,
+            supports_resume: true,
+            supports_tool_stream: true,
+        },
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: Some("default"),
+            source_label: "Claude default alias",
+        },
+        default_context_window: 1_000_000,
+        managed_tmux_backend: true,
+    },
+    ProviderRegistryEntry {
+        id: "codex",
+        display_name: "Codex",
+        cli_init_label: "codex (OpenAI)",
+        channel_suffix: Some("-cdx"),
+        default_channel_provider: false,
+        counterpart_provider_ids: CODEX_COUNTERPARTS,
+        capabilities: ProviderCapabilities {
+            binary_name: "codex",
+            supports_structured_output: true,
+            supports_resume: true,
+            supports_tool_stream: true,
+        },
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: 200_000,
+        managed_tmux_backend: true,
+    },
+    ProviderRegistryEntry {
+        id: "gemini",
+        display_name: "Gemini",
+        cli_init_label: "gemini (Google)",
+        channel_suffix: Some("-gm"),
+        default_channel_provider: false,
+        counterpart_provider_ids: GEMINI_COUNTERPARTS,
+        capabilities: ProviderCapabilities {
+            binary_name: "gemini",
+            supports_structured_output: true,
+            supports_resume: true,
+            supports_tool_stream: true,
+        },
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: 1_000_000,
+        managed_tmux_backend: false,
+    },
+    ProviderRegistryEntry {
+        id: "qwen",
+        display_name: "Qwen Code",
+        cli_init_label: "qwen (Alibaba)",
+        channel_suffix: Some("-qw"),
+        default_channel_provider: false,
+        counterpart_provider_ids: QWEN_COUNTERPARTS,
+        capabilities: ProviderCapabilities {
+            binary_name: "qwen",
+            supports_structured_output: true,
+            supports_resume: true,
+            supports_tool_stream: true,
+        },
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: 128_000,
+        managed_tmux_backend: true,
+    },
+];
+
+pub fn provider_registry() -> &'static [ProviderRegistryEntry] {
+    PROVIDER_REGISTRY
+}
+
 impl ProviderKind {
+    pub fn registry_entry(&self) -> Option<&'static ProviderRegistryEntry> {
+        provider_registry()
+            .iter()
+            .find(|entry| entry.id == self.as_str() && !matches!(self, Self::Unsupported(_)))
+    }
+
     pub fn as_str(&self) -> &str {
         match self {
             Self::Claude => "claude",
@@ -62,72 +178,78 @@ impl ProviderKind {
     }
 
     pub fn display_name(&self) -> &str {
-        match self {
-            Self::Claude => "Claude",
-            Self::Codex => "Codex",
-            Self::Gemini => "Gemini",
-            Self::Qwen => "Qwen Code",
-            Self::Unsupported(s) => s.as_str(),
-        }
+        self.registry_entry()
+            .map(|entry| entry.display_name)
+            .unwrap_or_else(|| match self {
+                Self::Unsupported(s) => s.as_str(),
+                _ => self.as_str(),
+            })
+    }
+
+    pub fn preferred_counterparts(&self) -> Vec<Self> {
+        self.registry_entry()
+            .map(|entry| {
+                entry
+                    .counterpart_provider_ids
+                    .iter()
+                    .filter_map(|provider_id| Self::from_str(provider_id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn select_counterpart_from<I>(&self, available: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        let available: Vec<Self> = available.into_iter().collect();
+        self.preferred_counterparts().into_iter().find(|candidate| {
+            available
+                .iter()
+                .any(|available_provider| available_provider == candidate)
+        })
+    }
+
+    pub fn default_channel_provider() -> Option<Self> {
+        provider_registry()
+            .iter()
+            .find(|entry| entry.default_channel_provider)
+            .and_then(|entry| Self::from_str(entry.id))
+    }
+
+    pub fn from_channel_suffix(channel_name: &str) -> Option<Self> {
+        provider_registry()
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .channel_suffix
+                    .filter(|suffix| channel_name.ends_with(suffix))
+                    .and_then(|_| Self::from_str(entry.id))
+            })
+            .next()
     }
 
     pub fn counterpart(&self) -> Self {
-        match self {
-            Self::Claude => Self::Codex,
-            Self::Codex => Self::Claude,
-            Self::Gemini => Self::Codex,
-            Self::Qwen => Self::Codex,
-            Self::Unsupported(_) => self.clone(),
-        }
+        self.preferred_counterparts()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| self.clone())
     }
 
     pub fn capabilities(&self) -> Option<ProviderCapabilities> {
-        match self {
-            Self::Claude => Some(ProviderCapabilities {
-                binary_name: "claude",
-                supports_structured_output: true,
-                supports_resume: true,
-                supports_tool_stream: true,
-            }),
-            Self::Codex => Some(ProviderCapabilities {
-                binary_name: "codex",
-                supports_structured_output: true,
-                supports_resume: true,
-                supports_tool_stream: true,
-            }),
-            Self::Gemini => Some(ProviderCapabilities {
-                binary_name: "gemini",
-                supports_structured_output: true,
-                supports_resume: true,
-                supports_tool_stream: true,
-            }),
-            Self::Qwen => Some(ProviderCapabilities {
-                binary_name: "qwen",
-                supports_structured_output: true,
-                supports_resume: true,
-                supports_tool_stream: true,
-            }),
-            Self::Unsupported(_) => None,
-        }
+        self.registry_entry().map(|entry| entry.capabilities)
     }
 
     /// Provider-specific behavior when AgentDesk clears its explicit model
     /// override and falls through to the provider-managed default path.
     pub fn default_model_behavior(&self) -> ProviderDefaultBehavior {
-        match self {
-            Self::Claude => ProviderDefaultBehavior {
+        self.registry_entry()
+            .map(|entry| entry.default_behavior)
+            .unwrap_or(ProviderDefaultBehavior {
                 resume_without_reset: true,
-                runtime_model: Some("default"),
-                source_label: "Claude default alias",
-            },
-            Self::Codex | Self::Gemini | Self::Qwen | Self::Unsupported(_) => {
-                ProviderDefaultBehavior {
-                    resume_without_reset: true,
-                    runtime_model: None,
-                    source_label: "provider default",
-                }
-            }
-        }
+                runtime_model: None,
+                source_label: "provider default",
+            })
     }
 
     #[allow(dead_code)]
@@ -160,18 +282,41 @@ impl ProviderKind {
 
     /// Parse a known provider string. Returns None for unknown providers.
     pub fn from_str(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            "gemini" => Some(Self::Gemini),
-            "qwen" => Some(Self::Qwen),
-            _ => None,
-        }
+        let normalized = raw.trim().to_ascii_lowercase();
+        provider_registry()
+            .iter()
+            .find(|entry| entry.id == normalized)
+            .and_then(|entry| match entry.id {
+                "claude" => Some(Self::Claude),
+                "codex" => Some(Self::Codex),
+                "gemini" => Some(Self::Gemini),
+                "qwen" => Some(Self::Qwen),
+                _ => None,
+            })
     }
 
-    /// Parse a provider string, returning Unsupported for unknown providers.
-    pub fn from_str_or_unsupported(raw: &str) -> Self {
-        Self::from_str(raw).unwrap_or_else(|| Self::Unsupported(raw.trim().to_string()))
+    pub fn cli_init_labels() -> Vec<&'static str> {
+        provider_registry()
+            .iter()
+            .map(|entry| entry.cli_init_label)
+            .collect()
+    }
+
+    pub fn provider_for_cli_init_index(index: usize) -> Option<Self> {
+        provider_registry()
+            .get(index)
+            .and_then(|entry| Self::from_str(entry.id))
+    }
+
+    pub fn resolve_channel_provider(
+        channel_name: Option<&str>,
+        explicit_provider: Option<&ProviderKind>,
+    ) -> Option<Self> {
+        explicit_provider
+            .cloned()
+            .filter(ProviderKind::is_supported)
+            .or_else(|| channel_name.and_then(Self::from_channel_suffix))
+            .or_else(Self::default_channel_provider)
     }
 
     /// Returns true if this is a known, supported provider.
@@ -179,32 +324,22 @@ impl ProviderKind {
         !matches!(self, Self::Unsupported(_))
     }
 
-    pub fn is_channel_supported(&self, channel_name: Option<&str>, is_dm: bool) -> bool {
+    pub fn is_channel_supported(
+        &self,
+        channel_name: Option<&str>,
+        is_dm: bool,
+        explicit_provider: Option<&ProviderKind>,
+    ) -> bool {
         if is_dm {
             return self.is_supported();
         }
+        Self::resolve_channel_provider(channel_name, explicit_provider)
+            .is_some_and(|provider| provider == *self)
+    }
 
-        let Some(channel_name) = channel_name else {
-            return matches!(self, Self::Claude);
-        };
-
-        if channel_name.ends_with("-cdx") {
-            return matches!(self, Self::Codex);
-        }
-
-        if channel_name.ends_with("-cc") {
-            return matches!(self, Self::Claude);
-        }
-
-        if channel_name.ends_with("-gm") {
-            return matches!(self, Self::Gemini);
-        }
-
-        if channel_name.ends_with("-qw") {
-            return matches!(self, Self::Qwen);
-        }
-
-        matches!(self, Self::Claude)
+    /// Parse a provider string, returning Unsupported for unknown providers.
+    pub fn from_str_or_unsupported(raw: &str) -> Self {
+        Self::from_str(raw).unwrap_or_else(|| Self::Unsupported(raw.trim().to_string()))
     }
 
     /// Returns provider-specific environment variables for auto-compact configuration.
@@ -224,13 +359,9 @@ impl ProviderKind {
 
     /// Default context window size in tokens for this provider.
     pub fn default_context_window(&self) -> u64 {
-        match self {
-            Self::Claude => 1_000_000, // Claude Code (Sonnet/Opus)
-            Self::Codex => 200_000,    // Codex CLI fallback
-            Self::Gemini => 1_000_000,
-            Self::Qwen => 128_000,
-            Self::Unsupported(_) => 200_000,
-        }
+        self.registry_entry()
+            .map(|entry| entry.default_context_window)
+            .unwrap_or(200_000)
     }
 
     /// Resolve the context window for a specific model, falling back to
@@ -262,7 +393,9 @@ impl ProviderKind {
     /// Returns true when this provider can own a reusable local tmux/process
     /// session that AgentDesk may need to clear or pre-seed in inflight state.
     pub fn uses_managed_tmux_backend(&self) -> bool {
-        matches!(self, Self::Claude | Self::Codex | Self::Qwen)
+        self.registry_entry()
+            .map(|entry| entry.managed_tmux_backend)
+            .unwrap_or(false)
     }
 
     pub fn build_tmux_session_name(&self, channel_name: &str) -> String {
@@ -313,19 +446,15 @@ pub fn parse_provider_and_channel_from_tmux_name(
     } else {
         stripped
     };
-    if let Some(rest) = without_suffix.strip_prefix("claude-") {
-        return Some((ProviderKind::Claude, rest.to_string()));
+    for entry in provider_registry() {
+        let prefix = format!("{}-", entry.id);
+        if let Some(rest) = without_suffix.strip_prefix(&prefix) {
+            if let Some(provider) = ProviderKind::from_str(entry.id) {
+                return Some((provider, rest.to_string()));
+            }
+        }
     }
-    if let Some(rest) = without_suffix.strip_prefix("codex-") {
-        return Some((ProviderKind::Codex, rest.to_string()));
-    }
-    if let Some(rest) = without_suffix.strip_prefix("gemini-") {
-        return Some((ProviderKind::Gemini, rest.to_string()));
-    }
-    if let Some(rest) = without_suffix.strip_prefix("qwen-") {
-        return Some((ProviderKind::Qwen, rest.to_string()));
-    }
-    Some((ProviderKind::Claude, without_suffix.to_string()))
+    ProviderKind::default_channel_provider().map(|provider| (provider, without_suffix.to_string()))
 }
 
 pub fn compose_structured_turn_prompt(
@@ -798,7 +927,7 @@ mod tests {
         StreamAttemptResult, StreamFinalState, cancel_requested, compose_structured_turn_prompt,
         fold_read_output_result, followup_result_from_read_output_result, is_readonly_tool_policy,
         parse_provider_and_channel_from_tmux_name, poll_output_file_until_result,
-        register_child_pid, run_retrying_stream_attempts,
+        provider_registry, register_child_pid, run_retrying_stream_attempts,
     };
     use crate::dispatch::extract_thread_channel_id;
 
@@ -836,18 +965,34 @@ mod tests {
 
     #[test]
     fn test_provider_channel_support() {
-        assert!(ProviderKind::Claude.is_channel_supported(Some("mac-mini"), false));
-        assert!(ProviderKind::Claude.is_channel_supported(Some("cookingheart-dev-cc"), false));
-        assert!(!ProviderKind::Claude.is_channel_supported(Some("cookingheart-dev-cdx"), false));
-        assert!(ProviderKind::Codex.is_channel_supported(Some("cookingheart-dev-cdx"), false));
-        assert!(!ProviderKind::Codex.is_channel_supported(Some("cookingheart-dev-cc"), false));
-        assert!(ProviderKind::Codex.is_channel_supported(None, true));
-        assert!(ProviderKind::Gemini.is_channel_supported(Some("research-gm"), false));
-        assert!(!ProviderKind::Gemini.is_channel_supported(Some("research-cc"), false));
-        assert!(ProviderKind::Gemini.is_channel_supported(None, true));
-        assert!(ProviderKind::Qwen.is_channel_supported(Some("sandbox-qw"), false));
-        assert!(!ProviderKind::Qwen.is_channel_supported(Some("sandbox-cc"), false));
-        assert!(ProviderKind::Qwen.is_channel_supported(None, true));
+        assert!(ProviderKind::Claude.is_channel_supported(Some("mac-mini"), false, None));
+        assert!(ProviderKind::Claude.is_channel_supported(
+            Some("cookingheart-dev-cc"),
+            false,
+            None
+        ));
+        assert!(!ProviderKind::Claude.is_channel_supported(
+            Some("cookingheart-dev-cdx"),
+            false,
+            None
+        ));
+        assert!(ProviderKind::Codex.is_channel_supported(
+            Some("cookingheart-dev-cdx"),
+            false,
+            None
+        ));
+        assert!(!ProviderKind::Codex.is_channel_supported(
+            Some("cookingheart-dev-cc"),
+            false,
+            None
+        ));
+        assert!(ProviderKind::Codex.is_channel_supported(None, true, None));
+        assert!(ProviderKind::Gemini.is_channel_supported(Some("research-gm"), false, None));
+        assert!(!ProviderKind::Gemini.is_channel_supported(Some("research-cc"), false, None));
+        assert!(ProviderKind::Gemini.is_channel_supported(None, true, None));
+        assert!(ProviderKind::Qwen.is_channel_supported(Some("sandbox-qw"), false, None));
+        assert!(!ProviderKind::Qwen.is_channel_supported(Some("sandbox-cc"), false, None));
+        assert!(ProviderKind::Qwen.is_channel_supported(None, true, None));
     }
 
     #[test]
@@ -856,9 +1001,9 @@ mod tests {
         assert!(!p.is_supported());
         assert_eq!(p.as_str(), "gpt");
         assert_eq!(p.display_name(), "gpt");
-        assert!(!p.is_channel_supported(Some("test-cc"), false));
-        assert!(!p.is_channel_supported(Some("test"), false));
-        assert!(!p.is_channel_supported(None, true));
+        assert!(!p.is_channel_supported(Some("test-cc"), false, None));
+        assert!(!p.is_channel_supported(Some("test"), false, None));
+        assert!(!p.is_channel_supported(None, true, None));
     }
 
     #[test]
@@ -990,14 +1135,52 @@ mod tests {
 
     #[test]
     fn test_is_channel_supported_cc_suffix() {
-        assert!(ProviderKind::Claude.is_channel_supported(Some("dev-cc"), false));
-        assert!(!ProviderKind::Codex.is_channel_supported(Some("dev-cc"), false));
+        assert!(ProviderKind::Claude.is_channel_supported(Some("dev-cc"), false, None));
+        assert!(!ProviderKind::Codex.is_channel_supported(Some("dev-cc"), false, None));
     }
 
     #[test]
     fn test_is_channel_supported_cdx_suffix() {
-        assert!(ProviderKind::Codex.is_channel_supported(Some("dev-cdx"), false));
-        assert!(!ProviderKind::Claude.is_channel_supported(Some("dev-cdx"), false));
+        assert!(ProviderKind::Codex.is_channel_supported(Some("dev-cdx"), false, None));
+        assert!(!ProviderKind::Claude.is_channel_supported(Some("dev-cdx"), false, None));
+    }
+
+    #[test]
+    fn test_registry_exposes_all_supported_cli_init_providers() {
+        let labels: Vec<&str> = provider_registry()
+            .iter()
+            .map(|entry| entry.cli_init_label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "claude (Anthropic)",
+                "codex (OpenAI)",
+                "gemini (Google)",
+                "qwen (Alibaba)"
+            ]
+        );
+        assert_eq!(
+            ProviderKind::provider_for_cli_init_index(3),
+            Some(ProviderKind::Qwen)
+        );
+    }
+
+    #[test]
+    fn test_resolve_channel_provider_prefers_explicit_metadata_before_suffix() {
+        assert_eq!(
+            ProviderKind::resolve_channel_provider(Some("mixed-cdx"), Some(&ProviderKind::Gemini)),
+            Some(ProviderKind::Gemini)
+        );
+    }
+
+    #[test]
+    fn test_from_channel_suffix_supports_qwen() {
+        assert_eq!(
+            ProviderKind::from_channel_suffix("sandbox-qw"),
+            Some(ProviderKind::Qwen)
+        );
+        assert_eq!(ProviderKind::from_channel_suffix("plain"), None);
     }
 
     // ── #157 suffix preservation tests ─────────────────────────────────

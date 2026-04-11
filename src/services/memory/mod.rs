@@ -15,7 +15,7 @@ use crate::services::provider::ProviderKind;
 pub(crate) use local::LocalMemoryBackend;
 pub(crate) use mem0::Mem0Backend;
 pub(crate) use memento::{
-    MementoBackend, resolve_memento_agent_id, resolve_memento_workspace,
+    MementoBackend, MementoRememberRequest, resolve_memento_agent_id, resolve_memento_workspace,
     sanitize_memento_workspace_segment,
 };
 pub(crate) use runtime_state::{backend_is_active, backend_state, refresh_backend_health};

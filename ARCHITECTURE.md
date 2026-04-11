@@ -282,7 +282,6 @@ Registered in `server/routes/mod.rs`. All endpoints prefixed with `/api/` except
 | `/api/auto-queue/generate` | POST | auto_queue.rs | Manual queue generation |
 | `/api/auto-queue/activate` | POST | auto_queue.rs | Manual activation |
 | `/api/auto-queue/status` | GET | auto_queue.rs | Queue status |
-| `/api/auto-queue/enqueue` | POST | auto_queue.rs | Manual card enqueue |
 | `/api/offices` | GET, POST | offices.rs | Office CRUD |
 | `/api/departments` | GET, POST | departments.rs | Department CRUD |
 | `/api/github/repos` | GET, POST | github.rs | GitHub integration |

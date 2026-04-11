@@ -37,7 +37,6 @@ pub async fn auth_middleware(
     if path == "/health"
         || path == "/send"
         || path == "/senddm"
-        || path == "/session/start"
         || path == "/auth/session"
         || path.starts_with("/hook/")
         || path.starts_with("/internal/")

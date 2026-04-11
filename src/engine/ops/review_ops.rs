@@ -7,12 +7,31 @@ pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let review_obj = Object::new(ctx.clone())?;
 
-    let db_verdict = db;
+    let db_verdict = db.clone();
     review_obj.set(
         "__getVerdictRaw",
         Function::new(ctx.clone(), move |card_id: String| -> String {
             review_get_verdict_raw(&db_verdict, &card_id)
         })?,
+    )?;
+
+    let db_entry = db.clone();
+    review_obj.set(
+        "__entryContextRaw",
+        Function::new(ctx.clone(), move |card_id: String| -> String {
+            review_entry_context_raw(&db_entry, &card_id)
+        })?,
+    )?;
+
+    let db_record = db;
+    review_obj.set(
+        "__recordEntryRaw",
+        Function::new(
+            ctx.clone(),
+            move |card_id: String, opts_json: String| -> String {
+                review_record_entry_raw(&db_record, &card_id, &opts_json)
+            },
+        )?,
     )?;
 
     ad.set("review", review_obj)?;
@@ -25,6 +44,16 @@ pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 var result = JSON.parse(review.__getVerdictRaw(cardId || ""));
                 if (result.error) throw new Error(result.error);
                 return result.review || null;
+            };
+            review.entryContext = function(cardId) {
+                var result = JSON.parse(review.__entryContextRaw(cardId || ""));
+                if (result.error) throw new Error(result.error);
+                return result.entry || null;
+            };
+            review.recordEntry = function(cardId, opts) {
+                var result = JSON.parse(review.__recordEntryRaw(cardId || "", JSON.stringify(opts || {})));
+                if (result.error) throw new Error(result.error);
+                return result;
             };
         })();
         "#,
@@ -86,6 +115,109 @@ fn review_get_verdict_raw(db: &Db, card_id: &str) -> String {
             .optional()?;
 
         Ok(json!({ "review": review }))
+    })();
+
+    match result {
+        Ok(value) => value.to_string(),
+        Err(err) => json!({ "error": err.to_string() }).to_string(),
+    }
+}
+
+fn review_entry_context_raw(db: &Db, card_id: &str) -> String {
+    let result = (|| -> anyhow::Result<serde_json::Value> {
+        if card_id.trim().is_empty() {
+            return Err(anyhow::anyhow!("review.entryContext requires card_id"));
+        }
+
+        let conn = db.read_conn()?;
+        let entry = conn
+            .query_row(
+                "SELECT COALESCE(kc.review_round, 0), \
+                        (SELECT COUNT(*) FROM task_dispatches td \
+                         WHERE td.kanban_card_id = kc.id \
+                           AND td.dispatch_type IN ('implementation', 'rework') \
+                           AND td.status = 'completed') \
+                 FROM kanban_cards kc \
+                 WHERE kc.id = ?1",
+                [card_id],
+                |row| {
+                    let current_round = row.get::<_, i64>(0)?;
+                    let completed_work_count = row.get::<_, i64>(1)?;
+                    let should_advance_round =
+                        current_round == 0 || completed_work_count > current_round;
+                    let next_round = if should_advance_round {
+                        current_round + 1
+                    } else {
+                        current_round
+                    };
+                    Ok(json!({
+                        "card_id": card_id,
+                        "current_round": current_round,
+                        "completed_work_count": completed_work_count,
+                        "should_advance_round": should_advance_round,
+                        "next_round": next_round,
+                    }))
+                },
+            )
+            .optional()?;
+
+        Ok(json!({ "entry": entry }))
+    })();
+
+    match result {
+        Ok(value) => value.to_string(),
+        Err(err) => json!({ "error": err.to_string() }).to_string(),
+    }
+}
+
+fn review_record_entry_raw(db: &Db, card_id: &str, opts_json: &str) -> String {
+    let result = (|| -> anyhow::Result<serde_json::Value> {
+        if card_id.trim().is_empty() {
+            return Err(anyhow::anyhow!("review.recordEntry requires card_id"));
+        }
+
+        let opts: serde_json::Value = if opts_json.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(opts_json)
+                .map_err(|e| anyhow::anyhow!("invalid review.recordEntry opts: {e}"))?
+        };
+
+        let conn = db.separate_conn()?;
+        let review_round = opts.get("review_round").and_then(|value| value.as_i64());
+        let exclude_status = opts
+            .get("exclude_status")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty());
+
+        let changed = match (review_round, exclude_status) {
+            (Some(round), Some(status)) => conn.execute(
+                "UPDATE kanban_cards SET review_round = ?1, updated_at = datetime('now') \
+                 WHERE id = ?2 AND status != ?3",
+                rusqlite::params![round, card_id, status],
+            )?,
+            (Some(round), None) => conn.execute(
+                "UPDATE kanban_cards SET review_round = ?1, updated_at = datetime('now') \
+                 WHERE id = ?2",
+                rusqlite::params![round, card_id],
+            )?,
+            (None, Some(status)) => conn.execute(
+                "UPDATE kanban_cards SET updated_at = datetime('now') \
+                 WHERE id = ?1 AND status != ?2",
+                rusqlite::params![card_id, status],
+            )?,
+            (None, None) => conn.execute(
+                "UPDATE kanban_cards SET updated_at = datetime('now') \
+                 WHERE id = ?1",
+                rusqlite::params![card_id],
+            )?,
+        };
+
+        Ok(json!({
+            "ok": true,
+            "rows_affected": changed,
+            "changed": changed > 0,
+        }))
     })();
 
     match result {

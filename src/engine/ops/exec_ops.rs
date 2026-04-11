@@ -96,6 +96,7 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                                     "channel_id": channel_id,
                                     "provider": provider,
                                     "started_at": data.get("started_at").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "updated_at": data.get("updated_at").and_then(|v| v.as_str()).unwrap_or(""),
                                     "channel_name": channel_name,
                                     "tmux_session_name": tmux_name,
                                     "session_id": data.get("session_id").and_then(|v| v.as_str()).unwrap_or(""),

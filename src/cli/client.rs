@@ -99,6 +99,55 @@ fn post_json(path: &str, body: Option<Value>) -> Result<Value, String> {
     request_json("POST", path, body_string.as_deref())
 }
 
+fn parse_github_repo_from_remote(remote: &str) -> Option<String> {
+    crate::services::platform::shell::parse_github_repo_from_remote(remote)
+}
+
+fn infer_dispatch_repo(repo: Option<&str>) -> Option<String> {
+    if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(repo.to_string());
+    }
+
+    let repo_dir = crate::services::platform::resolve_repo_dir()?;
+    let output = std::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let remote = String::from_utf8_lossy(&output.stdout);
+    parse_github_repo_from_remote(&remote)
+}
+
+fn parse_dispatch_groups(issue_groups: &[String]) -> Result<Vec<Value>, String> {
+    if issue_groups.is_empty() {
+        return Err("provide one or more issue groups or use a dispatch subcommand".to_string());
+    }
+
+    let mut groups = Vec::with_capacity(issue_groups.len());
+    for raw_group in issue_groups {
+        let issues: Vec<i64> = raw_group
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid issue number in group '{raw_group}': {value}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if issues.is_empty() {
+            return Err(format!("issue group '{raw_group}' is empty"));
+        }
+        groups.push(serde_json::json!({
+            "issues": issues,
+            "sequential": raw_group.contains(','),
+        }));
+    }
+
+    Ok(groups)
+}
+
 fn find_card_for_issue(issue_number: &str) -> Result<Value, String> {
     let cards = get_json("/api/kanban-cards")?;
     let issue_number: i64 = issue_number
@@ -181,6 +230,41 @@ fn dispatch_context_string_field(dispatch: Option<&Value>, key: &str) -> Option<
         .and_then(|context| context.get(key))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+fn render_queue_thread_links(entry: &Value) -> String {
+    let rendered: Vec<String> = entry
+        .get("thread_links")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|link| {
+            let label = link
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            if let Some(url) = link
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(format!("{label}:{url}"));
+            }
+            link.get("thread_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|thread_id| format!("{label}:thread:{thread_id}"))
+        })
+        .collect();
+
+    if rendered.is_empty() {
+        "-".to_string()
+    } else {
+        rendered.join(" | ")
+    }
 }
 
 fn build_cli_advance_completion_result(card: &Value, pending_dispatch: Option<&Value>) -> Value {
@@ -489,6 +573,45 @@ pub fn cmd_dispatch_list() -> Result<(), String> {
     Ok(())
 }
 
+/// `agentdesk dispatch 423,405 407 --unified --concurrent 2`
+pub fn cmd_dispatch(
+    issue_groups: &[String],
+    repo: Option<&str>,
+    agent_id: Option<&str>,
+    unified: bool,
+    concurrent: Option<i64>,
+    activate: bool,
+) -> Result<(), String> {
+    if let Some(value) = concurrent {
+        if value < 1 {
+            return Err("--concurrent must be >= 1".to_string());
+        }
+    }
+
+    let groups = parse_dispatch_groups(issue_groups)?;
+    let mut body = serde_json::json!({
+        "groups": groups,
+        "activate": activate,
+    });
+    if unified {
+        body["unified_thread"] = serde_json::json!(true);
+    }
+    if let Some(concurrent) = concurrent {
+        body["max_concurrent_threads"] = serde_json::json!(concurrent);
+    }
+    if let Some(agent_id) = agent_id.map(str::trim).filter(|value| !value.is_empty()) {
+        body["agent_id"] = serde_json::json!(agent_id);
+        body["auto_assign_agent"] = serde_json::json!(true);
+    }
+    if let Some(repo) = infer_dispatch_repo(repo) {
+        body["repo"] = serde_json::json!(repo);
+    }
+
+    let value = post_json("/api/auto-queue/dispatch", Some(body))?;
+    print_json(&value);
+    Ok(())
+}
+
 /// `agentdesk dispatch retry <card_id>`
 pub fn cmd_dispatch_retry(card_id: &str) -> Result<(), String> {
     let value = post_json(
@@ -549,6 +672,31 @@ pub fn cmd_config_set(json_str: &str) -> Result<(), String> {
     let payload = normalized.to_string();
     let value = request_json("PUT", "/api/settings/runtime-config", Some(&payload))?;
     print_json(&value);
+    Ok(())
+}
+
+/// `agentdesk config audit [--dry-run]`
+pub fn cmd_config_audit(dry_run: bool) -> Result<(), String> {
+    let root = crate::config::runtime_root()
+        .ok_or_else(|| "Failed to resolve AGENTDESK_ROOT_DIR".to_string())?;
+    let legacy_scan = crate::services::discord::config_audit::scan_legacy_sources(&root);
+
+    if !dry_run {
+        crate::runtime_layout::ensure_runtime_layout(&root)?;
+    }
+
+    let loaded = crate::services::discord::config_audit::load_runtime_config(&root)?;
+    let db = crate::db::init(&loaded.config).map_err(|err| err.to_string())?;
+    let outcome = crate::services::discord::config_audit::audit_and_reconcile(
+        &root,
+        loaded.config,
+        loaded.path,
+        loaded.existed,
+        &db,
+        &legacy_scan,
+        dry_run,
+    )?;
+    print_json(&serde_json::to_value(outcome.report).map_err(|err| err.to_string())?);
     Ok(())
 }
 
@@ -648,16 +796,6 @@ pub fn cmd_queue() -> Result<(), String> {
     );
     println!("{}", "-".repeat(100));
 
-    // Get unified_thread_id map for thread links
-    let thread_map: serde_json::Map<String, Value> = run["unified_thread_id"]
-        .as_str()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .or_else(|| run["unified_thread_id"].as_object().cloned())
-        .unwrap_or_default();
-
-    // Discord server ID — derive from channel IDs in thread_map
-    let discord_server = "1470762182344966308"; // TODO: make configurable
-
     for e in entries {
         let num = e["github_issue_number"].as_i64().unwrap_or(0);
         let status = e["status"].as_str().unwrap_or("?");
@@ -667,26 +805,7 @@ pub fn cmd_queue() -> Result<(), String> {
             .chars()
             .take(48)
             .collect::<String>();
-
-        // Build thread links
-        let mut links = Vec::new();
-        for (ch_id, thread_val) in &thread_map {
-            if let Some(tid) = thread_val.as_str() {
-                let label = if ch_id.ends_with("35") {
-                    "work"
-                } else {
-                    "review"
-                };
-                links.push(format!(
-                    "{label}:https://discord.com/channels/{discord_server}/{tid}"
-                ));
-            }
-        }
-        let links_str = if links.is_empty() {
-            "-".to_string()
-        } else {
-            links.join(" | ")
-        };
+        let links_str = render_queue_thread_links(e);
 
         println!("#{:<5} {:<12} {:<50} {}", num, status, title, links_str);
     }
@@ -841,8 +960,11 @@ pub fn cmd_terminations(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_cli_advance_completion_result, render_cards_table, runtime_config_payload};
-    use crate::cli::client::cmd_advance;
+    use super::{
+        build_cli_advance_completion_result, cmd_advance, cmd_dispatch,
+        parse_github_repo_from_remote, render_cards_table, render_queue_thread_links,
+        runtime_config_payload,
+    };
     use axum::extract::{Path, Query, State};
     use axum::routing::{get, patch, post};
     use axum::{Json, Router};
@@ -1054,6 +1176,19 @@ mod tests {
         })
     }
 
+    async fn dispatch_handler(
+        State(state): State<Arc<Mutex<Option<serde_json::Value>>>>,
+        Json(body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        *state.lock().unwrap() = Some(body);
+        Json(json!({
+            "run": {"id": "run-dispatch", "status": "active"},
+            "entries": [],
+            "thread_groups": {},
+            "activated": true
+        }))
+    }
+
     #[test]
     fn runtime_config_payload_uses_current_envelope() {
         let payload = runtime_config_payload(json!({
@@ -1078,6 +1213,118 @@ mod tests {
         assert!(rendered.contains("#90"));
         assert!(rendered.contains("feat: AgentDesk CLI client"));
         assert!(!rendered.contains("description"));
+    }
+
+    #[test]
+    fn render_queue_thread_links_prefers_server_urls() {
+        let rendered = render_queue_thread_links(&json!({
+            "thread_links": [
+                {
+                    "label": "work",
+                    "url": "https://discord.com/channels/guild-1/thread-1"
+                },
+                {
+                    "label": "review",
+                    "url": "https://discord.com/channels/guild-1/thread-2"
+                }
+            ]
+        }));
+
+        assert_eq!(
+            rendered,
+            "work:https://discord.com/channels/guild-1/thread-1 | review:https://discord.com/channels/guild-1/thread-2"
+        );
+    }
+
+    #[test]
+    fn render_queue_thread_links_falls_back_to_thread_id_without_guessing_url() {
+        let rendered = render_queue_thread_links(&json!({
+            "thread_links": [
+                {
+                    "label": "active",
+                    "thread_id": "1485506232256168011",
+                    "url": null
+                }
+            ]
+        }));
+
+        assert_eq!(rendered, "active:thread:1485506232256168011");
+    }
+
+    #[test]
+    fn parse_github_repo_from_remote_supports_common_formats() {
+        assert_eq!(
+            parse_github_repo_from_remote("git@github.com:itismyfield/AgentDesk.git"),
+            Some("itismyfield/AgentDesk".to_string())
+        );
+        assert_eq!(
+            parse_github_repo_from_remote("https://github.com/itismyfield/AgentDesk.git"),
+            Some("itismyfield/AgentDesk".to_string())
+        );
+        assert_eq!(parse_github_repo_from_remote("/tmp/local-origin.git"), None);
+    }
+
+    #[test]
+    fn cmd_dispatch_posts_declarative_auto_queue_payload() {
+        let _lock = env_lock();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let repo = tempfile::tempdir().unwrap();
+            run_git(repo.path(), &["init", "-b", "main"]);
+            run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+            run_git(repo.path(), &["config", "user.name", "Test"]);
+            run_git(
+                repo.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/itismyfield/AgentDesk.git",
+                ],
+            );
+
+            let captured = Arc::new(Mutex::new(None));
+            let app = Router::new()
+                .route("/api/auto-queue/dispatch", post(dispatch_handler))
+                .with_state(captured.clone());
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+
+            let _api_url = EnvVarGuard::set("AGENTDESK_API_URL", &format!("http://{addr}"));
+            let _repo_env = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
+
+            let result = cmd_dispatch(
+                &["423,405".to_string(), "407".to_string()],
+                None,
+                Some("project-agentdesk"),
+                true,
+                Some(2),
+                true,
+            );
+
+            server.abort();
+            assert!(result.is_ok(), "cmd_dispatch failed: {result:?}");
+
+            let payload = captured
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("dispatch payload must be captured");
+            assert_eq!(payload["repo"], "itismyfield/AgentDesk");
+            assert_eq!(payload["agent_id"], "project-agentdesk");
+            assert_eq!(payload["auto_assign_agent"], true);
+            assert_eq!(payload["activate"], true);
+            assert_eq!(payload["unified_thread"], true);
+            assert_eq!(payload["max_concurrent_threads"], 2);
+            assert_eq!(payload["groups"][0]["issues"], json!([423, 405]));
+            assert_eq!(payload["groups"][0]["sequential"], true);
+            assert_eq!(payload["groups"][1]["issues"], json!([407]));
+            assert_eq!(payload["groups"][1]["sequential"], false);
+        });
     }
 
     #[test]

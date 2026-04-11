@@ -29,6 +29,8 @@ pub struct Config {
     pub runtime: RuntimeSettingsConfig,
     #[serde(default, skip_serializing_if = "AutomationConfig::is_empty")]
     pub automation: AutomationConfig,
+    #[serde(default, skip_serializing_if = "EscalationConfig::is_empty")]
+    pub escalation: EscalationConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
 }
@@ -435,6 +437,8 @@ pub struct MeetingAgentDef {
 pub struct GitHubConfig {
     #[serde(default)]
     pub repos: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub repo_dirs: std::collections::BTreeMap<String, String>,
     #[serde(default = "default_sync_interval")]
     pub sync_interval_minutes: u64,
 }
@@ -575,6 +579,61 @@ pub struct AutomationConfig {
 impl AutomationConfig {
     pub fn is_empty(&self) -> bool {
         self.enabled.is_none() && self.strategy.is_none() && self.allowed_authors.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EscalationMode {
+    Pm,
+    User,
+    Scheduled,
+}
+
+impl Default for EscalationMode {
+    fn default() -> Self {
+        Self::Pm
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EscalationScheduleConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pm_hours: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+impl EscalationScheduleConfig {
+    pub fn is_empty(&self) -> bool {
+        self.pm_hours.is_none() && self.timezone.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EscalationConfig {
+    #[serde(default)]
+    pub mode: EscalationMode,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_u64",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub owner_user_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pm_channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "EscalationScheduleConfig::is_empty")]
+    pub schedule: EscalationScheduleConfig,
+}
+
+impl EscalationConfig {
+    pub fn is_empty(&self) -> bool {
+        self.mode == EscalationMode::Pm
+            && self.owner_user_id.is_none()
+            && self.pm_channel_id.is_none()
+            && self.schedule.is_empty()
     }
 }
 
@@ -772,6 +831,7 @@ impl Default for Config {
             review: ReviewConfig::default(),
             runtime: RuntimeSettingsConfig::default(),
             automation: AutomationConfig::default(),
+            escalation: EscalationConfig::default(),
             memory: None,
         }
     }
@@ -953,9 +1013,10 @@ pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
 mod tests {
     use super::{
         AgentChannel, AgentChannels, AgentDef, AutomationConfig, BotConfig, Config,
-        DiscordBotAuthConfig, FileMemoryConfig, KanbanConfig, McpMemoryConfig, MemoryConfig,
-        ReviewConfig, RuntimeSettingsConfig, load_from_path, resolve_graceful_config_path,
-        runtime_root, save_to_path,
+        DiscordBotAuthConfig, EscalationConfig, EscalationMode, EscalationScheduleConfig,
+        FileMemoryConfig, KanbanConfig, McpMemoryConfig, MemoryConfig, ReviewConfig,
+        RuntimeSettingsConfig, load_from_path, resolve_graceful_config_path, runtime_root,
+        save_to_path,
     };
     use std::path::PathBuf;
     use std::sync::MutexGuard;
@@ -1198,6 +1259,15 @@ mod tests {
             strategy: Some("rebase".to_string()),
             allowed_authors: Some("itismyfield,octocat".to_string()),
         };
+        config.escalation = EscalationConfig {
+            mode: EscalationMode::Scheduled,
+            owner_user_id: Some(343742347365974026),
+            pm_channel_id: Some("323456789012345678".to_string()),
+            schedule: EscalationScheduleConfig {
+                pm_hours: Some("00:00-08:00".to_string()),
+                timezone: Some("Asia/Seoul".to_string()),
+            },
+        };
         config.memory = Some(MemoryConfig {
             backend: "memento".to_string(),
             file: FileMemoryConfig {
@@ -1310,6 +1380,20 @@ mod tests {
         assert_eq!(
             loaded.automation.allowed_authors.as_deref(),
             Some("itismyfield,octocat")
+        );
+        assert_eq!(loaded.escalation.mode, EscalationMode::Scheduled);
+        assert_eq!(loaded.escalation.owner_user_id, Some(343742347365974026));
+        assert_eq!(
+            loaded.escalation.pm_channel_id.as_deref(),
+            Some("323456789012345678")
+        );
+        assert_eq!(
+            loaded.escalation.schedule.pm_hours.as_deref(),
+            Some("00:00-08:00")
+        );
+        assert_eq!(
+            loaded.escalation.schedule.timezone.as_deref(),
+            Some("Asia/Seoul")
         );
         assert_eq!(
             loaded.agents[0]

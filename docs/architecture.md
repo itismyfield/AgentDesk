@@ -575,13 +575,22 @@ rate_limits:
   - 저장 시 legacy key는 서버에서 제거
 - `kv_meta['runtime-config']`
   - 폴링 주기, cache TTL 같은 즉시 반영 숫자 설정
-  - `/api/settings/runtime-config`로 읽고 쓴다
+  - hardcoded default < `agentdesk.yaml runtime:` < `kv_meta['runtime-config']` override 순서로 해석
+  - `/api/settings/runtime-config`는 `current`와 `defaults`를 함께 돌려준다
 - 개별 `kv_meta` 키
   - 리뷰, 타임아웃, context compact, merge automation, Discord 채널 ID
   - `/api/settings/config` whitelist를 통해서만 노출/수정
+  - 응답에는 `baseline`, `override_active`, `editable`, `restart_behavior`가 포함되어 baseline과 live override를 구분한다
+  - YAML-backed key는 재시작 시 YAML baseline이 다시 seed되고, hardcoded-only key는 reset flag가 꺼져 있으면 기존 override를 유지한다
+- `kv_meta['escalation-settings-override']`
+  - PM/owner escalation 라우팅용 전용 override surface
+  - baseline은 `escalation:` + `discord.owner_id` + `kanban.manager_channel_id`
+  - `/api/settings/escalation`은 `current`와 `defaults`를 함께 돌려준다
 - 온보딩 전용 key/API
   - 토큰, provider, 초기 Discord 설정
   - 일반 settings form이 아니라 `/api/onboarding/*`와 wizard가 정본
+
+세부 계약은 `docs/adr-settings-precedence.md`를 기준으로 유지한다.
 
 ---
 

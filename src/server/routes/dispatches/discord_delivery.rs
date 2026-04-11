@@ -6,9 +6,8 @@ use super::thread_reuse::{
 use crate::db::agents::{
     resolve_agent_channel_for_provider_on_conn, resolve_agent_dispatch_channel_on_conn,
 };
-use crate::server::routes::auto_queue::{
-    ensure_agent_slot_pool_rows, reset_slot_thread_bindings, slot_has_active_dispatch,
-};
+use crate::db::auto_queue::{ensure_agent_slot_pool_rows, slot_has_active_dispatch};
+use crate::services::auto_queue::runtime::reset_slot_thread_bindings;
 
 const SLOT_THREAD_RESET_MESSAGE_LIMIT: u64 = 500;
 const SLOT_THREAD_RESET_MAX_AGE_DAYS: i64 = 7;
@@ -321,19 +320,20 @@ fn build_slot_thread_name(
     issue_number: Option<i64>,
     title: &str,
 ) -> String {
+    let mut batch_phase_for_label: i64 = 0;
     let grouped_issue_label: Option<String> = db.lock().ok().and_then(|conn| {
-        let group_info: Option<(String, i64)> = conn
+        let group_info: Option<(String, i64, i64)> = conn
             .query_row(
-                "SELECT run_id, COALESCE(thread_group, 0)
+                "SELECT run_id, COALESCE(thread_group, 0), COALESCE(batch_phase, 0)
                  FROM auto_queue_entries
                  WHERE dispatch_id = ?1",
                 [dispatch_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .ok()
             .or_else(|| {
                 conn.query_row(
-                    "SELECT run_id, COALESCE(thread_group, 0)
+                    "SELECT run_id, COALESCE(thread_group, 0), COALESCE(batch_phase, 0)
                      FROM auto_queue_entries
                      WHERE kanban_card_id = ?1
                        AND status IN ('pending', 'dispatched')
@@ -341,11 +341,12 @@ fn build_slot_thread_name(
                               priority_rank ASC
                      LIMIT 1",
                     [card_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .ok()
             });
-        let (run_id, thread_group) = group_info?;
+        let (run_id, thread_group, batch_phase) = group_info?;
+        batch_phase_for_label = batch_phase;
         let mut stmt = conn
             .prepare(
                 "SELECT kc.github_issue_number, e.kanban_card_id
@@ -353,12 +354,19 @@ fn build_slot_thread_name(
                  JOIN kanban_cards kc ON kc.id = e.kanban_card_id
                  WHERE e.run_id = ?1
                    AND COALESCE(e.thread_group, 0) = ?2
+                   AND COALESCE(e.batch_phase, 0) = (
+                       SELECT COALESCE(e2.batch_phase, 0)
+                       FROM auto_queue_entries e2
+                       WHERE e2.kanban_card_id = ?3
+                         AND e2.run_id = ?1
+                       LIMIT 1
+                   )
                    AND kc.github_issue_number IS NOT NULL
                  ORDER BY e.priority_rank ASC",
             )
             .ok()?;
         let issues: Vec<(i64, String)> = stmt
-            .query_map(rusqlite::params![run_id, thread_group], |row| {
+            .query_map(rusqlite::params![run_id, thread_group, card_id], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
             .ok()?
@@ -390,7 +398,12 @@ fn build_slot_thread_name(
     } else {
         title.chars().take(90).collect()
     };
-    format!("[slot {}] {}", slot_index, base)
+    let phase_prefix = if batch_phase_for_label > 0 {
+        format!("P{} ", batch_phase_for_label)
+    } else {
+        String::new()
+    };
+    format!("[slot {}] {}{}", slot_index, phase_prefix, base)
         .chars()
         .take(100)
         .collect()

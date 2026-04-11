@@ -1031,33 +1031,7 @@ fn merge_role_map_into_agentdesk_yaml(root: &Path) -> Result<(), String> {
     let json: Value = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse '{}': {e}", role_map.display()))?;
 
-    let mut changed = false;
-    changed |= merge_role_map_shared_prompt(&mut config, &json);
-    changed |= merge_role_map_meeting(&mut config, &json);
-
-    let mut providers_by_channel_id = BTreeMap::<String, String>::new();
-    if let Some(by_id) = json.get("byChannelId").and_then(Value::as_object) {
-        for (channel_id, entry) in by_id {
-            if let Some((provider_key, entry_changed)) =
-                merge_role_map_channel_id_entry(&mut config, channel_id, entry)
-            {
-                providers_by_channel_id.insert(channel_id.clone(), provider_key);
-                changed |= entry_changed;
-            }
-        }
-    }
-    if let Some(by_name) = json.get("byChannelName").and_then(Value::as_object) {
-        for (channel_name, entry) in by_name {
-            if merge_role_map_channel_name_entry(
-                &mut config,
-                channel_name,
-                entry,
-                &providers_by_channel_id,
-            ) {
-                changed = true;
-            }
-        }
-    }
+    let changed = preview_role_map_merge(&mut config, &json);
 
     if changed {
         crate::config::save_to_path(&yaml_path, &config)
@@ -1081,6 +1055,38 @@ fn merge_role_map_into_agentdesk_yaml(root: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub(crate) fn preview_role_map_merge(config: &mut crate::config::Config, json: &Value) -> bool {
+    let mut changed = false;
+    changed |= merge_role_map_shared_prompt(config, json);
+    changed |= merge_role_map_meeting(config, json);
+
+    let mut providers_by_channel_id = BTreeMap::<String, String>::new();
+    if let Some(by_id) = json.get("byChannelId").and_then(Value::as_object) {
+        for (channel_id, entry) in by_id {
+            if let Some((provider_key, entry_changed)) =
+                merge_role_map_channel_id_entry(config, channel_id, entry)
+            {
+                providers_by_channel_id.insert(channel_id.clone(), provider_key);
+                changed |= entry_changed;
+            }
+        }
+    }
+    if let Some(by_name) = json.get("byChannelName").and_then(Value::as_object) {
+        for (channel_name, entry) in by_name {
+            if merge_role_map_channel_name_entry(
+                config,
+                channel_name,
+                entry,
+                &providers_by_channel_id,
+            ) {
+                changed = true;
+            }
+        }
+    }
+
+    changed
 }
 
 fn merge_role_map_shared_prompt(config: &mut crate::config::Config, json: &Value) -> bool {

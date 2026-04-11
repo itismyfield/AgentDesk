@@ -223,9 +223,25 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         }
         ManagedSessionClearBehavior::Noop => {}
     }
+
+    // Notify bot message for session clear visibility
+    if let Some(ref db) = shared.db {
+        if let Ok(conn) = db.lock() {
+            let _ = conn.execute(
+                "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
+                rusqlite::params![
+                    format!("channel:{}", channel_id.get()),
+                    format!("🧹 세션 클리어 ({})", clear_source),
+                ],
+            );
+        }
+    }
 }
 
 /// /stop — Cancel in-progress AI request
+///
+/// #441: flows through mailbox_cancel_active_turn → cancel_active_token
+/// → token.cancelled triggers turn_bridge loop exit → mailbox_finish_turn canonical cleanup
 #[poise::command(slash_command, rename = "stop")]
 pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;

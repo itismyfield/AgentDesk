@@ -1,4 +1,6 @@
 pub mod agents;
+pub mod auto_queue;
+pub mod kanban;
 pub(crate) mod schema;
 pub mod session_transcripts;
 

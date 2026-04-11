@@ -166,6 +166,20 @@ events:
   on_review_verdict: [OnReviewVerdict]
   on_session_status_change: [OnSessionStatusChange]
 
+# ── Auto-Queue Phase Gate ───────────────────────────────────────
+#
+# Repo/agent overrides may replace this block. Resolution order:
+# agent override → repo override → these system defaults.
+
+phase_gate:
+  dispatch_to: self
+  dispatch_type: phase-gate
+  pass_verdict: phase_gate_passed
+  checks:
+    - merge_verified
+    - issue_closed
+    - build_passed
+
 # ── Clocks ────────────────────────────────────────────────────────
 #
 # Fields set on state entry for timeout detection.

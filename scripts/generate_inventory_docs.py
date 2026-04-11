@@ -540,69 +540,82 @@ def find_thread_name(prefix: str) -> str | None:
 
 
 def collect_workers() -> list[WorkerEntry]:
-    server_mod_path = REPO_ROOT / "src" / "server" / "mod.rs"
-    text = read_text(server_mod_path)
-    run_body, body_offset = find_function_body(text, "run")
+    registry_path = REPO_ROOT / "src" / "server" / "worker_registry.rs"
+    text = read_text(registry_path)
     workers: list[WorkerEntry] = []
 
-    spawn_batch_re = re.compile(r"([A-Za-z_][A-Za-z0-9_:]*spawn_[A-Za-z0-9_]+)\s*\(")
-    explicit_worker_calls: set[tuple[int, str]] = set()
+    array_match = re.search(
+        r"pub\(crate\)\s+const\s+WORKER_SPECS\s*:[^=]*=\s*\[(?P<body>.*?)\n\];",
+        text,
+        re.DOTALL,
+    )
+    if array_match is None:
+        raise ParseError("could not locate WORKER_SPECS definition")
 
-    for match in re.finditer(r"tokio::spawn\s*\(", run_body):
-        args, _ = extract_call_args(run_body, match)
-        target = find_worker_target(args)
-        full_offset = body_offset + match.start()
+    spec_re = re.compile(r"WorkerSpec\s*\{(?P<body>.*?)\n\s*\}", re.DOTALL)
+    kind_labels = {
+        "TokioTask": "tokio::spawn",
+        "DedicatedThread": "std::thread::spawn",
+        "SpawnHelper": "spawn helper",
+    }
+    stage_labels = {
+        "AfterBootReconcile": "after_boot_reconcile",
+        "AfterWebsocketBroadcast": "after_websocket_broadcast",
+    }
+    restart_labels = {
+        "SkipWhenDisabled": "skip_when_disabled",
+        "LoopOwned": "loop_owned",
+        "ManualProcessRestart": "manual_process_restart",
+    }
+    shutdown_labels = {
+        "RuntimeShutdown": "runtime_shutdown",
+        "ProcessExit": "process_exit",
+    }
+
+    def capture(body: str, pattern: str, field: str) -> str:
+        match = re.search(pattern, body)
+        if match is None:
+            raise ParseError(f"missing {field} in WORKER_SPECS entry: {strip_wrapping_whitespace(body)!r}")
+        return match.group(1)
+
+    array_body = array_match.group("body")
+    for match in spec_re.finditer(array_body):
+        body = match.group("body")
+        full_offset = array_match.start("body") + match.start()
         line = offset_to_line(text, full_offset)
-        comment = preceding_comment_block(text, full_offset)
-        explicit_worker_calls.add((full_offset, "tokio::spawn"))
-        workers.append(
-            WorkerEntry(
-                worker=comment or target.split("::")[-1],
-                kind="tokio::spawn",
-                target=f"`{target}`",
-                source=format_path_with_line(server_mod_path, line),
-                notes="inline loop" if "loop {" in args else "",
+        worker = capture(body, r'name:\s*"([^"]+)"', "name")
+        target = capture(body, r'target:\s*"([^"]+)"', "target")
+        kind = kind_labels[capture(body, r"kind:\s*WorkerKind::([A-Za-z0-9_]+)", "kind")]
+        stage = stage_labels[capture(body, r"start_stage:\s*WorkerStartStage::([A-Za-z0-9_]+)", "start_stage")]
+        start_order = capture(body, r"start_order:\s*([0-9]+)", "start_order")
+        restart = restart_labels[
+            capture(
+                body,
+                r"restart_policy:\s*WorkerRestartPolicy::([A-Za-z0-9_]+)",
+                "restart_policy",
             )
-        )
-
-    for match in re.finditer(r"\.spawn\s*\(\s*move\s*\|\|", run_body):
-        open_index = run_body.find("(", match.start(), match.end())
-        if open_index == -1:
-            raise ParseError("could not locate '(' for std::thread::spawn call")
-        args, _ = scan_balanced(run_body, open_index)
-        target = find_worker_target(args)
-        full_offset = body_offset + match.start()
-        line = offset_to_line(text, full_offset)
-        comment = preceding_comment_block(text, full_offset)
-        prefix_start = max(0, match.start() - 200)
-        thread_name = find_thread_name(run_body[prefix_start : match.start()])
-        worker_name = thread_name or comment or target.split("::")[-1]
-        workers.append(
-            WorkerEntry(
-                worker=worker_name,
-                kind="std::thread::spawn",
-                target=f"`{target}`",
-                source=format_path_with_line(server_mod_path, line),
-                notes=comment,
+        ]
+        shutdown = shutdown_labels[
+            capture(
+                body,
+                r"shutdown_policy:\s*WorkerShutdownPolicy::([A-Za-z0-9_]+)",
+                "shutdown_policy",
             )
-        )
-
-    for match in spawn_batch_re.finditer(run_body):
-        target = match.group(1)
-        if target == "tokio::spawn":
-            continue
-        full_offset = body_offset + match.start()
-        if any(existing_offset == full_offset for existing_offset, _ in explicit_worker_calls):
-            continue
-        line = offset_to_line(text, full_offset)
-        comment = preceding_comment_block(text, full_offset)
+        ]
+        responsibility = capture(body, r'responsibility:\s*"([^"]+)"', "responsibility")
+        owner = capture(body, r'owner:\s*"([^"]+)"', "owner")
+        health_owner = capture(body, r'health_owner:\s*"([^"]+)"', "health_owner")
+        notes = capture(body, r'notes:\s*"([^"]*)"', "notes")
         workers.append(
             WorkerEntry(
-                worker=comment or target.split("::")[-1],
-                kind="spawn helper",
+                worker=worker,
+                kind=kind,
                 target=f"`{target}`",
-                source=format_path_with_line(server_mod_path, line),
-                notes="direct bootstrap helper call",
+                source=format_path_with_line(registry_path, line),
+                notes=(
+                    f"stage={stage}; order={start_order}; restart={restart}; shutdown={shutdown}; "
+                    f"owner={owner}; health={health_owner}; responsibility={responsibility}; {notes}"
+                ),
             )
         )
 
@@ -674,7 +687,7 @@ def render_worker_inventory(entries: list[WorkerEntry]) -> str:
         "",
         "> Generated by `python3 scripts/generate_inventory_docs.py`. Do not edit manually.",
         "",
-        "- Scope: background task/thread bootstrap started directly from `server::run`.",
+        "- Scope: supervised worker specs registered in `server::worker_registry::WORKER_SPECS`.",
         f"- Workers: `{len(entries)}`",
         "",
         "| Worker | Kind | Target | Source | Notes |",

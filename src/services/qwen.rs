@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -22,6 +22,10 @@ use crate::services::process::{
 };
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe,
+};
+use crate::services::provider_runtime::{
+    LineStreamEvent, SharedAllowedToolKind, resolve_shared_allowed_tool_compat,
+    spawn_line_stream_reader,
 };
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
@@ -83,12 +87,7 @@ impl Drop for QwenSystemSettingsOverride {
     }
 }
 
-#[derive(Debug)]
-enum QwenStreamEvent {
-    Line(String),
-    ReadError(String),
-    Eof,
-}
+type QwenStreamEvent = LineStreamEvent;
 
 #[derive(Clone, Debug)]
 pub(crate) enum QwenResumeStrategy {
@@ -106,6 +105,13 @@ enum QwenAttemptResult {
         stderr: String,
         exit_code: Option<i32>,
     },
+    Cancelled,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QwenStreamLoopResult {
+    Eof,
+    RetrySession { message: String },
     Cancelled,
 }
 
@@ -389,7 +395,7 @@ fn execute_qwen_streaming_attempt(
         .stderr
         .take()
         .ok_or_else(|| "Failed to capture Qwen stderr".to_string())?;
-    let stdout_events = spawn_qwen_stream_reader(stdout);
+    let stdout_events = spawn_line_stream_reader(stdout, "Qwen");
     let stderr_handle = std::thread::spawn(move || {
         let mut buf = String::new();
         let mut reader = BufReader::new(stderr);
@@ -405,53 +411,30 @@ fn execute_qwen_streaming_attempt(
     }
 
     let mut state = QwenAttemptState::default();
-    let mut idle_ticks = 0;
-
-    loop {
-        if is_cancelled(cancel_token.as_deref()) {
+    match collect_qwen_stream_events(
+        &stdout_events,
+        cancel_token.as_deref(),
+        &mut state,
+        QWEN_STREAM_IDLE_TIMEOUT,
+        QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY,
+    ) {
+        QwenStreamLoopResult::Cancelled => {
             kill_child_tree(&mut child);
             let stderr = stderr_handle.join().unwrap_or_default();
             emit_cancellation_error(&sender, state.raw_stdout, stderr, None);
             return Ok(QwenAttemptResult::Cancelled);
         }
-
-        match stdout_events.recv_timeout(QWEN_STREAM_IDLE_TIMEOUT) {
-            Ok(QwenStreamEvent::Line(line)) => {
-                idle_ticks = 0;
-                process_qwen_stream_line(&line, &mut state);
-            }
-            Ok(QwenStreamEvent::ReadError(message)) => {
-                kill_child_tree(&mut child);
-                let stderr = stderr_handle.join().unwrap_or_default();
-                return Ok(QwenAttemptResult::RetrySession {
-                    message,
-                    stdout: state.raw_stdout,
-                    stderr,
-                    exit_code: None,
-                });
-            }
-            Ok(QwenStreamEvent::Eof) | Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => {
-                if state.terminal_result_seen {
-                    break;
-                }
-                idle_ticks += 1;
-                if idle_ticks >= QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY {
-                    kill_child_tree(&mut child);
-                    let stderr = stderr_handle.join().unwrap_or_default();
-                    return Ok(QwenAttemptResult::RetrySession {
-                        message: format!(
-                            "Qwen stream produced no output for {} seconds",
-                            QWEN_STREAM_IDLE_TIMEOUT.as_secs()
-                                * QWEN_STREAM_IDLE_TICKS_BEFORE_RETRY as u64
-                        ),
-                        stdout: state.raw_stdout,
-                        stderr,
-                        exit_code: None,
-                    });
-                }
-            }
+        QwenStreamLoopResult::RetrySession { message } => {
+            kill_child_tree(&mut child);
+            let stderr = stderr_handle.join().unwrap_or_default();
+            return Ok(QwenAttemptResult::RetrySession {
+                message,
+                stdout: state.raw_stdout,
+                stderr,
+                exit_code: None,
+            });
         }
+        QwenStreamLoopResult::Eof => {}
     }
 
     let status = child
@@ -499,31 +482,47 @@ fn execute_qwen_streaming_attempt(
     }
 }
 
-fn spawn_qwen_stream_reader<R>(stdout: R) -> mpsc::Receiver<QwenStreamEvent>
-where
-    R: Read + Send + 'static,
-{
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
-                    if tx.send(QwenStreamEvent::Line(line)).is_err() {
-                        return;
-                    }
+fn collect_qwen_stream_events(
+    stdout_events: &mpsc::Receiver<QwenStreamEvent>,
+    cancel_token: Option<&CancelToken>,
+    state: &mut QwenAttemptState,
+    idle_timeout: Duration,
+    idle_ticks_before_retry: u32,
+) -> QwenStreamLoopResult {
+    let mut idle_ticks = 0;
+
+    loop {
+        if is_cancelled(cancel_token) {
+            return QwenStreamLoopResult::Cancelled;
+        }
+
+        match stdout_events.recv_timeout(idle_timeout) {
+            Ok(QwenStreamEvent::Line(line)) => {
+                idle_ticks = 0;
+                process_qwen_stream_line(&line, state);
+            }
+            Ok(QwenStreamEvent::ReadError(message)) => {
+                return QwenStreamLoopResult::RetrySession { message };
+            }
+            Ok(QwenStreamEvent::Eof) | Err(RecvTimeoutError::Disconnected) => {
+                return QwenStreamLoopResult::Eof;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if state.terminal_result_seen {
+                    return QwenStreamLoopResult::Eof;
                 }
-                Err(e) => {
-                    let _ = tx.send(QwenStreamEvent::ReadError(format!(
-                        "Failed reading Qwen output: {}",
-                        e
-                    )));
-                    return;
+                idle_ticks += 1;
+                if idle_ticks >= idle_ticks_before_retry {
+                    return QwenStreamLoopResult::RetrySession {
+                        message: format!(
+                            "Qwen stream produced no output for {} seconds",
+                            idle_timeout.as_secs() * idle_ticks_before_retry as u64
+                        ),
+                    };
                 }
             }
         }
-        let _ = tx.send(QwenStreamEvent::Eof);
-    });
-    rx
+    }
 }
 
 fn process_qwen_stream_line(line: &str, state: &mut QwenAttemptState) {
@@ -1424,29 +1423,20 @@ fn compose_qwen_prompt(
     sections.join("\n\n")
 }
 
-fn map_agentdesk_tool_to_qwen_core_tools(tool: &str) -> Option<&'static [&'static str]> {
-    match tool.trim() {
-        "Bash" => Some(&["run_shell_command"]),
-        "Read" => Some(&["read_file"]),
-        "Edit" => Some(&["edit"]),
-        "Write" => Some(&["write_file"]),
-        "Glob" => Some(&["glob"]),
-        "Grep" => Some(&["grep_search"]),
-        // Qwen renamed the old "task" tool to "agent". Accept the whole shared
-        // Task* family so shared AgentDesk configs do not fail preflight here.
-        "Task" | "TaskCreate" | "TaskGet" | "TaskUpdate" | "TaskList" | "TaskOutput"
-        | "TaskStop" => Some(&["agent"]),
-        "WebFetch" => Some(&["web_fetch"]),
-        "WebSearch" => Some(&["web_search"]),
-        // Qwen has no notebook-specific editor tool, but the normal edit tool is
-        // the closest capability and avoids rejecting shared allowlists.
-        "NotebookEdit" => Some(&["edit"]),
-        "Skill" => Some(&["skill"]),
-        "AskUserQuestion" => Some(&["ask_user_question"]),
-        // Qwen exposes only exit_plan_mode. Treat EnterPlanMode as a compatible
-        // plan-mode alias so shared configs do not hard-fail on Qwen.
-        "EnterPlanMode" | "ExitPlanMode" => Some(&["exit_plan_mode"]),
-        _ => None,
+fn map_allowed_tool_to_qwen_core_tools(tool: &str) -> Option<&'static [&'static str]> {
+    match resolve_shared_allowed_tool_compat(tool)? {
+        SharedAllowedToolKind::Bash => Some(&["run_shell_command"]),
+        SharedAllowedToolKind::Read => Some(&["read_file"]),
+        SharedAllowedToolKind::Edit => Some(&["edit"]),
+        SharedAllowedToolKind::Write => Some(&["write_file"]),
+        SharedAllowedToolKind::Glob => Some(&["glob"]),
+        SharedAllowedToolKind::Grep => Some(&["grep_search"]),
+        SharedAllowedToolKind::Task => Some(&["agent"]),
+        SharedAllowedToolKind::WebFetch => Some(&["web_fetch"]),
+        SharedAllowedToolKind::WebSearch => Some(&["web_search"]),
+        SharedAllowedToolKind::Skill => Some(&["skill"]),
+        SharedAllowedToolKind::AskUserQuestion => Some(&["ask_user_question"]),
+        SharedAllowedToolKind::PlanMode => Some(&["exit_plan_mode"]),
     }
 }
 
@@ -1462,7 +1452,7 @@ pub(crate) fn resolve_allowed_core_tools(
     let mut core_tools = Vec::new();
 
     for tool in allowed_tools {
-        match map_agentdesk_tool_to_qwen_core_tools(tool) {
+        match map_allowed_tool_to_qwen_core_tools(tool) {
             Some(mapped_tools) => {
                 for core_tool in mapped_tools {
                     if seen.insert(*core_tool) {
@@ -1835,14 +1825,20 @@ fn render_qwen_value(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        QWEN_CODE_SYSTEM_SETTINGS_ENV, QwenAttemptState, QwenResumeStrategy,
-        build_stream_exec_args, compose_qwen_prompt, create_system_settings_override,
-        extract_text_from_json_output, normalize_resume_strategy, process_qwen_json_event,
-        qwen_project_cache_key, resolve_allowed_core_tools,
+        QWEN_CODE_SYSTEM_SETTINGS_ENV, QwenAttemptState, QwenResumeStrategy, QwenStreamEvent,
+        QwenStreamLoopResult, build_stream_exec_args, collect_qwen_stream_events,
+        compose_qwen_prompt, create_system_settings_override, extract_text_from_json_output,
+        normalize_resume_strategy, process_qwen_json_event, qwen_project_cache_key,
+        resolve_allowed_core_tools,
     };
     use crate::services::agent_protocol::StreamMessage;
+    use crate::services::provider::CancelToken;
     use serde_json::json;
     use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn with_temp_qwen_home<F>(f: F)
@@ -1962,6 +1958,36 @@ mod tests {
                 "exit_plan_mode".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn collect_qwen_stream_events_returns_cancelled_when_token_flips_mid_stream() {
+        let token = Arc::new(CancelToken::new());
+        let (tx, rx) = mpsc::channel();
+        let mut state = QwenAttemptState::default();
+
+        tx.send(QwenStreamEvent::Line(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"partial"}]}}"#
+                .to_string(),
+        ))
+        .unwrap();
+        let token_for_thread = token.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            token_for_thread.cancelled.store(true, Ordering::Relaxed);
+        });
+
+        let result = collect_qwen_stream_events(
+            &rx,
+            Some(token.as_ref()),
+            &mut state,
+            Duration::from_millis(100),
+            2,
+        );
+
+        assert_eq!(result, QwenStreamLoopResult::Cancelled);
+        assert_eq!(state.final_text, "partial");
+        assert!(!state.raw_stdout.is_empty());
     }
 
     #[test]

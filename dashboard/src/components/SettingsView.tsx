@@ -29,6 +29,11 @@ type ConfigEntry = {
   label_ko: string;
   label_en: string;
   default?: string | null;
+  baseline?: string | null;
+  baseline_source?: string | null;
+  override_active?: boolean;
+  editable?: boolean;
+  restart_behavior?: string | null;
 };
 
 type ConfigEditValue = string | boolean;
@@ -374,10 +379,10 @@ const AUDIT_NOTES: AuditNote[] = [
   },
   {
     id: "server-port-readonly",
-    titleKo: "`server_port`는 사실상 읽기 전용",
-    titleEn: "`server_port` is effectively read-only",
-    descriptionKo: "`src/server/mod.rs`에서 서버 부팅 시 `config.server.port` 값으로 매번 다시 기록합니다. UI에서 수정 가능한 설정처럼 보이면 오해를 만듭니다.",
-    descriptionEn: "`src/server/mod.rs` rewrites it from `config.server.port` on every boot. Treating it as editable in the UI is misleading.",
+    titleKo: "`server_port`는 계약상 읽기 전용",
+    titleEn: "`server_port` is contractually read-only",
+    descriptionKo: "`src/server/mod.rs`에서 서버 부팅 시 `config.server.port` 값으로 다시 기록하고, `/api/settings/config`도 editable=false로 내려줍니다. UI와 API 모두 수정 가능한 값처럼 다루지 않습니다.",
+    descriptionEn: "`src/server/mod.rs` rewrites it from `config.server.port` on boot, and `/api/settings/config` now marks it as editable=false. Neither the UI nor the API should treat it as a writable runtime setting.",
     keys: ["server_port"],
     status: "read-only",
   },
@@ -431,6 +436,12 @@ function isReadOnlyConfigKey(key: string): boolean {
   return READ_ONLY_CONFIG_KEYS.has(key);
 }
 
+function hasConfigValue(value: ConfigEditValue | string | null | undefined): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  return true;
+}
+
 function parseBooleanConfigValue(value: string | boolean | null | undefined): boolean {
   if (typeof value === "boolean") return value;
   const normalized = String(value ?? "").trim().toLowerCase();
@@ -466,6 +477,52 @@ function auditStatusClass(status: AuditNoteStatus): string {
   if (status === "read-only") return "border-slate-400/30 bg-slate-400/10 text-slate-200";
   if (status === "managed-elsewhere") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
   return "border-sky-400/30 bg-sky-400/10 text-sky-100";
+}
+
+function configLayerLabel(overrideActive: boolean, isKo: boolean): string {
+  if (overrideActive) return isKo ? "실시간 override" : "Live override";
+  return isKo ? "기준값" : "Baseline";
+}
+
+function configLayerClass(overrideActive: boolean): string {
+  if (overrideActive) return "border-amber-400/30 bg-amber-400/10 text-amber-100";
+  return "border-emerald-400/30 bg-emerald-400/10 text-emerald-100";
+}
+
+function baselineSourceNote(source: string | null | undefined, isKo: boolean): string | null {
+  if (source === "yaml") return isKo ? "기준값 출처: agentdesk.yaml" : "Baseline source: agentdesk.yaml";
+  if (source === "hardcoded") return isKo ? "기준값 출처: 하드코딩 기본값" : "Baseline source: hardcoded default";
+  if (source === "config") return isKo ? "기준값 출처: 서버 설정" : "Baseline source: server config";
+  return null;
+}
+
+function restartBehaviorNote(behavior: string | null | undefined, isKo: boolean): string | null {
+  if (behavior === "reseed-from-yaml") {
+    return isKo
+      ? "재시작 시 YAML baseline이 다시 적용됩니다."
+      : "Restart re-applies the YAML baseline.";
+  }
+  if (behavior === "persist-live-override") {
+    return isKo
+      ? "재시작 후에도 현재 live override가 유지됩니다."
+      : "The live override persists across restart.";
+  }
+  if (behavior === "reset-to-baseline") {
+    return isKo
+      ? "reset flag가 켜져 있어 재시작 시 baseline으로 초기화됩니다."
+      : "The reset flag clears this back to baseline on restart.";
+  }
+  if (behavior === "clear-on-restart") {
+    return isKo
+      ? "reset flag가 켜져 있어 재시작 시 override가 제거됩니다."
+      : "The reset flag removes this override on restart.";
+  }
+  if (behavior === "config-only") {
+    return isKo
+      ? "서버 설정에서 직접 읽는 값이라 대시보드에서 바꾸지 않습니다."
+      : "This comes directly from server config and is not edited here.";
+  }
+  return null;
 }
 
 interface SectionHeadingProps {
@@ -634,6 +691,10 @@ export default function SettingsView({
   const [rcLoaded, setRcLoaded] = useState(false);
   const [rcSaving, setRcSaving] = useState(false);
   const [rcDirty, setRcDirty] = useState(false);
+  const [escalationSettings, setEscalationSettings] = useState<api.EscalationSettings | null>(null);
+  const [escalationDefaults, setEscalationDefaults] = useState<api.EscalationSettings | null>(null);
+  const [escalationBaseline, setEscalationBaseline] = useState<api.EscalationSettings | null>(null);
+  const [escalationSaving, setEscalationSaving] = useState(false);
 
   const [configEntries, setConfigEntries] = useState<ConfigEntry[]>([]);
   const [configEdits, setConfigEdits] = useState<Record<string, ConfigEditValue>>({});
@@ -662,6 +723,14 @@ export default function SettingsView({
       .then((response) => response.json())
       .then((data: { entries: ConfigEntry[] }) => setConfigEntries(data.entries || []))
       .catch(() => {});
+
+    void api.getEscalationSettings()
+      .then((data) => {
+        setEscalationSettings(data.current);
+        setEscalationBaseline(data.current);
+        setEscalationDefaults(data.defaults);
+      })
+      .catch(() => {});
   }, []);
 
   const companyDirty =
@@ -670,6 +739,10 @@ export default function SettingsView({
     language !== settings.language ||
     theme !== settings.theme;
   const configDirty = Object.keys(configEdits).length > 0;
+  const escalationDirty =
+    escalationSettings !== null &&
+    escalationBaseline !== null &&
+    JSON.stringify(escalationSettings) !== JSON.stringify(escalationBaseline);
   const runtimeFieldCount = CATEGORIES.reduce((sum, category) => sum + category.fields.length, 0);
 
   const inputStyle: CSSProperties = {
@@ -737,6 +810,30 @@ export default function SettingsView({
     }
   };
 
+  const handleEscalationChange = (
+    patch:
+      | Partial<api.EscalationSettings>
+      | ((prev: api.EscalationSettings) => api.EscalationSettings),
+  ) => {
+    setEscalationSettings((prev) => {
+      if (!prev) return prev;
+      return typeof patch === "function" ? patch(prev) : { ...prev, ...patch };
+    });
+  };
+
+  const handleEscalationSave = async () => {
+    if (!escalationSettings) return;
+    setEscalationSaving(true);
+    try {
+      const data = await api.saveEscalationSettings(escalationSettings);
+      setEscalationSettings(data.current);
+      setEscalationBaseline(data.current);
+      setEscalationDefaults(data.defaults);
+    } finally {
+      setEscalationSaving(false);
+    }
+  };
+
   return (
     <div
       className="mx-auto h-full max-w-5xl min-w-0 space-y-6 overflow-x-hidden overflow-y-auto px-4 py-5 pb-40 sm:px-6"
@@ -801,6 +898,165 @@ export default function SettingsView({
 
       <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
         <SectionHeading
+          eyebrow={tr("에스컬레이션", "Escalation")}
+          title={tr("PM / owner 라우팅 전환", "Switch between PM and owner routing")}
+          description={tr(
+            "pending_decision 에스컬레이션을 PM 채널로 보낼지, owner 스레드로 보낼지, 시간대 기반으로 전환할지를 관리합니다.",
+            "Controls whether pending-decision escalations go to the PM channel, an owner thread, or switch automatically by time window.",
+          )}
+          badge={tr("api/settings/escalation", "api/settings/escalation")}
+        />
+
+        {escalationSettings ? (
+          <div className="mt-5 space-y-4">
+            <div className="grid gap-4 lg:grid-cols-2">
+              <InputCard
+                label={tr("라우팅 모드", "Routing mode")}
+                description={tr(
+                  "PM 고정, owner 고정, 또는 scheduled 자동 전환 중 하나를 고릅니다.",
+                  "Choose fixed PM, fixed owner, or scheduled automatic switching.",
+                )}
+              >
+                <select
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.mode}
+                  onChange={(event) =>
+                    handleEscalationChange({ mode: event.target.value as api.EscalationMode })
+                  }
+                >
+                  <option value="pm">{tr("PM 모드", "PM mode")}</option>
+                  <option value="user">{tr("Owner 모드", "Owner mode")}</option>
+                  <option value="scheduled">{tr("시간대 기반", "Scheduled")}</option>
+                </select>
+              </InputCard>
+
+              <InputCard
+                label={tr("fallback owner user ID", "Fallback owner user ID")}
+                description={tr(
+                  "live owner 추적이 비어 있을 때 owner 멘션에 사용할 Discord user ID입니다.",
+                  "Discord user ID used for owner mentions when live owner tracking is unavailable.",
+                )}
+              >
+                <input
+                  type="text"
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.owner_user_id ?? ""}
+                  onChange={(event) =>
+                    handleEscalationChange((prev) => ({
+                      ...prev,
+                      owner_user_id: event.target.value.trim()
+                        ? Number(event.target.value.trim())
+                        : null,
+                    }))
+                  }
+                />
+              </InputCard>
+
+              <InputCard
+                label={tr("PM channel ID", "PM channel ID")}
+                description={tr(
+                  "PM fallback 및 PM mode에서 사용할 Discord channel ID 또는 alias입니다.",
+                  "Discord channel ID or alias used for PM fallback and PM mode.",
+                )}
+              >
+                <input
+                  type="text"
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.pm_channel_id ?? ""}
+                  onChange={(event) =>
+                    handleEscalationChange({
+                      pm_channel_id: event.target.value.trim() || null,
+                    })
+                  }
+                />
+              </InputCard>
+
+              <InputCard
+                label={tr("PM hours", "PM hours")}
+                description={tr(
+                  "scheduled 모드에서 이 시간대에는 PM 라우팅으로 전환합니다. 형식: `HH:MM-HH:MM`.",
+                  "When scheduled mode is active, this window routes to PM. Format: `HH:MM-HH:MM`.",
+                )}
+              >
+                <input
+                  type="text"
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.schedule.pm_hours}
+                  onChange={(event) =>
+                    handleEscalationChange((prev) => ({
+                      ...prev,
+                      schedule: {
+                        ...prev.schedule,
+                        pm_hours: event.target.value,
+                      },
+                    }))
+                  }
+                />
+              </InputCard>
+
+              <InputCard
+                label={tr("Timezone", "Timezone")}
+                description={tr(
+                  "scheduled 모드 판단에 사용할 IANA timezone입니다. 예: `Asia/Seoul`.",
+                  "IANA timezone used for scheduled-mode evaluation. Example: `Asia/Seoul`.",
+                )}
+              >
+                <input
+                  type="text"
+                  className="w-full rounded-2xl px-3 py-2.5 text-sm"
+                  style={inputStyle}
+                  value={escalationSettings.schedule.timezone}
+                  onChange={(event) =>
+                    handleEscalationChange((prev) => ({
+                      ...prev,
+                      schedule: {
+                        ...prev.schedule,
+                        timezone: event.target.value,
+                      },
+                    }))
+                  }
+                />
+              </InputCard>
+            </div>
+
+            <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
+              <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
+                {tr(
+                  "Discord `!escalation` 명령과 같은 endpoint를 공유합니다. 기본값은 `agentdesk.yaml`, runtime override는 DB `kv_meta`에 저장됩니다.",
+                  "Shares the same endpoint as the Discord `!escalation` command. Defaults come from `agentdesk.yaml`, while runtime overrides are stored in DB `kv_meta`.",
+                )}
+                {escalationDefaults && (
+                  <>
+                    {" "}
+                    {tr(
+                      `기본 schedule은 ${escalationDefaults.schedule.pm_hours} / ${escalationDefaults.schedule.timezone} 입니다.`,
+                      `Default schedule is ${escalationDefaults.schedule.pm_hours} / ${escalationDefaults.schedule.timezone}.`,
+                    )}
+                  </>
+                )}
+              </p>
+              <button
+                onClick={handleEscalationSave}
+                disabled={escalationSaving || !escalationDirty}
+                className="inline-flex min-h-[44px] shrink-0 items-center justify-center rounded-2xl bg-amber-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-amber-500 disabled:opacity-50"
+              >
+                {escalationSaving ? tr("저장 중...", "Saving...") : tr("에스컬레이션 저장", "Save escalation")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-5 rounded-2xl border p-4 text-sm" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)", color: "var(--th-text-muted)" }}>
+            {tr("에스컬레이션 설정을 불러오는 중입니다.", "Loading escalation settings.")}
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-[28px] border p-5 sm:p-6" style={sectionStyle}>
+        <SectionHeading
           eyebrow={tr("저장 경로", "Storage Surfaces")}
           title={tr("어디에 저장되는지 먼저 보이게", "Make storage surfaces explicit")}
           description={tr(
@@ -809,7 +1065,7 @@ export default function SettingsView({
           )}
         />
 
-        <div className="mt-5 grid gap-3 lg:grid-cols-2 2xl:grid-cols-4">
+        <div className="mt-5 grid gap-3 lg:grid-cols-2 2xl:grid-cols-5">
           <SurfaceCard
             title={tr("회사 설정 JSON", "Company settings JSON")}
             body={tr(
@@ -829,10 +1085,18 @@ export default function SettingsView({
           <SurfaceCard
             title={tr("정책/파이프라인 키", "Policy and pipeline keys")}
             body={tr(
-              "리뷰, 타임아웃, context compact, merge automation 값은 `agentdesk.yaml` baseline에서 시작하고, 운영 중 수정은 개별 `kv_meta` 키 override로 유지됩니다.",
-              "Review, timeout, context-compaction, and merge automation values start from the `agentdesk.yaml` baseline and keep live edits as individual `kv_meta` overrides.",
+              "리뷰, 타임아웃, context compact, merge automation 값은 YAML baseline 위에 개별 `kv_meta` override로 쌓입니다. `/api/settings/config` 응답이 baseline과 restart behavior를 함께 내려줍니다.",
+              "Review, timeout, context-compaction, and merge automation values layer individual `kv_meta` overrides on top of YAML baselines, and `/api/settings/config` returns baseline plus restart metadata per key.",
             )}
             footer={tr("source: agentdesk.yaml + individual kv_meta overrides", "source: agentdesk.yaml + individual kv_meta overrides")}
+          />
+          <SurfaceCard
+            title={tr("에스컬레이션 라우팅", "Escalation routing")}
+            body={tr(
+              "PM/owner 라우팅은 `escalation:` baseline과 `kv_meta['escalation-settings-override']` 전용 override를 함께 사용합니다.",
+              "PM/owner routing uses an `escalation:` baseline plus a dedicated `kv_meta['escalation-settings-override']` layer.",
+            )}
+            footer={tr("source: escalation config + dedicated kv_meta override", "source: escalation config + dedicated kv_meta override")}
           />
           <SurfaceCard
             title={tr("온보딩/시크릿", "Onboarding and secrets")}
@@ -1040,7 +1304,7 @@ export default function SettingsView({
 
             <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
               <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                {tr("런타임 설정은 저장 즉시 적용됩니다. 값 조정이 잦다면 먼저 작은 폭으로 바꾸고 Pulse/영수증/로그 반응을 확인하는 편이 안전합니다.", "Runtime config applies immediately. If you tune frequently, prefer small changes first and verify Pulse, receipts, and logs before making larger moves.")}
+                {tr("런타임 설정은 저장 즉시 적용됩니다. 값 조정이 잦다면 먼저 작은 폭으로 바꾸고 대시보드/영수증/로그 반응을 확인하는 편이 안전합니다.", "Runtime config applies immediately. If you tune frequently, prefer small changes first and verify dashboard, receipts, and logs before making larger moves.")}
               </p>
               <button
                 onClick={handleRcSave}
@@ -1092,9 +1356,15 @@ export default function SettingsView({
                       const description = SYSTEM_CONFIG_DESCRIPTIONS[entry.key];
                       const hasLocalEdit = Object.prototype.hasOwnProperty.call(configEdits, entry.key);
                       const currentValue = hasLocalEdit ? configEdits[entry.key] : (entry.value ?? entry.default ?? "");
-                      const defaultLabel = entry.default ?? tr("없음", "None");
-                      const readOnly = isReadOnlyConfigKey(entry.key);
+                      const baselineValue = entry.baseline ?? entry.default ?? null;
+                      const defaultLabel = baselineValue ?? tr("없음", "None");
+                      const readOnly = entry.editable === false || isReadOnlyConfigKey(entry.key);
+                      const overrideActive = hasLocalEdit
+                        ? (baselineValue !== null ? String(currentValue) !== baselineValue : hasConfigValue(currentValue))
+                        : (entry.override_active ?? (baselineValue !== null ? String(currentValue) !== baselineValue : hasConfigValue(currentValue)));
                       const isEnabled = parseBooleanConfigValue(currentValue);
+                      const baselineSource = baselineSourceNote(entry.baseline_source, isKo);
+                      const restartNote = restartBehaviorNote(entry.restart_behavior, isKo);
 
                       return (
                         <div
@@ -1114,6 +1384,11 @@ export default function SettingsView({
                                 >
                                   kv_meta
                                 </span>
+                                {!readOnly && (
+                                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${configLayerClass(overrideActive)}`}>
+                                    {configLayerLabel(overrideActive, isKo)}
+                                  </span>
+                                )}
                                 {readOnly && (
                                   <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${auditStatusClass("read-only")}`}>
                                     {auditStatusLabel("read-only", isKo)}
@@ -1149,10 +1424,14 @@ export default function SettingsView({
                                   <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
                                     {isEnabled ? tr("활성화됨", "Enabled") : tr("비활성화됨", "Disabled")}
                                   </div>
-                                  <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                                    {readOnly
-                                      ? tr("서버 부팅 시 다시 동기화되는 항목입니다.", "This value is resynced on server boot.")
-                                      : tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}
+                                  <div className="mt-1 flex flex-wrap gap-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                                    <span>
+                                      {readOnly
+                                        ? tr("서버 부팅 시 다시 동기화되는 항목입니다.", "This value is resynced on server boot.")
+                                        : tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}
+                                    </span>
+                                    {baselineSource && <span>{baselineSource}</span>}
+                                    {restartNote && <span>{restartNote}</span>}
                                   </div>
                                 </div>
                                 <span
@@ -1180,6 +1459,8 @@ export default function SettingsView({
                                 </select>
                                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
                                   <span>{tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}</span>
+                                  {baselineSource && <span>{baselineSource}</span>}
+                                  {restartNote && <span>{restartNote}</span>}
                                   <span>{tr("GitHub auto-merge 전략과 1:1로 대응합니다.", "Maps directly to the GitHub auto-merge strategy.")}</span>
                                 </div>
                               </>
@@ -1196,9 +1477,8 @@ export default function SettingsView({
                                 />
                                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
                                   <span>{tr(`기본값: ${defaultLabel}`, `Default: ${defaultLabel}`)}</span>
-                                  {readOnly && (
-                                    <span>{tr("이 값은 서버 설정에서 덮어써집니다.", "This value is overwritten from server config.")}</span>
-                                  )}
+                                  {baselineSource && <span>{baselineSource}</span>}
+                                  {restartNote && <span>{restartNote}</span>}
                                   {entry.key.endsWith("_channel_id") && (
                                     <span>{tr("Discord ID는 정밀도 손실을 피하려고 문자열로 유지합니다.", "Discord IDs stay as strings to avoid precision loss.")}</span>
                                   )}

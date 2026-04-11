@@ -20,6 +20,8 @@ mod tests {
     use crate::server::routes::AppState;
     use serde_json::json;
 
+    mod high_risk_recovery;
+
     fn test_db() -> db::Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
@@ -30,6 +32,13 @@ mod tests {
     fn test_engine(db: &db::Db) -> PolicyEngine {
         let mut config = crate::config::Config::default();
         config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        PolicyEngine::new(&config, db.clone()).unwrap()
+    }
+
+    fn test_engine_with_dir(db: &db::Db, dir: &std::path::Path) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = dir.to_path_buf();
         config.policies.hot_reload = false;
         PolicyEngine::new(&config, db.clone()).unwrap()
     }
@@ -77,6 +86,58 @@ mod tests {
             match self.previous.take() {
                 Some(value) => unsafe { std::env::set_var("AGENTDESK_REPO_DIR", value) },
                 None => unsafe { std::env::remove_var("AGENTDESK_REPO_DIR") },
+            }
+        }
+    }
+
+    struct RuntimeRootOverride {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl RuntimeRootOverride {
+        fn new(path: &std::path::Path) -> Self {
+            let guard = repo_dir_env_lock().lock().unwrap();
+            let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
+            unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
+            Self {
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+
+    struct GeminiPathOverride {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl GeminiPathOverride {
+        fn new(path: &std::path::Path) -> Self {
+            let guard = crate::services::discord::runtime_store::lock_test_env();
+            let previous = std::env::var_os("AGENTDESK_GEMINI_PATH");
+            unsafe { std::env::set_var("AGENTDESK_GEMINI_PATH", path) };
+            Self {
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for GeminiPathOverride {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_GEMINI_PATH", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_GEMINI_PATH") },
+            }
+        }
+    }
+
+    impl Drop for RuntimeRootOverride {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
             }
         }
     }
@@ -287,6 +348,95 @@ mod tests {
         .unwrap();
     }
 
+    fn kv_value(db: &db::Db, key: &str) -> Option<String> {
+        let conn = db.lock().unwrap();
+        conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .ok()
+    }
+
+    fn relative_local_time(minutes_ago: i64) -> String {
+        (chrono::Local::now() - chrono::Duration::minutes(minutes_ago))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    fn setup_timeouts_policy_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("policies")
+            .join("timeouts.js");
+        fs::copy(&source, dir.path().join("timeouts.js")).unwrap();
+        fs::write(
+            dir.path().join("zz-timeouts-test-overrides.js"),
+            r#"
+            agentdesk.http.post = function(url, body) {
+                var countRows = agentdesk.db.query(
+                    "SELECT value FROM kv_meta WHERE key = ?1",
+                    ["test_http_count"]
+                );
+                var nextCount = countRows.length > 0
+                    ? (parseInt(countRows[0].value, 10) || 0) + 1
+                    : 1;
+                agentdesk.db.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    ["test_http_count", "" + nextCount]
+                );
+                agentdesk.db.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    ["test_http_last", JSON.stringify({ url: url, body: body })]
+                );
+                return {
+                    ok: true,
+                    new_deadline_ms: Date.now() + (((body && body.extend_secs) || 0) * 1000)
+                };
+            };
+            var rawExec = agentdesk.exec;
+            agentdesk.exec = function(cmd, args) {
+                if (cmd === "tmux" && args && args[0] === "list-panes") {
+                    return "0";
+                }
+                return rawExec(cmd, args);
+            };
+            agentdesk.registerPolicy({
+                name: "timeouts-test-overrides",
+                priority: 9999
+            });
+            "#,
+        )
+        .unwrap();
+        dir
+    }
+
+    fn write_codex_inflight(
+        runtime_root: &std::path::Path,
+        channel_id: &str,
+        started_at: &str,
+        updated_at: &str,
+        session_key: &str,
+        tmux_name: &str,
+        dispatch_id: Option<&str>,
+    ) {
+        let inflight_dir = runtime_root.join("runtime/discord_inflight/codex");
+        fs::create_dir_all(&inflight_dir).unwrap();
+        fs::write(
+            inflight_dir.join(format!("{channel_id}.json")),
+            serde_json::to_string(&json!({
+                "provider": "codex",
+                "channel_id": channel_id,
+                "channel_name": "Test Channel",
+                "tmux_session_name": tmux_name,
+                "started_at": started_at,
+                "updated_at": updated_at,
+                "session_key": session_key,
+                "dispatch_id": dispatch_id,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     fn seed_pr_tracking(
         db: &db::Db,
         card_id: &str,
@@ -448,6 +598,14 @@ mod tests {
 
         script.push_str("echo '[]'\n");
         script
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &std::path::Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
     }
 
     #[cfg(windows)]
@@ -712,280 +870,6 @@ mod tests {
         );
     }
 
-    // ── Scenario 3: Restart recovery — reconciliation fixes broken state ──
-
-    #[test]
-    fn scenario_3_restart_recovery_reconciles_broken_state() {
-        let db = test_db();
-        seed_agent(&db);
-        seed_card(&db, "card-s3", "review");
-
-        // Simulate pre-crash broken state from an older DB version:
-        // 1) Drop the partial unique index (simulates pre-#116 DB)
-        // 2) Insert duplicate pending review-decisions
-        // 3) Set latest_dispatch_id to the loser (broken pointer)
-        {
-            let conn = db.lock().unwrap();
-            // Remove index to simulate pre-#116 DB state
-            conn.execute_batch("DROP INDEX IF EXISTS idx_single_active_review_decision;")
-                .unwrap();
-            // Create two pending review-decisions (duplicate — legacy race)
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
-                 VALUES ('rd-loser', 'card-s3', 'agent-1', 'review-decision', 'pending', 'RD Loser', datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
-                 VALUES ('rd-winner', 'card-s3', 'agent-1', 'review-decision', 'pending', 'RD Winner', datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-            // Point latest_dispatch_id to loser (broken pointer)
-            conn.execute(
-                "UPDATE kanban_cards SET latest_dispatch_id = 'rd-loser' WHERE id = 'card-s3'",
-                [],
-            )
-            .unwrap();
-            // card_review_state with stale NULL pending_dispatch_id
-            conn.execute(
-                "INSERT INTO card_review_state (card_id, review_round, state, pending_dispatch_id, review_entered_at, updated_at) \
-                 VALUES ('card-s3', 1, 'reviewing', NULL, datetime('now'), datetime('now'))",
-                [],
-            ).unwrap();
-        }
-
-        // Simulate restart: re-run schema::migrate which includes reconciliation
-        {
-            let conn = db.lock().unwrap();
-            db::schema::migrate(&conn).unwrap();
-        }
-
-        // Verify reconciliation results:
-        {
-            let conn = db.lock().unwrap();
-
-            // 1) Only 1 active review-decision should remain (duplicate cancelled)
-            let active_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM task_dispatches \
-                     WHERE kanban_card_id = 'card-s3' AND dispatch_type = 'review-decision' \
-                     AND status IN ('pending', 'dispatched')",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(
-                active_count, 1,
-                "reconciliation must leave exactly 1 active review-decision"
-            );
-
-            // 2) latest_dispatch_id should point to the surviving active dispatch
-            let latest: String = conn
-                .query_row(
-                    "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-s3'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let survivor_status: String = conn
-                .query_row(
-                    "SELECT status FROM task_dispatches WHERE id = ?1",
-                    [&latest],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(
-                survivor_status == "pending" || survivor_status == "dispatched",
-                "latest_dispatch_id must point to active dispatch, got status: {}",
-                survivor_status
-            );
-        }
-    }
-
-    #[test]
-    fn scenario_251_boot_reconcile_backfills_missing_notify_outbox() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-251-outbox", "in_progress");
-        seed_dispatch(
-            &db,
-            "dispatch-251-outbox",
-            "card-251-outbox",
-            "implementation",
-            "pending",
-        );
-
-        let stats = crate::reconcile::reconcile_boot_runtime(&db, &engine).unwrap();
-        assert_eq!(
-            stats.missing_notify_outbox_backfilled, 1,
-            "boot reconcile must backfill missing notify outbox rows"
-        );
-
-        let conn = db.lock().unwrap();
-        let outbox_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_outbox \
-                 WHERE dispatch_id = 'dispatch-251-outbox' AND action = 'notify'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            outbox_count, 1,
-            "notify outbox row must exist after boot reconcile"
-        );
-    }
-
-    #[test]
-    fn scenario_251_boot_reconcile_resets_broken_auto_queue_entries() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-251-aq-orphan", "in_progress");
-        seed_card(&db, "card-251-aq-phantom", "in_progress");
-        seed_card(&db, "card-251-aq-cancelled", "in_progress");
-        seed_card(&db, "card-251-aq-completed", "in_progress");
-        seed_card(&db, "card-251-aq-valid", "in_progress");
-
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_runs (id, repo, agent_id, status) \
-                 VALUES ('run-251-aq', 'test-repo', 'agent-1', 'active')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-                 VALUES ('entry-251-aq-orphan', 'run-251-aq', 'card-251-aq-orphan', 'agent-1', 'dispatched', NULL, datetime('now', '-3 minutes'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-                 VALUES ('entry-251-aq-phantom', 'run-251-aq', 'card-251-aq-phantom', 'agent-1', 'dispatched', 'dispatch-251-aq-phantom', datetime('now', '-3 minutes'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title) \
-                 VALUES ('dispatch-251-aq-cancelled', 'card-251-aq-cancelled', 'agent-1', 'implementation', 'cancelled', 'cancelled')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-                 VALUES ('entry-251-aq-cancelled', 'run-251-aq', 'card-251-aq-cancelled', 'agent-1', 'dispatched', 'dispatch-251-aq-cancelled', datetime('now', '-3 minutes'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title) \
-                 VALUES ('dispatch-251-aq-completed', 'card-251-aq-completed', 'agent-1', 'implementation', 'completed', 'completed')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-                 VALUES ('entry-251-aq-completed', 'run-251-aq', 'card-251-aq-completed', 'agent-1', 'dispatched', 'dispatch-251-aq-completed', datetime('now', '-3 minutes'))",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title) \
-                 VALUES ('dispatch-251-aq-valid', 'card-251-aq-valid', 'agent-1', 'implementation', 'dispatched', 'valid')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
-                 VALUES ('entry-251-aq-valid', 'run-251-aq', 'card-251-aq-valid', 'agent-1', 'dispatched', 'dispatch-251-aq-valid', datetime('now'))",
-                [],
-            )
-            .unwrap();
-        }
-
-        let stats = crate::reconcile::reconcile_boot_runtime(&db, &engine).unwrap();
-        assert_eq!(
-            stats.broken_auto_queue_entries_reset, 4,
-            "boot reconcile must reset orphan/phantom/cancelled/completed auto-queue entries"
-        );
-
-        let conn = db.lock().unwrap();
-        let orphan_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-251-aq-orphan'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let phantom_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-251-aq-phantom'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let cancelled_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-251-aq-cancelled'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let completed_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-251-aq-completed'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let valid_status: String = conn
-            .query_row(
-                "SELECT status FROM auto_queue_entries WHERE id = 'entry-251-aq-valid'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(orphan_status, "pending");
-        assert_eq!(phantom_status, "pending");
-        assert_eq!(cancelled_status, "pending");
-        assert_eq!(completed_status, "pending");
-        assert_eq!(valid_status, "dispatched");
-    }
-
-    #[test]
-    fn scenario_251_boot_reconcile_refires_missing_review_dispatch() {
-        let (_repo, _repo_guard) = setup_test_repo();
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-251-review", "review");
-
-        let stats = crate::reconcile::reconcile_boot_runtime(&db, &engine).unwrap();
-        assert_eq!(
-            stats.missing_review_dispatches_refired, 1,
-            "boot reconcile must re-fire OnReviewEnter for review cards missing dispatch"
-        );
-
-        let conn = db.lock().unwrap();
-        let review_dispatch_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM task_dispatches \
-                 WHERE kanban_card_id = 'card-251-review' \
-                   AND dispatch_type = 'review' \
-                   AND status IN ('pending', 'dispatched')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            review_dispatch_count, 1,
-            "review card must have one active review dispatch after boot reconcile"
-        );
-    }
-
     // ── Scenario 4: Card status full cycle ──────────────────────────
 
     #[test]
@@ -1053,6 +937,86 @@ mod tests {
                 .unwrap();
             assert!(completed_at.is_some(), "completed_at set on done");
         }
+    }
+
+    #[test]
+    fn terminal_transition_records_card_retrospective_from_latest_completed_dispatch() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-retro-e2e", "review", "test/repo", 418, None);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards
+                 SET review_round = 2,
+                     review_notes = 'canonical thread_links only'
+                 WHERE id = 'card-retro-e2e'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, result,
+                    created_at, updated_at, completed_at
+                 ) VALUES (
+                    'dispatch-retro-e2e', 'card-retro-e2e', 'agent-1', 'implementation', 'completed', 'Done', ?1,
+                    datetime('now', '-37 minutes'), datetime('now'), datetime('now')
+                 )",
+                [json!({
+                    "summary": "Discord 링크 생성은 canonical thread_links만 사용하도록 정리"
+                })
+                .to_string()],
+            )
+            .unwrap();
+        }
+
+        assert!(
+            kanban::transition_status_with_opts(
+                &db,
+                &engine,
+                "card-retro-e2e",
+                "done",
+                "test",
+                true,
+            )
+            .is_ok()
+        );
+        assert_eq!(get_card_status(&db, "card-retro-e2e"), "done");
+
+        let conn = db.lock().unwrap();
+        let stored: (String, String, i64, String, String) = conn
+            .query_row(
+                "SELECT topic, content, review_round, terminal_status, sync_status
+                 FROM card_retrospectives
+                 WHERE card_id = 'card-retro-e2e'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, "issue-418");
+        assert!(stored.1.contains("AgentDesk 이슈 #418"));
+        assert!(stored.1.contains("canonical thread_links"));
+        assert!(stored.1.contains("review 2라운드"));
+        assert_eq!(stored.2, 2);
+        assert_eq!(stored.3, "done");
+        assert!(
+            stored.4 == "skipped_backend"
+                || stored.4 == "skipped_no_runtime"
+                || stored.4 == "queued",
+            "unexpected sync status: {}",
+            stored.4
+        );
     }
 
     // ── Scenario 5: Timeout recovery ────────────────────────────────
@@ -2320,6 +2284,18 @@ mod tests {
 
         {
             let conn = db.lock().unwrap();
+            let completed_at: Option<String> = conn
+                .query_row(
+                    "SELECT completed_at FROM kanban_cards WHERE id = 'card-review-disabled'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                completed_at.is_some(),
+                "review-disabled completion must still fire OnCardTerminal side-effects"
+            );
+
             let review_round: i64 = conn
                 .query_row(
                     "SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = 'card-review-disabled'",
@@ -2443,383 +2419,6 @@ mod tests {
         assert_eq!(
             to_agent_id, "agent-1",
             "review dispatch must target canonical assigned_agent_id, not a channel alias"
-        );
-    }
-
-    // ── #160: Process-level restart/delivery boundary tests ────
-    //
-    // Infrastructure: MockNotifier + process_outbox_batch + DB fallback helpers.
-    // Tests exercise actual outbox worker code paths, not raw SQL.
-
-    use crate::server::routes::dispatches::{OutboxNotifier, process_outbox_batch};
-
-    /// Mock Discord transport that records calls and optionally fails.
-    struct MockNotifier {
-        calls: std::sync::Mutex<Vec<MockCall>>,
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    enum MockCall {
-        Notify {
-            agent_id: String,
-            dispatch_id: String,
-        },
-        Followup {
-            dispatch_id: String,
-        },
-    }
-
-    impl MockNotifier {
-        fn new() -> Self {
-            Self {
-                calls: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-
-        fn call_log(&self) -> Vec<MockCall> {
-            self.calls.lock().unwrap().clone()
-        }
-
-        fn notify_count(&self) -> usize {
-            self.calls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|c| matches!(c, MockCall::Notify { .. }))
-                .count()
-        }
-    }
-
-    impl OutboxNotifier for MockNotifier {
-        async fn notify_dispatch(
-            &self,
-            _db: crate::db::Db,
-            agent_id: String,
-            _title: String,
-            _card_id: String,
-            dispatch_id: String,
-        ) -> Result<(), String> {
-            self.calls.lock().unwrap().push(MockCall::Notify {
-                agent_id,
-                dispatch_id,
-            });
-            Ok(())
-        }
-
-        async fn handle_followup(
-            &self,
-            _db: crate::db::Db,
-            dispatch_id: String,
-        ) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(MockCall::Followup { dispatch_id });
-            Ok(())
-        }
-    }
-
-    fn seed_outbox(db: &db::Db, dispatch_id: &str, action: &str) {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO dispatch_outbox (dispatch_id, action, agent_id, card_id, title, status) \
-             VALUES (?1, ?2, 'agent-1', 'card-160', 'Test', 'pending')",
-            rusqlite::params![dispatch_id, action],
-        )
-        .unwrap();
-    }
-
-    fn outbox_status(db: &db::Db, dispatch_id: &str) -> Vec<String> {
-        let conn = db.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT status FROM dispatch_outbox WHERE dispatch_id = ?1 ORDER BY id")
-            .unwrap();
-        stmt.query_map([dispatch_id], |row| row.get(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
-    }
-
-    fn has_reconcile_marker(db: &db::Db, dispatch_id: &str) -> bool {
-        let conn = db.lock().unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) > 0 FROM kv_meta WHERE key = ?1",
-            [&format!("reconcile_dispatch:{dispatch_id}")],
-            |row| row.get(0),
-        )
-        .unwrap_or(false)
-    }
-
-    fn get_dispatch_result_json(db: &db::Db, dispatch_id: &str) -> Option<String> {
-        let conn = db.lock().unwrap();
-        conn.query_row(
-            "SELECT result FROM task_dispatches WHERE id = ?1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .ok()
-    }
-
-    /// Scenario 160-1: DB commit → outbox worker delivers exactly 1 notification.
-    ///
-    /// Exercises `process_outbox_batch` with MockNotifier to verify:
-    /// - Outbox entry transitions pending → processing → done
-    /// - Mock Discord transport receives exactly 1 notify call
-    #[tokio::test]
-    async fn scenario_160_1_outbox_batch_delivers_exactly_once() {
-        let db = test_db();
-        seed_agent(&db);
-        seed_card(&db, "card-160", "ready");
-        seed_dispatch(&db, "d-160-1", "card-160", "implementation", "pending");
-        seed_outbox(&db, "d-160-1", "notify");
-
-        let mock = MockNotifier::new();
-
-        // Run one batch — this exercises the real process_outbox_batch code path
-        let processed = process_outbox_batch(&db, &mock).await;
-
-        assert_eq!(processed, 1, "Batch should process exactly 1 entry");
-        assert_eq!(
-            mock.notify_count(),
-            1,
-            "Mock should receive exactly 1 notify call"
-        );
-        assert_eq!(
-            mock.call_log(),
-            vec![MockCall::Notify {
-                agent_id: "agent-1".into(),
-                dispatch_id: "d-160-1".into(),
-            }]
-        );
-
-        // Verify outbox entry transitioned to done
-        assert_eq!(outbox_status(&db, "d-160-1"), vec!["done"]);
-        assert_eq!(
-            get_dispatch_status(&db, "d-160-1"),
-            "dispatched",
-            "successful notify must transition pending dispatch to dispatched"
-        );
-
-        // Second batch should find nothing pending
-        let processed2 = process_outbox_batch(&db, &mock).await;
-        assert_eq!(processed2, 0, "No pending entries after first drain");
-        assert_eq!(mock.notify_count(), 1, "No additional calls on empty queue");
-    }
-
-    /// Scenario 160-2: Recovery API failure → DB fallback completes dispatch
-    /// and sets reconciliation marker for onTick hook chain.
-    ///
-    /// Simulates the turn_bridge fallback path: when finalize_dispatch fails,
-    /// the system falls back to direct DB UPDATE + reconcile marker.
-    #[tokio::test]
-    async fn scenario_160_2_recovery_fallback_completes_dispatch() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        seed_agent(&db);
-        seed_card(&db, "card-160r", "in_progress");
-        seed_dispatch(&db, "d-160r", "card-160r", "implementation", "pending");
-        seed_assistant_response_for_dispatch(&db, "d-160r", "completed during downtime");
-
-        // Step 1: Verify finalize_dispatch works on the happy path
-        let result = dispatch::finalize_dispatch(
-            &db,
-            &engine,
-            "d-160r",
-            "recovery_completed_during_downtime",
-            Some(&serde_json::json!({"agent_response_present": true})),
-        );
-        assert!(
-            result.is_ok(),
-            "finalize_dispatch happy path should succeed"
-        );
-        assert_eq!(get_dispatch_status(&db, "d-160r"), "completed");
-
-        // Step 2: Simulate the fallback path — when finalize_dispatch fails,
-        // turn_bridge does a direct DB UPDATE + reconciliation marker.
-        // This is the exact SQL from turn_bridge.rs:605-617.
-        seed_card(&db, "card-160r2", "in_progress");
-        seed_dispatch(&db, "d-160r2", "card-160r2", "implementation", "pending");
-
-        // Execute the fallback SQL (mirrors turn_bridge.rs separate_conn path)
-        {
-            let fallback_conn = db.separate_conn().unwrap();
-            let changed = fallback_conn
-                .execute(
-                    "UPDATE task_dispatches SET status = 'completed', \
-                     result = '{\"completion_source\":\"turn_bridge_db_fallback\",\"needs_reconcile\":true,\"agent_response_present\":true}', \
-                     updated_at = datetime('now') WHERE id = ?1 AND status IN ('pending', 'dispatched')",
-                    ["d-160r2"],
-                )
-                .unwrap();
-            assert_eq!(changed, 1, "Fallback UPDATE should affect 1 row");
-
-            fallback_conn
-                .execute(
-                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params!["reconcile_dispatch:d-160r2", "d-160r2"],
-                )
-                .unwrap();
-        }
-
-        // Verify fallback outcome
-        assert_eq!(get_dispatch_status(&db, "d-160r2"), "completed");
-        assert!(
-            has_reconcile_marker(&db, "d-160r2"),
-            "Reconciliation marker must exist for onTick hook chain"
-        );
-        let result_json = get_dispatch_result_json(&db, "d-160r2").unwrap();
-        assert!(
-            result_json.contains("turn_bridge_db_fallback"),
-            "Result should record fallback completion source"
-        );
-        assert!(
-            result_json.contains("needs_reconcile"),
-            "Result should flag reconciliation needed"
-        );
-    }
-
-    /// Scenario 160-3: Multiple outbox entries processed in FIFO order via
-    /// actual process_outbox_batch — mock records call sequence.
-    ///
-    /// Verifies: persisted queue order → catch-up order → no order reversal.
-    #[tokio::test]
-    async fn scenario_160_3_outbox_fifo_ordering_through_worker() {
-        let db = test_db();
-        seed_agent(&db);
-        seed_card(&db, "card-160o", "ready");
-        seed_dispatch(&db, "d-160o-a", "card-160o", "implementation", "pending");
-        seed_dispatch(&db, "d-160o-b", "card-160o", "implementation", "pending");
-        seed_dispatch(&db, "d-160o-c", "card-160o", "implementation", "pending");
-
-        seed_outbox(&db, "d-160o-a", "notify");
-        seed_outbox(&db, "d-160o-b", "notify");
-        seed_outbox(&db, "d-160o-c", "notify");
-
-        let mock = MockNotifier::new();
-        let processed = process_outbox_batch(&db, &mock).await;
-
-        assert_eq!(processed, 3);
-
-        // Verify FIFO order via mock call log
-        let ids: Vec<String> = mock
-            .call_log()
-            .iter()
-            .filter_map(|c| match c {
-                MockCall::Notify { dispatch_id, .. } => Some(dispatch_id.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            ids,
-            vec!["d-160o-a", "d-160o-b", "d-160o-c"],
-            "Order reversal detected — outbox must process in id ASC (FIFO)"
-        );
-
-        // All entries should be done
-        assert_eq!(outbox_status(&db, "d-160o-a"), vec!["done"]);
-        assert_eq!(outbox_status(&db, "d-160o-b"), vec!["done"]);
-        assert_eq!(outbox_status(&db, "d-160o-c"), vec!["done"]);
-        assert_eq!(get_dispatch_status(&db, "d-160o-a"), "dispatched");
-        assert_eq!(get_dispatch_status(&db, "d-160o-b"), "dispatched");
-        assert_eq!(get_dispatch_status(&db, "d-160o-c"), "dispatched");
-    }
-
-    /// Scenario 160-4: Duplicate outbox entries for the same dispatch.
-    /// The two-phase delivery guard (dispatch_reserving/dispatch_notified) lives in
-    /// send_dispatch_to_discord, not in process_outbox_batch, so with MockNotifier
-    /// both entries call the notifier. In production, RealOutboxNotifier delegates
-    /// to send_dispatch_to_discord which deduplicates via the two-phase marker.
-    /// Both entries transition to 'done'.
-    #[tokio::test]
-    async fn scenario_160_4_outbox_processes_all_entries_including_duplicates() {
-        let db = test_db();
-        seed_agent(&db);
-        seed_card(&db, "card-160d", "ready");
-        seed_dispatch(&db, "d-160d", "card-160d", "implementation", "pending");
-
-        // Insert duplicate outbox entries for the same dispatch
-        seed_outbox(&db, "d-160d", "notify");
-        seed_outbox(&db, "d-160d", "notify");
-
-        let mock = MockNotifier::new();
-        let processed = process_outbox_batch(&db, &mock).await;
-
-        // Worker processes all pending entries
-        assert_eq!(processed, 2, "Worker should process both pending entries");
-        // MockNotifier doesn't have the two-phase guard — both entries call through.
-        // In production, send_dispatch_to_discord deduplicates via dispatch_reserving/notified.
-        assert_eq!(
-            mock.notify_count(),
-            2,
-            "MockNotifier receives both calls (production dedup is in send_dispatch_to_discord)"
-        );
-
-        // Both entries should transition to done (second via idempotent reservation check)
-        assert_eq!(outbox_status(&db, "d-160d"), vec!["done", "done"]);
-    }
-
-    /// Scenario 160-5: Mixed actions (notify + followup) are dispatched to the
-    /// correct notifier methods through process_outbox_batch.
-    #[tokio::test]
-    async fn scenario_160_5_mixed_actions_route_correctly() {
-        let db = test_db();
-        seed_agent(&db);
-        seed_card(&db, "card-160m", "ready");
-        seed_dispatch(&db, "d-160m-n", "card-160m", "implementation", "pending");
-        seed_dispatch(&db, "d-160m-f", "card-160m", "implementation", "pending");
-
-        seed_outbox(&db, "d-160m-n", "notify");
-        // Insert followup entry manually (seed_outbox hardcodes card_id)
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO dispatch_outbox (dispatch_id, action, status) \
-                 VALUES ('d-160m-f', 'followup', 'pending')",
-                [],
-            )
-            .unwrap();
-        }
-
-        let mock = MockNotifier::new();
-        let processed = process_outbox_batch(&db, &mock).await;
-
-        assert_eq!(processed, 2);
-        assert_eq!(
-            mock.call_log(),
-            vec![
-                MockCall::Notify {
-                    agent_id: "agent-1".into(),
-                    dispatch_id: "d-160m-n".into(),
-                },
-                MockCall::Followup {
-                    dispatch_id: "d-160m-f".into(),
-                },
-            ]
-        );
-    }
-
-    /// Scenario 160-6: Notify success must not rewrite terminal dispatch states.
-    ///
-    /// Verifies the `status = 'pending'` guard keeps completed dispatches
-    /// terminal while still draining the outbox entry successfully.
-    #[tokio::test]
-    async fn scenario_160_6_notify_success_keeps_completed_dispatch_terminal() {
-        let db = test_db();
-        seed_agent(&db);
-        seed_card(&db, "card-160c", "done");
-        seed_dispatch(&db, "d-160c", "card-160c", "implementation", "completed");
-        seed_outbox(&db, "d-160c", "notify");
-
-        let mock = MockNotifier::new();
-        let processed = process_outbox_batch(&db, &mock).await;
-
-        assert_eq!(processed, 1);
-        assert_eq!(mock.notify_count(), 1);
-        assert_eq!(outbox_status(&db, "d-160c"), vec!["done"]);
-        assert_eq!(
-            get_dispatch_status(&db, "d-160c"),
-            "completed",
-            "terminal dispatch status must not be rewritten by notify success"
         );
     }
 
@@ -3167,12 +2766,25 @@ mod tests {
     }
 
     #[test]
-    fn scenario_332_implementation_noop_completion_skips_review_and_finishes_done() {
+    fn scenario_332_implementation_noop_completion_returns_card_to_ready_and_closes_auto_queue() {
         let db = test_db();
         let engine = test_engine(&db);
         seed_agent(&db);
         seed_card(&db, "card-332", "in_progress");
         seed_dispatch(&db, "impl-332", "card-332", "implementation", "pending");
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status) VALUES ('run-332', 'repo', 'agent-1', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at) \
+                 VALUES ('entry-332', 'run-332', 'card-332', 'agent-1', 'dispatched', 'impl-332', datetime('now'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
 
         let result = dispatch::complete_dispatch(
             &db,
@@ -3182,6 +2794,7 @@ mod tests {
                 "completion_source": "test_harness",
                 "work_outcome": "noop",
                 "completed_without_changes": true,
+                "card_status_target": "ready",
                 "notes": "spec already satisfied"
             }),
         );
@@ -3193,8 +2806,8 @@ mod tests {
 
         assert_eq!(
             get_card_status(&db, "card-332"),
-            "done",
-            "#332: explicit noop outcome must finish implementation card as done"
+            "ready",
+            "#332: explicit noop outcome must return implementation card to ready"
         );
 
         let conn = db.lock().unwrap();
@@ -3212,6 +2825,18 @@ mod tests {
             "#332: noop completion must not create a follow-up review dispatch"
         );
 
+        let auto_queue_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-332'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            auto_queue_status, "done",
+            "#332: noop completion must close the active auto-queue entry"
+        );
+
         let metadata_json: String = conn
             .query_row(
                 "SELECT metadata FROM kanban_cards WHERE id = 'card-332'",
@@ -3227,6 +2852,10 @@ mod tests {
         assert_eq!(
             metadata["work_resolution_result"]["completed_without_changes"],
             true
+        );
+        assert_eq!(
+            metadata["work_resolution_result"]["card_status_target"],
+            "ready"
         );
     }
 
@@ -3954,5 +3583,89 @@ mod tests {
         };
         assert_eq!(entry_status, "dispatched");
         assert_eq!(entry_dispatch_id, latest_dispatch_id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gemini_streaming_cancel_integration_stops_after_partial_output() {
+        use std::sync::Arc;
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let gemini_path = dir.path().join("gemini");
+        write_executable_script(
+            &gemini_path,
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' '{"type":"init","session_id":"latest","model":"gemini-2.5-flash"}'
+printf '%s\n' '{"type":"message","role":"assistant","content":"partial"}'
+while true; do
+  printf '%s\n' 'heartbeat'
+  sleep 0.05
+done
+"#,
+        );
+        let _gemini_override = GeminiPathOverride::new(&gemini_path);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let token_for_thread = token.clone();
+        let working_dir = dir.path().display().to_string();
+        let started_at = Instant::now();
+        let handle = std::thread::spawn(move || {
+            crate::services::gemini::execute_command_streaming(
+                "say hello",
+                None,
+                &working_dir,
+                tx,
+                None,
+                None,
+                Some(token_for_thread),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        });
+
+        match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            crate::services::agent_protocol::StreamMessage::Init { session_id } => {
+                assert_eq!(session_id, "latest");
+            }
+            other => panic!("expected Init, got {:?}", other),
+        }
+        match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            crate::services::agent_protocol::StreamMessage::Text { content } => {
+                assert_eq!(content, "partial");
+            }
+            other => panic!("expected Text, got {:?}", other),
+        }
+
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let result = handle.join().unwrap();
+        assert!(result.is_ok());
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "cancellation should complete without waiting for provider shutdown"
+        );
+
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+                Ok(crate::services::agent_protocol::StreamMessage::Done { .. }) => {
+                    panic!("unexpected terminal Done after cancellation")
+                }
+                Ok(crate::services::agent_protocol::StreamMessage::Error { message, .. }) => {
+                    panic!("unexpected terminal Error after cancellation: {message}")
+                }
+                Ok(_) => {}
+            }
+        }
     }
 }

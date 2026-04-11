@@ -6,6 +6,7 @@ use crate::db::Db;
 use crate::services::platform::binary_resolver::{
     apply_runtime_path, resolve_binary_with_login_shell,
 };
+use regex::Regex;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -50,6 +51,12 @@ pub fn gh_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedIssue {
+    pub number: i64,
+    pub url: String,
 }
 
 /// Run a `gh` CLI command and return its stdout as a String.
@@ -97,6 +104,51 @@ pub async fn reopen_issue_by_url(url: &str) -> Result<(), String> {
         return Err(format!("gh issue reopen failed: {}", stderr.trim()));
     }
     Ok(())
+}
+
+pub async fn create_issue(repo: &str, title: &str, body: &str) -> Result<CreatedIssue, String> {
+    let repo = repo.trim();
+    let title = title.trim();
+    let body = body.trim();
+    if repo.is_empty() {
+        return Err("repo is required".to_string());
+    }
+    if title.is_empty() {
+        return Err("title is required".to_string());
+    }
+
+    let mut cmd = tokio_gh_command()?;
+    cmd.kill_on_drop(true);
+    cmd.args([
+        "issue", "create", "--repo", repo, "--title", title, "--body", body,
+    ]);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
+        .await
+        .map_err(|_| format!("gh issue create timed out after 10s: {repo}"))?
+        .map_err(|err| format!("gh exec: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh issue create failed: {}", stderr.trim()));
+    }
+
+    let url = String::from_utf8(output.stdout)
+        .map_err(|err| format!("invalid utf8 from gh issue create: {err}"))?
+        .trim()
+        .to_string();
+    let number = parse_issue_number_from_url(&url)
+        .ok_or_else(|| format!("gh issue create returned unparseable url: {url}"))?;
+
+    Ok(CreatedIssue { number, url })
+}
+
+fn parse_issue_number_from_url(url: &str) -> Option<i64> {
+    static ISSUE_URL_RE: OnceLock<Regex> = OnceLock::new();
+    ISSUE_URL_RE
+        .get_or_init(|| Regex::new(r"/issues/(\d+)\s*$").expect("valid issue url regex"))
+        .captures(url)
+        .and_then(|caps| caps.get(1))
+        .and_then(|value| value.as_str().parse::<i64>().ok())
 }
 
 /// List all registered repos from the database.
@@ -190,5 +242,17 @@ mod tests {
 
         let repos = list_repos(&db).unwrap();
         assert_eq!(repos.len(), 1);
+    }
+
+    #[test]
+    fn parse_issue_number_from_url_reads_numeric_suffix() {
+        assert_eq!(
+            parse_issue_number_from_url("https://github.com/itismyfield/AgentDesk/issues/427"),
+            Some(427)
+        );
+        assert_eq!(
+            parse_issue_number_from_url("https://example.com/not-an-issue"),
+            None
+        );
     }
 }

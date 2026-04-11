@@ -1,5 +1,4 @@
 use super::super::*;
-use crate::config::local_api_url;
 use crate::utils::format::safe_suffix;
 
 #[derive(Debug)]
@@ -10,15 +9,12 @@ pub(super) struct DispatchSnapshot {
 }
 
 pub(super) async fn fetch_dispatch_snapshot(
-    api_port: u16,
+    _api_port: u16,
     dispatch_id: &str,
 ) -> Option<DispatchSnapshot> {
-    let url = local_api_url(api_port, &format!("/api/dispatches/{dispatch_id}"));
-    let resp = reqwest::Client::new().get(url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body = resp.json::<serde_json::Value>().await.ok()?;
+    let body = crate::services::discord::internal_api::fetch_dispatch(dispatch_id)
+        .await
+        .ok()?;
     let dispatch = body.get("dispatch")?;
     Some(DispatchSnapshot {
         dispatch_type: dispatch.get("dispatch_type")?.as_str()?.to_string(),
@@ -28,6 +24,11 @@ pub(super) async fn fetch_dispatch_snapshot(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
     })
+}
+
+fn should_complete_work_dispatch(snapshot: &DispatchSnapshot) -> bool {
+    matches!(snapshot.status.as_str(), "pending" | "dispatched")
+        && matches!(snapshot.dispatch_type.as_str(), "implementation" | "rework")
 }
 
 fn normalize_review_decision_text(text: &str) -> String {
@@ -153,34 +154,23 @@ pub(in crate::services::discord) fn extract_review_decision(
 }
 
 async fn submit_review_decision_fallback(
-    api_port: u16,
+    _api_port: u16,
     card_id: &str,
     dispatch_id: &str,
     decision: &str,
     full_response: &str,
 ) -> Result<(), String> {
     let comment = truncate_str(full_response.trim(), 4000).to_string();
-    let url = local_api_url(api_port, "/api/review-decision");
-    // #109: Include dispatch_id so the server can atomically consume the
-    // specific review-decision dispatch, preventing replay attacks.
-    let resp = reqwest::Client::new()
-        .post(url)
-        .json(&serde_json::json!({
-            "card_id": card_id,
-            "dispatch_id": dispatch_id,
-            "decision": decision,
-            "comment": comment,
-        }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        Err(format!("HTTP {status}: {body}"))
-    }
+    crate::services::discord::internal_api::submit_review_decision(
+        crate::server::routes::review_verdict::ReviewDecisionBody {
+            card_id: card_id.to_string(),
+            dispatch_id: Some(dispatch_id.to_string()),
+            decision: decision.to_string(),
+            comment: Some(comment),
+        },
+    )
+    .await
+    .map(|_| ())
 }
 
 pub(in crate::services::discord) fn extract_explicit_review_verdict(
@@ -236,27 +226,25 @@ pub(super) fn build_verdict_payload(
 }
 
 async fn submit_review_verdict_fallback(
-    api_port: u16,
+    _api_port: u16,
     dispatch_id: &str,
     verdict: &str,
     full_response: &str,
     provider: &str,
 ) -> Result<(), String> {
-    let payload = build_verdict_payload(dispatch_id, verdict, full_response, provider);
-    let url = local_api_url(api_port, "/api/review-verdict");
-    let resp = reqwest::Client::new()
-        .post(url)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        Err(format!("HTTP {status}: {body}"))
-    }
+    crate::services::discord::internal_api::submit_review_verdict(
+        crate::server::routes::review_verdict::SubmitVerdictBody {
+            dispatch_id: dispatch_id.to_string(),
+            overall: verdict.to_string(),
+            items: None,
+            notes: None,
+            feedback: Some(truncate_str(full_response.trim(), 4000).to_string()),
+            commit: None,
+            provider: Some(provider.to_string()),
+        },
+    )
+    .await
+    .map(|_| ())
 }
 
 pub(in crate::services::discord) async fn guard_review_dispatch_completion(
@@ -343,14 +331,16 @@ pub(in crate::services::discord) fn runtime_db_fallback_complete_with_result(
     let Ok(conn) = rusqlite::Connection::open(&db_path) else {
         return false;
     };
-    let result_json = result.to_string();
-    let changed = conn
-        .execute(
-            "UPDATE task_dispatches SET status = 'completed', result = ?1, \
-             updated_at = datetime('now') WHERE id = ?2 AND status IN ('pending', 'dispatched')",
-            rusqlite::params![result_json, dispatch_id],
-        )
-        .unwrap_or(0);
+    let changed = crate::dispatch::set_dispatch_status_on_conn(
+        &conn,
+        dispatch_id,
+        "completed",
+        Some(result),
+        "turn_bridge_runtime_db_fallback",
+        Some(&["pending", "dispatched"]),
+        true,
+    )
+    .unwrap_or(0);
     if changed > 0 {
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
@@ -567,6 +557,10 @@ fn noop_completion_context(
         "completed_without_changes".to_string(),
         serde_json::Value::Bool(true),
     );
+    obj.insert(
+        "card_status_target".to_string(),
+        serde_json::Value::String("ready".to_string()),
+    );
     if let Some(response) = full_response {
         let trimmed = response.trim();
         if !trimmed.is_empty() {
@@ -595,26 +589,24 @@ fn noop_completion_context(
 /// API submissions arrive. Work dispatches use explicit PATCH/finalize flows.
 /// Fail a dispatch with retry on PATCH failure.
 pub(in crate::services::discord) async fn fail_dispatch_with_retry(
-    api_port: u16,
+    _api_port: u16,
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
-    let url = local_api_url(api_port, &format!("/api/dispatches/{dispatch_id}"));
-    let payload = serde_json::json!({
-        "status": "failed",
-        "result": {"error": error_msg.chars().take(500).collect::<String>()}
-    });
+    let payload = crate::server::routes::dispatches::UpdateDispatchBody {
+        status: Some("failed".to_string()),
+        result: Some(serde_json::json!({
+            "error": error_msg.chars().take(500).collect::<String>()
+        })),
+    };
     for attempt in 1..=3 {
-        match reqwest::Client::new()
-            .patch(&url)
-            .json(&payload)
-            .send()
+        match crate::services::discord::internal_api::update_dispatch(dispatch_id, payload.clone())
             .await
         {
-            Ok(resp) if resp.status().is_success() => {
+            Ok(_) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 eprintln!("  [{ts}] ⚠ Dispatch {dispatch_id} failed (transport error)");
                 return;
@@ -635,10 +627,15 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     if let Some(root) = crate::cli::agentdesk_runtime_root() {
         let db_path = root.join("data/agentdesk.sqlite");
         if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-            let result_json = serde_json::json!({"error": error_msg.chars().take(500).collect::<String>(), "fallback": true}).to_string();
-            let _ = conn.execute(
-                "UPDATE task_dispatches SET status = 'failed', result = ?1, updated_at = datetime('now') WHERE id = ?2 AND status = 'pending'",
-                rusqlite::params![result_json, dispatch_id],
+            let fallback_result = serde_json::json!({"error": error_msg.chars().take(500).collect::<String>(), "fallback": true});
+            let _ = crate::dispatch::set_dispatch_status_on_conn(
+                &conn,
+                dispatch_id,
+                "failed",
+                Some(&fallback_result),
+                "turn_bridge_patch_failure_fallback",
+                Some(&["pending"]),
+                false,
             );
             // Leave reconciliation marker for onTick to pick up and run hook chain
             let _ = conn.execute(
@@ -672,12 +669,8 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         .await;
         return;
     };
-    if snapshot.status != "pending" {
+    if !should_complete_work_dispatch(&snapshot) {
         return;
-    }
-    match snapshot.dispatch_type.as_str() {
-        "implementation" | "rework" => {}
-        _ => return,
     }
 
     let explicit_work_outcome = turn_output.and_then(extract_explicit_work_outcome);
@@ -798,18 +791,22 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             } else {
                 completion_result_with_context("turn_bridge_db_fallback", true, adk_cwd, &hints)
             };
-            let result_json = fallback_result.to_string();
-            let changed = conn.execute(
-                "UPDATE task_dispatches SET status = 'completed', \
-                 result = ?1, \
-                 updated_at = datetime('now') WHERE id = ?2 AND status IN ('pending', 'dispatched')",
-                rusqlite::params![result_json, dispatch_id],
-            ).unwrap_or(0);
+            let changed = crate::dispatch::set_dispatch_status_on_conn(
+                &conn,
+                dispatch_id,
+                "completed",
+                Some(&fallback_result),
+                "turn_bridge_db_fallback",
+                Some(&["pending", "dispatched"]),
+                true,
+            )
+            .unwrap_or(0);
             if changed > 0 {
                 conn.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
                     rusqlite::params![format!("reconcile_dispatch:{dispatch_id}"), dispatch_id],
-                ).ok();
+                )
+                .ok();
             }
             changed > 0
         });
@@ -839,9 +836,8 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             }
         }
     } else {
-        // Db/Engine not available — fall back to API PATCH with retry
-        let url = local_api_url(shared.api_port, &format!("/api/dispatches/{dispatch_id}"));
-        let api_result = if explicit_work_outcome == Some("noop") {
+        // Db/Engine not available — fall back to direct dispatch update with retry
+        let update_result = if explicit_work_outcome == Some("noop") {
             let mut result = noop_completion_context(adk_cwd, turn_output);
             if let Some(obj) = result.as_object_mut() {
                 obj.insert(
@@ -862,36 +858,29 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 },
             )
         };
-        let payload = serde_json::json!({
-            "status": "completed",
-            "result": api_result,
-        });
+        let payload = crate::server::routes::dispatches::UpdateDispatchBody {
+            status: Some("completed".to_string()),
+            result: Some(update_result),
+        };
         for attempt in 1..=3u8 {
-            match reqwest::Client::new()
-                .patch(&url)
-                .json(&payload)
-                .send()
-                .await
+            match crate::services::discord::internal_api::update_dispatch(
+                dispatch_id,
+                payload.clone(),
+            )
+            .await
             {
-                Ok(resp) if resp.status().is_success() => {
+                Ok(_) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
-                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id} (via API)",
+                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id}",
                         dtype = snapshot.dispatch_type,
                     );
                     return;
                 }
-                Ok(resp) => {
+                Err(err) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     eprintln!(
-                        "  [{ts}] ⚠ Explicit dispatch completion failed (attempt {attempt}/3): HTTP {}",
-                        resp.status()
-                    );
-                }
-                Err(e) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
-                        "  [{ts}] ⚠ Explicit dispatch completion error (attempt {attempt}/3): {e}"
+                        "  [{ts}] ⚠ Explicit dispatch completion failed (attempt {attempt}/3): {err}",
                     );
                 }
             }
@@ -1020,5 +1009,54 @@ mod tests {
             context["completed_worktree_path"].as_str(),
             repo_dir.to_str()
         );
+    }
+
+    #[test]
+    fn should_complete_work_dispatch_accepts_pending_implementation() {
+        let snapshot = DispatchSnapshot {
+            dispatch_type: "implementation".to_string(),
+            status: "pending".to_string(),
+            kanban_card_id: None,
+        };
+
+        assert!(should_complete_work_dispatch(&snapshot));
+    }
+
+    #[test]
+    fn should_complete_work_dispatch_accepts_dispatched_rework() {
+        let snapshot = DispatchSnapshot {
+            dispatch_type: "rework".to_string(),
+            status: "dispatched".to_string(),
+            kanban_card_id: None,
+        };
+
+        assert!(should_complete_work_dispatch(&snapshot));
+    }
+
+    #[test]
+    fn should_complete_work_dispatch_rejects_non_work_statuses() {
+        let completed_work = DispatchSnapshot {
+            dispatch_type: "implementation".to_string(),
+            status: "completed".to_string(),
+            kanban_card_id: None,
+        };
+        let dispatched_review = DispatchSnapshot {
+            dispatch_type: "review".to_string(),
+            status: "dispatched".to_string(),
+            kanban_card_id: None,
+        };
+
+        assert!(!should_complete_work_dispatch(&completed_work));
+        assert!(!should_complete_work_dispatch(&dispatched_review));
+    }
+
+    #[test]
+    fn noop_completion_context_targets_ready_without_changes() {
+        let result = noop_completion_context(None, Some("OUTCOME: noop\nalready satisfied"));
+
+        assert_eq!(result["work_outcome"], "noop");
+        assert_eq!(result["completed_without_changes"], true);
+        assert_eq!(result["card_status_target"], "ready");
+        assert_eq!(result["notes"], "OUTCOME: noop\nalready satisfied");
     }
 }

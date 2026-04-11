@@ -307,9 +307,14 @@ pub async fn submit_verdict(
         if let Err(e) = stamp_review_passed_marker(effective_commit.as_deref()) {
             // Roll back the dispatch status since we can't complete the pass flow
             if let Ok(conn) = state.db.lock() {
-                let _ = conn.execute(
-                    "UPDATE task_dispatches SET status = 'dispatched', updated_at = datetime('now') WHERE id = ?1",
-                    [&body.dispatch_id],
+                let _ = crate::dispatch::set_dispatch_status_on_conn(
+                    &conn,
+                    &body.dispatch_id,
+                    "dispatched",
+                    None,
+                    "review_verdict_marker_rollback",
+                    Some(&["completed"]),
+                    false,
                 );
             }
             return (

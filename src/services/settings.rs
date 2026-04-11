@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value, json};
 
 use crate::db::Db;
-use crate::services::service_error::{ServiceError, ServiceResult};
+use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 const RUNTIME_CONFIG_KEYS: &[&str] = &[
     "dispatchPollSec",
@@ -33,10 +33,11 @@ impl SettingsService {
     }
 
     pub fn get_runtime_config(&self) -> ServiceResult<Value> {
-        let conn = self
-            .db
-            .lock()
-            .map_err(|e| ServiceError::internal(format!("{e}")))?;
+        let conn = self.db.lock().map_err(|e| {
+            ServiceError::internal(format!("{e}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("get_runtime_config.lock")
+        })?;
 
         let value: String = conn
             .query_row(
@@ -63,13 +64,14 @@ impl SettingsService {
     }
 
     pub fn put_runtime_config(&self, body: Value) -> ServiceResult<()> {
-        let conn = self
-            .db
-            .lock()
-            .map_err(|e| ServiceError::internal(format!("{e}")))?;
+        let conn = self.db.lock().map_err(|e| {
+            ServiceError::internal(format!("{e}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("put_runtime_config.lock")
+        })?;
 
         if let Some(obj) = body.as_object() {
-            write_runtime_config(&conn, obj);
+            write_runtime_config(&conn, obj)?;
             return Ok(());
         }
 
@@ -78,7 +80,11 @@ impl SettingsService {
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', ?1)",
             [&value_str],
         )
-        .map_err(|e| ServiceError::internal(format!("{e}")))?;
+        .map_err(|e| {
+            ServiceError::internal(format!("{e}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("put_runtime_config.upsert_runtime_config")
+        })?;
 
         Ok(())
     }
@@ -194,18 +200,30 @@ fn runtime_scalar_to_string(value: &Value) -> Option<String> {
     }
 }
 
-fn write_runtime_config(conn: &rusqlite::Connection, values: &Map<String, Value>) {
+fn write_runtime_config(
+    conn: &rusqlite::Connection,
+    values: &Map<String, Value>,
+) -> ServiceResult<()> {
     let value_str =
         serde_json::to_string(&Value::Object(values.clone())).unwrap_or_else(|_| "{}".to_string());
     conn.execute(
         "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', ?1)",
         [&value_str],
     )
-    .ok();
+    .map_err(|error| {
+        ServiceError::internal(format!("{error}"))
+            .with_code(ErrorCode::Database)
+            .with_operation("write_runtime_config.upsert_runtime_config")
+    })?;
 
     for key in RUNTIME_CONFIG_KEYS {
         conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
-            .ok();
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("write_runtime_config.delete_legacy_key")
+                    .with_context("key", key)
+            })?;
     }
     for (key, value) in values {
         if let Some(text) = runtime_scalar_to_string(value) {
@@ -213,9 +231,16 @@ fn write_runtime_config(conn: &rusqlite::Connection, values: &Map<String, Value>
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
                 rusqlite::params![key, text],
             )
-            .ok();
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("write_runtime_config.upsert_scalar")
+                    .with_context("key", key)
+            })?;
         }
     }
+
+    Ok(())
 }
 
 pub fn seed_runtime_config_defaults(conn: &rusqlite::Connection, config: &crate::config::Config) {
@@ -244,8 +269,12 @@ pub fn seed_runtime_config_defaults(conn: &rusqlite::Connection, config: &crate:
     }
 
     if config.runtime.reset_overrides_on_restart || saved_obj.is_none() || current != defaults {
-        write_runtime_config(conn, &current);
+        if let Err(error) = write_runtime_config(conn, &current) {
+            tracing::warn!("[settings] failed to seed runtime config defaults: {error}");
+        }
     } else if let Some(saved) = saved_obj {
-        write_runtime_config(conn, &saved);
+        if let Err(error) = write_runtime_config(conn, &saved) {
+            tracing::warn!("[settings] failed to preserve runtime config defaults: {error}");
+        }
     }
 }

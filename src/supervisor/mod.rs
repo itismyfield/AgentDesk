@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::db::Db;
 use crate::engine::{PolicyEngine, PolicyEngineHandle};
+use crate::error::{AppError, ErrorCode};
 
 const SUPERVISOR_ACTOR: &str = "runtime_supervisor";
 
@@ -271,21 +272,17 @@ impl RuntimeSupervisor {
             .db
             .separate_conn()
             .map_err(|e| format!("db connection: {e}"))?;
-        conn.execute(
-            "UPDATE task_dispatches
-             SET status = 'completed',
-                 result = ?1,
-                 updated_at = datetime('now')
-             WHERE id = ?2
-               AND status IN ('pending', 'dispatched')",
-            rusqlite::params![
-                json!({
-                    "auto_completed": true,
-                    "completion_source": "orphan_recovery"
-                })
-                .to_string(),
-                dispatch_id,
-            ],
+        crate::dispatch::set_dispatch_status_on_conn(
+            &conn,
+            dispatch_id,
+            "completed",
+            Some(&json!({
+                "auto_completed": true,
+                "completion_source": "orphan_recovery"
+            })),
+            "orphan_recovery",
+            Some(&["pending", "dispatched"]),
+            true,
         )
         .map_err(|e| format!("mark dispatch completed: {e}"))
     }
@@ -295,21 +292,17 @@ impl RuntimeSupervisor {
             .db
             .separate_conn()
             .map_err(|e| format!("db connection: {e}"))?;
-        conn.execute(
-            "UPDATE task_dispatches
-             SET status = 'failed',
-                 result = ?1,
-                 updated_at = datetime('now')
-             WHERE id = ?2
-               AND status IN ('pending', 'dispatched')",
-            rusqlite::params![
-                json!({
-                    "orphan_failed": true,
-                    "completion_source": "orphan_recovery_rollback"
-                })
-                .to_string(),
-                dispatch_id,
-            ],
+        crate::dispatch::set_dispatch_status_on_conn(
+            &conn,
+            dispatch_id,
+            "failed",
+            Some(&json!({
+                "orphan_failed": true,
+                "completion_source": "orphan_recovery_rollback"
+            })),
+            "orphan_recovery_rollback",
+            Some(&["pending", "dispatched"]),
+            false,
         )
         .map_err(|e| format!("mark dispatch failed: {e}"))
     }
@@ -421,23 +414,47 @@ pub fn emit_signal_json(
 ) -> String {
     let signal = match SupervisorSignal::try_from(signal_name) {
         Ok(signal) => signal,
-        Err(err) => return json!({ "error": err }).to_string(),
+        Err(err) => {
+            return AppError::bad_request(err)
+                .with_code(ErrorCode::Policy)
+                .with_operation("emit_signal_json.parse_signal")
+                .with_context("signal_name", signal_name)
+                .into_policy_json_string();
+        }
     };
     let evidence: Value = match serde_json::from_str(evidence_json) {
         Ok(value) => value,
         Err(err) => {
-            return json!({ "error": format!("invalid evidence_json: {err}") }).to_string();
+            return AppError::bad_request(format!("invalid evidence_json: {err}"))
+                .with_code(ErrorCode::Policy)
+                .with_operation("emit_signal_json.parse_evidence")
+                .with_context("signal_name", signal_name)
+                .into_policy_json_string();
         }
     };
     let supervisor = match bridge.runtime_supervisor(db.clone()) {
         Ok(supervisor) => supervisor,
-        Err(err) => return json!({ "error": err }).to_string(),
+        Err(err) => {
+            return AppError::internal(err)
+                .with_code(ErrorCode::Policy)
+                .with_operation("emit_signal_json.runtime_supervisor")
+                .with_context("signal_name", signal_name)
+                .into_policy_json_string();
+        }
     };
     match supervisor.emit_signal(signal, evidence) {
         Ok(decision) => serde_json::to_string(&decision).unwrap_or_else(|err| {
-            json!({ "error": format!("serialize decision: {err}") }).to_string()
+            AppError::internal(format!("serialize decision: {err}"))
+                .with_code(ErrorCode::Policy)
+                .with_operation("emit_signal_json.serialize_decision")
+                .with_context("signal_name", signal_name)
+                .into_policy_json_string()
         }),
-        Err(err) => json!({ "error": err }).to_string(),
+        Err(err) => AppError::internal(err)
+            .with_code(ErrorCode::Policy)
+            .with_operation("emit_signal_json.emit_signal")
+            .with_context("signal_name", signal_name)
+            .into_policy_json_string(),
     }
 }
 
@@ -512,5 +529,39 @@ impl std::fmt::Display for SupervisorAction {
             Self::Resume => write!(f, "Resume"),
             Self::Escalate => write!(f, "Escalate"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        crate::db::wrap_conn(conn)
+    }
+
+    #[test]
+    fn emit_signal_json_returns_unified_policy_error_for_invalid_signal() {
+        let db = test_db();
+        let bridge = BridgeHandle::new();
+
+        let value: Value =
+            serde_json::from_str(&emit_signal_json(&db, &bridge, "Nope", r#"{}"#)).unwrap();
+
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["code"], "policy");
+        assert_eq!(
+            value["context"]["operation"],
+            "emit_signal_json.parse_signal"
+        );
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unknown supervisor signal")
+        );
     }
 }

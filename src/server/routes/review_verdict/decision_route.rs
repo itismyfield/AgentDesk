@@ -29,7 +29,11 @@ pub(crate) fn clear_test_worktree_commit_override() {
     }
 }
 
-fn current_issue_worktree_commit(issue_num: i64) -> Option<String> {
+fn current_issue_worktree_commit(
+    db: &crate::db::Db,
+    card_id: &str,
+    issue_num: i64,
+) -> Option<String> {
     #[cfg(test)]
     {
         if let Ok(slot) = test_worktree_commit_override_slot().lock() {
@@ -39,7 +43,28 @@ fn current_issue_worktree_commit(issue_num: i64) -> Option<String> {
         }
     }
 
-    let repo_dir = crate::services::platform::resolve_repo_dir().unwrap_or_default();
+    let repo_id: Option<String> = db.lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT repo_id FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
+    });
+    let repo_dir = match crate::services::platform::resolve_repo_dir_for_id(repo_id.as_deref()) {
+        Ok(Some(repo_dir)) => repo_dir,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::warn!(
+                "[review-decision] current_issue_worktree_commit: card {} issue #{}: {}",
+                card_id,
+                issue_num,
+                err
+            );
+            return None;
+        }
+    };
     crate::services::platform::find_worktree_for_issue(&repo_dir, issue_num).map(|wt| wt.commit)
 }
 
@@ -315,7 +340,8 @@ pub async fn submit_review_decision(
 
                 if let (Some(prev_commit), Some(issue_num)) = (&last_reviewed_commit, issue_number)
                 {
-                    let current_commit = current_issue_worktree_commit(issue_num);
+                    let current_commit =
+                        current_issue_worktree_commit(&state.db, &body.card_id, issue_num);
                     if let Some(ref cur) = current_commit {
                         let differs = cur != prev_commit;
                         if differs {

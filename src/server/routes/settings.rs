@@ -243,7 +243,78 @@ fn config_entry_default(
     }
 }
 
+fn is_read_only_config_key(key: &str) -> bool {
+    matches!(key, "server_port")
+}
+
+fn config_entry_baseline_source(
+    config: &crate::config::Config,
+    key: &str,
+    hardcoded_default: Option<&str>,
+) -> Option<&'static str> {
+    match key {
+        "server_port" => Some("config"),
+        _ if yaml_section_value(config, key).is_some() => Some("yaml"),
+        _ if hardcoded_default.is_some() => Some("hardcoded"),
+        _ => None,
+    }
+}
+
+fn config_entry_effective_value(
+    key: &str,
+    stored_value: Option<String>,
+    baseline: Option<String>,
+) -> Option<String> {
+    if is_read_only_config_key(key) {
+        return baseline;
+    }
+    stored_value.or(baseline)
+}
+
+fn config_entry_override_active(
+    editable: bool,
+    effective: Option<&str>,
+    baseline: Option<&str>,
+) -> bool {
+    if !editable {
+        return false;
+    }
+
+    match (effective, baseline) {
+        (Some(current), Some(default_value)) => current != default_value,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+fn config_entry_restart_behavior(
+    config: &crate::config::Config,
+    key: &str,
+    hardcoded_default: Option<&str>,
+) -> &'static str {
+    if is_read_only_config_key(key) {
+        return "config-only";
+    }
+
+    let baseline = config_entry_default(config, key, hardcoded_default);
+    if config.runtime.reset_overrides_on_restart {
+        return if baseline.is_some() {
+            "reset-to-baseline"
+        } else {
+            "clear-on-restart"
+        };
+    }
+
+    if yaml_section_value(config, key).is_some() {
+        "reseed-from-yaml"
+    } else {
+        "persist-live-override"
+    }
+}
+
 /// GET /api/settings/config
+/// Returns each whitelisted key with its effective value, baseline, mutability, and
+/// restart-behavior metadata so callers can distinguish baseline from live override.
 pub async fn get_config_entries(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -258,15 +329,33 @@ pub async fn get_config_entries(
     };
     let mut entries = Vec::new();
     for (key, category, label_ko, label_en, default_val) in CONFIG_KEYS {
-        let value: Option<String> = conn
-            .query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
+        let stored_value: Option<String> = if is_read_only_config_key(key) {
+            None
+        } else {
+            conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
                 row.get(0)
             })
-            .ok();
+            .ok()
+        };
+        let baseline = config_entry_default(state.config.as_ref(), key, *default_val);
+        let effective = config_entry_effective_value(key, stored_value, baseline.clone());
+        let editable = !is_read_only_config_key(key);
         entries.push(json!({
-            "key": key, "value": value, "category": category,
-            "label_ko": label_ko, "label_en": label_en,
-            "default": config_entry_default(state.config.as_ref(), key, *default_val),
+            "key": key,
+            "value": effective,
+            "category": category,
+            "label_ko": label_ko,
+            "label_en": label_en,
+            "default": baseline.clone(),
+            "baseline": baseline.clone(),
+            "baseline_source": config_entry_baseline_source(state.config.as_ref(), key, *default_val),
+            "override_active": config_entry_override_active(
+                editable,
+                effective.as_deref(),
+                baseline.as_deref(),
+            ),
+            "editable": editable,
+            "restart_behavior": config_entry_restart_behavior(state.config.as_ref(), key, *default_val),
         }));
     }
     // Only return whitelisted CONFIG_KEYS — unknown kv_meta keys are not exposed.
@@ -274,6 +363,8 @@ pub async fn get_config_entries(
 }
 
 /// PATCH /api/settings/config
+/// Writes live overrides for editable whitelisted keys only. Read-only metadata entries
+/// such as `server_port` are rejected instead of being persisted as misleading overrides.
 pub async fn patch_config_entries(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
@@ -302,6 +393,10 @@ pub async fn patch_config_entries(
     let mut rejected = Vec::new();
     for (key, value) in entries {
         if !allowed.contains(key.as_str()) {
+            rejected.push(key.clone());
+            continue;
+        }
+        if is_read_only_config_key(key) {
             rejected.push(key.clone());
             continue;
         }
@@ -378,6 +473,7 @@ pub fn seed_config_defaults(conn: &rusqlite::Connection, config: &crate::config:
     }
 
     crate::services::settings::seed_runtime_config_defaults(conn, config);
+    crate::server::routes::escalation::seed_escalation_defaults(conn, config);
 
     for key in RETIRED_CONFIG_KEYS {
         conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
@@ -455,6 +551,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_config_entries_reports_baseline_override_and_restart_metadata() {
+        let db = test_db();
+        let mut config = crate::config::Config::default();
+        config.automation.strategy = Some("rebase".to_string());
+        let expected_port = config.server.port.to_string();
+
+        {
+            let conn = db.lock().unwrap();
+            seed_config_defaults(&conn, &config);
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('merge_strategy', 'merge')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('max_review_rounds', '7')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_port', '9999')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let state = AppState::test_state_with_config(db.clone(), test_engine(&db), config);
+        let (status, Json(body)) = get_config_entries(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let entries = body["entries"].as_array().expect("entries array");
+        let values: std::collections::HashMap<&str, &Value> = entries
+            .iter()
+            .filter_map(|entry| Some((entry["key"].as_str()?, entry)))
+            .collect();
+
+        let merge_strategy = values.get("merge_strategy").expect("merge_strategy");
+        assert_eq!(merge_strategy["value"], json!("merge"));
+        assert_eq!(merge_strategy["baseline"], json!("rebase"));
+        assert_eq!(merge_strategy["baseline_source"], json!("yaml"));
+        assert_eq!(merge_strategy["override_active"], json!(true));
+        assert_eq!(merge_strategy["editable"], json!(true));
+        assert_eq!(
+            merge_strategy["restart_behavior"],
+            json!("reseed-from-yaml")
+        );
+
+        let max_review_rounds = values.get("max_review_rounds").expect("max_review_rounds");
+        assert_eq!(max_review_rounds["value"], json!("7"));
+        assert_eq!(max_review_rounds["baseline"], json!("3"));
+        assert_eq!(max_review_rounds["baseline_source"], json!("hardcoded"));
+        assert_eq!(max_review_rounds["override_active"], json!(true));
+        assert_eq!(
+            max_review_rounds["restart_behavior"],
+            json!("persist-live-override")
+        );
+
+        let server_port = values.get("server_port").expect("server_port");
+        assert_eq!(server_port["value"], json!(expected_port));
+        assert_eq!(server_port["baseline"], json!(expected_port));
+        assert_eq!(server_port["baseline_source"], json!("config"));
+        assert_eq!(server_port["override_active"], json!(false));
+        assert_eq!(server_port["editable"], json!(false));
+        assert_eq!(server_port["restart_behavior"], json!("config-only"));
+    }
+
+    #[tokio::test]
     async fn patch_config_entries_accepts_merge_automation_and_provider_specific_keys() {
         let db = test_db();
         let state = AppState::test_state(db.clone(), test_engine(&db));
@@ -499,6 +662,34 @@ mod tests {
             values.get("merge_allowed_authors"),
             Some(&Some("itismyfield,octocat"))
         );
+    }
+
+    #[tokio::test]
+    async fn patch_config_entries_rejects_read_only_server_port() {
+        let db = test_db();
+        let state = AppState::test_state(db.clone(), test_engine(&db));
+
+        let (patch_status, Json(patch_body)) = patch_config_entries(
+            State(state),
+            Json(json!({
+                "server_port": "9999",
+                "merge_strategy": "merge",
+            })),
+        )
+        .await;
+        assert_eq!(patch_status, StatusCode::OK);
+        assert_eq!(patch_body["updated"], json!(1));
+        assert_eq!(patch_body["rejected"], json!(["server_port"]));
+
+        let conn = db.lock().unwrap();
+        let server_port_override_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kv_meta WHERE key = 'server_port' AND value = '9999'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(server_port_override_count, 0);
     }
 
     #[test]
@@ -565,6 +756,11 @@ mod tests {
         )
         .unwrap();
         conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('max_review_rounds', '7')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('runtime-config', '{\"dispatchPollSec\":10,\"maxRetries\":7}')",
             [],
         )
@@ -594,6 +790,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(timeout_min, "55");
+
+        let max_review_rounds: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'max_review_rounds'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(max_review_rounds, "7");
 
         let runtime_config: Value = conn
             .query_row(

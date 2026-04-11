@@ -3,7 +3,7 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 
 // ── Dispatch ops ────────────────────────────────────────────────
 //
-// agentdesk.dispatch.create(cardId, agentId, dispatchType, title) → dispatchId
+// agentdesk.dispatch.create(cardId, agentId, dispatchType, title, context?) → dispatchId
 // Creates a task_dispatch row + updates kanban card to "requested".
 // Discord notification is handled by posting to the local /api/send endpoint.
 
@@ -11,7 +11,7 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let dispatch_obj = Object::new(ctx.clone())?;
 
-    // #248: __dispatch_create_sync(card_id, agent_id, dispatch_type, title) → json_string
+    // #248: __dispatch_create_sync(card_id, agent_id, dispatch_type, title, context_json) → json_string
     // Synchronous DB INSERT — no deferred intent.
     let db_d = db.clone();
     dispatch_obj.set(
@@ -22,9 +22,17 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                 move |card_id: String,
                       agent_id: String,
                       dispatch_type: String,
-                      title: String|
+                      title: String,
+                      context_json: String|
                       -> String {
-                    dispatch_create_sync(&db_d, &card_id, &agent_id, &dispatch_type, &title)
+                    dispatch_create_sync(
+                        &db_d,
+                        &card_id,
+                        &agent_id,
+                        &dispatch_type,
+                        &title,
+                        &context_json,
+                    )
                 },
             ),
         )?,
@@ -35,20 +43,28 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     let db_mf = db.clone();
     dispatch_obj.set(
         "__mark_failed_raw",
-        Function::new(ctx.clone(), move |dispatch_id: String, reason: String| -> String {
-            let conn = match db_mf.separate_conn() {
-                Ok(c) => c,
-                Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
-            };
-            match conn.execute(
-                "UPDATE task_dispatches SET status = 'failed', result = ?1, updated_at = datetime('now') \
-                 WHERE id = ?2 AND status IN ('pending', 'dispatched')",
-                rusqlite::params![reason, dispatch_id],
-            ) {
-                Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
-                Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
-            }
-        })?,
+        Function::new(
+            ctx.clone(),
+            move |dispatch_id: String, reason: String| -> String {
+                let conn = match db_mf.separate_conn() {
+                    Ok(c) => c,
+                    Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
+                };
+                let reason_json = serde_json::json!({ "reason": reason });
+                match crate::dispatch::set_dispatch_status_on_conn(
+                    &conn,
+                    &dispatch_id,
+                    "failed",
+                    Some(&reason_json),
+                    "js_dispatch_mark_failed_raw",
+                    Some(&["pending", "dispatched"]),
+                    false,
+                ) {
+                    Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+                    Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
+                }
+            },
+        )?,
     )?;
 
     // __mark_completed_raw(dispatch_id, result_json) → json_string
@@ -56,20 +72,29 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
     let db_mc = db.clone();
     dispatch_obj.set(
         "__mark_completed_raw",
-        Function::new(ctx.clone(), move |dispatch_id: String, result_json: String| -> String {
-            let conn = match db_mc.separate_conn() {
-                Ok(c) => c,
-                Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
-            };
-            match conn.execute(
-                "UPDATE task_dispatches SET status = 'completed', result = ?1, updated_at = datetime('now') \
-                 WHERE id = ?2 AND status IN ('pending', 'dispatched')",
-                rusqlite::params![result_json, dispatch_id],
-            ) {
-                Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
-                Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
-            }
-        })?,
+        Function::new(
+            ctx.clone(),
+            move |dispatch_id: String, result_json: String| -> String {
+                let conn = match db_mc.separate_conn() {
+                    Ok(c) => c,
+                    Err(e) => return format!(r#"{{"error":"DB: {}"}}"#, e),
+                };
+                let parsed_result = serde_json::from_str::<serde_json::Value>(&result_json)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw_result": result_json }));
+                match crate::dispatch::set_dispatch_status_on_conn(
+                    &conn,
+                    &dispatch_id,
+                    "completed",
+                    Some(&parsed_result),
+                    "js_dispatch_mark_completed_raw",
+                    Some(&["pending", "dispatched"]),
+                    true,
+                ) {
+                    Ok(n) => format!(r#"{{"ok":true,"rows_affected":{n}}}"#),
+                    Err(e) => format!(r#"{{"error":"sql: {}"}}"#, e),
+                }
+            },
+        )?,
     )?;
 
     // __set_retry_count_raw(dispatch_id, count) → json_string
@@ -102,12 +127,13 @@ pub(super) fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
         r#"
         (function() {
             var sync = agentdesk.dispatch.__create_sync;
-            agentdesk.dispatch.create = function(cardId, agentId, dispatchType, title) {
+            agentdesk.dispatch.create = function(cardId, agentId, dispatchType, title, context) {
                 var dt = dispatchType || "implementation";
                 var t = title || "Dispatch";
+                var ctxJson = JSON.stringify(context || {});
                 // #248: Synchronous DB INSERT — no deferred intent.
                 // Validation + INSERT happen atomically in Rust.
-                var result = JSON.parse(sync(cardId, agentId, dt, t));
+                var result = JSON.parse(sync(cardId, agentId, dt, t, ctxJson));
                 if (result.error) throw new Error(result.error);
                 var dispatchId = result.dispatch_id;
                 return dispatchId;
@@ -155,15 +181,36 @@ fn dispatch_create_sync(
     agent_id: &str,
     dispatch_type: &str,
     title: &str,
+    context_json: &str,
 ) -> String {
-    let context = serde_json::json!({});
-    match crate::dispatch::create_dispatch_core(
+    let context: serde_json::Value = match serde_json::from_str(context_json) {
+        Ok(value) => value,
+        Err(e) => {
+            return format!(
+                r#"{{"error":"invalid dispatch context JSON: {}"}}"#,
+                e.to_string().replace('"', "'")
+            );
+        }
+    };
+    let options = crate::dispatch::DispatchCreateOptions {
+        skip_outbox: false,
+        sidecar_dispatch: context
+            .get("sidecar_dispatch")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+            || context
+                .get("phase_gate")
+                .and_then(|value| value.as_object())
+                .is_some(),
+    };
+    match crate::dispatch::create_dispatch_core_with_options(
         db,
         card_id,
         agent_id,
         dispatch_type,
         title,
         &context,
+        options,
     ) {
         Ok((dispatch_id, _old_status, reused)) => {
             if reused {

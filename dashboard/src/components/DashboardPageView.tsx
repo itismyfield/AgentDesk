@@ -40,7 +40,7 @@ import { DEPT_COLORS, useNow, type TFunction } from "./dashboard/model";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
 
-type PulseKanbanSignal = "review" | "blocked" | "requested" | "stalled";
+type DashboardKanbanSignal = "review" | "blocked" | "requested" | "stalled";
 
 interface DashboardPageViewProps {
   stats: DashboardStats | null;
@@ -49,7 +49,7 @@ interface DashboardPageViewProps {
   meetings: RoundTableMeeting[];
   settings: CompanySettings;
   onSelectAgent?: (agent: Agent) => void;
-  onOpenKanbanSignal?: (signal: PulseKanbanSignal) => void;
+  onOpenKanbanSignal?: (signal: DashboardKanbanSignal) => void;
   onOpenDispatchSessions?: () => void;
   onOpenSettings?: () => void;
   onOpenMeetings?: () => void;
@@ -87,7 +87,7 @@ export default function DashboardPageView({
         const data = await getSkillRanking(skillWindow, 10);
         if (mounted) setSkillRanking(data);
       } catch {
-        // ignore auth/network errors in pulse widgets
+        // Ignore auth/network errors in dashboard widgets.
       }
     };
 
@@ -104,7 +104,7 @@ export default function DashboardPageView({
       <div className="flex items-center justify-center h-full" style={{ color: "var(--th-text-muted)" }}>
         <div className="text-center">
           <div className="text-4xl mb-4 opacity-30">📊</div>
-          <div>{t({ ko: "펄스 로딩 중...", en: "Loading pulse...", ja: "Pulse 読み込み中...", zh: "Pulse 加载中..." })}</div>
+          <div>{t({ ko: "대시보드 로딩 중...", en: "Loading dashboard...", ja: "ダッシュボード読み込み中...", zh: "仪表板加载中..." })}</div>
         </div>
       </div>
     );
@@ -249,7 +249,7 @@ export default function DashboardPageView({
             />
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              <PulseSignalCard
+              <DashboardSignalCard
                 label={t({ ko: "세션 신호", en: "Session Signal", ja: "セッション信号", zh: "会话信号" })}
                 value={staleLinkedSessions.length + reconnectingSessions.length}
                 accent="#f97316"
@@ -262,7 +262,7 @@ export default function DashboardPageView({
                 actionLabel={t({ ko: "Dispatch 보기", en: "Open Dispatch", ja: "Dispatch を開く", zh: "打开 Dispatch" })}
                 onAction={onOpenDispatchSessions}
               />
-              <PulseSignalCard
+              <DashboardSignalCard
                 label={t({ ko: "리뷰 대기", en: "Review Queue", ja: "レビュー待ち", zh: "待审查" })}
                 value={stats.kanban.review_queue}
                 accent="#14b8a6"
@@ -275,7 +275,7 @@ export default function DashboardPageView({
                 actionLabel={t({ ko: "칸반 열기", en: "Open Kanban", ja: "カンバンを開く", zh: "打开看板" })}
                 onAction={onOpenKanbanSignal ? () => onOpenKanbanSignal("review") : undefined}
               />
-              <PulseSignalCard
+              <DashboardSignalCard
                 label={t({ ko: "블록됨", en: "Blocked", ja: "ブロック", zh: "阻塞" })}
                 value={stats.kanban.blocked}
                 accent="#ef4444"
@@ -288,7 +288,7 @@ export default function DashboardPageView({
                 actionLabel={t({ ko: "막힘 카드 보기", en: "Open Blocked", ja: "Blocked を開く", zh: "打开阻塞卡片" })}
                 onAction={onOpenKanbanSignal ? () => onOpenKanbanSignal("blocked") : undefined}
               />
-              <PulseSignalCard
+              <DashboardSignalCard
                 label={t({ ko: "수락 대기", en: "Waiting Acceptance", ja: "受諾待ち", zh: "等待接收" })}
                 value={stats.kanban.waiting_acceptance}
                 accent="#8b5cf6"
@@ -301,7 +301,7 @@ export default function DashboardPageView({
                 actionLabel={t({ ko: "requested 보기", en: "Open Requested", ja: "requested を開く", zh: "打开 requested" })}
                 onAction={onOpenKanbanSignal ? () => onOpenKanbanSignal("requested") : undefined}
               />
-              <PulseSignalCard
+              <DashboardSignalCard
                 label={t({ ko: "진행 정체", en: "Stale In Progress", ja: "進行停滞", zh: "进行停滞" })}
                 value={stats.kanban.stale_in_progress}
                 accent="#f59e0b"
@@ -314,7 +314,7 @@ export default function DashboardPageView({
                 actionLabel={t({ ko: "정체 카드 보기", en: "Open Stale", ja: "停滞カードを開く", zh: "打开停滞卡片" })}
                 onAction={onOpenKanbanSignal ? () => onOpenKanbanSignal("stalled") : undefined}
               />
-              <PulseSignalCard
+              <DashboardSignalCard
                 label={t({ ko: "회의 후속", en: "Meeting Follow-up", ja: "会議フォローアップ", zh: "会议后续" })}
                 value={openMeetingFollowUps}
                 accent="#22c55e"
@@ -351,10 +351,10 @@ export default function DashboardPageView({
         <SectionHeader
           title={t({ ko: "게이미피케이션", en: "Gamification", ja: "ゲーミフィケーション", zh: "游戏化" })}
           subtitle={t({
-            ko: "XP 순위, 보상, streak, 팀 하이라이트를 Pulse 안에서 확인합니다",
-            en: "Track XP ranks, rewards, streaks, and team highlights directly in Pulse",
-            ja: "XP 順位、報酬、連続記録、チームの見どころを Pulse で確認",
-            zh: "在 Pulse 中直接查看 XP 排名、奖励、连续记录和团队亮点",
+            ko: "XP 순위, 보상, streak, 팀 하이라이트를 대시보드에서 바로 확인합니다",
+            en: "Track XP ranks, rewards, streaks, and team highlights directly in the dashboard",
+            ja: "XP 順位、報酬、連続記録、チームの見どころをダッシュボードで確認",
+            zh: "在仪表板中直接查看 XP 排名、奖励、连续记录和团队亮点",
           })}
         />
 
@@ -457,9 +457,9 @@ export default function DashboardPageView({
           title={t({ ko: "인프라", en: "Infrastructure", ja: "インフラ", zh: "基础设施" })}
           subtitle={t({
             ko: "머신 상태와 자동화, 업무 히트맵까지 그대로 유지합니다",
-            en: "Keep machine status, automation, and work heatmaps in the new Pulse",
-            ja: "マシン状態、自動化、作業ヒートマップをそのまま Pulse に統合",
-            zh: "将机器状态、自动化和工作热力图完整保留到 Pulse",
+            en: "Keep machine status, automation, and work heatmaps together in the dashboard",
+            ja: "マシン状態、自動化、作業ヒートマップをダッシュボードに統合",
+            zh: "将机器状态、自动化和工作热力图完整保留在仪表板中",
           })}
         />
 
@@ -506,7 +506,7 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle: string })
   );
 }
 
-function PulseSignalCard({
+function DashboardSignalCard({
   label,
   value,
   sublabel,
@@ -861,7 +861,7 @@ function TeamAchievementCard({
         {t({ ko: "팀 업적", en: "Team Achievements", ja: "チーム実績", zh: "团队成就" })}
       </h3>
       <p className="text-sm" style={{ color: "var(--th-text-muted)" }}>
-        {t({ ko: "오늘 가장 눈에 띄는 부서 하이라이트입니다", en: "Department highlights worth surfacing in the pulse", ja: "Pulse に載せるべき部門ハイライト", zh: "值得在 Pulse 中突出的部门亮点" })}
+        {t({ ko: "오늘 가장 눈에 띄는 부서 하이라이트입니다", en: "Department highlights worth surfacing in the dashboard", ja: "ダッシュボードに載せるべき部門ハイライト", zh: "值得在仪表板中突出的部门亮点" })}
       </p>
 
       <div className="mt-4 space-y-3">

@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use rusqlite::{Connection, params};
+#[cfg(test)]
 use serde::Serialize;
 
 use crate::db::Db;
@@ -16,6 +17,7 @@ pub struct PersistSessionTranscript<'a> {
     pub assistant_message: &'a str,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SessionTranscriptSearchHit {
     pub id: i64,
@@ -123,6 +125,7 @@ pub fn persist_turn_on_conn(
     Ok(true)
 }
 
+#[cfg(test)]
 pub fn search_transcripts(
     conn: &Connection,
     raw_query: &str,
@@ -174,6 +177,7 @@ pub fn search_transcripts(
     Ok((match_query, hits))
 }
 
+#[cfg(test)]
 pub fn build_match_query(raw_query: &str) -> Option<String> {
     let terms: Vec<String> = sanitize_match_terms(raw_query)
         .into_iter()
@@ -196,6 +200,7 @@ fn build_search_document(user_message: &str, assistant_message: &str) -> String 
     }
 }
 
+#[cfg(test)]
 fn sanitize_match_terms(raw: &str) -> Vec<String> {
     let mut terms = Vec::new();
     let mut current = String::new();

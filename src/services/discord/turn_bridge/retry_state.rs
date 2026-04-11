@@ -3,7 +3,6 @@
 /// Provides helpers to clear, reset, and manage the in-flight retry state
 /// during Gemini/Qwen auto-retry boundaries and session recovery.
 use super::super::*;
-use crate::config::local_api_url;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 
@@ -126,16 +125,7 @@ pub(super) async fn reset_session_for_auto_retry(
     }
 
     if let Some(ref sid) = stale_sid {
-        let port = shared.api_port;
-        let sid_c = sid.clone();
-        let _ = reqwest::Client::new()
-            .post(local_api_url(
-                port,
-                "/api/dispatched-sessions/clear-stale-session-id",
-            ))
-            .json(&serde_json::json!({"claude_session_id": sid_c}))
-            .send()
-            .await;
+        let _ = super::super::internal_api::clear_stale_session_id(sid).await;
     }
 
     #[cfg(unix)]

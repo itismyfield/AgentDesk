@@ -175,81 +175,16 @@ pub async fn list_cards(
     State(state): State<AppState>,
     Query(params): Query<ListCardsQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let result = state.db.lock().map_err(|e| format!("{e}"));
-    let conn = match result {
-        Ok(c) => c,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
-    };
-
-    // Only show cards from registered repos (unless a specific repo_id filter is given)
-    let registered_repos: Vec<String> = {
-        let repo_sql = "SELECT id FROM github_repos";
-        match conn.prepare(repo_sql) {
-            Ok(mut stmt) => stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .ok()
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
-    };
-
-    let mut sql = String::from(&format!("{CARD_SELECT} WHERE 1=1"));
-    let mut bind_values: Vec<String> = Vec::new();
-
-    if let Some(ref status) = params.status {
-        bind_values.push(status.clone());
-        sql.push_str(&format!(" AND kc.status = ?{}", bind_values.len()));
+    match state
+        .kanban_service()
+        .list_cards(crate::services::kanban::ListCardsInput {
+            status: params.status,
+            repo_id: params.repo_id,
+            assigned_agent_id: params.assigned_agent_id,
+        }) {
+        Ok(response) => (StatusCode::OK, Json(json!({"cards": response.cards}))),
+        Err(error) => error.into_json_response(),
     }
-    if let Some(ref repo_id) = params.repo_id {
-        bind_values.push(repo_id.clone());
-        sql.push_str(&format!(" AND kc.repo_id = ?{}", bind_values.len()));
-    } else if !registered_repos.is_empty() {
-        let placeholders: Vec<String> = registered_repos
-            .iter()
-            .enumerate()
-            .map(|(_i, r)| {
-                bind_values.push(r.clone());
-                format!("?{}", bind_values.len())
-            })
-            .collect();
-        sql.push_str(&format!(" AND kc.repo_id IN ({})", placeholders.join(",")));
-    }
-    if let Some(ref agent_id) = params.assigned_agent_id {
-        bind_values.push(agent_id.clone());
-        sql.push_str(&format!(
-            " AND kc.assigned_agent_id = ?{}",
-            bind_values.len()
-        ));
-    }
-
-    sql.push_str(" ORDER BY kc.created_at DESC");
-
-    let mut stmt = match conn.prepare(&sql) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("prepare: {e}")})),
-            );
-        }
-    };
-
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind_values
-        .iter()
-        .map(|v| v as &dyn rusqlite::types::ToSql)
-        .collect();
-
-    let rows = stmt
-        .query_map(params_ref.as_slice(), |row| card_row_to_json(row))
-        .ok();
-
-    let cards: Vec<serde_json::Value> = match rows {
-        Some(iter) => iter.filter_map(|r| r.ok()).collect(),
-        None => Vec::new(),
-    };
-
-    (StatusCode::OK, Json(json!({"cards": cards})))
 }
 
 /// GET /api/kanban-cards/:id
@@ -1817,15 +1752,29 @@ pub async fn pm_decision(
 
     // Complete any pending pm-decision dispatches (rework handles its own completion after dispatch success)
     if body.decision != "rework" {
-        if let Ok(conn) = state.db.lock() {
-            conn.execute(
-                "UPDATE task_dispatches SET status = 'completed', result = ?1, updated_at = datetime('now') \
-                 WHERE kanban_card_id = ?2 AND dispatch_type = 'pm-decision' AND status = 'pending'",
-                rusqlite::params![
-                    serde_json::to_string(&json!({"decision": body.decision, "comment": body.comment})).unwrap_or_default(),
-                    body.card_id
-                ],
-            ).ok();
+        let completion_result = json!({"decision": body.decision, "comment": body.comment});
+        let pending_dispatch_ids: Vec<String> = state
+            .db
+            .lock()
+            .ok()
+            .and_then(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id FROM task_dispatches
+                         WHERE kanban_card_id = ?1 AND dispatch_type = 'pm-decision' AND status = 'pending'",
+                    )
+                    .ok()?;
+                Some(
+                    stmt.query_map([&body.card_id], |row| row.get(0))
+                        .ok()?
+                        .filter_map(|row| row.ok())
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+        for dispatch_id in pending_dispatch_ids {
+            crate::dispatch::mark_dispatch_completed(&state.db, &dispatch_id, &completion_result)
+                .ok();
         }
     }
     // Clear blocked_reason
@@ -1906,15 +1855,33 @@ pub async fn pm_decision(
             ) {
                 Ok(_) => {
                     // Dispatch succeeded — now complete pm-decision dispatch + transition
-                    if let Ok(conn) = state.db.lock() {
-                        conn.execute(
-                            "UPDATE task_dispatches SET status = 'completed', result = ?1, updated_at = datetime('now') \
-                             WHERE kanban_card_id = ?2 AND dispatch_type = 'pm-decision' AND status = 'pending'",
-                            rusqlite::params![
-                                serde_json::to_string(&json!({"decision": "rework", "comment": body.comment})).unwrap_or_default(),
-                                body.card_id
-                            ],
-                        ).ok();
+                    let completion_result = json!({"decision": "rework", "comment": body.comment});
+                    let pending_dispatch_ids: Vec<String> = state
+                        .db
+                        .lock()
+                        .ok()
+                        .and_then(|conn| {
+                            let mut stmt = conn
+                                .prepare(
+                                    "SELECT id FROM task_dispatches
+                                     WHERE kanban_card_id = ?1 AND dispatch_type = 'pm-decision' AND status = 'pending'",
+                                )
+                                .ok()?;
+                            Some(
+                                stmt.query_map([&body.card_id], |row| row.get(0))
+                                    .ok()?
+                                    .filter_map(|row| row.ok())
+                                    .collect(),
+                            )
+                        })
+                        .unwrap_or_default();
+                    for dispatch_id in pending_dispatch_ids {
+                        crate::dispatch::mark_dispatch_completed(
+                            &state.db,
+                            &dispatch_id,
+                            &completion_result,
+                        )
+                        .ok();
                     }
                     // Pipeline-driven: rework target from current state's review_rework gate
                     let rework_status: String = state
@@ -2240,16 +2207,19 @@ pub async fn rereview_card(
             tracing::warn!("[kanban] rereview review_state_sync cleanup failed: {sync_result}");
         }
 
-        // #272: Explicitly clear approach_change_round so a new re-review cycle
-        // starts with clean state.  The generic sync uses COALESCE (preserves old
+        // #272/#420: Explicitly clear repeated-finding escalation markers so a
+        // new re-review cycle starts with clean state. The generic sync uses COALESCE (preserves old
         // value when NULL is passed), so we do a targeted UPDATE here instead of
         // widening the idle-sync semantics which would affect timeout / gate-failure
         // paths that also sync to "idle".
         if let Err(e) = conn.execute(
-            "UPDATE card_review_state SET approach_change_round = NULL WHERE card_id = ?1",
+            "UPDATE card_review_state
+             SET approach_change_round = NULL,
+                 session_reset_round = NULL
+             WHERE card_id = ?1",
             [&id],
         ) {
-            tracing::warn!("[kanban] rereview approach_change_round reset failed: {e}");
+            tracing::warn!("[kanban] rereview repeated-finding reset failed: {e}");
         }
     }
 
@@ -3078,10 +3048,10 @@ fn cleanup_force_transition_revert_on_conn(
     conn.execute(
         "INSERT INTO card_review_state (
             card_id, review_round, state, pending_dispatch_id, last_verdict, last_decision,
-            decided_by, decided_at, approach_change_round, review_entered_at, updated_at
+            decided_by, decided_at, approach_change_round, session_reset_round, review_entered_at, updated_at
          ) VALUES (
             ?1, 0, 'idle', NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL, datetime('now')
+            NULL, NULL, NULL, NULL, NULL, datetime('now')
          )
          ON CONFLICT(card_id) DO UPDATE SET
             review_round = 0,
@@ -3092,6 +3062,7 @@ fn cleanup_force_transition_revert_on_conn(
             decided_by = NULL,
             decided_at = NULL,
             approach_change_round = NULL,
+            session_reset_round = NULL,
             review_entered_at = NULL,
             updated_at = datetime('now')",
         [card_id],

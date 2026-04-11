@@ -84,7 +84,8 @@ fn proactive_memory_guidance(
                      - 스코프 규칙: 이 에이전트만의 반복 에러, 작업 습관, 도구 사용 패턴은 `workspace={agent_workspace}` + `agentId={agent_id}`로 저장한다.\n\
                      - 현재 채널 힌트: workspace 스코프 이름은 `{workspace_scope}`, 에이전트 스코프 이름은 `{agent_workspace}`, 에이전트 ID는 `{agent_id}`다.\n\
                      - 원칙: 전역이 아니면 `workspace`를 명시하고, 에이전트 전용이 아니면 `agentId`는 `default`를 유지한다.\n\
-                     - 참고: 턴 시작 `context` 주입과 세션 종료 시 `reflect`는 서버가 담당한다. 턴 중 보강만 `recall`/`remember`로 수행한다."
+                     - 참고: 턴 시작 `context` 주입과 세션 종료 시 `reflect`는 서버가 담당한다. 턴 중 보강만 `recall`/`remember`로 수행한다.\n\
+                     - 피드백: `recall` 결과를 활용한 후 `tool_feedback(tool_name=\"recall\", relevant=true/false, sufficient=true/false, fragment_ids=[...])` 호출. 검색 품질 자동 개선에 필수."
                 ),
             )
         }
@@ -97,6 +98,18 @@ fn proactive_memory_guidance(
          - 쓰기: {write_tool} — 중요한 결정/에러/절차 발견 시 기록\n\
          - 트리거: 에러 원인 확정, 아키텍처 결정, 설정 변경, \"이전에\" 언급 시{extra_note}"
     ))
+}
+
+fn api_friction_guidance(profile: DispatchProfile) -> Option<String> {
+    (profile == DispatchProfile::Full).then_some(
+        "\n\n[ADK API Usage]\n\
+         - ADK API 작업 전에는 먼저 `GET /api/docs` 또는 `GET /api/docs/{category}`로 관련 엔드포인트를 확인한다.\n\
+         - API 호출이 실패하면 `sqlite3`나 `agentdesk.db.query`로 우회하지 말고 `/api/docs`에서 대안 엔드포인트를 다시 찾는다.\n\
+         - 같은 엔드포인트 재시도, DB 직접 우회, 과도한 다단계 API 호출, `/api/docs` 없이 시행착오 탐색은 `API friction`으로 본다.\n\
+         - API friction이 발생하면 응답 마지막 줄에 단일 행 JSON marker를 남긴다: `API_FRICTION: {\"endpoint\":\"/api/docs/kanban\",\"friction_type\":\"docs-bypass\",\"summary\":\"...\",\"workaround\":\"sqlite3\",\"suggested_fix\":\"...\",\"docs_category\":\"kanban\",\"keywords\":[\"/api/docs/kanban\",\"sqlite3\"]}`\n\
+         - 서버가 이 marker를 사용자 응답에서 제거하고 `topic=api-friction`, `type=error`로 구조화 저장한다."
+            .to_string(),
+    )
 }
 /// Dispatch prompt profile — controls which system prompt sections are injected.
 /// `Full` includes everything (used for implementation dispatches and normal turns).
@@ -286,6 +299,9 @@ pub(super) fn build_system_prompt(
     ) {
         system_prompt_owned.push_str(&memory_guidance);
     }
+    if let Some(api_friction_guidance) = api_friction_guidance(profile) {
+        system_prompt_owned.push_str(&api_friction_guidance);
+    }
 
     if queued_turn {
         system_prompt_owned.push_str(
@@ -393,6 +409,15 @@ mod tests {
         assert!(output.contains("[Context Compression]"));
         assert!(output.contains(CONTEXT_COMPRESSION_SECTION_ORDER));
         assert!(output.contains(STALE_TOOL_RESULT_PLACEHOLDER_EXAMPLE));
+    }
+
+    #[test]
+    fn test_build_system_prompt_includes_api_friction_guidance() {
+        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        assert!(output.contains("[ADK API Usage]"));
+        assert!(output.contains("GET /api/docs/{category}"));
+        assert!(output.contains("API_FRICTION:"));
+        assert!(output.contains("topic=api-friction"));
     }
 
     #[test]

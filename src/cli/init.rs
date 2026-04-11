@@ -6,6 +6,7 @@ use std::io::{self, BufRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
 use super::dcserver;
+use crate::services::provider::ProviderKind;
 
 // ── Discord REST helpers ───────────────────────────────────────────
 
@@ -83,6 +84,23 @@ fn prompt_select(msg: &str, options: &[&str]) -> usize {
             }
         }
         println!("1-{} 사이의 숫자를 입력하세요.", options.len());
+    }
+}
+
+fn cli_init_provider_labels() -> Vec<&'static str> {
+    ProviderKind::cli_init_labels()
+}
+
+fn cli_init_provider_from_index(index: usize) -> &'static str {
+    match ProviderKind::provider_for_cli_init_index(index)
+        .or_else(ProviderKind::default_channel_provider)
+        .unwrap_or(ProviderKind::Claude)
+    {
+        ProviderKind::Claude => "claude",
+        ProviderKind::Codex => "codex",
+        ProviderKind::Gemini => "gemini",
+        ProviderKind::Qwen => "qwen",
+        ProviderKind::Unsupported(_) => "claude",
     }
 }
 
@@ -255,6 +273,8 @@ fn default_shared_prompt() -> &'static str {
 - Plan before implementing.
 - Verify your work before reporting done.
 - Fix bugs autonomously without asking "how should I fix this?"
+- Check `GET /api/docs` or `GET /api/docs/{category}` before guessing ADK API calls.
+- When ADK API usage causes repeated trial-and-error, record it as `api-friction` instead of bypassing with direct DB access.
 "#
 }
 
@@ -611,16 +631,9 @@ pub fn handle_init(reconfigure: bool) {
     }
 
     // Provider selection
-    let provider_idx = prompt_select(
-        "AI 프로바이더를 선택하세요:",
-        &["claude (Anthropic)", "codex (OpenAI)", "gemini (Google)"],
-    );
-    let provider = match provider_idx {
-        0 => "claude",
-        1 => "codex",
-        2 => "gemini",
-        _ => "claude",
-    };
+    let provider_labels = cli_init_provider_labels();
+    let provider_idx = prompt_select("AI 프로바이더를 선택하세요:", &provider_labels);
+    let provider = cli_init_provider_from_index(provider_idx);
 
     // Owner user ID (optional)
     println!("\nStep 4/5: 소유자 설정");
@@ -904,6 +917,20 @@ mod tests {
         assert_eq!(parse_launchd_env_line("# comment"), None);
         assert_eq!(parse_launchd_env_line("1BAD=value"), None);
         assert_eq!(parse_launchd_env_line("NO_EQUALS"), None);
+    }
+
+    #[test]
+    fn cli_init_provider_choices_follow_provider_registry() {
+        assert_eq!(
+            cli_init_provider_labels(),
+            vec![
+                "claude (Anthropic)",
+                "codex (OpenAI)",
+                "gemini (Google)",
+                "qwen (Alibaba)"
+            ]
+        );
+        assert_eq!(cli_init_provider_from_index(3), "qwen");
     }
 
     #[cfg(target_os = "macos")]

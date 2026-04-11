@@ -146,6 +146,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          UPDATE kanban_cards SET awaiting_dod_at = updated_at WHERE status = 'review' AND review_status = 'awaiting_dod' AND awaiting_dod_at IS NULL;",
     );
     ensure_auto_queue_schema(conn)?;
+    ensure_api_friction_schema(conn)?;
 
     // Unique constraint: one kanban card per GitHub issue per repo.
     // Deduplicate existing rows first so CREATE UNIQUE INDEX succeeds.
@@ -375,6 +376,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             last_decision       TEXT,
             decided_by          TEXT,
             decided_at          TEXT,
+            approach_change_round INTEGER,
+            session_reset_round INTEGER,
             review_entered_at   TEXT,
             updated_at          TEXT DEFAULT (datetime('now'))
         );",
@@ -425,6 +428,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     // #118: Track approach-change round for repeated-finding detection
     let _ = conn.execute(
         "ALTER TABLE card_review_state ADD COLUMN approach_change_round INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE card_review_state ADD COLUMN session_reset_round INTEGER",
         [],
     );
 
@@ -536,6 +543,37 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS card_retrospectives (
+            id               TEXT PRIMARY KEY,
+            card_id          TEXT NOT NULL REFERENCES kanban_cards(id) ON DELETE CASCADE,
+            dispatch_id      TEXT NOT NULL REFERENCES task_dispatches(id) ON DELETE CASCADE,
+            terminal_status  TEXT NOT NULL,
+            repo_id          TEXT,
+            issue_number     INTEGER,
+            title            TEXT NOT NULL,
+            topic            TEXT NOT NULL,
+            content          TEXT NOT NULL,
+            review_round     INTEGER NOT NULL DEFAULT 0,
+            review_notes     TEXT,
+            duration_seconds INTEGER,
+            success          INTEGER NOT NULL DEFAULT 0,
+            result_json      TEXT NOT NULL,
+            memory_payload   TEXT NOT NULL,
+            sync_backend     TEXT,
+            sync_status      TEXT NOT NULL DEFAULT 'skipped',
+            sync_error       TEXT,
+            created_at       DATETIME DEFAULT (datetime('now')),
+            updated_at       DATETIME DEFAULT (datetime('now')),
+            UNIQUE(card_id, dispatch_id, terminal_status)
+        );
+        CREATE INDEX IF NOT EXISTS idx_card_retrospectives_card_created
+            ON card_retrospectives(card_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_card_retrospectives_issue_created
+            ON card_retrospectives(issue_number, created_at DESC)
+            WHERE issue_number IS NOT NULL;",
+    )?;
+
     // #126: Add expires_at column to kv_meta for TTL support
     {
         let has_expires: bool = conn
@@ -597,6 +635,27 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_ste_session_key ON session_termination_events(session_key);
         CREATE INDEX IF NOT EXISTS idx_ste_dispatch_id ON session_termination_events(dispatch_id);
         CREATE INDEX IF NOT EXISTS idx_ste_created_at ON session_termination_events(created_at);",
+    )?;
+
+    // #436: Dispatch status transition audit trail
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dispatch_events (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id       TEXT NOT NULL REFERENCES task_dispatches(id) ON DELETE CASCADE,
+            kanban_card_id    TEXT REFERENCES kanban_cards(id) ON DELETE SET NULL,
+            dispatch_type     TEXT,
+            from_status       TEXT,
+            to_status         TEXT NOT NULL,
+            transition_source TEXT NOT NULL,
+            payload_json      TEXT,
+            created_at        DATETIME DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_dispatch_events_dispatch_id
+            ON dispatch_events(dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_events_card_id
+            ON dispatch_events(kanban_card_id);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_events_created_at
+            ON dispatch_events(created_at);",
     )?;
 
     // #398: Runtime supervisor decision audit
@@ -811,6 +870,61 @@ pub(crate) fn ensure_auto_queue_schema(conn: &Connection) -> Result<()> {
             conn.execute_batch("ALTER TABLE auto_queue_runs DROP COLUMN max_concurrent_per_agent;");
     }
 
+    Ok(())
+}
+
+fn ensure_api_friction_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_friction_events (
+            id                  TEXT PRIMARY KEY,
+            fingerprint         TEXT NOT NULL,
+            endpoint            TEXT NOT NULL,
+            friction_type       TEXT NOT NULL,
+            summary             TEXT NOT NULL,
+            workaround          TEXT,
+            suggested_fix       TEXT,
+            docs_category       TEXT,
+            keywords_json       TEXT NOT NULL DEFAULT '[]',
+            payload_json        TEXT NOT NULL,
+            session_key         TEXT,
+            channel_id          TEXT,
+            provider            TEXT,
+            dispatch_id         TEXT,
+            card_id             TEXT,
+            repo_id             TEXT,
+            github_issue_number INTEGER,
+            task_summary        TEXT,
+            agent_id            TEXT,
+            memory_backend      TEXT,
+            memory_status       TEXT NOT NULL DEFAULT 'pending',
+            memory_error        TEXT,
+            created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_friction_events_fingerprint
+            ON api_friction_events (fingerprint);
+        CREATE INDEX IF NOT EXISTS idx_api_friction_events_dispatch_id
+            ON api_friction_events (dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_api_friction_events_created_at
+            ON api_friction_events (created_at DESC);
+        CREATE TABLE IF NOT EXISTS api_friction_issues (
+            fingerprint   TEXT PRIMARY KEY,
+            repo_id       TEXT NOT NULL,
+            endpoint      TEXT NOT NULL,
+            friction_type TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            body          TEXT NOT NULL,
+            issue_number  INTEGER,
+            issue_url     TEXT,
+            event_count   INTEGER NOT NULL DEFAULT 0,
+            first_event_at DATETIME,
+            last_event_at DATETIME,
+            last_error    TEXT,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_friction_issues_repo
+            ON api_friction_issues (repo_id, updated_at DESC);",
+    )?;
     Ok(())
 }
 

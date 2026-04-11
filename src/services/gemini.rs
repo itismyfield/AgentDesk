@@ -15,6 +15,7 @@ use crate::services::provider::{
     CancelToken, ProviderKind, StreamAttemptFailure, StreamAttemptResult, StreamFinalState,
     cancel_requested, is_readonly_tool_policy, register_child_pid, run_retrying_stream_attempts,
 };
+use crate::services::provider_runtime::{LineStreamEvent, spawn_line_stream_reader};
 use crate::services::remote::RemoteProfile;
 
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
@@ -47,12 +48,7 @@ priority = 900
 denyMessage = "AgentDesk meeting_readonly mode allows only filesystem read/search tools."
 "#;
 
-#[derive(Debug)]
-enum GeminiStreamEvent {
-    Line(String),
-    ReadError(String),
-    Eof,
-}
+type GeminiStreamEvent = LineStreamEvent;
 
 #[derive(Debug, PartialEq, Eq)]
 enum GeminiStreamLoopResult {
@@ -261,7 +257,7 @@ fn execute_gemini_streaming_attempt(
         .stderr
         .take()
         .ok_or_else(|| "Failed to capture Gemini stderr".to_string())?;
-    let stdout_events = spawn_gemini_stream_reader(stdout);
+    let stdout_events = spawn_line_stream_reader(stdout, "Gemini");
     let stderr_handle = std::thread::spawn(move || {
         let mut buf = String::new();
         let mut reader = BufReader::new(stderr);
@@ -415,33 +411,6 @@ where
             }
         }
     }
-}
-
-fn spawn_gemini_stream_reader<R>(stdout: R) -> mpsc::Receiver<GeminiStreamEvent>
-where
-    R: Read + Send + 'static,
-{
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
-                    if tx.send(GeminiStreamEvent::Line(line)).is_err() {
-                        return;
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(GeminiStreamEvent::ReadError(format!(
-                        "Failed reading Gemini output: {}",
-                        e
-                    )));
-                    return;
-                }
-            }
-        }
-        let _ = tx.send(GeminiStreamEvent::Eof);
-    });
-    rx
 }
 
 fn process_gemini_stream_line(

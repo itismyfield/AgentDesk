@@ -128,6 +128,147 @@ pub fn resolve_repo_dir() -> Option<String> {
     legacy.map(|p| p.to_string_lossy().into_owned())
 }
 
+fn expand_tilde(path: &str) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if path == "~" {
+            return home.display().to_string();
+        }
+        if let Some(rest) = path.strip_prefix("~/") {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
+}
+
+fn load_repo_resolution_config() -> Option<(crate::config::Config, std::path::PathBuf)> {
+    let explicit = std::env::var_os("AGENTDESK_CONFIG")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+
+    let mut candidates = Vec::new();
+    if let Some(path) = explicit {
+        candidates.push(path);
+    }
+    if let Some(root) = crate::config::runtime_root() {
+        candidates.push(crate::runtime_layout::config_file_path(&root));
+        candidates.push(crate::runtime_layout::legacy_config_file_path(&root));
+    }
+
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(config) = crate::config::load_from_path(&path) {
+            let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            return Some((config, base_dir.to_path_buf()));
+        }
+    }
+
+    None
+}
+
+fn configured_repo_dir(repo_id: &str) -> Option<String> {
+    let (config, base_dir) = load_repo_resolution_config()?;
+    let raw = config.github.repo_dirs.get(repo_id)?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let expanded = expand_tilde(raw);
+    let path = std::path::PathBuf::from(expanded);
+    let resolved = if path.is_relative() {
+        base_dir.join(path)
+    } else {
+        path
+    };
+
+    Some(
+        std::fs::canonicalize(&resolved)
+            .unwrap_or(resolved)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+pub(crate) fn parse_github_repo_from_remote(remote: &str) -> Option<String> {
+    let trimmed = remote.trim().trim_end_matches(".git");
+    let path = trimmed
+        .strip_prefix("git@github.com:")
+        .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| trimmed.strip_prefix("https://github.com/"))
+        .or_else(|| trimmed.strip_prefix("http://github.com/"))?
+        .trim_matches('/');
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn repo_id_for_dir(repo_dir: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    parse_github_repo_from_remote(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn ensure_git_worktree(path: &str) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("git rev-parse failed for '{}': {e}", path))?;
+    if !output.status.success() {
+        return Err(format!("'{}' is not a git worktree", path));
+    }
+    Ok(())
+}
+
+/// Resolve the local git directory for a specific GitHub repo id.
+///
+/// Resolution order:
+/// 1. `github.repo_dirs[repo_id]` from runtime config
+/// 2. the current default repo iff its `origin` remote matches `repo_id`
+///
+/// When `repo_id` is absent, this simply mirrors `resolve_repo_dir()`.
+/// When `repo_id` is present but no mapping exists, this returns an error
+/// instead of silently falling back to the default repo.
+pub fn resolve_repo_dir_for_id(repo_id: Option<&str>) -> Result<Option<String>, String> {
+    let requested = repo_id.map(str::trim).filter(|value| !value.is_empty());
+    let Some(requested) = requested else {
+        return Ok(resolve_repo_dir());
+    };
+
+    if let Some(mapped_dir) = configured_repo_dir(requested) {
+        ensure_git_worktree(&mapped_dir)?;
+        if let Some(actual_repo_id) = repo_id_for_dir(&mapped_dir) {
+            if actual_repo_id != requested {
+                return Err(format!(
+                    "Configured repo dir '{}' resolves to '{}' instead of requested '{}'",
+                    mapped_dir, actual_repo_id, requested
+                ));
+            }
+        }
+        return Ok(Some(mapped_dir));
+    }
+
+    if let Some(default_dir) = resolve_repo_dir() {
+        if repo_id_for_dir(&default_dir).as_deref() == Some(requested) {
+            return Ok(Some(default_dir));
+        }
+    }
+
+    Err(format!(
+        "No local repo mapping for '{}'; configure github.repo_dirs.{} in agentdesk config",
+        requested, requested
+    ))
+}
+
 /// Get the current HEAD commit hash from a git repo directory.
 ///
 /// Returns `None` if git is unavailable or the directory is not a repo.

@@ -930,46 +930,6 @@ pub async fn agent_signal(
     )
 }
 
-/// GET /api/agent-channels
-/// Returns agent ID → Discord channel mapping.
-pub async fn agent_channels(
-    State(state): State<super::AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, name, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
-             FROM agents ORDER BY id",
-        )
-        .unwrap();
-
-    let channels: Vec<serde_json::Value> = stmt
-        .query_map([], |row| {
-            Ok(json!({
-                "agent_id": row.get::<_, String>(0)?,
-                "name": row.get::<_, Option<String>>(1)?,
-                "channel_id": row.get::<_, Option<String>>(2)?,
-                "channel_alt": row.get::<_, Option<String>>(3)?,
-                "channel_cc": row.get::<_, Option<String>>(4)?,
-                "channel_cdx": row.get::<_, Option<String>>(5)?,
-            }))
-        })
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
-
-    (StatusCode::OK, Json(json!({"channels": channels})))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

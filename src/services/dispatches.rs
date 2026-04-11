@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use crate::db::Db;
 use crate::dispatch;
 use crate::engine::PolicyEngine;
-use crate::services::service_error::{ServiceError, ServiceResult};
+use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 const VALID_DISPATCH_STATUSES: &[&str] =
     &["pending", "dispatched", "completed", "cancelled", "failed"];
@@ -44,10 +44,11 @@ impl DispatchService {
         status: Option<&str>,
         kanban_card_id: Option<&str>,
     ) -> ServiceResult<Vec<Value>> {
-        let conn = self
-            .db
-            .lock()
-            .map_err(|e| ServiceError::internal(format!("{e}")))?;
+        let conn = self.db.lock().map_err(|e| {
+            ServiceError::internal(format!("{e}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("list_dispatches.lock")
+        })?;
 
         let mut sql = String::from(
             "SELECT id, kanban_card_id, from_agent_id, to_agent_id, dispatch_type, status, title, context, result, parent_dispatch_id, chain_depth, created_at, updated_at FROM task_dispatches WHERE 1=1",
@@ -65,9 +66,11 @@ impl DispatchService {
 
         sql.push_str(" ORDER BY created_at DESC");
 
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| ServiceError::internal(format!("prepare: {e}")))?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            ServiceError::internal(format!("prepare: {e}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("list_dispatches.prepare")
+        })?;
 
         let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind_values
             .iter()
@@ -76,16 +79,22 @@ impl DispatchService {
 
         let rows = stmt
             .query_map(params_ref.as_slice(), dispatch_row_to_json)
-            .map_err(|e| ServiceError::internal(format!("{e}")))?;
+            .map_err(|e| {
+                ServiceError::internal(format!("{e}"))
+                    .with_code(ErrorCode::Database)
+                    .with_operation("list_dispatches.query")
+            })?;
 
         Ok(rows.filter_map(|row| row.ok()).collect())
     }
 
     pub fn get_dispatch(&self, id: &str) -> ServiceResult<Value> {
-        let conn = self
-            .db
-            .lock()
-            .map_err(|e| ServiceError::internal(format!("{e}")))?;
+        let conn = self.db.lock().map_err(|e| {
+            ServiceError::internal(format!("{e}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("get_dispatch.lock")
+                .with_context("dispatch_id", id)
+        })?;
 
         conn.query_row(
             "SELECT id, kanban_card_id, from_agent_id, to_agent_id, dispatch_type, status, title, context, result, parent_dispatch_id, chain_depth, created_at, updated_at FROM task_dispatches WHERE id = ?1",
@@ -93,10 +102,13 @@ impl DispatchService {
             dispatch_row_to_json,
         )
         .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                ServiceError::not_found("dispatch not found")
-            }
-            other => ServiceError::internal(format!("{other}")),
+            rusqlite::Error::QueryReturnedNoRows => ServiceError::not_found("dispatch not found")
+                .with_code(ErrorCode::Dispatch)
+                .with_context("dispatch_id", id),
+            other => ServiceError::internal(format!("{other}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("get_dispatch.query")
+                .with_context("dispatch_id", id),
         })
     }
 
@@ -110,6 +122,7 @@ impl DispatchService {
         let context = input.context.unwrap_or_else(|| json!({}));
         let options = dispatch::DispatchCreateOptions {
             skip_outbox: input.skip_outbox.unwrap_or(false),
+            ..Default::default()
         };
 
         match dispatch::create_dispatch_with_options(
@@ -139,13 +152,13 @@ impl DispatchService {
             Err(error) => {
                 let message = format!("{error}");
                 if message.contains("not found") {
-                    Err(ServiceError::not_found(message))
+                    Err(ServiceError::not_found(message).with_code(ErrorCode::Dispatch))
                 } else if message.starts_with("Cannot create ")
                     || message.contains("already exists")
                 {
-                    Err(ServiceError::conflict(message))
+                    Err(ServiceError::conflict(message).with_code(ErrorCode::Dispatch))
                 } else {
-                    Err(ServiceError::internal(message))
+                    Err(ServiceError::internal(message).with_code(ErrorCode::Dispatch))
                 }
             }
         }
@@ -159,10 +172,16 @@ impl DispatchService {
                     let message = format!("{error}");
                     if message.contains("not found") {
                         ServiceError::not_found(message)
+                            .with_code(ErrorCode::Dispatch)
+                            .with_context("dispatch_id", id)
                     } else if message.contains("no agent execution evidence") {
                         ServiceError::bad_request(message)
+                            .with_code(ErrorCode::Dispatch)
+                            .with_context("dispatch_id", id)
                     } else {
                         ServiceError::internal(message)
+                            .with_code(ErrorCode::Dispatch)
+                            .with_context("dispatch_id", id)
                     }
                 })?;
             crate::server::routes::dispatches::queue_dispatch_followup(&self.db, id);
@@ -175,51 +194,74 @@ impl DispatchService {
                     "invalid dispatch status '{}' — allowed values: {}",
                     status,
                     VALID_DISPATCH_STATUSES.join(", ")
-                )));
+                ))
+                .with_code(ErrorCode::Validation)
+                .with_context("dispatch_id", id)
+                .with_context("status", status));
             }
         }
 
-        let conn = self
-            .db
-            .lock()
-            .map_err(|e| ServiceError::internal(format!("{e}")))?;
-
-        let mut sets: Vec<String> = Vec::new();
-        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        let mut idx = 1;
+        let conn = self.db.lock().map_err(|e| {
+            ServiceError::internal(format!("{e}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("update_dispatch.lock")
+                .with_context("dispatch_id", id)
+        })?;
 
         if let Some(status) = input.status {
-            sets.push(format!("status = ?{}", idx));
-            values.push(Box::new(status));
-            idx += 1;
-        }
-
-        if let Some(result) = input.result {
+            let changed = dispatch::set_dispatch_status_on_conn(
+                &conn,
+                id,
+                &status,
+                input.result.as_ref(),
+                "api_update_dispatch",
+                None,
+                false,
+            )
+            .map_err(|error| {
+                ServiceError::internal(format!("{error}"))
+                    .with_code(ErrorCode::Dispatch)
+                    .with_operation("update_dispatch.set_status")
+                    .with_context("dispatch_id", id)
+            })?;
+            if changed == 0 {
+                return Err(ServiceError::not_found("dispatch not found")
+                    .with_code(ErrorCode::Dispatch)
+                    .with_context("dispatch_id", id));
+            }
+        } else if let Some(result) = input.result {
+            let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             let result_str = serde_json::to_string(&result).unwrap_or_default();
-            sets.push(format!("result = ?{}", idx));
+            let mut sets = vec!["result = ?1".to_string()];
             values.push(Box::new(result_str));
-            idx += 1;
-        }
-
-        if sets.is_empty() {
-            return Err(ServiceError::bad_request("no fields to update"));
-        }
-
-        sets.push("updated_at = datetime('now')".to_string());
-
-        let sql = format!(
-            "UPDATE task_dispatches SET {} WHERE id = ?{}",
-            sets.join(", "),
-            idx
-        );
-        values.push(Box::new(id.to_string()));
-
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
-            values.iter().map(|value| value.as_ref()).collect();
-        match conn.execute(&sql, params_ref.as_slice()) {
-            Ok(0) => return Err(ServiceError::not_found("dispatch not found")),
-            Ok(_) => {}
-            Err(error) => return Err(ServiceError::internal(format!("{error}"))),
+            sets.push("updated_at = datetime('now')".to_string());
+            values.push(Box::new(id.to_string()));
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+                values.iter().map(|value| value.as_ref()).collect();
+            match conn.execute(
+                &format!(
+                    "UPDATE task_dispatches SET {} WHERE id = ?2",
+                    sets.join(", ")
+                ),
+                params_ref.as_slice(),
+            ) {
+                Ok(0) => {
+                    return Err(ServiceError::not_found("dispatch not found")
+                        .with_code(ErrorCode::Dispatch)
+                        .with_context("dispatch_id", id));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(ServiceError::internal(format!("{error}"))
+                        .with_code(ErrorCode::Database)
+                        .with_operation("update_dispatch.update_result")
+                        .with_context("dispatch_id", id));
+                }
+            }
+        } else {
+            return Err(ServiceError::bad_request("no fields to update")
+                .with_code(ErrorCode::Validation)
+                .with_context("dispatch_id", id));
         }
 
         conn.query_row(
@@ -227,7 +269,12 @@ impl DispatchService {
             [id],
             dispatch_row_to_json,
         )
-        .map_err(|error| ServiceError::internal(format!("{error}")))
+        .map_err(|error| {
+            ServiceError::internal(format!("{error}"))
+                .with_code(ErrorCode::Database)
+                .with_operation("update_dispatch.readback")
+                .with_context("dispatch_id", id)
+        })
     }
 }
 

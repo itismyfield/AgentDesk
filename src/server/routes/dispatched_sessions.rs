@@ -5,17 +5,15 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::time::Duration;
 
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
-use crate::db::agents::AgentChannelBindings;
-use crate::db::session_transcripts::SessionTranscriptSearchHit;
+use crate::db::agents::{AgentChannelBindings, resolve_agent_channel_for_provider_on_conn};
+use crate::services::provider::ProviderKind;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
-use crate::utils::format::safe_prefix;
+use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
 
 const STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL: &str = "-6 hours";
-const SEARCH_SUMMARY_MODEL: &str = "haiku";
 
 /// Extract parent channel name from a thread channel name.
 /// Thread names follow the convention `{parent}-t{thread_id}` where thread_id
@@ -108,20 +106,22 @@ fn resolve_agent_id_from_channel_name(
     })
 }
 
-fn spawn_auto_queue_activate_for_agent(agent_id: String) {
-    let port = crate::config::load_graceful().server.port;
+fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
     tokio::spawn(async move {
         // Let the session/dispatch cleanup commit before queue activation probes.
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        let url = crate::config::local_api_url(port, "/api/auto-queue/activate");
-        let _ = reqwest::Client::new()
-            .post(&url)
-            .json(&serde_json::json!({
-                "agent_id": agent_id,
-                "active_only": true,
-            }))
-            .send()
-            .await;
+        let _ = super::auto_queue::activate(
+            State(state),
+            Json(super::auto_queue::ActivateBody {
+                run_id: None,
+                repo: None,
+                agent_id: Some(agent_id),
+                thread_group: None,
+                unified_thread: None,
+                active_only: Some(true),
+            }),
+        )
+        .await;
     });
 }
 
@@ -166,153 +166,7 @@ pub struct DeleteSessionQuery {
     pub provider: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SearchSessionsQuery {
-    pub q: String,
-    pub limit: Option<usize>,
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct SearchSummary {
-    model: &'static str,
-    text: String,
-}
-
-fn summary_requested(raw: Option<&str>) -> bool {
-    !matches!(
-        raw.map(|value| value.trim().to_ascii_lowercase()),
-        Some(value) if value == "0" || value == "false" || value == "no"
-    )
-}
-
-fn build_search_summary_prompt(query: &str, hits: &[SessionTranscriptSearchHit]) -> String {
-    let mut sections = Vec::new();
-    for (idx, hit) in hits.iter().take(8).enumerate() {
-        let user = safe_prefix(hit.user_message.trim(), 700);
-        let assistant = safe_prefix(hit.assistant_message.trim(), 900);
-        let snippet = safe_prefix(hit.snippet.trim(), 220);
-        sections.push(format!(
-            "[{index}] session_key={session_key}\nprovider={provider}\nagent_id={agent_id}\ncreated_at={created_at}\nsnippet={snippet}\n\nUser:\n{user}\n\nAssistant:\n{assistant}",
-            index = idx + 1,
-            session_key = hit.session_key.as_deref().unwrap_or("-"),
-            provider = hit.provider.as_deref().unwrap_or("-"),
-            agent_id = hit.agent_id.as_deref().unwrap_or("-"),
-            created_at = hit.created_at,
-            snippet = if snippet.is_empty() { "-" } else { snippet },
-        ));
-    }
-
-    format!(
-        "당신은 AgentDesk의 과거 세션 검색 결과를 요약하는 분석기입니다.\n\
-         검색어: {query}\n\n\
-         규칙:\n\
-         - 검색 결과에 실제로 나온 정보만 사용합니다.\n\
-         - 추측하지 않습니다.\n\
-         - 한국어로 3개 이하 bullet로 답합니다.\n\
-         - 반복 설명 대신 공통 주제, 관련 이슈/기능, 눈에 띄는 결론만 압축합니다.\n\n\
-         검색 결과:\n{results}",
-        results = sections.join("\n\n---\n\n")
-    )
-}
-
-async fn summarize_search_hits(
-    query: &str,
-    hits: &[SessionTranscriptSearchHit],
-) -> Result<Option<SearchSummary>, String> {
-    if hits.is_empty() {
-        return Ok(None);
-    }
-
-    let prompt = build_search_summary_prompt(query, hits);
-    let task = tokio::task::spawn_blocking(move || {
-        crate::services::claude::execute_command_simple_with_model(
-            &prompt,
-            Some(SEARCH_SUMMARY_MODEL),
-        )
-    });
-
-    let text = tokio::time::timeout(Duration::from_secs(30), task)
-        .await
-        .map_err(|_| "summary generation timed out".to_string())?
-        .map_err(|e| format!("summary task join failed: {e}"))?
-        .map_err(|e| format!("summary generation failed: {e}"))?;
-
-    let text = text.trim().to_string();
-    if text.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(SearchSummary {
-            model: SEARCH_SUMMARY_MODEL,
-            text,
-        }))
-    }
-}
-
 // ── Handlers ──────────────────────────────────────────────────
-
-/// GET /api/sessions/search?q=keyword
-pub async fn search_session_transcripts(
-    State(state): State<AppState>,
-    Query(params): Query<SearchSessionsQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let raw_query = params.q.trim();
-    if raw_query.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "q is required"})),
-        );
-    }
-
-    let conn = match state.db.read_conn() {
-        Ok(conn) => conn,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("db read_conn failed: {e}")})),
-            );
-        }
-    };
-
-    let limit = params.limit.unwrap_or(10).clamp(1, 50);
-    let (match_query, hits) =
-        match crate::db::session_transcripts::search_transcripts(&conn, raw_query, limit) {
-            Ok(result) => result,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("search failed: {e}")})),
-                );
-            }
-        };
-    drop(conn);
-
-    let want_summary = summary_requested(params.summary.as_deref());
-    let (summary, summary_error) = if want_summary && !hits.is_empty() {
-        match summarize_search_hits(raw_query, &hits).await {
-            Ok(summary) => (summary, None),
-            Err(e) => (None, Some(e)),
-        }
-    } else {
-        (None, None)
-    };
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "query": raw_query,
-            "match_query": match_query,
-            "count": hits.len(),
-            "summary_requested": want_summary,
-            "summary": summary.as_ref().map(|summary| json!({
-                "model": summary.model,
-                "text": summary.text,
-            })),
-            "summary_error": summary_error,
-            "results": hits,
-        })),
-    )
-}
 
 /// GET /api/dispatched-sessions
 pub async fn list_dispatched_sessions(
@@ -642,7 +496,7 @@ pub async fn hook_session(
             // but the agent is already idle and could start the next queued item.
             if status == "idle" {
                 if let Some(ref aid) = agent_id {
-                    spawn_auto_queue_activate_for_agent(aid.clone());
+                    spawn_auto_queue_activate_for_agent(state.clone(), aid.clone());
                 }
             }
 
@@ -1205,7 +1059,7 @@ pub(crate) async fn force_kill_session_impl(
         crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_name);
 
     // Query session from DB
-    let (active_dispatch_id, agent_id, _thread_channel_id) = {
+    let (active_dispatch_id, agent_id, runtime_channel_id, session_provider) = {
         let conn = match state.db.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -1217,17 +1071,41 @@ pub(crate) async fn force_kill_session_impl(
         };
 
         match conn.query_row(
-            "SELECT active_dispatch_id, agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
+            "SELECT active_dispatch_id, agent_id, thread_channel_id, provider FROM sessions WHERE session_key = ?1",
             [session_key],
             |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         ) {
-            Ok(row) => row,
+            Ok((active_dispatch_id, agent_id, thread_channel_id, session_provider)) => {
+                let provider_name = provider_info
+                    .as_ref()
+                    .map(|(provider, _)| provider.as_str())
+                    .or(session_provider.as_deref());
+                let runtime_channel_id = normalize_thread_channel_id(thread_channel_id.as_deref())
+                    .or_else(|| {
+                        agent_id.as_deref().and_then(|agent_id| {
+                            resolve_agent_channel_for_provider_on_conn(
+                                &conn,
+                                agent_id,
+                                provider_name,
+                            )
+                            .ok()
+                            .flatten()
+                        })
+                    });
+                (
+                    active_dispatch_id,
+                    agent_id,
+                    runtime_channel_id,
+                    session_provider,
+                )
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 return (
                     StatusCode::NOT_FOUND,
@@ -1243,26 +1121,28 @@ pub(crate) async fn force_kill_session_impl(
         }
     };
 
-    // 1. Kill tmux session
-    let tmux_killed = {
-        let sess = tmux_name.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::services::tmux_diagnostics::record_tmux_exit_reason(
-                &sess,
-                "force-kill API invoked",
-            );
-            crate::services::platform::tmux::kill_session(&sess)
-        })
-        .await
-        .unwrap_or(false)
-    };
+    let lifecycle = stop_turn_preserving_queue(
+        state.health_registry.as_deref(),
+        &TurnLifecycleTarget {
+            provider: provider_info
+                .as_ref()
+                .map(|(provider, _)| provider.clone())
+                .or_else(|| session_provider.as_deref().and_then(ProviderKind::from_str)),
+            channel_id: runtime_channel_id
+                .as_deref()
+                .and_then(|channel_id| channel_id.parse::<u64>().ok())
+                .map(poise::serenity_prelude::ChannelId::new),
+            tmux_name: tmux_name.clone(),
+        },
+        "force-kill API invoked",
+    )
+    .await;
 
-    // 2. Clear inflight state by scanning provider directory for matching tmux_session_name
-    let inflight_cleared = if let Some((ref provider, _)) = provider_info {
-        clear_inflight_by_tmux_name(provider, &tmux_name)
-    } else {
-        false
-    };
+    // 1. Kill tmux session (or confirm the runtime path already stopped it).
+    let tmux_killed = lifecycle.tmux_killed;
+
+    // 2. Clear inflight state by scanning provider directory for matching tmux_session_name.
+    let inflight_cleared = lifecycle.inflight_cleared;
 
     // 3. Update session → disconnected, clear active fields
     // 4. Mark dispatch → failed
@@ -1295,12 +1175,25 @@ pub(crate) async fn force_kill_session_impl(
         .ok();
 
         if let Some(ref did) = active_dispatch_id {
-            conn.execute(
-                "UPDATE task_dispatches SET status = 'failed', updated_at = datetime('now') \
-                 WHERE id = ?1 AND status NOT IN ('completed')",
-                [did],
-            )
-            .ok();
+            let current_status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM task_dispatches WHERE id = ?1",
+                    [did],
+                    |row| row.get(0),
+                )
+                .ok();
+            if current_status.as_deref() != Some("completed") {
+                crate::dispatch::set_dispatch_status_on_conn(
+                    &conn,
+                    did,
+                    "failed",
+                    None,
+                    "force_kill_session",
+                    None,
+                    false,
+                )
+                .ok();
+            }
 
             // Prepare retry metadata from the failed dispatch (read while lock held)
             if retry {
@@ -1367,7 +1260,7 @@ pub(crate) async fn force_kill_session_impl(
 
     let queue_activation_requested = if retry_dispatch_id.is_none() {
         if let Some(ref aid) = agent_id {
-            spawn_auto_queue_activate_for_agent(aid.clone());
+            spawn_auto_queue_activate_for_agent(state.clone(), aid.clone());
             true
         } else {
             false
@@ -1378,9 +1271,40 @@ pub(crate) async fn force_kill_session_impl(
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     eprintln!(
-        "  [{ts}] ⚡ force-kill: session={}, tmux_killed={}, inflight_cleared={}, dispatch_failed={:?}",
-        session_key, tmux_killed, inflight_cleared, active_dispatch_id
+        "  [{ts}] ⚡ force-kill: session={}, tmux_killed={}, inflight_cleared={}, dispatch_failed={:?}, lifecycle={}",
+        session_key, tmux_killed, inflight_cleared, active_dispatch_id, lifecycle.lifecycle_path
     );
+
+    // Notify bot message for force-kill visibility
+    if let Some(ref channel_id_str) = runtime_channel_id {
+        // Build human-readable message: agent name + reason from tmux exit file
+        let agent_label = agent_id.as_deref().unwrap_or("unknown");
+        let exit_reason = crate::services::tmux_diagnostics::read_tmux_exit_reason(&tmux_name)
+            .map(|r| {
+                // Strip timestamp prefix "[2026-...] " if present
+                let trimmed = if let Some(idx) = r.find("] ") {
+                    &r[idx + 2..]
+                } else {
+                    &r
+                };
+                let s = trimmed.trim();
+                if s.len() > 80 {
+                    format!("{}…", &s[..80])
+                } else {
+                    s.to_string()
+                }
+            })
+            .unwrap_or_else(|| lifecycle.lifecycle_path.to_string());
+        if let Ok(conn) = state.db.lock() {
+            let _ = conn.execute(
+                "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
+                rusqlite::params![
+                    format!("channel:{channel_id_str}"),
+                    format!("⚡ 세션 강제 종료: {agent_label}\n사유: {exit_reason}"),
+                ],
+            );
+        }
+    }
 
     (
         StatusCode::OK,
@@ -1388,6 +1312,9 @@ pub(crate) async fn force_kill_session_impl(
             "ok": true,
             "tmux_killed": tmux_killed,
             "inflight_cleared": inflight_cleared,
+            "lifecycle_path": lifecycle.lifecycle_path,
+            "queued_remaining": lifecycle.queue_depth,
+            "queue_preserved": lifecycle.queue_preserved,
             "dispatch_failed": active_dispatch_id,
             "retry_dispatch_id": retry_dispatch_id,
             "queue_activation_requested": queue_activation_requested,
@@ -1415,38 +1342,6 @@ pub async fn force_kill_session_legacy(
     Json(body): Json<ForceKillBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     force_kill_session_impl(&state, &body.session_key, body.retry).await
-}
-
-/// Scan inflight directory for the provider and delete the file matching the given tmux_session_name.
-fn clear_inflight_by_tmux_name(
-    provider: &crate::services::provider::ProviderKind,
-    tmux_name: &str,
-) -> bool {
-    let inflight_root = match crate::config::runtime_root() {
-        Some(root) => root.join("runtime").join("discord_inflight"),
-        None => return false,
-    };
-
-    let provider_dir = inflight_root.join(provider.as_str());
-    let Ok(entries) = std::fs::read_dir(&provider_dir) else {
-        return false;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        if let Ok(data) = std::fs::read_to_string(&path) {
-            if let Ok(state) = serde_json::from_str::<serde_json::Value>(&data) {
-                if state.get("tmux_session_name").and_then(|v| v.as_str()) == Some(tmux_name) {
-                    let _ = std::fs::remove_file(&path);
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 #[cfg(test)]
@@ -1564,80 +1459,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_session_transcripts_returns_fts_hits_without_summary() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        let state = AppState::test_state(db.clone(), engine);
-
-        {
-            let mut conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO agents (id, name) VALUES ('agent-search', 'Agent Search')",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO sessions (session_key, agent_id, provider, status, created_at)
-                 VALUES ('host:search-1', 'agent-search', 'claude', 'idle', datetime('now'))",
-                [],
-            )
-            .unwrap();
-            crate::db::session_transcripts::persist_turn_on_conn(
-                &mut conn,
-                crate::db::session_transcripts::PersistSessionTranscript {
-                    turn_id: "discord:search:1",
-                    session_key: Some("host:search-1"),
-                    channel_id: Some("1490559149790986270"),
-                    agent_id: None,
-                    provider: Some("claude"),
-                    dispatch_id: Some("dispatch-search"),
-                    user_message: "FTS5 세션검색 구현 상태 알려줘",
-                    assistant_message: "LLM 요약과 session transcript FTS 검색 API를 추가했습니다.",
-                },
-            )
-            .unwrap();
-        }
-
-        let (status, body) = search_session_transcripts(
-            State(state),
-            Query(SearchSessionsQuery {
-                q: "FTS5 요약".to_string(),
-                limit: Some(5),
-                summary: Some("0".to_string()),
-            }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        let body = response_json(body);
-        assert_eq!(body["count"], 1);
-        assert_eq!(body["summary_requested"], false);
-        assert!(body["summary"].is_null());
-        assert_eq!(body["results"][0]["session_key"], "host:search-1");
-    }
-
-    #[tokio::test]
-    async fn search_session_transcripts_rejects_empty_query() {
-        let db = test_db();
-        let engine = test_engine(&db);
-        let state = AppState::test_state(db, engine);
-
-        let (status, body) = search_session_transcripts(
-            State(state),
-            Query(SearchSessionsQuery {
-                q: "   ".to_string(),
-                limit: None,
-                summary: None,
-            }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let body = response_json(body);
-        assert_eq!(body["error"], "q is required");
-    }
-
-    #[tokio::test]
     async fn force_kill_session_path_route_retries_active_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -1667,6 +1488,7 @@ mod tests {
         let body = response_json(body);
         let retry_dispatch_id = body["retry_dispatch_id"].as_str().unwrap().to_string();
         assert!(!retry_dispatch_id.is_empty());
+        assert_eq!(body["lifecycle_path"], "direct-fallback");
         assert_eq!(body["queue_activation_requested"], false);
 
         let conn = db.lock().unwrap();
@@ -1740,6 +1562,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         let body = response_json(body);
+        assert_eq!(body["lifecycle_path"], "direct-fallback");
         assert!(body["retry_dispatch_id"].is_null());
         assert_eq!(body["queue_activation_requested"], true);
 
@@ -1775,8 +1598,24 @@ mod tests {
         std::fs::write(
             &inflight_path,
             serde_json::to_string(&json!({
+                "version": 1,
+                "provider": "codex",
+                "channel_id": 123456789012345678u64,
+                "channel_name": "force-kill",
+                "request_owner_user_id": 1u64,
+                "user_msg_id": 2u64,
+                "current_msg_id": 3u64,
+                "current_msg_len": 0,
+                "user_text": "kill this",
+                "session_id": null,
                 "tmux_session_name": tmux_name,
-                "channel_id": "123456789012345678"
+                "output_path": null,
+                "input_fifo_path": null,
+                "last_offset": 0u64,
+                "full_response": "",
+                "response_sent_offset": 0,
+                "started_at": "2026-04-06 10:20:00",
+                "updated_at": "2026-04-06 10:20:01"
             }))
             .unwrap(),
         )
@@ -1822,6 +1661,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["tmux_killed"], true);
         assert_eq!(body["inflight_cleared"], true);
+        assert_eq!(body["lifecycle_path"], "direct-fallback");
         assert_eq!(body["queue_activation_requested"], true);
         assert!(
             !tmux_still_alive,

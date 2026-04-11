@@ -151,9 +151,14 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
                     )
                     .ok();
                     if action == "notify" {
-                        conn.execute(
-                            "UPDATE task_dispatches SET status = 'dispatched' WHERE id = ?1 AND status = 'pending'",
-                            [&dispatch_id],
+                        crate::dispatch::set_dispatch_status_on_conn(
+                            &conn,
+                            &dispatch_id,
+                            "dispatched",
+                            None,
+                            "dispatch_outbox_notify",
+                            Some(&["pending"]),
+                            false,
                         )
                         .ok();
                     }

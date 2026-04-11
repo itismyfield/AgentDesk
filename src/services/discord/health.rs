@@ -1,12 +1,15 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use poise::serenity_prelude as serenity;
 use serde::Serialize;
 use serenity::ChannelId;
 
-use super::{SharedData, mailbox_clear_channel};
+use super::{
+    SharedData, clear_inflight_state, clear_watchdog_deadline_override, mailbox_cancel_active_turn,
+    mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_finish_turn,
+};
 use crate::db::Db;
 use crate::services::provider::ProviderKind;
 
@@ -195,6 +198,340 @@ impl HealthRegistry {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeTurnStopResult {
+    pub lifecycle_path: &'static str,
+    pub queue_depth: usize,
+}
+
+fn decrement_counter(counter: &AtomicUsize) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        current.checked_sub(1)
+    });
+}
+
+async fn shared_for_provider(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+) -> Option<Arc<SharedData>> {
+    let providers = registry.providers.lock().await;
+    providers
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(provider.as_str()))
+        .map(|entry| entry.shared.clone())
+}
+
+async fn wait_for_turn_end(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    timeout: std::time::Duration,
+) -> bool {
+    let start = tokio::time::Instant::now();
+    while shared.mailbox(channel_id).has_active_turn().await {
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    true
+}
+
+fn runtime_stop_wait_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        std::time::Duration::from_millis(150)
+    }
+    #[cfg(not(test))]
+    {
+        std::time::Duration::from_secs(3)
+    }
+}
+
+pub async fn stop_provider_channel_runtime(
+    registry: &HealthRegistry,
+    provider_name: &str,
+    channel_id: ChannelId,
+    reason: &str,
+) -> Option<RuntimeTurnStopResult> {
+    let provider = ProviderKind::from_str(provider_name)?;
+    let shared = shared_for_provider(registry, &provider).await?;
+    let result = mailbox_cancel_active_turn(&shared, channel_id).await;
+
+    if let Some(token) = result.token.as_ref() {
+        if !result.already_stopping {
+            super::turn_bridge::cancel_active_token(token, true, reason);
+        }
+        if wait_for_turn_end(&shared, channel_id, runtime_stop_wait_timeout()).await {
+            let snapshot = shared.mailbox(channel_id).snapshot().await;
+            return Some(RuntimeTurnStopResult {
+                lifecycle_path: "canonical",
+                queue_depth: snapshot.intervention_queue.len(),
+            });
+        }
+    }
+
+    let finish = mailbox_finish_turn(&shared, &provider, channel_id).await;
+    if let Some(token) = finish.removed_token {
+        super::turn_bridge::cancel_active_token(&token, true, reason);
+        decrement_counter(shared.global_active.as_ref());
+    }
+    if !finish.has_pending {
+        shared.dispatch_role_overrides.remove(&channel_id);
+    }
+    let queue_depth = shared
+        .mailbox(channel_id)
+        .snapshot()
+        .await
+        .intervention_queue
+        .len();
+
+    clear_watchdog_deadline_override(channel_id.get()).await;
+    shared
+        .dispatch_thread_parents
+        .retain(|_, thread| *thread != channel_id);
+    mailbox_clear_recovery_marker(&shared, channel_id).await;
+    clear_inflight_state(&provider, channel_id.get());
+
+    Some(RuntimeTurnStopResult {
+        lifecycle_path: "runtime-fallback",
+        queue_depth,
+    })
+}
+
+pub async fn active_request_owner_for_channel(
+    registry: &HealthRegistry,
+    channel_id: u64,
+) -> Option<u64> {
+    let channel_id = ChannelId::new(channel_id);
+    let providers: Vec<_> = registry
+        .providers
+        .lock()
+        .await
+        .iter()
+        .map(|entry| entry.shared.clone())
+        .collect();
+    for shared in providers {
+        let snapshots = shared.mailboxes.snapshot_all().await;
+        if let Some(owner) = snapshots
+            .get(&channel_id)
+            .and_then(|snapshot| snapshot.active_request_owner)
+        {
+            return Some(owner.get());
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HardStopRuntimeResult {
+    pub cleanup_path: &'static str,
+    pub had_active_turn: bool,
+    pub has_pending_queue: bool,
+    pub runtime_session_cleared: bool,
+}
+
+impl Default for HardStopRuntimeResult {
+    fn default() -> Self {
+        Self {
+            cleanup_path: "runtime_unavailable_fallback",
+            had_active_turn: false,
+            has_pending_queue: false,
+            runtime_session_cleared: false,
+        }
+    }
+}
+
+struct RuntimeChannelMatch {
+    provider: ProviderKind,
+    shared: Arc<SharedData>,
+    channel_id: ChannelId,
+}
+
+async fn find_runtime_channel_match(
+    registry: &HealthRegistry,
+    provider_name: Option<&str>,
+    channel_id: Option<ChannelId>,
+    tmux_name: Option<&str>,
+) -> Option<RuntimeChannelMatch> {
+    let preferred_provider = provider_name.and_then(ProviderKind::from_str);
+    let providers: Vec<_> = registry
+        .providers
+        .lock()
+        .await
+        .iter()
+        .filter_map(|entry| {
+            let provider = ProviderKind::from_str(&entry.name)?;
+            if preferred_provider
+                .as_ref()
+                .is_some_and(|preferred| preferred != &provider)
+            {
+                return None;
+            }
+            Some((provider, entry.shared.clone()))
+        })
+        .collect();
+
+    for (provider, shared) in providers {
+        if let Some(channel_id) = channel_id {
+            let has_session = {
+                let data = shared.core.lock().await;
+                data.sessions.contains_key(&channel_id)
+            };
+            if has_session || super::ChannelMailboxRegistry::global_handle(channel_id).is_some() {
+                return Some(RuntimeChannelMatch {
+                    provider,
+                    shared,
+                    channel_id,
+                });
+            }
+            continue;
+        }
+
+        let Some(tmux_name) = tmux_name else {
+            continue;
+        };
+        let matched_channel_id = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .iter()
+                .find_map(|(candidate_channel_id, session)| {
+                    session.channel_name.as_ref().and_then(|channel_name| {
+                        let expected_tmux_name = provider.build_tmux_session_name(channel_name);
+                        (expected_tmux_name == tmux_name).then_some(*candidate_channel_id)
+                    })
+                })
+        };
+        if let Some(channel_id) = matched_channel_id {
+            return Some(RuntimeChannelMatch {
+                provider,
+                shared,
+                channel_id,
+            });
+        }
+    }
+
+    None
+}
+
+async fn apply_runtime_hard_stop_cleanup(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    finish: &super::FinishTurnResult,
+    stop_source: &'static str,
+) -> bool {
+    if let Some(token) = finish.removed_token.as_ref() {
+        token.cancelled.store(true, Ordering::Relaxed);
+        shared.global_active.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    super::clear_watchdog_deadline_override(channel_id.get()).await;
+    shared
+        .dispatch_thread_parents
+        .retain(|_, thread| *thread != channel_id);
+    shared.recovering_channels.remove(&channel_id);
+    shared.turn_start_times.remove(&channel_id);
+
+    if !finish.has_pending {
+        shared.dispatch_role_overrides.remove(&channel_id);
+    }
+
+    if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel_id) {
+        watcher.cancel.store(true, Ordering::Relaxed);
+    }
+
+    let runtime_session_cleared = {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+            true
+        } else {
+            false
+        }
+    };
+
+    if finish.mailbox_online && finish.has_pending {
+        super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            stop_source,
+        );
+    }
+
+    runtime_session_cleared
+}
+
+pub async fn hard_stop_runtime_turn(
+    registry: Option<&HealthRegistry>,
+    provider_name: Option<&str>,
+    channel_id: Option<u64>,
+    tmux_name: Option<&str>,
+    stop_source: &'static str,
+) -> HardStopRuntimeResult {
+    let channel_id = channel_id.map(ChannelId::new);
+
+    if let Some(registry) = registry
+        && let Some(runtime) =
+            find_runtime_channel_match(registry, provider_name, channel_id, tmux_name).await
+    {
+        let finish = if let Some(handle) =
+            super::ChannelMailboxRegistry::global_handle(runtime.channel_id)
+        {
+            handle
+                .finish_turn(super::queue_persistence_context(
+                    &runtime.shared,
+                    &runtime.provider,
+                    runtime.channel_id,
+                ))
+                .await
+        } else {
+            super::FinishTurnResult {
+                removed_token: None,
+                has_pending: false,
+                mailbox_online: false,
+            }
+        };
+        let runtime_session_cleared = apply_runtime_hard_stop_cleanup(
+            &runtime.shared,
+            &runtime.provider,
+            runtime.channel_id,
+            &finish,
+            stop_source,
+        )
+        .await;
+        return HardStopRuntimeResult {
+            cleanup_path: if finish.mailbox_online {
+                "mailbox_canonical"
+            } else {
+                "mailbox_fallback"
+            },
+            had_active_turn: finish.removed_token.is_some(),
+            has_pending_queue: finish.has_pending,
+            runtime_session_cleared,
+        };
+    }
+
+    if let Some(channel_id) = channel_id
+        && let Some(handle) = super::ChannelMailboxRegistry::global_handle(channel_id)
+    {
+        let finish = handle.hard_stop().await;
+        super::clear_watchdog_deadline_override(channel_id.get()).await;
+        return HardStopRuntimeResult {
+            cleanup_path: if finish.mailbox_online {
+                "mailbox_canonical"
+            } else {
+                "mailbox_fallback"
+            },
+            had_active_turn: finish.removed_token.is_some(),
+            has_pending_queue: finish.has_pending,
+            runtime_session_cleared: false,
+        };
+    }
+
+    HardStopRuntimeResult::default()
+}
+
 /// Best-effort runtime-side equivalent of `/clear` for an existing Discord channel session.
 /// Used by auto-queue slot recycling so pooled unified-thread slots start the next group fresh
 /// without killing the shared thread itself.
@@ -235,7 +572,7 @@ pub async fn clear_provider_channel_runtime(
     let cleared = mailbox_clear_channel(&shared, &provider, channel_id).await;
     if let Some(token) = cleared.removed_token {
         super::turn_bridge::cancel_active_token(&token, true, "auto-queue slot clear");
-        shared.global_active.fetch_sub(1, Ordering::Relaxed);
+        decrement_counter(shared.global_active.as_ref());
     }
 
     {
@@ -436,6 +773,7 @@ fn recovery_duration_secs(shared: &SharedData) -> f64 {
 
 #[cfg(test)]
 pub(crate) struct TestHealthHarness {
+    provider: ProviderKind,
     registry: Arc<HealthRegistry>,
     shared: Arc<SharedData>,
 }
@@ -443,17 +781,23 @@ pub(crate) struct TestHealthHarness {
 #[cfg(test)]
 impl TestHealthHarness {
     pub(crate) async fn new() -> Self {
+        Self::new_with_provider(ProviderKind::Claude).await
+    }
+
+    pub(crate) async fn new_with_provider(provider: ProviderKind) -> Self {
         let registry = Arc::new(HealthRegistry::new());
         let global_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let global_finalizing = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let shutdown_remaining = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let mut settings = super::DiscordBotSettings::default();
+        settings.provider = provider.clone();
         let shared = Arc::new(SharedData {
             core: tokio::sync::Mutex::new(super::CoreState {
                 sessions: std::collections::HashMap::new(),
                 active_meetings: std::collections::HashMap::new(),
             }),
             mailboxes: super::ChannelMailboxRegistry::default(),
-            settings: tokio::sync::RwLock::new(super::DiscordBotSettings::default()),
+            settings: tokio::sync::RwLock::new(settings),
             api_timestamps: dashmap::DashMap::new(),
             skills_cache: tokio::sync::RwLock::new(Vec::new()),
             tmux_watchers: dashmap::DashMap::new(),
@@ -490,13 +834,21 @@ impl TestHealthHarness {
         });
         super::mark_reconcile_complete(&shared);
         registry
-            .register("claude".to_string(), shared.clone())
+            .register(provider.as_str().to_string(), shared.clone())
             .await;
-        Self { registry, shared }
+        Self {
+            provider,
+            registry,
+            shared,
+        }
     }
 
     pub(crate) fn registry(&self) -> Arc<HealthRegistry> {
         self.registry.clone()
+    }
+
+    fn shared(&self) -> Arc<SharedData> {
+        self.shared.clone()
     }
 
     pub(crate) fn set_deferred_hooks(&self, count: usize) {
@@ -512,10 +864,20 @@ impl TestHealthHarness {
     }
 
     pub(crate) async fn set_queue_depth(&self, depth: usize) {
+        self.set_queue_depth_for_channel(1, ProviderKind::Claude, depth)
+            .await;
+    }
+
+    pub(crate) async fn set_queue_depth_for_channel(
+        &self,
+        channel_id: u64,
+        provider: ProviderKind,
+        depth: usize,
+    ) {
         super::mailbox_replace_queue(
             &self.shared,
-            &ProviderKind::Claude,
-            ChannelId::new(1),
+            &provider,
+            ChannelId::new(channel_id),
             Vec::new(),
         )
         .await;
@@ -531,10 +893,106 @@ impl TestHealthHarness {
                 created_at: Instant::now(),
             })
             .collect::<Vec<_>>();
+        super::mailbox_replace_queue(&self.shared, &provider, ChannelId::new(channel_id), queue)
+            .await;
+    }
+
+    pub(crate) async fn queue_depth_for_channel(&self, channel_id: u64) -> usize {
+        self.shared
+            .mailbox(ChannelId::new(channel_id))
+            .snapshot()
+            .await
+            .intervention_queue
+            .len()
+    }
+
+    pub(crate) async fn seed_channel_session(
+        &self,
+        channel_id: u64,
+        channel_name: &str,
+        session_id: Option<&str>,
+    ) {
+        let mut data = self.shared.core.lock().await;
+        data.sessions.insert(
+            ChannelId::new(channel_id),
+            super::DiscordSession {
+                session_id: session_id.map(str::to_string),
+                memento_context_loaded: session_id.is_some(),
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id),
+                channel_name: Some(channel_name.to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+            },
+        );
+    }
+
+    pub(crate) async fn start_active_turn(
+        &self,
+        channel_id: u64,
+        user_id: u64,
+        message_id: u64,
+        tmux_name: Option<&str>,
+    ) -> Arc<crate::services::provider::CancelToken> {
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        if let Some(tmux_name) = tmux_name {
+            *token.tmux_session.lock().unwrap() = Some(tmux_name.to_string());
+        }
+        let started = self
+            .shared
+            .mailbox(ChannelId::new(channel_id))
+            .try_start_turn(
+                token.clone(),
+                serenity::UserId::new(user_id),
+                serenity::MessageId::new(message_id),
+            )
+            .await;
+        assert!(started, "test active turn should start");
+        self.shared.global_active.fetch_add(1, Ordering::Relaxed);
+        token
+    }
+
+    pub(crate) async fn seed_active_turn(
+        &self,
+        channel_id: u64,
+        request_owner: u64,
+        user_message_id: u64,
+    ) {
+        let started = self
+            .shared
+            .mailbox(ChannelId::new(channel_id))
+            .try_start_turn(
+                Arc::new(crate::services::provider::CancelToken::new()),
+                serenity::UserId::new(request_owner),
+                serenity::MessageId::new(user_message_id),
+            )
+            .await;
+        assert!(started, "test harness expected an idle mailbox");
+        self.shared.global_active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn seed_queue(&self, channel_id: u64, queue_items: &[(u64, &str)]) {
+        let queue = queue_items
+            .iter()
+            .map(|(message_id, text)| super::Intervention {
+                author_id: serenity::UserId::new(1),
+                message_id: serenity::MessageId::new(*message_id),
+                text: (*text).to_string(),
+                mode: super::InterventionMode::Soft,
+                created_at: Instant::now(),
+            })
+            .collect::<Vec<_>>();
         super::mailbox_replace_queue(
             &self.shared,
-            &ProviderKind::Claude,
-            ChannelId::new(1),
+            &self.provider,
+            ChannelId::new(channel_id),
             queue,
         )
         .await;
@@ -574,6 +1032,34 @@ impl TestHealthHarness {
         )
         .await;
         snapshot_now
+    }
+
+    pub(crate) async fn mailbox_state(&self, channel_id: u64) -> (bool, usize, Option<String>) {
+        let snapshot = super::mailbox_snapshot(&self.shared, ChannelId::new(channel_id)).await;
+        let session_id = {
+            let data = self.shared.core.lock().await;
+            data.sessions
+                .get(&ChannelId::new(channel_id))
+                .and_then(|session| session.session_id.clone())
+        };
+        (
+            snapshot.cancel_token.is_some(),
+            snapshot.intervention_queue.len(),
+            session_id,
+        )
+    }
+
+    pub(crate) fn has_dispatch_role_override(&self, channel_id: u64) -> bool {
+        self.shared
+            .dispatch_role_overrides
+            .contains_key(&ChannelId::new(channel_id))
+    }
+
+    pub(crate) fn insert_dispatch_role_override(&self, channel_id: u64, override_channel_id: u64) {
+        self.shared.dispatch_role_overrides.insert(
+            ChannelId::new(channel_id),
+            ChannelId::new(override_channel_id),
+        );
     }
 }
 
@@ -677,25 +1163,14 @@ fn resolve_send_target_channel_id(db: &Db, target: &str) -> Result<u64, SendTarg
 
 /// Handle POST /api/send — agent-to-agent native routing.
 /// Accepts JSON: {"target":"channel:<id>|channel:<name>|agent:<roleId>", "content":"...", "source":"role-id", "bot":"announce|notify"}
-pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> (&'a str, String) {
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
-        return (
-            "400 Bad Request",
-            r#"{"ok":false,"error":"invalid JSON"}"#.to_string(),
-        );
-    };
-
-    let target = json.get("target").and_then(|v| v.as_str()).unwrap_or("");
-    let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    let source = json
-        .get("source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let bot = json
-        .get("bot")
-        .and_then(|v| v.as_str())
-        .unwrap_or("announce");
-
+pub async fn send_message(
+    registry: &HealthRegistry,
+    db: &Db,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+) -> (&'static str, String) {
     if content.is_empty() {
         return (
             "400 Bad Request",
@@ -870,6 +1345,28 @@ pub async fn start_direct_meeting(
     .await
 }
 
+pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> (&'a str, String) {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return (
+            "400 Bad Request",
+            r#"{"ok":false,"error":"invalid JSON"}"#.to_string(),
+        );
+    };
+
+    let target = json.get("target").and_then(|v| v.as_str()).unwrap_or("");
+    let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let source = json
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let bot = json
+        .get("bot")
+        .and_then(|v| v.as_str())
+        .unwrap_or("announce");
+
+    send_message(registry, db, target, content, source, bot).await
+}
+
 /// Handle POST /api/senddm — send a DM to a Discord user.
 /// Accepts JSON: {"user_id":"...", "content":"...", "bot":"announce|notify"}
 /// When using announce bot, user replies trigger a Claude session.
@@ -943,103 +1440,6 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
             ),
         ),
     }
-}
-
-/// Handle POST /api/session/start — start a session via API.
-/// Accepts JSON: {"channel_id":"<id>", "path":"/some/path", "provider":"claude"}
-/// Creates a DiscordSession in the provider's SharedData and responds.
-pub async fn handle_session_start<'a>(registry: &HealthRegistry, body: &str) -> (&'a str, String) {
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
-        return (
-            "400 Bad Request",
-            r#"{"ok":false,"error":"invalid JSON"}"#.to_string(),
-        );
-    };
-
-    let channel_id_str = json
-        .get("channel_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let path = json.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let provider_hint = json.get("provider").and_then(|v| v.as_str()).unwrap_or("");
-
-    let Some(channel_id_raw) = channel_id_str.parse::<u64>().ok() else {
-        return (
-            "400 Bad Request",
-            r#"{"ok":false,"error":"channel_id must be a numeric string"}"#.to_string(),
-        );
-    };
-
-    // Resolve path — expand ~ and . to absolute
-    let effective_path = if path == "." || path.is_empty() {
-        std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string())
-    } else if path.starts_with('~') {
-        dirs::home_dir()
-            .map(|h| path.replacen('~', &h.to_string_lossy(), 1))
-            .unwrap_or_else(|| path.to_string())
-    } else {
-        path.to_string()
-    };
-
-    let channel_id = ChannelId::new(channel_id_raw);
-
-    // Find the matching provider
-    let providers = registry.providers.lock().await;
-
-    // Try to match by provider hint, or by channel name suffix
-    let target_provider = if !provider_hint.is_empty() {
-        providers.iter().find(|p| p.name == provider_hint)
-    } else {
-        // Try to detect from channel_id via role binding
-        let binding = super::settings::resolve_role_binding(channel_id, None);
-        let bound_provider = binding.as_ref().and_then(|b| b.provider.as_ref());
-        match bound_provider {
-            Some(p) => providers.iter().find(|e| &e.name == p.as_str()),
-            None => providers.first(),
-        }
-    };
-
-    let Some(provider_entry) = target_provider else {
-        return (
-            "404 Not Found",
-            r#"{"ok":false,"error":"no matching provider found"}"#.to_string(),
-        );
-    };
-
-    // Create session
-    {
-        let mut data = provider_entry.shared.core.lock().await;
-        let session = data
-            .sessions
-            .entry(channel_id)
-            .or_insert_with(|| super::DiscordSession {
-                session_id: None,
-                memento_context_loaded: false,
-                memento_reflected: false,
-                current_path: None,
-                history: Vec::new(),
-                pending_uploads: Vec::new(),
-                cleared: false,
-                channel_name: None,
-                category_name: None,
-                remote_profile_name: None,
-                channel_id: Some(channel_id_raw),
-                last_active: tokio::time::Instant::now(),
-                worktree: None,
-
-                born_generation: super::runtime_store::load_generation(),
-            });
-        session.current_path = Some(effective_path.clone());
-        session.last_active = tokio::time::Instant::now();
-    }
-
-    let response = format!(
-        r#"{{"ok":true,"channel_id":"{}","path":"{}","provider":"{}"}}"#,
-        channel_id_raw, effective_path, provider_entry.name
-    );
-    ("200 OK", response)
 }
 
 /// Self-watchdog: runs on a dedicated OS thread (not tokio) to detect
@@ -1289,6 +1689,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hard_stop_runtime_turn_uses_mailbox_canonical_cleanup_when_runtime_online() {
+        let harness = TestHealthHarness::new().await;
+        let channel_id = 123_456_789_012_345_678;
+        harness
+            .seed_channel_session(channel_id, "hard-stop-runtime", Some("session-live"))
+            .await;
+        harness.seed_active_turn(channel_id, 99, 101).await;
+        harness
+            .seed_queue(channel_id, &[(7001, "preserve me")])
+            .await;
+        harness.insert_dispatch_role_override(channel_id, 987_654_321_098_765_432);
+
+        let registry = harness.registry();
+        let result = hard_stop_runtime_turn(
+            Some(registry.as_ref()),
+            Some("claude"),
+            Some(channel_id),
+            None,
+            "test hard stop",
+        )
+        .await;
+
+        assert_eq!(result.cleanup_path, "mailbox_canonical");
+        assert!(result.had_active_turn);
+        assert!(result.has_pending_queue);
+        assert!(result.runtime_session_cleared);
+
+        let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_id).await;
+        assert!(!has_active_turn);
+        assert_eq!(queue_depth, 1);
+        assert_eq!(session_id, None);
+        assert!(harness.has_dispatch_role_override(channel_id));
+    }
+
+    #[tokio::test]
+    async fn hard_stop_runtime_turn_removes_dispatch_override_when_queue_is_empty() {
+        let harness = TestHealthHarness::new().await;
+        let channel_id = 223_456_789_012_345_678;
+        harness
+            .seed_channel_session(channel_id, "hard-stop-empty", Some("session-empty"))
+            .await;
+        harness.seed_active_turn(channel_id, 77, 88).await;
+        harness.insert_dispatch_role_override(channel_id, 887_654_321_098_765_432);
+
+        let registry = harness.registry();
+        let result = hard_stop_runtime_turn(
+            Some(registry.as_ref()),
+            Some("claude"),
+            Some(channel_id),
+            None,
+            "test hard stop",
+        )
+        .await;
+
+        assert_eq!(result.cleanup_path, "mailbox_canonical");
+        assert!(result.had_active_turn);
+        assert!(!result.has_pending_queue);
+        assert!(result.runtime_session_cleared);
+
+        let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_id).await;
+        assert!(!has_active_turn);
+        assert_eq!(queue_depth, 0);
+        assert_eq!(session_id, None);
+        assert!(!harness.has_dispatch_role_override(channel_id));
+    }
+
+    #[tokio::test]
     async fn health_snapshot_reports_observability_metrics_and_degraded_queue_state() {
         let harness = TestHealthHarness::new().await;
         harness.set_deferred_hooks(2);
@@ -1353,5 +1820,38 @@ mod tests {
     #[test]
     fn unknown_send_source_is_rejected() {
         assert!(!is_allowed_send_source("totally-unknown-source"));
+    }
+
+    #[tokio::test]
+    async fn runtime_stop_fallback_preserves_mailbox_queue() {
+        let harness = TestHealthHarness::new().await;
+        let channel_id = 777_000_000_000_000_001u64;
+        harness
+            .set_queue_depth_for_channel(channel_id, ProviderKind::Claude, 2)
+            .await;
+        harness
+            .start_active_turn(channel_id, 7, 70, Some("missing-runtime-stop"))
+            .await;
+
+        let result = stop_provider_channel_runtime(
+            harness.registry().as_ref(),
+            "claude",
+            ChannelId::new(channel_id),
+            "test runtime fallback",
+        )
+        .await
+        .expect("runtime stop should resolve provider");
+
+        assert_eq!(result.lifecycle_path, "runtime-fallback");
+        assert_eq!(result.queue_depth, 2);
+        assert_eq!(harness.queue_depth_for_channel(channel_id).await, 2);
+        assert!(
+            !harness
+                .shared()
+                .mailbox(ChannelId::new(channel_id))
+                .has_active_turn()
+                .await,
+            "fallback cleanup should clear the active turn",
+        );
     }
 }

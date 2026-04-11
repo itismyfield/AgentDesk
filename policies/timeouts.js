@@ -14,9 +14,9 @@
  * [H] Stale dispatched 큐 엔트리 진행
  * [I-0] 미전송 디스패치 알림 복구 (2분)
  * [J] Failed 디스패치 자동 재시도 (30초 쿨다운, ~60초 cadence, 최대 10회 + 즉시 Discord 알림)
- * [I] 턴 데드락 감지 + 자동 복구 (15분 주기, 최대 3회 연장 후 강제 중단 + 재디스패치)
+ * [I] 턴 데드락 감지 + 자동 복구 (30분 주기, 정상 진행은 +30분 롤링 연장, 상한 3시간)
  * [K] 고아 디스패치 복구 (5분) — in_progress 카드 + pending 디스패치 + 활성 세션 없음 → review 전이
- * [L] Inflight 장시간 턴 감지 (#130) — heartbeat와 독립, started_at 기반 15/30/60/120분 단계별 알림
+ * [L] Inflight 장시간 턴 감지 (#130) — heartbeat와 독립, started_at 기반 30/60/120분 단계별 알림
  * [M] Workspace branch 보호 (5분) — 메인 repo가 wt/* 브랜치로 이탈하면 자동 복구 (#181)
  * [N] Orphan review 자동 복구 (1분) — review 상태인데 활성 review 계열 dispatch가 없으면 pending_decision
  * [O] Idle session TTL cleanup (5분) — idle 60분 tmux-backed 세션 force-kill + notify
@@ -64,64 +64,95 @@ function latestCardActivityExpr(cardAlias, dispatchAlias) {
   return "MAX(COALESCE(" + dispatchAlias + ".created_at, ''), COALESCE(" + cardAlias + ".updated_at, ''), COALESCE(" + cardAlias + ".started_at, ''))";
 }
 
-// #231: PM Decision notification dedup — durable kv_meta buffer.
-// Reasons are persisted to kv_meta (survives restart) and flushed
-// in onTick (legacy, 5min) AFTER all tiered handlers to combine
-// cross-tier reasons into one notification per card.
-var PM_DECISION_COOLDOWN_SEC = 300;  // 5-min cross-tick cooldown
-var PM_PENDING_TTL_SEC = 600;  // 10-min TTL for pending entries (auto-cleanup)
+function parseLocalTimestampMs(value) {
+  if (!value || typeof value !== "string") return 0;
+  var trimmed = value.trim();
+  var m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(trimmed);
+  if (m) {
+    return new Date(
+      parseInt(m[1], 10),
+      parseInt(m[2], 10) - 1,
+      parseInt(m[3], 10),
+      parseInt(m[4], 10),
+      parseInt(m[5], 10),
+      parseInt(m[6], 10)
+    ).getTime();
+  }
+  var parsed = Date.parse(trimmed);
+  return isNaN(parsed) ? 0 : parsed;
+}
+
+function findRecentInflightForSession(sessionKey, tmuxName) {
+  var inflights = [];
+  try {
+    inflights = agentdesk.inflight.list() || [];
+  } catch(e) {
+    return null;
+  }
+  var best = null;
+  var bestUpdatedAt = 0;
+  for (var i = 0; i < inflights.length; i++) {
+    var inf = inflights[i];
+    if (!inf) continue;
+    var sessionMatch = !!sessionKey && inf.session_key === sessionKey;
+    var tmuxMatch = !!tmuxName && inf.tmux_session_name === tmuxName;
+    if (!sessionMatch && !tmuxMatch) continue;
+    var updatedAtMs = parseLocalTimestampMs(inf.updated_at);
+    if (!best || updatedAtMs >= bestUpdatedAt) {
+      best = inf;
+      bestUpdatedAt = updatedAtMs;
+    }
+  }
+  return best;
+}
+
+function inspectInflightProgress(sessionKey, tmuxName, recentWindowMin, maxTurnMin) {
+  var inflight = findRecentInflightForSession(sessionKey, tmuxName);
+  if (!inflight) {
+    return {
+      inflight: null,
+      recent: false,
+      updated_age_min: null,
+      turn_age_min: null,
+      channel_id: null,
+      max_turn_reached: false
+    };
+  }
+  var nowMs = Date.now();
+  var updatedAtMs = parseLocalTimestampMs(inflight.updated_at);
+  var startedAtMs = parseLocalTimestampMs(inflight.started_at);
+  var updatedAgeMin = updatedAtMs > 0 ? (nowMs - updatedAtMs) / 60000 : null;
+  var turnAgeMin = startedAtMs > 0 ? (nowMs - startedAtMs) / 60000 : null;
+  return {
+    inflight: inflight,
+    recent: updatedAgeMin !== null && updatedAgeMin <= recentWindowMin,
+    updated_age_min: updatedAgeMin,
+    turn_age_min: turnAgeMin,
+    channel_id: inflight.channel_id || null,
+    max_turn_reached: turnAgeMin !== null && turnAgeMin >= maxTurnMin
+  };
+}
+
+function requestTurnWatchdogExtension(channelId, extendMinutes) {
+  if (!channelId) return { ok: false, error: "channel_id missing" };
+  var apiPort = agentdesk.config.get("server_port");
+  if (!apiPort) return { ok: false, error: "server_port missing" };
+  var extendSecs = Math.max(1, Math.round(extendMinutes * 60));
+  var url = "http://127.0.0.1:" + apiPort +
+    "/api/turns/" + encodeURIComponent(channelId) + "/extend-timeout";
+  var resp = agentdesk.http.post(url, { extend_secs: extendSecs });
+  if (!resp || resp.error) {
+    return { ok: false, error: resp && resp.error ? resp.error : "unknown error" };
+  }
+  return resp;
+}
 
 function _queuePMDecision(cardId, title, reason) {
-  var pendingKey = "pm_pending:" + cardId;
-  var existing = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [pendingKey]);
-  var entry;
-  if (existing.length > 0) {
-    try { entry = JSON.parse(existing[0].value); } catch(e) { entry = null; }
-  }
-  if (!entry) {
-    entry = { title: title, reasons: [] };
-  }
-  // Deduplicate identical reasons
-  if (entry.reasons.indexOf(reason) === -1) {
-    entry.reasons.push(reason);
-  }
-  agentdesk.db.execute(
-    "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
-    [pendingKey, JSON.stringify(entry), String(PM_PENDING_TTL_SEC)]
-  );
+  escalate(cardId, reason);
 }
 
 function _flushPMDecisions() {
-  var pmdCh = getPMDChannel();
-  var rows = agentdesk.db.query("SELECT key, value FROM kv_meta WHERE key LIKE 'pm_pending:%'");
-  for (var i = 0; i < rows.length; i++) {
-    var cardId = rows[i].key.substring("pm_pending:".length);
-    var entry;
-    try { entry = JSON.parse(rows[i].value); } catch(e) { continue; }
-    // Delete the pending entry first (consumed regardless of cooldown)
-    agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [rows[i].key]);
-    // Cross-tick cooldown: skip send if notified recently
-    var cooldownKey = "pm_decision_sent:" + cardId;
-    var cooldownRow = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]);
-    if (cooldownRow.length > 0) {
-      var sentAt = parseInt(cooldownRow[0].value, 10) || 0;
-      var now = Math.floor(Date.now() / 1000);
-      if (now - sentAt < PM_DECISION_COOLDOWN_SEC) {
-        agentdesk.log.info("[PM dedup] Skipped notification for card " + cardId +
-          " (" + entry.reasons.length + " reasons, cooldown " + (now - sentAt) + "s)");
-        continue;
-      }
-    }
-    // Send combined notification with all accumulated reasons
-    if (!pmdCh) continue;
-    var msg = "⚠️ [PM 결정 요청] " + entry.title + "\n카드가 pending_decision 상태입니다. PMD가 다음 조치를 결정해주세요.\n사유: " + entry.reasons.join("; ");
-    agentdesk.message.queue(pmdCh, msg, "announce", "system");
-    // Set cooldown with TTL
-    agentdesk.db.execute(
-      "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))",
-      [cooldownKey, String(Math.floor(Date.now() / 1000)), String(PM_DECISION_COOLDOWN_SEC)]
-    );
-  }
+  flushEscalations();
 }
 
 var timeouts = {
@@ -638,12 +669,13 @@ var timeouts = {
   },
 
   _section_I: function() {
-    // ─── [I] 턴 데드락 감지 + 자동 복구 (15분 주기) ─────────
-    // 판별: sessions.last_heartbeat 기반 (연속 스톨만 카운트)
-    // 연장: 15분 단위로 최대 MAX_EXTENSIONS회 (연속 스톨만 카운트)
-    // 확정: 연장 상한 초과 시 agentdesk.session.kill → 강제 중단 + 재디스패치
-    var DEADLOCK_MINUTES = 15;
+    // ─── [I] 턴 데드락 감지 + 자동 복구 (30분 주기) ─────────
+    // 판별: sessions.last_heartbeat 기반. 정상 진행은 tmux live + inflight 최근 output으로 인정.
+    // 회복: 정상 진행이면 watchdog을 30분씩 롤링 연장. 최근 output이 없으면 연속 스톨만 카운트.
+    // 확정: 연속 스톨 상한 또는 turn 3시간 상한 도달 시 강제 중단 + 재디스패치.
+    var DEADLOCK_MINUTES = 30;
     var MAX_EXTENSIONS = 3;
+    var MAX_TURN_MINUTES = 180;
     var iCfg = agentdesk.pipeline.getConfig();
     var iInitial = agentdesk.pipeline.kickoffState(iCfg);
     var iInProgress = agentdesk.pipeline.nextGatedTarget(iInitial, iCfg);
@@ -705,21 +737,68 @@ var timeouts = {
     }
 
     // 데드락 의심 세션: sessions.last_heartbeat 기반 판별
+    // deadlock-manager 자신의 세션은 제외 (자기 자신을 오탐하는 무한 루프 방지)
     var staleSessions = agentdesk.db.query(
       "SELECT session_key, agent_id, active_dispatch_id, last_heartbeat " +
       "FROM sessions WHERE status = 'working' " +
+      "AND session_key NOT LIKE '%deadlock-manager%' " +
       "AND last_heartbeat < datetime('now', '-" + DEADLOCK_MINUTES + " minutes')"
     );
     for (var dl = 0; dl < staleSessions.length; dl++) {
       var sess = staleSessions[dl];
       var deadlockKey = "deadlock_check:" + sess.session_key;
-
-      // #219: If tmux session has a live pane, the agent is actively working
-      // despite stale heartbeat (long tool calls, subagents). Reset counter
-      // and skip — heartbeat staleness alone is not sufficient for deadlock.
       var dlTmuxName = (sess.session_key || "").split(":").pop();
-      if (timeouts._tmuxHasLivePane(dlTmuxName)) {
+      var tmuxAlive = timeouts._tmuxHasLivePane(dlTmuxName);
+      var inflightProgress = tmuxAlive
+        ? inspectInflightProgress(sess.session_key, dlTmuxName, DEADLOCK_MINUTES, MAX_TURN_MINUTES)
+        : { recent: false, updated_age_min: null, turn_age_min: null, channel_id: null, max_turn_reached: false };
+
+      // Recent terminal output is the authoritative signal for "normal progress".
+      // A live pane alone is not enough — hung tools can leave a pane alive forever.
+      if (tmuxAlive && inflightProgress.recent && !inflightProgress.max_turn_reached) {
         agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
+        var extendMin = DEADLOCK_MINUTES;
+        if (inflightProgress.turn_age_min !== null) {
+          extendMin = Math.min(
+            DEADLOCK_MINUTES,
+            Math.max(0, MAX_TURN_MINUTES - inflightProgress.turn_age_min)
+          );
+        }
+        var extendResp = requestTurnWatchdogExtension(inflightProgress.channel_id, extendMin);
+        var extendMinText = Math.max(1, Math.round(extendMin));
+        if (extendResp.ok) {
+          agentdesk.log.info("[deadlock] Session " + sess.session_key +
+            " — live pane + recent output confirmed. Extended watchdog +" + extendMinText + "min.");
+          sendDeadlockAlert(
+            "🟢 [Deadlock 점검] " + sess.agent_id + "\n" +
+            "session_key: " + sess.session_key + "\n" +
+            "tmux: " + (dlTmuxName || "unknown") + "\n" +
+            "최근 output: " + Math.round(inflightProgress.updated_age_min || 0) + "분 전\n" +
+            "정상 진행 확인, +" + extendMinText + "분 연장"
+          );
+        } else {
+          agentdesk.log.warn("[deadlock] Session " + sess.session_key +
+            " — recent output confirmed but watchdog extension failed: " + extendResp.error);
+          sendDeadlockAlert(
+            "🟢 [Deadlock 점검] " + sess.agent_id + "\n" +
+            "session_key: " + sess.session_key + "\n" +
+            "tmux: " + (dlTmuxName || "unknown") + "\n" +
+            "최근 output: " + Math.round(inflightProgress.updated_age_min || 0) + "분 전\n" +
+            "정상 진행 확인, watchdog 연장 실패: " + extendResp.error
+          );
+        }
+        continue;
+      }
+
+      // 활성 턴(inflight)이 없는 working 세션은 idle로 전환하고 스킵
+      // (턴 완료 후 세션 상태가 working으로 남은 stale 케이스)
+      if (!tmuxAlive || (!inflightProgress.channel_id && !inflightProgress.recent)) {
+        agentdesk.db.execute(
+          "UPDATE sessions SET status = 'idle' WHERE session_key = ? AND status = 'working'",
+          [sess.session_key]
+        );
+        agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
+        agentdesk.log.info("[deadlock] Stale working session → idle (no active turn): " + sess.session_key);
         continue;
       }
 
@@ -746,11 +825,19 @@ var timeouts = {
         continue;
       }
 
-      if (extensions >= MAX_EXTENSIONS) {
+      var hitTurnCap = tmuxAlive && inflightProgress.recent && inflightProgress.max_turn_reached;
+      if (hitTurnCap || extensions >= MAX_EXTENSIONS) {
         // ── 데드락 확정: 강제 중단 + 자동 복구 ──
-        var totalMin = DEADLOCK_MINUTES * (MAX_EXTENSIONS + 1);
+        var totalMin = hitTurnCap
+          ? Math.max(MAX_TURN_MINUTES, Math.round(inflightProgress.turn_age_min || 0))
+          : DEADLOCK_MINUTES * (MAX_EXTENSIONS + 1);
+        var timeoutLabel = hitTurnCap
+          ? (MAX_TURN_MINUTES + "분 상한 도달")
+          : (totalMin + "분 무응답");
         agentdesk.log.warn("[deadlock] Session " + sess.session_key +
-          " — max extensions (" + MAX_EXTENSIONS + ") reached. Force cancelling + re-dispatch.");
+          (hitTurnCap
+            ? " — max turn cap reached. Force cancelling + re-dispatch."
+            : " — max extensions (" + MAX_EXTENSIONS + ") reached. Force cancelling + re-dispatch."));
 
         // 1) authoritative force-kill API로 tmux 종료 + inflight cleanup + dispatch fail/retry 일원화
         var forceKillResp = null;
@@ -792,19 +879,21 @@ var timeouts = {
           "session_key: " + sess.session_key + "\n" +
           "tmux: " + ((sess.session_key || "").split(":").pop() || "unknown") + "\n" +
           "연장: " + extensions + "/" + MAX_EXTENSIONS + "\n" +
-          totalMin + "분 무응답 → 강제 중단" +
+          timeoutLabel + " → 강제 중단" +
           (redispatched ? " + 재디스패치 완료" : ""));
 
         // 5) Termination audit
         try {
           var probeInfo = "agent=" + sess.agent_id + " extensions=" + extensions + "/" + MAX_EXTENSIONS +
             " last_heartbeat=" + sess.last_heartbeat +
+            " recent_output_age_min=" + (inflightProgress.updated_age_min === null ? "null" : Math.round(inflightProgress.updated_age_min)) +
+            " turn_age_min=" + (inflightProgress.turn_age_min === null ? "null" : Math.round(inflightProgress.turn_age_min)) +
             " kill_ok=" + (!!forceKillResp.tmux_killed) +
             " inflight_cleared=" + (!!forceKillResp.inflight_cleared);
           agentdesk.db.execute(
             "INSERT INTO session_termination_events (session_key, dispatch_id, killer_component, reason_code, reason_text, probe_snapshot, tmux_alive) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [sess.session_key, sess.active_dispatch_id || null, "deadlock_policy", "deadlock_timeout",
-             totalMin + "min timeout — " + (redispatched ? "redispatched" : "cancelled"), probeInfo, 0]
+             timeoutLabel + " — " + (redispatched ? "redispatched" : "cancelled"), probeInfo, tmuxAlive ? 1 : 0]
           );
         } catch (e) { /* fire-and-forget */ }
 
@@ -937,7 +1026,7 @@ var timeouts = {
     // ─── [L] Inflight 장시간 턴 감지 (#130) ──────────────────
     // heartbeat와 독립 — inflight 파일의 started_at 기반 단계별 알림.
     // Prevents alarm fatigue while still notifying at key thresholds.
-    var ALERT_THRESHOLDS = [15, 30, 60, 120]; // minutes
+    var ALERT_THRESHOLDS = [30, 60, 120]; // minutes
     try {
       var inflights = agentdesk.inflight.list();
       for (var li = 0; li < inflights.length; li++) {
@@ -946,14 +1035,15 @@ var timeouts = {
         // Stale inflight check: skip cleanup here — let InflightCleanupGuard handle it.
         // Previous approach (checking working sessions) caused false positives because
         // DB session status can lag behind actual tmux state.
-        var startedAt = new Date(inf.started_at);
-        var elapsedMin = (Date.now() - startedAt.getTime()) / 60000;
+        var startedAtMs = parseLocalTimestampMs(inf.started_at);
+        if (startedAtMs <= 0) continue;
+        var elapsedMin = (Date.now() - startedAtMs) / 60000;
         // Find the highest threshold that elapsed time exceeds
         var currentTier = -1;
         for (var t = ALERT_THRESHOLDS.length - 1; t >= 0; t--) {
           if (elapsedMin >= ALERT_THRESHOLDS[t]) { currentTier = t; break; }
         }
-        if (currentTier < 0) continue; // under 15min, skip
+        if (currentTier < 0) continue; // under 30min, skip
         // Check if we already alerted at this tier
         var tierKey = "long_turn_tier:" + inf.provider + ":" + inf.channel_id;
         var lastTier = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [tierKey]);
@@ -1275,7 +1365,7 @@ timeouts.onTick5min = function(ev) {
 
 // Legacy onTick: flush PM decision buffer after all tiered handlers (#231)
 timeouts.onTick = function() {
-  _flushPMDecisions();
+  flushEscalations();
 };
 
 agentdesk.registerPolicy(timeouts);

@@ -1,119 +1,15 @@
 use super::super::gateway::{DiscordGateway, LiveDiscordTurnContext};
 use super::super::*;
+use super::control_intent::{
+    build_control_intent_system_reminder, detect_natural_language_control_intent,
+};
 use crate::services::memory::{
     RecallRequest, RecallResponse, build_memory_backend, resolve_memory_role_id,
     resolve_memory_session_id,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
+use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
-
-fn normalize_control_intent_text(text: &str) -> String {
-    text.to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn contains_review_bypass_negation(normalized: &str) -> bool {
-    const NEGATION_TERMS: &[&str] = &[
-        "하지 마",
-        "하지마",
-        "하면 안",
-        "안 돼",
-        "안돼",
-        "안 됩니다",
-        "안됩니다",
-        "안됨",
-        "못 하게",
-        "못하게",
-        "막아",
-        "막아줘",
-        "보류",
-        "금지",
-        "불가",
-        "불가능",
-    ];
-    NEGATION_TERMS.iter().any(|term| normalized.contains(term))
-}
-
-fn extract_merge_target_pr_number(user_text: &str) -> Option<u64> {
-    let explicit_re =
-        regex::Regex::new(r"(?i)(?:^|[^\w])(?:pr\s*#?\s*|#)(\d{1,6})(?:\b|$)").ok()?;
-    if let Some(caps) = explicit_re.captures(user_text) {
-        return caps.get(1)?.as_str().parse::<u64>().ok();
-    }
-
-    let leading_re = regex::Regex::new(r"^\s*(\d{1,6})(?:은|는|이|가|\s|$)").ok()?;
-    if let Some(caps) = leading_re.captures(user_text) {
-        return caps.get(1)?.as_str().parse::<u64>().ok();
-    }
-
-    None
-}
-
-fn build_review_bypass_context_hint(user_text: &str) -> Option<String> {
-    let normalized = normalize_control_intent_text(user_text);
-    if normalized.is_empty() {
-        return None;
-    }
-
-    const META_TERMS: &[&str] = &[
-        "인식",
-        "안먹",
-        "안 먹",
-        "왜",
-        "원인",
-        "버그",
-        "로그",
-        "테스트",
-        "수정",
-        "디버그",
-        "debug",
-        "parser",
-        "파서",
-        "잡아줘",
-    ];
-    if META_TERMS.iter().any(|term| normalized.contains(term)) {
-        return None;
-    }
-    if contains_review_bypass_negation(&normalized) {
-        return None;
-    }
-
-    const REVIEW_BYPASS_PHRASES: &[&str] = &[
-        "리뷰 우회",
-        "리뷰 무시",
-        "리뷰 스킵",
-        "직접 머지",
-        "직접 merge",
-        "머지 가능하게",
-        "머지가능하게",
-        "merge 가능하게",
-        "merge가능하게",
-        "기여자가 직접 머지",
-        "contributor can merge",
-        "author can merge",
-        "direct merge",
-    ];
-    if !REVIEW_BYPASS_PHRASES
-        .iter()
-        .any(|phrase| normalized.contains(phrase))
-    {
-        return None;
-    }
-
-    let pr_number = extract_merge_target_pr_number(user_text)?;
-    Some(format!(
-        "<system-reminder>\n\
-         Detected control intent from the latest user message:\n\
-         - kind: review_bypass_direct_merge\n\
-         - pr_number: {pr_number}\n\
-         - review_decision: dismiss\n\
-         Treat this as an explicit approval to bypass or dismiss review blockers so PR #{pr_number} can proceed via the direct/manual merge path if the repository/runtime supports it.\n\
-         This is not a passive status question.\n\
-         </system-reminder>"
-    ))
-}
 
 #[derive(Debug, PartialEq, Eq)]
 struct MemoryInjectionPlan<'a> {
@@ -167,6 +63,32 @@ fn should_skip_memento_recall(
     memento_context_loaded: bool,
 ) -> bool {
     memory_settings.backend == settings::MemoryBackendKind::Memento && memento_context_loaded
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DispatchContextHints {
+    worktree_path: Option<String>,
+    force_new_session: bool,
+}
+
+fn parse_dispatch_context_hints(dispatch_context: Option<&str>) -> DispatchContextHints {
+    let Some(raw) = dispatch_context else {
+        return DispatchContextHints::default();
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok();
+    DispatchContextHints {
+        worktree_path: parsed
+            .as_ref()
+            .and_then(|v| v.get("worktree_path"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .filter(|p| std::path::Path::new(p).exists()),
+        force_new_session: parsed
+            .as_ref()
+            .and_then(|v| v.get("force_new_session"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
 }
 
 pub(in crate::services::discord) async fn handle_text_message(
@@ -391,15 +313,13 @@ pub(in crate::services::discord) async fn handle_text_message(
     };
     // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
     // All dispatch types now inject worktree_path into context via resolve_card_worktree().
-    let dispatch_worktree_path = dispatch_info_cached
-        .as_ref()
-        .and_then(|info| {
-            info.context
-                .as_ref()
-                .and_then(|ctx_str| serde_json::from_str::<serde_json::Value>(ctx_str).ok())
-                .and_then(|v| v.get("worktree_path")?.as_str().map(String::from))
-        })
-        .filter(|p| std::path::Path::new(p).exists());
+    let dispatch_context_hints = parse_dispatch_context_hints(
+        dispatch_info_cached
+            .as_ref()
+            .and_then(|info| info.context.as_deref()),
+    );
+    let dispatch_worktree_path = dispatch_context_hints.worktree_path.clone();
+    let dispatch_force_new_session = dispatch_context_hints.force_new_session;
     if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
@@ -580,6 +500,22 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         current_path
     };
+    let (mut session_id, mut memento_context_loaded) = (session_id, memento_context_loaded);
+    if dispatch_force_new_session {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+        }
+        drop(data);
+        session_id = None;
+        memento_context_loaded = false;
+        if let Some(ref did) = dispatch_id_for_thread {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!(
+                "  [{ts}] ♻️ Dispatch {did}: force_new_session=true, skipping provider session reuse"
+            );
+        }
+    }
 
     // Send placeholder message
     rate_limit_wait(shared, channel_id).await;
@@ -785,8 +721,8 @@ pub(in crate::services::discord) async fn handle_text_message(
     if let Some(external_recall) = memory_injection_plan.external_recall_for_context {
         context_chunks.push(external_recall.to_string());
     }
-    if let Some(control_intent_hint) = build_review_bypass_context_hint(user_text) {
-        context_chunks.push(control_intent_hint);
+    if let Some(control_intent) = detect_natural_language_control_intent(user_text) {
+        context_chunks.push(build_control_intent_system_reminder(&control_intent));
     }
     context_chunks.push(sanitized_input);
     let context_prompt = context_chunks.join("\n\n");
@@ -1027,6 +963,8 @@ pub(in crate::services::discord) async fn handle_text_message(
                         "  [{ts}] ⏰ WATCHDOG: turn timeout (~{elapsed_mins}m) for channel {}, cancelling",
                         channel_id
                     );
+                    // #441: cancel_active_token → token.cancelled triggers turn_bridge loop exit
+                    // → mailbox_finish_turn canonical cleanup
                     super::super::turn_bridge::cancel_active_token(
                         &watchdog_token,
                         true,
@@ -1602,6 +1540,51 @@ pub(super) async fn cancel_text_stop_token_mailbox(
     }
 }
 
+async fn fetch_escalation_settings_via_api()
+-> Result<crate::server::routes::escalation::EscalationSettingsResponse, String> {
+    let body = crate::services::discord::internal_api::get_escalation_settings().await?;
+    serde_json::from_value(body).map_err(|err| err.to_string())
+}
+
+async fn save_escalation_settings_via_api(
+    settings: &crate::server::routes::escalation::EscalationSettings,
+) -> Result<crate::server::routes::escalation::EscalationSettingsResponse, String> {
+    let body =
+        crate::services::discord::internal_api::put_escalation_settings(settings.clone()).await?;
+    serde_json::from_value(body).map_err(|err| err.to_string())
+}
+
+fn parse_discord_user_id(raw: &str) -> Option<u64> {
+    raw.trim()
+        .trim_start_matches("<@")
+        .trim_end_matches('>')
+        .trim_start_matches('!')
+        .parse::<u64>()
+        .ok()
+}
+
+fn format_escalation_settings_summary(
+    settings: &crate::server::routes::escalation::EscalationSettings,
+) -> String {
+    let mode = match settings.mode {
+        crate::config::EscalationMode::Pm => "pm",
+        crate::config::EscalationMode::User => "user",
+        crate::config::EscalationMode::Scheduled => "scheduled",
+    };
+    let owner = settings
+        .owner_user_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    let pm_channel = settings
+        .pm_channel_id
+        .clone()
+        .unwrap_or_else(|| "(none)".to_string());
+    format!(
+        "mode: `{}`\nowner_user_id: `{}`\npm_channel_id: `{}`\nschedule: `{}` / `{}`",
+        mode, owner, pm_channel, settings.schedule.pm_hours, settings.schedule.timezone
+    )
+}
+
 /// Handle text-based commands (!start, !meeting, !stop, !clear, etc.).
 /// Returns true if the command was handled, false otherwise.
 pub(super) async fn handle_text_command(
@@ -1837,6 +1820,9 @@ pub(super) async fn handle_text_command(
         }
 
         "!stop" => {
+            // #441: flows through cancel_text_stop_token_mailbox (mailbox_cancel_active_turn)
+            // → cancel_active_token → token.cancelled triggers turn_bridge loop exit
+            // → mailbox_finish_turn canonical cleanup
             let stop_lookup = cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
             match stop_lookup {
                 TextStopLookup::Stop(token) => {
@@ -1964,6 +1950,134 @@ pub(super) async fn handle_text_command(
             return Ok(true);
         }
 
+        "!escalation" => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let rest = text.strip_prefix("!escalation").unwrap_or("").trim();
+            println!("  [{ts}] ◀ [{}] !escalation {}", msg.author.name, rest);
+
+            if !check_owner(msg.author.id, &data.shared).await {
+                let _ = msg
+                    .reply(&ctx.http, "Only the owner can change escalation settings.")
+                    .await;
+                return Ok(true);
+            }
+
+            let mut settings = match fetch_escalation_settings_via_api().await {
+                Ok(response) => response.current,
+                Err(err) => {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!("Failed to load escalation settings: {err}"),
+                        )
+                        .await;
+                    return Ok(true);
+                }
+            };
+
+            if rest.is_empty() || rest.eq_ignore_ascii_case("status") {
+                let _ = msg
+                    .reply(
+                        &ctx.http,
+                        format!(
+                            "**Escalation Settings**\n{}",
+                            format_escalation_settings_summary(&settings)
+                        ),
+                    )
+                    .await;
+                return Ok(true);
+            }
+
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let subcommand = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+            let value = parts.next().unwrap_or("").trim();
+
+            let usage = "Usage: `!escalation status|pm|user|scheduled|schedule <HH:MM-HH:MM>|timezone <IANA>|owner <user_id>|pm-channel <channel_id>`";
+            let update_error = match subcommand.as_str() {
+                "pm" => {
+                    settings.mode = crate::config::EscalationMode::Pm;
+                    None
+                }
+                "user" => {
+                    settings.mode = crate::config::EscalationMode::User;
+                    None
+                }
+                "scheduled" => {
+                    settings.mode = crate::config::EscalationMode::Scheduled;
+                    None
+                }
+                "schedule" => {
+                    if value.is_empty() {
+                        Some("schedule value is required")
+                    } else {
+                        settings.mode = crate::config::EscalationMode::Scheduled;
+                        settings.schedule.pm_hours = value.to_string();
+                        None
+                    }
+                }
+                "timezone" => {
+                    if value.is_empty() {
+                        Some("timezone value is required")
+                    } else {
+                        settings.schedule.timezone = value.to_string();
+                        None
+                    }
+                }
+                "owner" => match parse_discord_user_id(value) {
+                    Some(user_id) => {
+                        settings.owner_user_id = Some(user_id);
+                        None
+                    }
+                    None => Some("owner must be a numeric Discord user id or mention"),
+                },
+                "clear-owner" => {
+                    settings.owner_user_id = None;
+                    None
+                }
+                "pm-channel" => {
+                    if value.is_empty() {
+                        Some("pm-channel value is required")
+                    } else {
+                        settings.pm_channel_id = Some(value.to_string());
+                        None
+                    }
+                }
+                "clear-pm-channel" => {
+                    settings.pm_channel_id = None;
+                    None
+                }
+                _ => Some(usage),
+            };
+
+            if let Some(err) = update_error {
+                let _ = msg.reply(&ctx.http, err).await;
+                return Ok(true);
+            }
+
+            match save_escalation_settings_via_api(&settings).await {
+                Ok(response) => {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!(
+                                "**Escalation Settings Updated**\n{}",
+                                format_escalation_settings_summary(&response.current)
+                            ),
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    let _ = msg
+                        .reply(
+                            &ctx.http,
+                            format!("Failed to save escalation settings: {err}"),
+                        )
+                        .await;
+                }
+            }
+            return Ok(true);
+        }
+
         "!help" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ◀ [{}] !help", msg.author.name);
@@ -2007,11 +2121,17 @@ Any other message is sent to {p}.
 `!debug` — Toggle debug logging
 `!metrics [date]` — Show turn metrics
 `!queue [all]` — Show pending queue
+`!escalation status` — Show escalation routing mode
 
 **User Management** (owner only)
 `!allowall on|off|status` — Allow everyone or restrict to authorized users
 `!adduser <user_id>` — Allow a user to use the bot
 `!removeuser <user_id>` — Remove a user's access
+`!escalation pm|user|scheduled` — Change escalation routing mode
+`!escalation schedule <HH:MM-HH:MM>` — Set PM hours and switch to scheduled mode
+`!escalation timezone <IANA>` — Set scheduled timezone
+`!escalation owner <user_id>` — Override fallback owner user id
+`!escalation pm-channel <channel_id>` — Override PM channel
 `!help` — Show this help",
                 p = provider_name
             );
@@ -2440,6 +2560,9 @@ Any other message is sent to {p}.
                     return Ok(true);
                 }
                 "stop" => {
+                    // #441: flows through cancel_text_stop_token_mailbox (mailbox_cancel_active_turn)
+                    // → cancel_active_token → token.cancelled triggers turn_bridge loop exit
+                    // → mailbox_finish_turn canonical cleanup
                     let stop_lookup =
                         cancel_text_stop_token_mailbox(&data.shared, channel_id).await;
                     match stop_lookup {
@@ -2824,7 +2947,8 @@ mod tests {
     #[test]
     fn review_bypass_hint_detects_leading_pr_number_direct_merge_request() {
         let hint =
-            build_review_bypass_context_hint("366은 기여자가 직접 머지가능하게 만들 것 같아")
+            detect_natural_language_control_intent("366은 기여자가 직접 머지가능하게 만들 것 같아")
+                .map(|intent| build_control_intent_system_reminder(&intent))
                 .expect("direct merge intent should be detected");
 
         assert!(hint.contains("pr_number: 366"));
@@ -2833,7 +2957,8 @@ mod tests {
 
     #[test]
     fn review_bypass_hint_detects_explicit_pr_reference() {
-        let hint = build_review_bypass_context_hint("#366 리뷰 우회하고 직접 머지해도 돼")
+        let hint = detect_natural_language_control_intent("#366 리뷰 우회하고 직접 머지해도 돼")
+            .map(|intent| build_control_intent_system_reminder(&intent))
             .expect("explicit PR reference should be detected");
 
         assert!(hint.contains("PR #366"));
@@ -2842,7 +2967,7 @@ mod tests {
     #[test]
     fn review_bypass_hint_ignores_debug_discussion() {
         assert_eq!(
-            build_review_bypass_context_hint("366 리뷰 우회 인식이 왜 안먹었는지 잡아줘"),
+            detect_natural_language_control_intent("366 리뷰 우회 인식이 왜 안먹었는지 잡아줘"),
             None
         );
     }
@@ -2850,11 +2975,11 @@ mod tests {
     #[test]
     fn review_bypass_hint_ignores_negative_direct_merge_request() {
         assert_eq!(
-            build_review_bypass_context_hint("#366 리뷰 우회하면 안 돼"),
+            detect_natural_language_control_intent("#366 리뷰 우회하면 안 돼"),
             None
         );
         assert_eq!(
-            build_review_bypass_context_hint("366은 직접 머지하지 마"),
+            detect_natural_language_control_intent("366은 직접 머지하지 마"),
             None
         );
     }
@@ -2862,7 +2987,7 @@ mod tests {
     #[test]
     fn review_bypass_hint_ignores_stray_non_pr_numbers() {
         assert_eq!(
-            build_review_bypass_context_hint("2명만 직접 머지 가능하게 해줘"),
+            detect_natural_language_control_intent("2명만 직접 머지 가능하게 해줘"),
             None
         );
     }
@@ -2900,5 +3025,30 @@ mod tests {
             &memento,
             session.memento_context_loaded
         ));
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_extracts_force_new_session_and_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = serde_json::json!({
+            "worktree_path": temp.path(),
+            "force_new_session": true
+        })
+        .to_string();
+
+        let hints = parse_dispatch_context_hints(Some(&raw));
+
+        assert_eq!(hints.worktree_path.as_deref(), temp.path().to_str());
+        assert!(hints.force_new_session);
+    }
+
+    #[test]
+    fn parse_dispatch_context_hints_ignores_missing_path_but_keeps_reset_flag() {
+        let hints = parse_dispatch_context_hints(Some(
+            r#"{"worktree_path":"/definitely/missing","force_new_session":true}"#,
+        ));
+
+        assert!(hints.worktree_path.is_none());
+        assert!(hints.force_new_session);
     }
 }

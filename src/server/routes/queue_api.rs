@@ -153,7 +153,11 @@ pub async fn cancel_turn(
     State(state): State<AppState>,
     Path(channel_id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match state.queue_service().cancel_turn(&channel_id) {
+    match state
+        .queue_service()
+        .cancel_turn(state.health_registry.as_ref(), &channel_id)
+        .await
+    {
         Ok(response) => (StatusCode::OK, Json(response)),
         Err(error) => error.into_json_response(),
     }

@@ -5,6 +5,26 @@
 
 ---
 
+## 실행 레이어
+
+| Layer | 목적 | 기준 파일/경계 | 실행 명령 |
+| --- | --- | --- | --- |
+| `unit` | 직렬화, 저장, mailbox state 같은 로컬 불변식 검증 | `src/services/discord/*` 개별 테스트 모듈 | 모듈별 `cargo test --bin agentdesk <filter>` |
+| `state-transition integration` | DB + policy + dispatch 상태 전이 검증 | `src/integration_tests.rs` | 기본 gate는 `cargo test --all-targets` |
+| `failure-recovery` | restart / reconcile / outbox / delayed-worker 복구 경계 검증 | `src/integration_tests/tests/high_risk_recovery.rs` | `cargo test --bin agentdesk high_risk_recovery::` |
+
+### 현재 고정 실행 경로
+
+- broad regression: `cargo test --all-targets`
+- high-risk recovery gate: `cargo test --bin agentdesk high_risk_recovery::`
+- restart / boot reconcile만 재현: `cargo test --bin agentdesk high_risk_recovery::failure_recovery::`
+- outbox boundary만 재현: `cargo test --bin agentdesk high_risk_recovery::outbox_boundary::`
+- delayed worker / watchdog만 재현: `cargo test --bin agentdesk high_risk_recovery::delayed_worker::`
+
+고위험 coverage inventory와 `existing vs missing` 매핑은 `docs/high-risk-recovery-lane.md`가 기준 문서다.
+
+---
+
 ## P0: 재시작/복구 시나리오 (반드시 통과)
 
 ### Restart During Active Turn
@@ -276,3 +296,5 @@ tests/
     ├── smoke_test.rs     ← ✅ 서버 기동 → health → CRUD → settings → cleanup
     └── restart_test.rs   ← 기동 → turn → kill → 재기동 → 복구
 ```
+
+현재 운영 중인 recovery lane 모듈 경계는 `src/integration_tests/tests/high_risk_recovery.rs`이며, 위 디렉터리 구조는 장기적인 분리 방향을 설명한다.

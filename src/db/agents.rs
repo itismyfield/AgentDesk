@@ -17,37 +17,53 @@ pub struct AgentChannelBindings {
 }
 
 impl AgentChannelBindings {
-    pub fn primary_channel(&self) -> Option<String> {
-        match self.provider.as_deref().and_then(ProviderKind::from_str) {
-            Some(ProviderKind::Claude) => self
-                .claude_channel()
-                .or_else(|| self.codex_channel())
-                .or_else(|| self.legacy_primary_channel()),
-            Some(ProviderKind::Codex) => self
-                .codex_channel()
-                .or_else(|| self.claude_channel())
-                .or_else(|| self.legacy_primary_channel()),
-            Some(_) | None => self
-                .legacy_primary_channel()
-                .or_else(|| self.codex_channel())
-                .or_else(|| self.claude_channel()),
+    fn primary_provider_kind(&self) -> Option<ProviderKind> {
+        self.provider
+            .as_deref()
+            .and_then(ProviderKind::from_str)
+            .or_else(ProviderKind::default_channel_provider)
+    }
+
+    fn provider_specific_channel(&self, provider: &ProviderKind) -> Option<String> {
+        match provider {
+            ProviderKind::Claude => self.claude_channel(),
+            ProviderKind::Codex => self.codex_channel(),
+            _ => None,
         }
     }
 
+    pub fn primary_channel(&self) -> Option<String> {
+        if let Some(primary_provider) = self.primary_provider_kind() {
+            if let Some(channel) = self.provider_specific_channel(&primary_provider) {
+                return Some(channel);
+            }
+            if let Some(channel) = primary_provider
+                .preferred_counterparts()
+                .into_iter()
+                .find_map(|provider| self.provider_specific_channel(&provider))
+            {
+                return Some(channel);
+            }
+        }
+        self.legacy_primary_channel()
+            .or_else(|| self.codex_channel())
+            .or_else(|| self.claude_channel())
+    }
+
     pub fn counter_model_channel(&self) -> Option<String> {
-        let target = self
-            .provider
-            .as_deref()
-            .and_then(ProviderKind::from_str)
-            .unwrap_or(ProviderKind::Claude)
-            .counterpart();
-        self.channel_for_provider(Some(target.as_str()))
+        self.primary_provider_kind().and_then(|provider| {
+            provider
+                .preferred_counterparts()
+                .into_iter()
+                .find_map(|counterpart| self.provider_specific_channel(&counterpart))
+        })
     }
 
     pub fn channel_for_provider(&self, provider: Option<&str>) -> Option<String> {
         match provider.and_then(ProviderKind::from_str) {
-            Some(ProviderKind::Claude) => self.claude_channel(),
-            Some(ProviderKind::Codex) => self.codex_channel(),
+            Some(kind) => self
+                .provider_specific_channel(&kind)
+                .or_else(|| self.legacy_primary_channel()),
             _ => self.legacy_primary_channel(),
         }
     }
@@ -633,6 +649,28 @@ mod tests {
             .expect("bindings");
         // Gemini hits Some(_) branch — should fall back to codex channel
         assert_eq!(bindings.primary_channel(), Some("cdx-chan".into()));
+        assert_eq!(bindings.counter_model_channel(), Some("cdx-chan".into()));
+    }
+
+    #[test]
+    fn non_claude_codex_provider_counter_channel_uses_registry_priority() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (
+                id, name, provider,
+                discord_channel_id, discord_channel_alt,
+                discord_channel_cc, discord_channel_cdx
+            ) VALUES ('ag-04b', 'QwenAgent', 'qwen', 'cc-legacy', NULL, 'cc-chan', NULL)",
+            [],
+        )
+        .unwrap();
+
+        let bindings = load_agent_channel_bindings(&conn, "ag-04b")
+            .unwrap()
+            .expect("bindings");
+        assert_eq!(bindings.primary_channel(), Some("cc-chan".into()));
+        assert_eq!(bindings.counter_model_channel(), Some("cc-chan".into()));
     }
 
     #[test]

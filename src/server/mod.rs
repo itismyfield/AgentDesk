@@ -1,4 +1,5 @@
 pub mod routes;
+mod worker_registry;
 pub mod ws;
 
 use std::sync::Arc;
@@ -35,84 +36,14 @@ pub async fn run(
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Result<()> {
-    refresh_memory_health_for_startup().await;
-
-    // Startup: drain any deferred hooks persisted before last shutdown (#125)
-    engine.drain_startup_hooks();
-
-    // #251 (boot-only): reconcile broken DB/runtime state before workers begin
-    // draining outbox rows or ticks resume.
-    crate::reconcile::reconcile_boot_runtime(&db, &engine)?;
-
-    // Spawn periodic GitHub sync task
-    let sync_interval = config.github.sync_interval_minutes;
-    if sync_interval > 0 {
-        let sync_db = db.clone();
-        let sync_engine = engine.clone();
-        tokio::spawn(async move {
-            github_sync_loop(sync_db, sync_engine, sync_interval).await;
-        });
-    }
-
-    // Spawn periodic policy tick on a DEDICATED OS thread to avoid
-    // engine lock deadlock with request handler threads.
-    // The std::thread runs its own blocking loop, never competing with
-    // tokio workers for the engine Mutex.
-    {
-        let tick_engine = engine.clone();
-        let tick_db = db.clone();
-        std::thread::Builder::new()
-            .name("policy-tick".to_string())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap_or_else(|e| {
-                        eprintln!("Fatal: failed to create policy-tick runtime: {e}");
-                        std::process::exit(1);
-                    });
-                rt.block_on(policy_tick_loop(tick_engine, tick_db));
-            })
-            .map_err(|e| anyhow::anyhow!("Failed to spawn policy-tick thread: {e}"))?;
-    }
-
-    // Spawn periodic rate-limit cache sync (every 120s)
-    {
-        let rl_db = db.clone();
-        tokio::spawn(async move {
-            rate_limit_sync_loop(rl_db).await;
-        });
-    }
-
-    // Spawn async message outbox worker (#120) — drains queued messages
-    {
-        let outbox_db = db.clone();
-        let outbox_port = config.server.port;
-        tokio::spawn(async move {
-            message_outbox_loop(outbox_db, outbox_port).await;
-        });
-    }
-
-    // #144: Spawn dispatch notification outbox worker — centralizes Discord side-effects
-    {
-        let dispatch_outbox_db = db.clone();
-        tokio::spawn(async move {
-            routes::dispatches::dispatch_outbox_loop(dispatch_outbox_db).await;
-        });
-    }
-
-    // #189: Spawn DM reply notification retry loop (5-min interval)
-    {
-        let dm_retry_db = db.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            interval.tick().await; // skip immediate first tick
-            loop {
-                interval.tick().await;
-                crate::services::discord::retry_failed_dm_notifications(&dm_retry_db).await;
-            }
-        });
-    }
+    let mut worker_registry = worker_registry::SupervisedWorkerRegistry::new(
+        config.clone(),
+        db.clone(),
+        engine.clone(),
+        health_registry.clone(),
+    );
+    worker_registry.run_boot_only_steps().await?;
+    worker_registry.start_after_boot_reconcile()?;
 
     // Resolve dashboard dist path relative to runtime root or binary location
     let dashboard_dir = crate::cli::agentdesk_runtime_root()
@@ -150,7 +81,7 @@ pub async fn run(
     tracing::info!("Serving dashboard from {:?}", dashboard_dir);
 
     let broadcast_tx = ws::new_broadcast();
-    let batch_buffer = ws::spawn_batch_flusher(broadcast_tx.clone());
+    let batch_buffer = worker_registry.start_after_websocket_broadcast(broadcast_tx.clone())?;
 
     // Seed config defaults + store server port in kv_meta so policy JS can read them
     if let Ok(conn) = db.lock() {
@@ -222,6 +153,11 @@ async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
             fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min");
             drain_transitions(&engine, &db);
             refresh_memory_health_for_five_min_tick().await;
+            if let Err(error) =
+                crate::services::api_friction::process_api_friction_patterns(&db, None, None).await
+            {
+                tracing::warn!("[policy-tick] api-friction aggregation failed: {error}");
+            }
             // Also fire legacy OnTick for backward compat
             fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy");
             drain_transitions(&engine, &db);
@@ -767,25 +703,17 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(count)
 }
 
-/// Async worker that drains the message_outbox table and delivers via /api/send (#120).
+/// Async worker that drains the message_outbox table via the in-process Discord delivery path (#120).
 /// Runs every 2 seconds, processes up to 10 messages per tick.
-async fn message_outbox_loop(db: Db, port: u16) {
+async fn message_outbox_loop(db: Db, health_registry: Option<Arc<HealthRegistry>>) {
     use std::time::Duration;
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("[outbox] Failed to create HTTP client: {e}");
-            return;
-        }
+    let Some(health_registry) = health_registry else {
+        tracing::error!("[outbox] Health registry unavailable; message outbox worker stopped");
+        return;
     };
 
-    let url = crate::config::local_api_url(port, "/api/send");
-
-    // Wait for server to be ready
+    // Give Discord runtime bootstrap a brief head start before polling.
     tokio::time::sleep(Duration::from_secs(3)).await;
     tracing::info!("[outbox] Message outbox worker started (adaptive backoff 500ms-5s)");
 
@@ -831,48 +759,44 @@ async fn message_outbox_loop(db: Db, port: u16) {
         poll_interval = Duration::from_millis(500);
 
         for (id, target, content, bot, source) in pending {
-            let body = serde_json::json!({
-                "target": target,
-                "content": content,
-                "bot": bot,
-                "source": source,
-            });
-
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
+            let (status, err_text) = crate::services::discord::health::send_message(
+                &health_registry,
+                &db,
+                &target,
+                &content,
+                &source,
+                &bot,
+            )
+            .await;
+            if status == "200 OK" {
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
                             "UPDATE message_outbox SET status = 'sent', sent_at = datetime('now') WHERE id = ?1",
                             [id],
                         )
                         .ok();
-                    }
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
                 }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let err_text = resp.text().await.unwrap_or_default();
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
-                            rusqlite::params![format!("{status}: {err_text}"), id],
-                        )
-                        .ok();
-                    }
-                    tracing::warn!("[outbox] ❌ msg {id} → {target} failed: {status}");
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
+            } else {
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
+                        "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
+                        rusqlite::params![format!("{status}: {err_text}"), id],
+                    )
+                    .ok();
                 }
-                Err(e) => {
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
-                            rusqlite::params![e.to_string(), id],
-                        )
-                        .ok();
-                    }
-                    tracing::warn!("[outbox] ❌ msg {id} → {target} error: {e}");
-                }
+                tracing::warn!("[outbox] ❌ msg {id} → {target} failed: {status}");
             }
         }
+    }
+}
+
+async fn dm_reply_retry_loop(db: Db) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+    interval.tick().await; // skip immediate first tick
+    loop {
+        interval.tick().await;
+        crate::services::discord::retry_failed_dm_notifications(&db).await;
     }
 }

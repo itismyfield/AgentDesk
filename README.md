@@ -72,31 +72,47 @@ Enter your Discord User ID (found via Developer Mode → right-click your profil
 ## Features
 
 ### Kanban Pipeline
-Cards flow through a managed lifecycle with automated transitions:
+Cards flow through a configurable pipeline with automated transitions:
 
 ```
 backlog → ready → requested → in_progress → review → done
                                     ↓            ↓
-                                 blocked    suggestion_pending
+                              pending_decision  blocked
 ```
 
-- **Dispatch-driven transitions** — Cards only advance via task dispatches, not manual status changes
+- **Pipeline-driven transitions** — States, gates, and hooks are defined in YAML pipeline configs
+- **Dispatch-driven lifecycle** — Cards advance via task dispatches, not manual status changes
 - **Counter-model review** — Claude reviews Codex's work and vice versa, with configurable max rounds
-- **Auto-queue** — Automatic card progression with priority scoring
+- **Auto-queue with batch phases** — Automatic card progression with priority scoring, dependency-aware phased execution, and phase gate verification
 - **GitHub sync** — Bidirectional issue synchronization with DoD checklist mirroring
-- **Audit logging** — Every state transition is recorded
+- **Escalation routing** — PM/user/time-based escalation mode switching
+- **Audit logging** — Every state transition and dispatch event is recorded
 
 ### Policy Engine
 Business logic lives in JavaScript files under `policies/`, hot-reloaded without restarting:
 
 | Policy | Purpose |
 |--------|---------|
-| `kanban-rules.js` | Core lifecycle: session status → card transitions, PM decision gates |
-| `review-automation.js` | Counter-model review dispatch, verdict processing |
-| `auto-queue.js` | Automatic card queuing on terminal state |
-| `timeouts.js` | Stale card detection (45min requested, 100min in-progress) |
-| `triage-rules.js` | GitHub issue auto-classification |
+| `kanban-rules.js` | Core lifecycle: dispatch completion, PM decision gates, worktree auto-merge |
+| `review-automation.js` | Counter-model review dispatch, verdict processing, PR tracking |
+| `auto-queue.js` | Batch-phased card queuing, phase gate dispatch, slot management |
+| `timeouts.js` | Stale card detection, deadlock detection/recovery, idle session cleanup |
+| `triage-rules.js` | GitHub issue auto-classification and agent assignment |
 | `pipeline.js` | Multi-stage workflow progression |
+| `merge-automation.js` | PR auto-merge, worktree cleanup after merge |
+| `deploy-pipeline.js` | E2E test dispatch and deploy stage advancement |
+
+Policies are not checked into the repository — they are created at runtime and loaded from the configured `policies.dir` path.
+
+### Tiered Tick System
+Policies hook into a 3-tier periodic tick system running on a dedicated OS thread:
+
+| Hook | Interval | Typical Use |
+|------|----------|-------------|
+| `onTick30s` | 30s | Retry recovery, notification delivery, deadlock detection |
+| `onTick1min` | 1m | Stale card timeouts, auto-queue walk, CI recovery |
+| `onTick5min` | 5m | Idle session cleanup, merge queue processing, reconciliation |
+| `onTick` | 5m (legacy) | Backward compatibility for older policies |
 
 ### Multi-Bot Architecture
 Each bot has a distinct role to prevent message conflicts:
@@ -112,22 +128,27 @@ A React-based dashboard served from the same binary:
 
 - **Office View** — Virtual 2D office with agent avatars (Pixi.js)
 - **Kanban Board** — Drag-and-drop card management with column filters
-- **Agent Manager** — Agent configuration, skills, timeline, sessions
+- **Agent Manager** — Agent configuration, skills, timeline, sessions, kanban tab
+- **Control Center** — Runtime controls, dispatch monitoring, system health
 - **Analytics** — Streaks, achievements, activity heatmaps, audit logs
 - **Meeting Minutes** — Round-table meeting transcripts with issue extraction
-- **Settings** — Runtime configuration, onboarding re-run, policy management
+- **Settings** — Runtime configuration, onboarding re-run, policy management, escalation routing
 
 ### Round-Table Meetings
 Coordinate multi-agent discussions with structured rounds, automatic transcript recording, and post-meeting issue extraction to GitHub.
 
-### OpenClaw Migration
-Import OpenClaw agent/runtime state into AgentDesk with `agentdesk migrate openclaw`. Generated role prompts point at the imported AgentDesk memory/workspace paths so migrated agents use runtime-managed data instead of raw OpenClaw source paths. See [`docs/openclaw-migrate.md`](docs/openclaw-migrate.md) for dry-run, apply, resume, and audit output details, and [`docs/openclaw-migration.md`](docs/openclaw-migration.md) for the contract-level migration spec and current implementation notes.
+### Turn Orchestration
+Agent turn lifecycle is managed by a dedicated orchestration layer (extracted from the Discord adapter):
+- **Heartbeat monitoring** — Tracks agent session liveness
+- **Completion guard** — Validates dispatch results before card transitions
+- **Deadlock detection** — Identifies stuck sessions and auto-recovers with configurable thresholds
+- **Inflight tracking** — Per-provider inflight files for concurrent session management
 
 ## Configuration
 
 ### agentdesk.yaml
 
-The main configuration file at `~/.adk/release/agentdesk.yaml`:
+The main configuration file at `~/.adk/release/config/agentdesk.yaml`:
 
 ```yaml
 server:
@@ -137,12 +158,29 @@ server:
 
 discord:
   bots:
-    claude:
-      token: "your-claude-bot-token"
+    command:
+      token: "your-command-bot-token"
     announce:
       token: "your-announce-bot-token"
     notify:
       token: "your-notify-bot-token"
+    codex:
+      token: "your-codex-bot-token"
+      provider: codex
+  guild_id: "your-guild-id"
+
+agents:
+  - id: my-agent
+    name: My Agent
+    provider: claude          # or codex
+    channels:
+      claude:
+        id: "channel-id"
+        name: agent-cc
+        workspace: ~/.adk/release/workspaces/my-project
+      codex:
+        id: "channel-id"
+        name: agent-cdx
 
 github:
   repos:
@@ -172,34 +210,15 @@ kanban:
 
 ### Runtime Configuration
 
-Additional settings are stored in the database (`kv_meta` table) and exposed through four distinct surfaces:
+AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-surface canonical owner plus explicit precedence and restart semantics, not a single physical store. The full decision record lives in [`docs/adr-settings-precedence.md`](docs/adr-settings-precedence.md).
 
-| Surface | Storage | API | Notes |
-|---------|---------|-----|-------|
-| Company settings | `kv_meta['settings']` JSON | `GET/PUT /api/settings` | Full-replace payload; callers should send a merged object. Retired legacy keys are stripped server-side. |
-| Runtime config | `kv_meta['runtime-config']` JSON | `GET/PUT /api/settings/runtime-config` | Live numeric tuning applied without restart. |
-| Policy/config keys | Individual `kv_meta` rows | `GET/PATCH /api/settings/config` | Whitelisted review, timeout, context, Discord, and merge-automation keys. |
-| Onboarding/secrets | Dedicated onboarding keys and flows | `/api/onboarding/*` | Tokens and setup secrets stay outside the general settings form. |
-
-The dashboard Settings page only edits the surfaces that truthfully map to those APIs.
-
-### Whitelisted policy/config keys
-
-Key individual `kv_meta` entries exposed via `/api/settings/config`:
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `review_enabled` | `true` | Enable counter-model review |
-| `counter_model_review_enabled` | `false` | Enable cross-model review |
-| `max_review_rounds` | `3` | Maximum review rounds before escalation |
-| `pm_decision_gate_enabled` | `false` | Require PM decision gate before next transition |
-| `merge_automation_enabled` | `false` | Enable automated PR merge flow |
-| `merge_strategy` | `squash` | Auto-merge strategy (`squash`, `merge`, `rebase`) |
-| `merge_allowed_authors` | — | Comma-separated authors allowed for auto-merge |
-| `requested_timeout_min` | `45` | Timeout for cards in requested state |
-| `in_progress_stale_min` | `120` | Timeout for stale in-progress cards |
-| `context_compact_percent` | `60` | Global context compaction threshold |
-| `kanban_manager_channel_id` | — | Discord channel for PM notifications |
+| Surface | Canonical owner | Storage / precedence | Persistence and restart semantics | API |
+|---------|------------------|----------------------|-----------------------------------|-----|
+| Company settings | General settings UI / callers that own the merged JSON | `kv_meta['settings']` only. No YAML baseline. | Persists until replaced. `PUT /api/settings` is full replace, so callers must merge hidden keys before saving. Retired legacy keys are stripped server-side. | `GET/PUT /api/settings` |
+| Runtime config | Dashboard live-runtime controls | Hardcoded defaults < `agentdesk.yaml` `runtime:` < `kv_meta['runtime-config']` override JSON | Applies immediately. On reboot, YAML-backed keys are re-applied; saved keys without YAML baselines persist unless `runtime.reset_overrides_on_restart=true`, in which case the whole surface resets to baseline. | `GET/PUT /api/settings/runtime-config` |
+| Policy/config keys | Dashboard policy controls and automation helpers | Hardcoded defaults < YAML sections (`review:`, `runtime:`, `automation:`, `kanban:`) < individual `kv_meta` rows | `PATCH` writes live overrides. YAML-backed keys are re-seeded on restart, while hardcoded-only keys keep their DB override unless the reset flag is on. `server_port` is surfaced as read-only config metadata. | `GET/PATCH /api/settings/config` |
+| Escalation routing | Dashboard escalation panel and Discord `!escalation` command | `escalation:` config baseline plus fallback owner/channel defaults, overridden by `kv_meta['escalation-settings-override']` | Override persists until changed back to defaults. When `runtime.reset_overrides_on_restart=true`, the stored escalation override is cleared on boot. | `GET/PUT /api/settings/escalation` |
+| Onboarding/secrets | Dedicated onboarding wizard | Dedicated onboarding keys and flows | Tokens and setup secrets stay outside the general settings form. | `/api/onboarding/*` |
 
 ### Environment Variables
 
@@ -209,6 +228,9 @@ Key individual `kv_meta` entries exposed via `/api/settings/config`:
 | `AGENTDESK_CONFIG` | Override config file path |
 | `AGENTDESK_SERVER_PORT` | Override HTTP server port (default: 8791) |
 | `AGENTDESK_DCSERVER_LABEL` | Override launchd service label |
+| `AGENTDESK_STATUS_INTERVAL_SECS` | Status polling interval (default: 5) |
+| `AGENTDESK_TURN_TIMEOUT_SECS` | Turn watchdog timeout (default: 3600) |
+| `RUST_LOG` | Standard tracing filter (default: `agentdesk=info`) |
 
 ## Customization
 
@@ -217,70 +239,96 @@ Key individual `kv_meta` entries exposed via `/api/settings/config`:
 Create a `.js` file in the `policies/` directory. It will be automatically loaded and hot-reloaded:
 
 ```javascript
-export default {
+var myPolicy = {
   name: "my-custom-policy",
   priority: 50,  // Lower = runs first (range: 1-999)
 
-  // Fires when an agent session changes status
   onSessionStatusChange: function(payload) {
     // payload: { agentId, status, dispatchId, sessionKey }
     agentdesk.log.info("Agent " + payload.agentId + " is now " + payload.status);
   },
 
-  // Fires when a kanban card transitions between states
   onCardTransition: function(payload) {
-    // payload: { cardId, from, to, reason }
+    // payload: { card_id, from, to, status }
   },
 
-  // Fires when a card reaches a terminal state (done, blocked, failed)
   onCardTerminal: function(payload) {
-    // payload: { cardId, status }
+    // payload: { card_id, status }
   },
 
-  // Fires when a dispatch completes
   onDispatchCompleted: function(payload) {
-    // payload: { dispatchId, result }
+    // payload: { dispatch_id, kanban_card_id, result }
   },
 
-  // Fires when a card enters review
   onReviewEnter: function(payload) {
     // payload: { card_id, from }
   },
 
-  // Fires when a review verdict is submitted
   onReviewVerdict: function(payload) {
     // payload: { card_id, dispatch_id, verdict, notes, feedback }
   },
 
-  // Fires every ~60 seconds (for timeouts, cleanup, etc.)
-  onTick: function() {
-    // Periodic maintenance
-  }
+  // Tiered ticks — choose the interval that fits your use case
+  onTick30s: function() { /* fast: retries, notifications */ },
+  onTick1min: function() { /* normal: timeouts, queue walk */ },
+  onTick5min: function() { /* slow: reconciliation, cleanup */ }
 };
+
+agentdesk.registerPolicy(myPolicy);
 ```
 
 ### Bridge API (available in policy JS)
 
 ```javascript
 // Database
-agentdesk.db.query("SELECT * FROM agents WHERE status = ?", ["idle"])
+agentdesk.db.query("SELECT * FROM agents WHERE id = ?", ["my-agent"])
 agentdesk.db.execute("UPDATE kv_meta SET value = ? WHERE key = ?", ["true", "my_flag"])
 
-// Kanban (use instead of direct SQL for status changes)
+// Cards (typed queries with filters)
+agentdesk.cards.list({ status: "ready", unassigned: true })
+agentdesk.cards.get(cardId)
+agentdesk.cards.assign(cardId, agentId)
+agentdesk.cards.setPriority(cardId, "high")
+
+// Kanban state transitions (fires hooks automatically)
 agentdesk.kanban.setStatus(cardId, "in_progress")
+agentdesk.kanban.setStatus(cardId, "done", true)  // force
 agentdesk.kanban.getCard(cardId)
+agentdesk.kanban.reopen(cardId, "ready")
+
+// Review state
+agentdesk.reviewState.sync(cardId, "idle")
+agentdesk.kanban.setReviewStatus(cardId, "awaiting_dod", { awaiting_dod_at: "now" })
 
 // Dispatch
 agentdesk.dispatch.create(cardId, agentId, "implementation", "Task title")
 
+// Pipeline
+agentdesk.pipeline.resolveForCard(cardId)
+agentdesk.pipeline.kickoffState(config)
+agentdesk.pipeline.isTerminal(status, config)
+agentdesk.pipeline.terminalState(config)
+
+// Agents
+agentdesk.agents.get(agentId)
+
 // Configuration
 agentdesk.config.get("review_max_rounds")
 
-// HTTP (localhost only)
-agentdesk.http.post("/api/some-endpoint", { key: "value" })
+// Messaging
+agentdesk.message.queue("channel:123456", "Hello", "announce", "system")
 
-// External commands (gh and git only)
+// External commands (gh, git, tmux only)
 agentdesk.exec("gh", ["issue", "close", "42", "--repo", "owner/repo"])
+agentdesk.exec("git", ["-C", repoDir, "log", "--oneline", "-5"])
+
+// Session control
+agentdesk.session.sendCommand(sessionKey, "/compact")
+agentdesk.session.kill(sessionKey)
+
+// Inflight turn tracking
+agentdesk.inflight.list()
+agentdesk.inflight.remove(provider, channelId)
 
 // Logging
 agentdesk.log.info("message")
@@ -300,35 +348,80 @@ Each agent maps to a Discord channel where it receives and responds to tasks.
 ## CLI Reference
 
 ```
-agentdesk dcserver                              # Start Discord control plane
-agentdesk init                                  # Interactive setup wizard
-agentdesk reconfigure                           # Re-run setup (preserves data)
-agentdesk restart-dcserver                      # Graceful restart
+# Server
+agentdesk dcserver                               # Start Discord control plane
+agentdesk init                                   # Interactive setup wizard
+agentdesk reconfigure                            # Re-run setup (preserves data)
+agentdesk restart-dcserver                        # Graceful restart with crash context
+agentdesk doctor                                 # System diagnostics
+
+# Discord messaging
 agentdesk discord-sendfile <PATH> --channel <ID> --key <HASH>
 agentdesk discord-sendmessage --channel <ID> --message <TEXT>
 agentdesk discord-senddm --user <ID> --message <TEXT>
-agentdesk status                                # Runtime health summary
-agentdesk api GET /api/health                   # Direct API call
+agentdesk send --target channel:<ID> --content <TEXT>
+agentdesk discord read <CHANNEL_ID> [--limit <N>]
+
+# Review / docs / sessions
+agentdesk review-verdict --dispatch <ID> --verdict pass|improve|rework|reject|approved
+agentdesk review-decision --card <CARD_ID> --decision approve|rework|escalate
+agentdesk docs [CATEGORY]
+agentdesk force-kill --session-key <KEY>
+
+# Kanban / dispatch / auto-queue
+agentdesk cards                                  # List kanban cards
+agentdesk card create --from-issue <NUMBER> [--status ready] [--agent <ID>]
+agentdesk card status <CARD_ID|ISSUE_NUMBER>
+agentdesk dispatch <ISSUE_GROUPS...>             # Dispatch issue groups
+agentdesk dispatch list
+agentdesk dispatch retry <CARD_ID>
+agentdesk dispatch redispatch <CARD_ID>
+agentdesk resume                                 # Resume stuck cards
+agentdesk advance                                # Promote card to review
+agentdesk queue                                  # Auto-queue status
+agentdesk auto-queue activate [--run <ID>] [--agent <ID>]
+agentdesk auto-queue add <CARD_ID> [--run <ID>] [--priority <N>] [--phase <N>]
+agentdesk auto-queue config --max-concurrent <N> [--run <ID>]
+
+# Git / runtime
+agentdesk github-sync [--repo <OWNER/REPO>]
+agentdesk cherry-merge <BRANCH> [--close-issue]
+agentdesk status                                 # Runtime health summary
+agentdesk config get                             # Read runtime config
+agentdesk config set '<JSON>'                    # Set runtime config
+agentdesk config audit [--dry-run]               # Reconcile yaml/DB drift
+agentdesk agents                                 # List agents
+agentdesk terminations                           # Session termination events
+agentdesk api GET /api/health                    # Direct API call
+
+# Process wrappers (internal)
+agentdesk tmux-wrapper                           # Claude session wrapper
+agentdesk codex-tmux-wrapper                     # Codex session wrapper
 ```
 
 ## API Overview
 
-AgentDesk exposes 50+ REST API endpoints. Key groups:
+AgentDesk exposes 150+ REST API endpoints. Key groups:
 
 | Group | Endpoints | Description |
 |-------|-----------|-------------|
 | `/api/agents` | CRUD + signal, skills, timeline | Agent management |
-| `/api/kanban-cards` | CRUD + assign, retry, bulk actions | Work item management |
-| `/api/dispatches` | CRUD | Task assignment tracking |
+| `/api/kanban-cards` | CRUD + assign, retry, redispatch, bulk actions | Work item management |
+| `/api/dispatches` | CRUD + cancel | Task assignment tracking |
+| `/api/auto-queue` | Generate, activate, reorder, status, slots | Batch-phased work queuing |
 | `/api/sessions` | List, update, cleanup | Agent runtime sessions |
-| `/api/auto-queue` | Generate, activate, reorder | Automatic work queuing |
 | `/api/round-table-meetings` | Start, transcript, issues | Multi-agent meetings |
-| `/api/offices` | CRUD + agent assignment | Virtual office management |
-| `/api/settings` | Company settings + config/runtime subroutes | Platform configuration surfaces |
-| `/api/health` | Health check | Service status |
+| `/api/offices` | CRUD + agent assignment, ordering | Virtual office management |
+| `/api/departments` | CRUD + ordering | Department management |
+| `/api/pipeline` | Stages, config, graphs, card history | Pipeline configuration |
+| `/api/settings` | Company + config/runtime/escalation subroutes | Platform configuration surfaces |
+| `/api/github` | Repo sync, dashboard views, issue actions | GitHub integration |
+| `/api/discord` | Channel messages, bindings, DM reply hooks | Discord access layer |
+| `/api/health` | Health check + detailed metrics | Service status |
 | `/api/onboarding` | Status, validate, complete | Setup wizard backend |
+| `/api/docs` | Endpoint discovery + category drill-down | Self-documenting API |
 
-Full API documentation is available at `/api/docs` when the server is running.
+Full API documentation is available at `/api/docs` when the server is running, with category-based grouping and parameter details.
 
 ## Architecture
 
@@ -337,19 +430,19 @@ Full API documentation is available at `/api/docs` when the server is running.
 │                   AgentDesk Binary (Rust)                │
 │                                                         │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐  │
-│  │ Discord  │  │ Session  │  │   HTTP   │  │ GitHub │  │
-│  │ Gateway  │  │ Manager  │  │ Server   │  │  Sync  │  │
+│  │ Discord  │  │   Turn   │  │   HTTP   │  │ GitHub │  │
+│  │ Gateway  │  │Orchestr. │  │ Server   │  │  Sync  │  │
 │  │(serenity)│  │  (tmux)  │  │  (axum)  │  │  (gh)  │  │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───┬────┘  │
 │       │              │             │             │       │
 │  ┌────┴──────────────┴─────────────┴─────────────┴────┐  │
-│  │               Core Event Bus (channels)             │  │
+│  │           Supervised Worker Registry                 │  │
 │  └────┬──────────────┬─────────────┬─────────────┬────┘  │
 │       │              │             │             │       │
 │  ┌────┴─────┐  ┌─────┴────┐  ┌────┴─────┐  ┌───┴────┐  │
 │  │ Dispatch │  │  Policy   │  │ Database │  │   WS   │  │
-│  │ Engine   │  │  Engine   │  │ (SQLite) │  │Broadcast│  │
-│  │          │  │(QuickJS)  │  │          │  │        │  │
+│  │ Service  │  │  Engine   │  │ (SQLite) │  │Broadcast│  │
+│  │ +outbox  │  │(QuickJS)  │  │          │  │        │  │
 │  └──────────┘  └──────────┘  └──────────┘  └────────┘  │
 │                     │                                    │
 │              ┌──────┴──────┐                             │
@@ -370,6 +463,7 @@ Full API documentation is available at `/api/docs` when the server is running.
 3. **Single Database** — SQLite for all state (agents, cards, dispatches, sessions)
 4. **Hot-Reloadable Policies** — Business logic in JS, editable without rebuild
 5. **Self-Contained** — No Node.js, Python, or other runtimes needed at deploy time
+6. **Pipeline-Driven** — State machines defined in YAML, not hardcoded in Rust or JS
 
 ## Limitations
 
@@ -385,19 +479,29 @@ Full API documentation is available at `/api/docs` when the server is running.
 
 ```
 AgentDesk/
-├── src/                    # Rust source
-│   ├── main.rs             # Entry point
-│   ├── config.rs           # YAML configuration
-│   ├── cli/                # CLI commands (init, dcserver)
-│   ├── db/                 # SQLite schema & migrations
-│   ├── engine/             # QuickJS policy engine
-│   ├── server/routes/      # 50+ HTTP API handlers
-│   ├── services/discord/   # Discord gateway & bot management
-│   └── services/           # Session management, providers
-├── policies/               # JavaScript policy files (hot-reload)
-├── dashboard/              # React frontend (Vite + TypeScript)
-├── migrations/             # SQL schema migrations
-└── scripts/                # Install, build, deploy scripts
+├── src/                        # Rust source
+│   ├── main.rs                 # Entry point + CLI dispatch
+│   ├── config.rs               # YAML configuration
+│   ├── kanban.rs               # Kanban state machine + transition hooks
+│   ├── pipeline.rs             # Pipeline config resolution
+│   ├── cli/                    # CLI commands (dcserver, init, client)
+│   ├── db/                     # SQLite schema, migrations, typed queries
+│   ├── dispatch/               # Dispatch creation, outbox, delivery
+│   ├── engine/                 # QuickJS policy engine + bridge ops
+│   │   └── ops/                # 15 bridge namespaces (cards, kanban, dispatch, ...)
+│   ├── github/                 # Issue sync, auto-triage, DoD mirroring
+│   ├── server/                 # Axum HTTP server + WebSocket
+│   │   └── routes/             # 150+ API route handlers
+│   └── services/               # Provider integrations + platform abstractions
+│       ├── discord/            # Serenity/Poise gateway, router, recovery
+│       ├── dispatches.rs       # Dispatch service layer
+│       ├── turn_orchestrator.rs # Turn lifecycle management
+│       ├── retrospectives.rs   # Terminal card retrospectives
+│       └── api_friction.rs     # API friction reporting
+├── policies/                   # JavaScript policy files (hot-reload, runtime-only)
+├── dashboard/                  # React 19 + TypeScript + Vite + Tailwind
+├── docs/                       # ADRs and design documents
+└── scripts/                    # Install, build, deploy, verify scripts
 ```
 
 ## Acknowledgments
