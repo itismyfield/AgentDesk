@@ -98,7 +98,6 @@ function renderMeetingStartFormMarkup() {
     ),
   );
 }
-
 describe("pruneFixedParticipantRoleIdsForLoadedChannel", () => {
   it("keeps stored fixed participants while meeting channels are loading", () => {
     const previous = ["td", "pd"];
