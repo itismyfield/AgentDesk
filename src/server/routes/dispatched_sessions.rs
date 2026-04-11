@@ -1041,6 +1041,15 @@ pub(crate) async fn force_kill_session_impl(
     session_key: &str,
     retry: bool,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    force_kill_session_impl_with_reason(state, session_key, retry, "force-kill API invoked").await
+}
+
+pub(crate) async fn force_kill_session_impl_with_reason(
+    state: &AppState,
+    session_key: &str,
+    retry: bool,
+    reason: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
     let session_key = session_key;
 
     // Parse tmux session name from session_key (format: "hostname:tmux_name")
@@ -1134,7 +1143,7 @@ pub(crate) async fn force_kill_session_impl(
                 .map(poise::serenity_prelude::ChannelId::new),
             tmux_name: tmux_name.clone(),
         },
-        "force-kill API invoked",
+        reason,
     )
     .await;
 
@@ -1300,7 +1309,7 @@ pub(crate) async fn force_kill_session_impl(
                 "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
                 rusqlite::params![
                     format!("channel:{channel_id_str}"),
-                    format!("⚡ 세션 강제 종료: {agent_label}\n사유: {exit_reason}"),
+                    format!("🔴 세션 종료: {agent_label}\n사유: {exit_reason}"),
                 ],
             );
         }

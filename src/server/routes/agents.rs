@@ -733,8 +733,13 @@ pub async fn stop_agent_turn(
     }
 
     let session_key = session.session_key.clone();
-    let (status, Json(mut body)) =
-        super::dispatched_sessions::force_kill_session_impl(&state, &session_key, false).await;
+    let (status, Json(mut body)) = super::dispatched_sessions::force_kill_session_impl_with_reason(
+        &state,
+        &session_key,
+        false,
+        "turn/stop API invoked",
+    )
+    .await;
     body["agent_id"] = json!(id);
     body["session_key"] = json!(session_key);
     body["status"] = json!(if status == StatusCode::OK {
