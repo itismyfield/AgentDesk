@@ -596,20 +596,28 @@ async fn emit_escalation_with_base_url(
         (settings, summary, parent_channels, cached_thread_id)
     };
 
-    let announce_token = match crate::credential::read_bot_token("notify")
+    let client = reqwest::Client::new();
+    let requested_mode = settings.mode.clone();
+    let resolved_mode = resolve_mode_at(&settings, Utc::now());
+
+    // PM 에스컬레이션 → announce 봇 (PM 에이전트가 반응해야 함)
+    // User 에스컬레이션 → notify 봇 (사람이 읽고 직접 반응)
+    let bot_name = if resolved_mode == EscalationMode::User {
+        "notify"
+    } else {
+        "announce"
+    };
+    let announce_token = match crate::credential::read_bot_token(bot_name)
         .or_else(|| crate::credential::read_bot_token("announce"))
     {
         Some(token) => token,
         None => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "notify/announce bot token not found"})),
+                Json(json!({"error": "bot token not found"})),
             );
         }
     };
-    let client = reqwest::Client::new();
-    let requested_mode = settings.mode.clone();
-    let resolved_mode = resolve_mode_at(&settings, Utc::now());
 
     if resolved_mode == EscalationMode::User {
         let owner_target =
