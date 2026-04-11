@@ -501,6 +501,7 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
             "last_offset": 0u64,
             "started_at": "2026-04-06 10:11:12",
             "updated_at": "2026-04-06 10:11:13",
+            "prev_tool_status": "✓ Read: src/config.rs",
             "current_tool_line": "⚙ Bash: rg -n turn src",
             "full_response": "partial output\nOPENAI_API_KEY=sk-secret",
             "response_sent_offset": 0,
@@ -546,12 +547,23 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "working");
     assert_eq!(json["started_at"], "2026-04-06 10:11:12");
+    assert_eq!(json["updated_at"], "2026-04-06 10:11:13");
     assert_eq!(json["recent_output_source"], "inflight");
     assert_eq!(json["active_dispatch_id"], "dispatch-turn");
+    assert_eq!(json["prev_tool_status"], "✓ Read: src/config.rs");
+    assert_eq!(json["current_tool_line"], "⚙ Bash: rg -n turn src");
+    assert_eq!(json["tool_count"], 2);
     let recent_output = json["recent_output"].as_str().unwrap();
     assert!(recent_output.contains("⚙ Bash: rg -n turn src"));
+    assert!(recent_output.contains("✓ Read: src/config.rs"));
     assert!(recent_output.contains("OPENAI_API_KEY=[REDACTED]"));
     assert!(!recent_output.contains("sk-secret"));
+    let tool_events = json["tool_events"].as_array().unwrap();
+    assert_eq!(tool_events.len(), 2);
+    assert_eq!(tool_events[0]["tool_name"], "Read");
+    assert_eq!(tool_events[0]["status"], "success");
+    assert_eq!(tool_events[1]["tool_name"], "Bash");
+    assert_eq!(tool_events[1]["status"], "running");
 }
 
 #[tokio::test]
@@ -587,6 +599,12 @@ async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
     assert_eq!(json["status"], "idle");
     assert!(json["recent_output"].is_null());
     assert!(json["started_at"].is_null());
+    assert!(json["updated_at"].is_null());
+    assert_eq!(json["recent_output_source"], "none");
+    assert!(json["current_tool_line"].is_null());
+    assert!(json["prev_tool_status"].is_null());
+    assert_eq!(json["tool_count"], 0);
+    assert!(json["tool_events"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

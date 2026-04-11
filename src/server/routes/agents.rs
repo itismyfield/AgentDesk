@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::OnceLock;
 
@@ -37,8 +37,26 @@ struct AgentTurnSession {
 #[derive(Debug, Clone, Default)]
 struct InflightTurnSnapshot {
     started_at: Option<String>,
+    updated_at: Option<String>,
     current_tool_line: Option<String>,
+    prev_tool_status: Option<String>,
     full_response: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TurnToolEvent {
+    kind: &'static str,
+    status: &'static str,
+    tool_name: Option<String>,
+    summary: String,
+    line: String,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedTurnToolEvent {
+    event: TurnToolEvent,
+    identity_kind: &'static str,
+    identity_value: String,
 }
 
 fn agent_exists(conn: &rusqlite::Connection, id: &str) -> bool {
@@ -129,6 +147,13 @@ fn normalize_recent_output(text: &str) -> Option<String> {
     (!normalized.is_empty()).then(|| tail_chars(normalized, TURN_OUTPUT_MAX_CHARS))
 }
 
+fn sanitize_status_line(text: &str) -> Option<String> {
+    let stripped = strip_ansi(text);
+    let sanitized = sanitize_sensitive_text(stripped.trim());
+    let normalized = sanitized.trim();
+    (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
 fn capture_recent_tmux_output(tmux_name: &str) -> Option<String> {
     let capture =
         crate::services::platform::tmux::capture_pane(tmux_name, TURN_CAPTURE_SCROLLBACK_LINES)?;
@@ -184,8 +209,16 @@ fn load_inflight_snapshot(
                     .get("started_at")
                     .and_then(|value| value.as_str())
                     .map(str::to_string),
+                updated_at: state
+                    .get("updated_at")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
                 current_tool_line: state
                     .get("current_tool_line")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                prev_tool_status: state
+                    .get("prev_tool_status")
                     .and_then(|value| value.as_str())
                     .map(str::to_string),
                 full_response: state
@@ -202,12 +235,18 @@ fn load_inflight_snapshot(
 fn inflight_recent_output(snapshot: &InflightTurnSnapshot) -> Option<String> {
     let mut sections = Vec::new();
     if let Some(tool_line) = snapshot
+        .prev_tool_status
+        .as_deref()
+        .and_then(sanitize_status_line)
+    {
+        sections.push(tool_line);
+    }
+    if let Some(tool_line) = snapshot
         .current_tool_line
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(sanitize_status_line)
     {
-        sections.push(tool_line.to_string());
+        sections.push(tool_line);
     }
     if let Some(response) = snapshot
         .full_response
@@ -220,6 +259,113 @@ fn inflight_recent_output(snapshot: &InflightTurnSnapshot) -> Option<String> {
     (!sections.is_empty())
         .then(|| normalize_recent_output(&sections.join("\n\n")))
         .flatten()
+}
+
+fn parse_turn_tool_event(line: &str) -> Option<ParsedTurnToolEvent> {
+    let trimmed = sanitize_status_line(line)?;
+
+    if trimmed.starts_with("💭") {
+        return Some(ParsedTurnToolEvent {
+            event: TurnToolEvent {
+                kind: "thinking",
+                status: "info",
+                tool_name: None,
+                summary: trimmed.trim_start_matches("💭").trim().to_string(),
+                line: trimmed.to_string(),
+            },
+            identity_kind: "thinking",
+            identity_value: "thinking".to_string(),
+        });
+    }
+
+    let (status, stripped) = if let Some(rest) = trimmed.strip_prefix("⚙") {
+        ("running", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("✓") {
+        ("success", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("✗") {
+        ("error", rest)
+    } else {
+        return None;
+    };
+
+    let stripped = stripped.trim();
+    if stripped.is_empty() {
+        return None;
+    }
+    let (tool_name, summary) = match stripped.split_once(':') {
+        Some((name, summary)) => (
+            Some(name.trim().to_string()).filter(|value| !value.is_empty()),
+            summary.trim().to_string(),
+        ),
+        None => (Some(stripped.to_string()), String::new()),
+    };
+    let summary = if summary.is_empty() {
+        tool_name.clone().unwrap_or_else(|| stripped.to_string())
+    } else {
+        summary
+    };
+
+    Some(ParsedTurnToolEvent {
+        event: TurnToolEvent {
+            kind: "tool",
+            status,
+            tool_name,
+            summary,
+            line: trimmed.to_string(),
+        },
+        identity_kind: "tool",
+        identity_value: stripped.to_string(),
+    })
+}
+
+fn collect_turn_tool_events(
+    recent_output: Option<&str>,
+    inflight: Option<&InflightTurnSnapshot>,
+) -> Vec<TurnToolEvent> {
+    let mut parsed = Vec::<ParsedTurnToolEvent>::new();
+    let mut push_line = |line: &str| {
+        let Some(event) = parse_turn_tool_event(line) else {
+            return;
+        };
+
+        if let Some(last) = parsed.last_mut() {
+            if last.identity_kind == event.identity_kind
+                && last.identity_value == event.identity_value
+            {
+                *last = event;
+                return;
+            }
+        }
+
+        parsed.push(event);
+    };
+
+    if let Some(previous) = inflight
+        .and_then(|snapshot| snapshot.prev_tool_status.as_deref())
+        .and_then(sanitize_status_line)
+    {
+        push_line(&previous);
+    }
+
+    if let Some(output) = recent_output {
+        for line in output.lines() {
+            push_line(line);
+        }
+    }
+
+    if let Some(current) = inflight
+        .and_then(|snapshot| snapshot.current_tool_line.as_deref())
+        .and_then(sanitize_status_line)
+    {
+        push_line(&current);
+    }
+
+    let len = parsed.len();
+    parsed
+        .into_iter()
+        .skip(len.saturating_sub(24))
+        .map(|entry| entry.event)
+        .collect()
 }
 
 fn find_agent_turn_session(
@@ -611,13 +757,19 @@ pub async fn agent_turn(
                 "agent_id": id,
                 "status": "idle",
                 "started_at": serde_json::Value::Null,
+                "updated_at": serde_json::Value::Null,
                 "recent_output": serde_json::Value::Null,
+                "recent_output_source": "none",
                 "session_key": serde_json::Value::Null,
                 "tmux_session": serde_json::Value::Null,
                 "provider": serde_json::Value::Null,
                 "thread_channel_id": serde_json::Value::Null,
                 "active_dispatch_id": serde_json::Value::Null,
                 "last_heartbeat": serde_json::Value::Null,
+                "current_tool_line": serde_json::Value::Null,
+                "prev_tool_status": serde_json::Value::Null,
+                "tool_events": Vec::<TurnToolEvent>::new(),
+                "tool_count": 0,
             })),
         );
     };
@@ -629,13 +781,19 @@ pub async fn agent_turn(
                 "agent_id": id,
                 "status": "idle",
                 "started_at": serde_json::Value::Null,
+                "updated_at": serde_json::Value::Null,
                 "recent_output": serde_json::Value::Null,
+                "recent_output_source": "none",
                 "session_key": session.session_key,
                 "tmux_session": extract_tmux_name(&session.session_key),
                 "provider": session.provider,
                 "thread_channel_id": session.thread_channel_id,
                 "active_dispatch_id": serde_json::Value::Null,
                 "last_heartbeat": session.last_heartbeat,
+                "current_tool_line": serde_json::Value::Null,
+                "prev_tool_status": serde_json::Value::Null,
+                "tool_events": Vec::<TurnToolEvent>::new(),
+                "tool_count": 0,
             })),
         );
     }
@@ -661,6 +819,11 @@ pub async fn agent_turn(
             None => (None, "none"),
         }
     };
+    let tool_events = collect_turn_tool_events(recent_output.as_deref(), inflight.as_ref());
+    let tool_count = tool_events
+        .iter()
+        .filter(|event| event.kind == "tool")
+        .count();
 
     (
         StatusCode::OK,
@@ -668,6 +831,7 @@ pub async fn agent_turn(
             "agent_id": id,
             "status": session.effective_status,
             "started_at": started_at,
+            "updated_at": inflight.as_ref().and_then(|snapshot| snapshot.updated_at.clone()),
             "recent_output": recent_output,
             "recent_output_source": recent_output_source,
             "session_key": session.session_key,
@@ -676,6 +840,10 @@ pub async fn agent_turn(
             "thread_channel_id": session.thread_channel_id,
             "active_dispatch_id": session.effective_active_dispatch_id,
             "last_heartbeat": session.last_heartbeat,
+            "current_tool_line": inflight.as_ref().and_then(|snapshot| snapshot.current_tool_line.as_deref()).and_then(sanitize_status_line),
+            "prev_tool_status": inflight.as_ref().and_then(|snapshot| snapshot.prev_tool_status.as_deref()).and_then(sanitize_status_line),
+            "tool_events": tool_events,
+            "tool_count": tool_count,
         })),
     )
 }
