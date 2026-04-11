@@ -402,6 +402,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         return;
     }
 
+    super::internal_api::init(db.clone(), engine.clone(), health_registry.clone());
+
     // Initialize debug logging from environment variable
     claude::init_debug_from_env();
 
@@ -1204,27 +1206,16 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
 /// Periodic GC: delete stale idle/disconnected thread sessions from DB via cleanup API.
 async fn gc_stale_thread_sessions_via_api(api_port: u16) {
-    let url = crate::config::local_api_url(api_port, "/api/dispatched-sessions/gc-threads");
-    match reqwest::Client::new().delete(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                let gc = body.get("gc_threads").and_then(|v| v.as_u64()).unwrap_or(0);
-                if gc > 0 {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
-                }
-            }
-        }
-        Ok(resp) => {
+    let _ = api_port;
+    match super::internal_api::gc_stale_thread_sessions() {
+        Ok(gc) if gc > 0 => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] ⚠ Thread session GC failed: HTTP {}",
-                resp.status()
-            );
+            println!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
         }
-        Err(e) => {
+        Ok(_) => {}
+        Err(err) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ Thread session GC error: {e}");
+            eprintln!("  [{ts}] ⚠ Thread session GC error: {err}");
         }
     }
 }

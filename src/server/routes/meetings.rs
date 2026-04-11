@@ -554,7 +554,7 @@ pub async fn discard_all_issues(
 /// POST /api/round-table-meetings/start
 /// Send meeting start request to Discord channel via announce bot.
 pub async fn start_meeting(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(body): Json<StartMeetingBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let channel_id = match &body.channel_id {
@@ -575,39 +575,32 @@ pub async fn start_meeting(
         }
     };
 
-    // Send meeting start command to the channel via /api/send (same axum server)
-    let server_port = crate::config::load_graceful().server.port;
-
     let message = build_meeting_start_command(agenda, primary_provider);
-    let client = reqwest::Client::new();
-    match client
-        .post(crate::config::local_api_url(server_port, "/api/send"))
-        .json(&json!({
-            "target": format!("channel:{channel_id}"),
-            "content": message,
-            "source": "dashboard",
-        }))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => (
+    let Some(registry) = state.health_registry.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"ok": false, "error": "Discord health registry unavailable"})),
+        );
+    };
+    let (status, body) = crate::services::discord::health::send_message(
+        registry,
+        &state.db,
+        &format!("channel:{channel_id}"),
+        &message,
+        "dashboard",
+        "announce",
+    )
+    .await;
+    if status == "200 OK" {
+        (
             StatusCode::OK,
             Json(json!({"ok": true, "message": "Meeting start command sent"})),
-        ),
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"ok": false, "error": format!("Discord send failed: {status} {body}")}),
-                ),
-            )
-        }
-        Err(e) => (
+        )
+    } else {
+        (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "error": format!("Request failed: {e}")})),
-        ),
+            Json(json!({"ok": false, "error": format!("Discord send failed: {status} {body}")})),
+        )
     }
 }
 

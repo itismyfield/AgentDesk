@@ -1554,41 +1554,18 @@ pub(super) async fn cancel_text_stop_token_mailbox(
     }
 }
 
-fn escalation_settings_api_url() -> String {
-    let config = crate::config::load_graceful();
-    crate::config::local_api_url(config.server.port, "/api/settings/escalation")
-}
-
 async fn fetch_escalation_settings_via_api()
 -> Result<crate::server::routes::escalation::EscalationSettingsResponse, String> {
-    let response = reqwest::Client::new()
-        .get(escalation_settings_api_url())
-        .send()
-        .await
-        .map_err(|err| err.to_string())?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("settings fetch failed: {status} {body}"));
-    }
-    response.json().await.map_err(|err| err.to_string())
+    let body = crate::services::discord::internal_api::get_escalation_settings().await?;
+    serde_json::from_value(body).map_err(|err| err.to_string())
 }
 
 async fn save_escalation_settings_via_api(
     settings: &crate::server::routes::escalation::EscalationSettings,
 ) -> Result<crate::server::routes::escalation::EscalationSettingsResponse, String> {
-    let response = reqwest::Client::new()
-        .put(escalation_settings_api_url())
-        .json(settings)
-        .send()
-        .await
-        .map_err(|err| err.to_string())?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("settings save failed: {status} {body}"));
-    }
-    response.json().await.map_err(|err| err.to_string())
+    let body =
+        crate::services::discord::internal_api::put_escalation_settings(settings.clone()).await?;
+    serde_json::from_value(body).map_err(|err| err.to_string())
 }
 
 fn parse_discord_user_id(raw: &str) -> Option<u64> {

@@ -7,6 +7,7 @@ mod gateway;
 mod handoff;
 pub(crate) mod health;
 mod inflight;
+mod internal_api;
 mod meeting;
 mod metrics;
 mod model_catalog;

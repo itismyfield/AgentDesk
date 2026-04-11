@@ -106,20 +106,22 @@ fn resolve_agent_id_from_channel_name(
     })
 }
 
-fn spawn_auto_queue_activate_for_agent(agent_id: String) {
-    let port = crate::config::load_graceful().server.port;
+fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
     tokio::spawn(async move {
         // Let the session/dispatch cleanup commit before queue activation probes.
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        let url = crate::config::local_api_url(port, "/api/auto-queue/activate");
-        let _ = reqwest::Client::new()
-            .post(&url)
-            .json(&serde_json::json!({
-                "agent_id": agent_id,
-                "active_only": true,
-            }))
-            .send()
-            .await;
+        let _ = super::auto_queue::activate(
+            State(state),
+            Json(super::auto_queue::ActivateBody {
+                run_id: None,
+                repo: None,
+                agent_id: Some(agent_id),
+                thread_group: None,
+                unified_thread: None,
+                active_only: Some(true),
+            }),
+        )
+        .await;
     });
 }
 
@@ -494,7 +496,7 @@ pub async fn hook_session(
             // but the agent is already idle and could start the next queued item.
             if status == "idle" {
                 if let Some(ref aid) = agent_id {
-                    spawn_auto_queue_activate_for_agent(aid.clone());
+                    spawn_auto_queue_activate_for_agent(state.clone(), aid.clone());
                 }
             }
 
@@ -1258,7 +1260,7 @@ pub(crate) async fn force_kill_session_impl(
 
     let queue_activation_requested = if retry_dispatch_id.is_none() {
         if let Some(ref aid) = agent_id {
-            spawn_auto_queue_activate_for_agent(aid.clone());
+            spawn_auto_queue_activate_for_agent(state.clone(), aid.clone());
             true
         } else {
             false

@@ -1394,17 +1394,13 @@ async fn post_meeting_status(
     payload: serde_json::Value,
     api_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-    let _ = client
-        .post(crate::config::local_api_url(
-            api_port,
-            "/api/round-table-meetings",
-        ))
-        .json(&payload)
-        .send()
-        .await?;
+    let _ = api_port;
+    let body: crate::server::routes::meetings::UpsertMeetingBody = serde_json::from_value(payload)?;
+    super::internal_api::upsert_meeting(body)
+        .await
+        .map_err(|err| {
+            Box::new(std::io::Error::other(err)) as Box<dyn std::error::Error + Send + Sync>
+        })?;
     Ok(())
 }
 

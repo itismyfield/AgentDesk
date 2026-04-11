@@ -464,53 +464,37 @@ pub(super) async fn restore_inflight_turns(
                             }
                         }
                     } else {
-                        // Db/Engine not available — fall back to API PATCH with retry
-                        let complete_url = crate::config::local_api_url(
-                            shared.api_port,
-                            &format!("/api/dispatches/{}", did),
-                        );
-                        let payload = serde_json::json!({
-                            "status": "completed",
-                            "result": completion_context.clone().map(|mut result| {
-                                if let Some(obj) = result.as_object_mut() {
-                                    obj.insert(
-                                        "completion_source".to_string(),
-                                        serde_json::Value::String(
-                                            "recovery_completed_during_downtime".to_string(),
-                                        ),
-                                    );
-                                }
-                                result
-                            }).unwrap_or_else(|| {
-                                serde_json::json!({"completion_source": "recovery_completed_during_downtime"})
-                            }),
-                        });
+                        // Db/Engine not available — fall back to direct dispatch update with retry
+                        let payload = crate::server::routes::dispatches::UpdateDispatchBody {
+                                status: Some("completed".to_string()),
+                                result: Some(completion_context.clone().map(|mut result| {
+                                    if let Some(obj) = result.as_object_mut() {
+                                        obj.insert(
+                                            "completion_source".to_string(),
+                                            serde_json::Value::String(
+                                                "recovery_completed_during_downtime".to_string(),
+                                            ),
+                                        );
+                                    }
+                                    result
+                                }).unwrap_or_else(|| {
+                                    serde_json::json!({
+                                        "completion_source": "recovery_completed_during_downtime"
+                                    })
+                                })),
+                            };
                         for attempt in 1..=3u8 {
-                            match reqwest::Client::new()
-                                .patch(&complete_url)
-                                .json(&payload)
-                                .send()
-                                .await
-                            {
-                                Ok(resp) if resp.status().is_success() => {
+                            match super::internal_api::update_dispatch(did, payload.clone()).await {
+                                Ok(_) => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!(
-                                        "  [{ts}] ✓ recovery: completed dispatch {did} via API"
-                                    );
+                                    println!("  [{ts}] ✓ recovery: completed dispatch {did}");
                                     dispatch_completed = true;
                                     break;
                                 }
-                                Ok(resp) => {
+                                Err(err) => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     eprintln!(
-                                        "  [{ts}] ⚠ recovery: dispatch {did} API completion failed (attempt {attempt}/3): {}",
-                                        resp.status()
-                                    );
-                                }
-                                Err(e) => {
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    eprintln!(
-                                        "  [{ts}] ⚠ recovery: dispatch {did} API call failed (attempt {attempt}/3): {e}"
+                                        "  [{ts}] ⚠ recovery: dispatch {did} completion failed (attempt {attempt}/3): {err}"
                                     );
                                 }
                             }

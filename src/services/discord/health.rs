@@ -1063,25 +1063,14 @@ fn resolve_send_target_channel_id(db: &Db, target: &str) -> Result<u64, SendTarg
 
 /// Handle POST /api/send — agent-to-agent native routing.
 /// Accepts JSON: {"target":"channel:<id>|channel:<name>|agent:<roleId>", "content":"...", "source":"role-id", "bot":"announce|notify"}
-pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> (&'a str, String) {
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
-        return (
-            "400 Bad Request",
-            r#"{"ok":false,"error":"invalid JSON"}"#.to_string(),
-        );
-    };
-
-    let target = json.get("target").and_then(|v| v.as_str()).unwrap_or("");
-    let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    let source = json
-        .get("source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let bot = json
-        .get("bot")
-        .and_then(|v| v.as_str())
-        .unwrap_or("announce");
-
+pub async fn send_message(
+    registry: &HealthRegistry,
+    db: &Db,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+) -> (&'static str, String) {
     if content.is_empty() {
         return (
             "400 Bad Request",
@@ -1123,6 +1112,7 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> 
         "system",
         "timeouts",
         "merge-automation",
+        "dashboard",
     ];
     if !INTERNAL_SOURCES.contains(&source) && !super::settings::is_known_agent(source) {
         return (
@@ -1199,6 +1189,28 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> 
             )
         }
     }
+}
+
+pub async fn handle_send<'a>(registry: &HealthRegistry, db: &Db, body: &str) -> (&'a str, String) {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return (
+            "400 Bad Request",
+            r#"{"ok":false,"error":"invalid JSON"}"#.to_string(),
+        );
+    };
+
+    let target = json.get("target").and_then(|v| v.as_str()).unwrap_or("");
+    let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let source = json
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let bot = json
+        .get("bot")
+        .and_then(|v| v.as_str())
+        .unwrap_or("announce");
+
+    send_message(registry, db, target, content, source, bot).await
 }
 
 /// Handle POST /api/senddm — send a DM to a Discord user.

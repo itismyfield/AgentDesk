@@ -270,14 +270,7 @@ async fn clear_provider_session_for_retry(
     super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
 
     if let Some(sid) = stale_sid {
-        let _ = reqwest::Client::new()
-            .post(crate::config::local_api_url(
-                shared.api_port,
-                "/api/dispatched-sessions/clear-stale-session-id",
-            ))
-            .json(&serde_json::json!({ "session_id": sid }))
-            .send()
-            .await;
+        let _ = super::internal_api::clear_stale_session_id(&sid).await;
     }
 }
 
@@ -1252,14 +1245,7 @@ pub(super) async fn tmux_output_watcher(
                 super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
             }
             if let Some(ref sid) = stale_sid {
-                let _ = reqwest::Client::new()
-                    .post(crate::config::local_api_url(
-                        shared.api_port,
-                        "/api/dispatched-sessions/clear-stale-session-id",
-                    ))
-                    .json(&serde_json::json!({"session_id": sid}))
-                    .send()
-                    .await;
+                let _ = super::internal_api::clear_stale_session_id(sid).await;
             }
             crate::services::termination_audit::record_termination_for_tmux(
                 &tmux_session_name,

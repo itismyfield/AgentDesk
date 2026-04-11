@@ -17,20 +17,10 @@ pub(super) async fn lookup_card_thread(api_port: u16, dispatch_id: &str) -> Opti
 }
 
 pub(super) async fn lookup_dispatch_info(api_port: u16, dispatch_id: &str) -> Option<DispatchInfo> {
-    let url = crate::config::local_api_url(
-        api_port,
-        &format!("/api/internal/card-thread?dispatch_id={dispatch_id}"),
-    );
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
+    let _ = api_port;
+    let body = crate::services::discord::internal_api::lookup_dispatch_info(dispatch_id)
         .await
         .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body: serde_json::Value = resp.json().await.ok()?;
     Some(DispatchInfo {
         active_thread_id: body
             .get("active_thread_id")
@@ -92,15 +82,13 @@ pub(super) async fn link_dispatch_thread(
     thread_id: u64,
     channel_id: u64,
 ) {
-    let url = crate::config::local_api_url(api_port, "/api/internal/link-dispatch-thread");
-    let _ = reqwest::Client::new()
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(2))
-        .json(&serde_json::json!({
-            "dispatch_id": dispatch_id,
-            "thread_id": thread_id.to_string(),
-            "channel_id": channel_id.to_string(),
-        }))
-        .send()
-        .await;
+    let _ = api_port;
+    let _ = crate::services::discord::internal_api::link_dispatch_thread(
+        crate::server::routes::dispatches::LinkDispatchThreadBody {
+            dispatch_id: dispatch_id.to_string(),
+            thread_id: thread_id.to_string(),
+            channel_id: Some(channel_id.to_string()),
+        },
+    )
+    .await;
 }

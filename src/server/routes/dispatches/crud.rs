@@ -26,7 +26,7 @@ pub struct CreateDispatchBody {
     pub skip_outbox: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct UpdateDispatchBody {
     pub status: Option<String>,
     pub result: Option<serde_json::Value>,

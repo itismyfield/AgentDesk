@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::config::local_api_url;
 use crate::services::discord::SharedData;
 use crate::services::provider::ProviderKind;
 use serenity::all::{ChannelId, MessageId};
@@ -66,14 +65,10 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     // Store history in kv_meta for the router to inject into LLM prompt.
     // Key: session_retry_context:{channel_id} — consumed on next turn start.
     if let Some(ref hist) = history {
-        let _ = reqwest::Client::new()
-            .post(local_api_url(shared.api_port, "/api/kv"))
-            .json(&serde_json::json!({
-                "key": format!("session_retry_context:{}", channel_id),
-                "value": hist,
-            }))
-            .send()
-            .await;
+        let _ = super::super::internal_api::set_kv_value(
+            &format!("session_retry_context:{}", channel_id),
+            hist,
+        );
     }
 
     // Discord message: short notice only — history stays LLM-side

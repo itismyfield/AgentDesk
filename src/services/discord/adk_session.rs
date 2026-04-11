@@ -4,7 +4,6 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 
 use super::SharedData;
-use crate::config::local_api_url;
 use crate::services::provider::ProviderKind;
 
 const SESSION_INFO_MAX_CHARS: usize = 60;
@@ -33,21 +32,12 @@ pub(super) fn parse_dispatch_id(text: &str) -> Option<String> {
 /// via the ADK API. Used as fallback when parse_dispatch_id fails (unified threads
 /// where user_text doesn't contain DISPATCH: prefix).
 pub(super) async fn lookup_pending_dispatch_for_thread(
-    api_port: u16,
+    _api_port: u16,
     thread_channel_id: u64,
 ) -> Option<String> {
-    let url = local_api_url(
-        api_port,
-        &format!(
-            "/api/internal/pending-dispatch-for-thread?thread_id={}",
-            thread_channel_id
-        ),
-    );
-    let resp = reqwest::Client::new().get(&url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body: serde_json::Value = resp.json().await.ok()?;
+    let body = super::internal_api::lookup_pending_dispatch_for_thread(thread_channel_id)
+        .await
+        .ok()?;
     body.get("dispatch_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
@@ -171,126 +161,56 @@ pub(super) async fn post_adk_session_status(
     cwd: Option<&str>,
     dispatch_id: Option<&str>,
     thread_channel_id: Option<u64>,
-    api_port: u16,
+    _api_port: u16,
 ) {
     let Some(session_key) = session_key else {
         return;
     };
 
-    let mut body = serde_json::json!({
-        "session_key": session_key,
-        "status": status,
-        "provider": provider.as_str(),
-        "session_info": session_info,
-    });
+    let body = crate::server::routes::dispatched_sessions::HookSessionBody {
+        session_key: session_key.to_string(),
+        status: Some(status.to_string()),
+        provider: Some(provider.as_str().to_string()),
+        session_info: session_info.map(str::to_string),
+        name: name.and_then(clean_nonempty).map(str::to_string),
+        model: model.and_then(clean_nonempty).map(str::to_string),
+        tokens,
+        cwd: cwd.and_then(clean_nonempty).map(str::to_string),
+        dispatch_id: dispatch_id.and_then(clean_nonempty).map(str::to_string),
+        thread_channel_id: thread_channel_id.map(|id| id.to_string()),
+        claude_session_id: None,
+        session_id: None,
+    };
 
-    if let Some(name) = name.and_then(clean_nonempty) {
-        body["name"] = serde_json::json!(name);
-    }
-    if let Some(model) = model.and_then(clean_nonempty) {
-        body["model"] = serde_json::json!(model);
-    }
-    if let Some(tokens) = tokens {
-        body["tokens"] = serde_json::json!(tokens);
-    }
-    if let Some(cwd) = cwd.and_then(clean_nonempty) {
-        body["cwd"] = serde_json::json!(cwd);
-    }
-    if let Some(did) = dispatch_id.and_then(clean_nonempty) {
-        body["dispatch_id"] = serde_json::json!(did);
-    }
-    if let Some(thread_channel_id) = thread_channel_id {
-        body["thread_channel_id"] = serde_json::json!(thread_channel_id.to_string());
-    }
-
-    match reqwest::Client::new()
-        .post(local_api_url(api_port, "/api/hook/session"))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) if !resp.status().is_success() => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ ADK session POST failed: HTTP {}", resp.status());
-        }
-        Err(e) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ ADK session POST error: {e}");
-        }
-        _ => {}
+    if let Err(err) = super::internal_api::hook_session(body).await {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!("  [{ts}] ⚠ ADK session POST failed: {err}");
     }
 }
 
 /// Delete a session row from the DB by session_key.
 /// Used to clean up thread sessions after dispatch completion.
-pub(super) async fn delete_adk_session(session_key: &str, api_port: u16) {
-    let url = local_api_url(api_port, "/api/hook/session");
-    match reqwest::Client::new()
-        .delete(&url)
-        .query(&[("session_key", session_key)])
-        .send()
-        .await
-    {
-        Ok(resp) if !resp.status().is_success() => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] ⚠ ADK session DELETE failed: HTTP {}",
-                resp.status()
-            );
-        }
-        Err(e) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ ADK session DELETE error: {e}");
-        }
-        _ => {}
+pub(super) async fn delete_adk_session(session_key: &str, _api_port: u16) {
+    if let Err(err) = super::internal_api::delete_session(session_key).await {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!("  [{ts}] ⚠ ADK session DELETE failed: {err}");
     }
 
     if let Some(legacy_key) = legacy_session_key_from_namespaced(session_key) {
-        let _ = reqwest::Client::new()
-            .delete(&url)
-            .query(&[("session_key", legacy_key.as_str())])
-            .send()
-            .await;
+        let _ = super::internal_api::delete_session(&legacy_key).await;
     }
 }
 
 /// Clear the stored provider session_id from DB for a given session_key.
 /// Called when the user runs /clear so the next turn doesn't resume a dead session.
-pub(super) async fn clear_provider_session_id(session_key: &str, api_port: u16) {
-    let body = serde_json::json!({ "session_key": session_key });
-    match reqwest::Client::new()
-        .post(local_api_url(
-            api_port,
-            "/api/dispatched-sessions/clear-session-id",
-        ))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) if !resp.status().is_success() => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] ⚠ clear_provider_session_id failed: HTTP {}",
-                resp.status()
-            );
-        }
-        Err(e) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ clear_provider_session_id error: {e}");
-        }
-        _ => {}
+pub(super) async fn clear_provider_session_id(session_key: &str, _api_port: u16) {
+    if let Err(err) = super::internal_api::clear_session_id(session_key).await {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!("  [{ts}] ⚠ clear_provider_session_id failed: {err}");
     }
 
     if let Some(legacy_key) = legacy_session_key_from_namespaced(session_key) {
-        let legacy_body = serde_json::json!({ "session_key": legacy_key });
-        let _ = reqwest::Client::new()
-            .post(local_api_url(
-                api_port,
-                "/api/dispatched-sessions/clear-session-id",
-            ))
-            .json(&legacy_body)
-            .send()
-            .await;
+        let _ = super::internal_api::clear_session_id(&legacy_key).await;
     }
 }
 
@@ -300,27 +220,25 @@ pub(super) async fn save_provider_session_id(
     session_key: &str,
     session_id: &str,
     provider: &ProviderKind,
-    api_port: u16,
+    _api_port: u16,
 ) {
-    let body = build_provider_session_payload(session_key, session_id, provider);
-    match reqwest::Client::new()
-        .post(local_api_url(api_port, "/api/hook/session"))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) if !resp.status().is_success() => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] ⚠ save_provider_session_id failed: HTTP {}",
-                resp.status()
-            );
-        }
-        Err(e) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ save_provider_session_id error: {e}");
-        }
-        _ => {}
+    let body = crate::server::routes::dispatched_sessions::HookSessionBody {
+        session_key: session_key.to_string(),
+        status: None,
+        provider: Some(provider.as_str().to_string()),
+        session_info: None,
+        name: None,
+        model: None,
+        tokens: None,
+        cwd: None,
+        dispatch_id: None,
+        thread_channel_id: None,
+        claude_session_id: Some(session_id.to_string()),
+        session_id: Some(session_id.to_string()),
+    };
+    if let Err(err) = super::internal_api::hook_session(body).await {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        eprintln!("  [{ts}] ⚠ save_provider_session_id failed: {err}");
     }
 }
 
@@ -342,22 +260,11 @@ pub(super) async fn fetch_provider_session_id(
 async fn fetch_provider_session_id_once(
     session_key: &str,
     provider: &ProviderKind,
-    api_port: u16,
+    _api_port: u16,
 ) -> Option<String> {
-    let url = local_api_url(api_port, "/api/dispatched-sessions/claude-session-id");
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .query(&[
-            ("session_key", session_key),
-            ("provider", provider.as_str()),
-        ])
-        .send()
+    let json = super::internal_api::get_provider_session_id(session_key, Some(provider.as_str()))
         .await
         .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let json: serde_json::Value = resp.json().await.ok()?;
     // #107: Filter empty strings — a stale clear path may have stored ""
     // instead of NULL; treat it as no session ID.
     // Also try session_id field as fallback for provider-agnostic lookup.
@@ -366,6 +273,19 @@ async fn fetch_provider_session_id_once(
         .or_else(|| json.get("claude_session_id").and_then(|v| v.as_str()))
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
+}
+
+fn build_provider_session_payload(
+    session_key: &str,
+    session_id: &str,
+    provider: &ProviderKind,
+) -> serde_json::Value {
+    serde_json::json!({
+        "session_key": session_key,
+        "session_id": session_id,
+        "claude_session_id": session_id,
+        "provider": provider.as_str(),
+    })
 }
 
 fn normalize_user_task_summary(input: &str) -> Option<String> {
@@ -386,19 +306,6 @@ fn normalize_user_task_summary(input: &str) -> Option<String> {
     }
 
     Some(truncate_chars(&collapsed, SESSION_INFO_MAX_CHARS))
-}
-
-fn build_provider_session_payload(
-    session_key: &str,
-    session_id: &str,
-    provider: &ProviderKind,
-) -> serde_json::Value {
-    serde_json::json!({
-        "session_key": session_key,
-        "session_id": session_id,
-        "claude_session_id": session_id,
-        "provider": provider.as_str(),
-    })
 }
 
 fn trim_leading_marker(input: &str) -> &str {
@@ -775,16 +682,11 @@ impl ContextThresholds {
 /// Fetch context thresholds from the ADK config API (individual kv_meta keys).
 /// Falls back to defaults on any error.
 /// Supports provider-specific overrides: `context_compact_percent_codex`, etc.
-pub(super) async fn fetch_context_thresholds(api_port: u16) -> ContextThresholds {
+pub(super) async fn fetch_context_thresholds(_api_port: u16) -> ContextThresholds {
     let defaults = ContextThresholds::default();
-    let url = local_api_url(api_port, "/api/settings/config");
-    let resp = match reqwest::Client::new().get(&url).send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return defaults,
-    };
-    let body: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        _ => return defaults,
+    let body = match super::internal_api::get_config_entries().await {
+        Ok(body) => body,
+        Err(_) => return defaults,
     };
     let entries = body.get("entries").and_then(|v| v.as_array());
 

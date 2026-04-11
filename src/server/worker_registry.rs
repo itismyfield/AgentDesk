@@ -1,10 +1,12 @@
 use std::future::Future;
 
 use anyhow::{Result, anyhow};
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::db::Db;
 use crate::engine::PolicyEngine;
+use crate::services::discord::health::HealthRegistry;
 
 use super::ws::{BatchBuffer, BroadcastTx};
 
@@ -183,14 +185,14 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 7] = [
         name: "message_outbox_loop",
         kind: WorkerKind::TokioTask,
         target: "message_outbox_loop",
-        responsibility: "Drain queued message_outbox rows through the local /api/send endpoint",
+        responsibility: "Drain queued message_outbox rows through the in-process Discord delivery path",
         owner: "server::worker_registry",
         start_stage: WorkerStartStage::AfterBootReconcile,
         start_order: 40,
         restart_policy: WorkerRestartPolicy::LoopOwned,
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
         health_owner: "message_outbox row state and delivery tracing",
-        notes: "Waits three seconds for HTTP readiness before polling with adaptive backoff",
+        notes: "Waits three seconds for Discord runtime readiness before polling with adaptive backoff",
     },
     WorkerSpec {
         id: ServerWorkerId::DispatchOutbox,
@@ -255,15 +257,22 @@ pub(crate) struct SupervisedWorkerRegistry {
     config: Config,
     db: Db,
     engine: PolicyEngine,
+    health_registry: Option<Arc<HealthRegistry>>,
     running: Vec<RunningWorker>,
 }
 
 impl SupervisedWorkerRegistry {
-    pub(crate) fn new(config: Config, db: Db, engine: PolicyEngine) -> Self {
+    pub(crate) fn new(
+        config: Config,
+        db: Db,
+        engine: PolicyEngine,
+        health_registry: Option<Arc<HealthRegistry>>,
+    ) -> Self {
         Self {
             config,
             db,
             engine,
+            health_registry,
             running: Vec::new(),
         }
     }
@@ -278,7 +287,7 @@ impl SupervisedWorkerRegistry {
             );
             match step.id {
                 BootStepId::RefreshMemoryHealth => {
-                    super::tick::refresh_memory_health_for_startup().await;
+                    super::refresh_memory_health_for_startup().await;
                 }
                 BootStepId::DrainStartupHooks => {
                     self.engine.drain_startup_hooks();
@@ -349,7 +358,7 @@ impl SupervisedWorkerRegistry {
                 let sync_db = self.db.clone();
                 let sync_engine = self.engine.clone();
                 self.register_tokio(spec, async move {
-                    super::background::github_sync_loop(sync_db, sync_engine, sync_interval).await;
+                    super::github_sync_loop(sync_db, sync_engine, sync_interval).await;
                 });
                 Ok(None)
             }
@@ -364,22 +373,22 @@ impl SupervisedWorkerRegistry {
                             eprintln!("Fatal: failed to create policy-tick runtime: {e}");
                             std::process::exit(1);
                         });
-                    rt.block_on(super::tick::policy_tick_loop(tick_engine, tick_db));
+                    rt.block_on(super::policy_tick_loop(tick_engine, tick_db));
                 })?;
                 Ok(None)
             }
             ServerWorkerId::RateLimitSync => {
                 let rate_limit_db = self.db.clone();
                 self.register_tokio(spec, async move {
-                    super::background::rate_limit_sync_loop(rate_limit_db).await;
+                    super::rate_limit_sync_loop(rate_limit_db).await;
                 });
                 Ok(None)
             }
             ServerWorkerId::MessageOutbox => {
                 let outbox_db = self.db.clone();
-                let outbox_port = self.config.server.port;
+                let outbox_health_registry = self.health_registry.clone();
                 self.register_tokio(spec, async move {
-                    super::background::message_outbox_loop(outbox_db, outbox_port).await;
+                    super::message_outbox_loop(outbox_db, outbox_health_registry).await;
                 });
                 Ok(None)
             }
@@ -393,7 +402,7 @@ impl SupervisedWorkerRegistry {
             ServerWorkerId::DmReplyRetry => {
                 let dm_retry_db = self.db.clone();
                 self.register_tokio(spec, async move {
-                    super::background::dm_reply_retry_loop(dm_retry_db).await;
+                    super::dm_reply_retry_loop(dm_retry_db).await;
                 });
                 Ok(None)
             }
