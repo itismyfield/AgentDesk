@@ -1081,7 +1081,7 @@ pub(super) async fn replace_long_message_raw(
 
     if let Err(e) = edit_result {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] ⚠ replace_long_message_raw edit failed for channel {} msg {}: {e}",
             channel_id.get(),
             message_id.get()
@@ -1182,7 +1182,7 @@ pub(super) async fn add_reaction_raw(
     let reaction = serenity::ReactionType::Unicode(emoji.to_string());
     if let Err(e) = channel_id.create_reaction(http, message_id, reaction).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!(
+        tracing::warn!(
             "  [{ts}] ⚠ Failed to add reaction '{emoji}' to msg {message_id} in channel {channel_id}: {e}"
         );
     }
@@ -1201,7 +1201,7 @@ pub(super) async fn remove_reaction_raw(
         .await
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!(
+        tracing::warn!(
             "  [{ts}] ⚠ Failed to remove reaction '{emoji}' from msg {message_id} in channel {channel_id}: {e}"
         );
     }

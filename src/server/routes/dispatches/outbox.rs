@@ -266,7 +266,7 @@ pub(crate) async fn handle_completed_dispatch_followups(
     if dispatch_type == "review" {
         let verdict = extract_review_verdict(result_json.as_deref());
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 🔍 REVIEW-FOLLOWUP: dispatch={dispatch_id} verdict={verdict} result={:?}",
             result_json.as_deref().unwrap_or("NULL")
         );
@@ -283,7 +283,7 @@ pub(crate) async fn handle_completed_dispatch_followups(
             )
             .await?;
         } else {
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ REVIEW-FOLLOWUP: skipping send_review_result_to_primary (verdict=unknown)"
             );
         }

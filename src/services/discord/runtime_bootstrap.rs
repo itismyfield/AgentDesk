@@ -17,7 +17,7 @@ fn spawn_startup_thread_map_validation(db: crate::db::Db, token: String) {
                 .await;
         if checked > 0 || cleared > 0 {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 🧹 THREAD-MAP: validated {checked} mapping(s), cleared {cleared} stale binding(s)"
             );
         }
@@ -39,7 +39,7 @@ async fn execute_handoff_turns(
     }
     let settings_snapshot = shared.settings.read().await.clone();
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts}] 📎 Found {} handoff record(s) to process",
         handoffs.len()
     );
@@ -52,9 +52,10 @@ async fn execute_handoff_turns(
 
         // Skip if from a different generation (stale)
         if record.born_generation > current_gen {
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (future generation {})",
-                record.channel_id, record.born_generation
+                record.channel_id,
+                record.born_generation
             );
             clear_handoff(provider, record.channel_id);
             continue;
@@ -62,9 +63,10 @@ async fn execute_handoff_turns(
 
         // Skip if already executed/skipped/failed
         if record.state != "created" {
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (state={})",
-                record.channel_id, record.state
+                record.channel_id,
+                record.state
             );
             clear_handoff(provider, record.channel_id);
             continue;
@@ -88,7 +90,7 @@ async fn execute_handoff_turns(
             provider_channel_name.as_deref(),
             is_dm,
         ) {
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ Skipping handoff for channel {} — {reason}",
                 record.channel_id
             );
@@ -101,7 +103,7 @@ async fn execute_handoff_turns(
             .intervention_queue
             .is_empty();
         if has_pending {
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (pending queue has messages)",
                 record.channel_id
             );
@@ -113,7 +115,7 @@ async fn execute_handoff_turns(
         // Skip if an active turn is already running
         let has_active = mailbox_has_active_turn(shared, channel_id).await;
         if has_active {
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (active turn running)",
                 record.channel_id
             );
@@ -131,7 +133,7 @@ async fn execute_handoff_turns(
                 .is_some()
         };
         if !has_session {
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ Skipping handoff for channel {} (no active session)",
                 record.channel_id
             );
@@ -142,9 +144,10 @@ async fn execute_handoff_turns(
 
         // Mark as executing
         let _ = update_handoff_state(provider, record.channel_id, "executing");
-        println!(
+        tracing::info!(
             "  [{ts}] ▶ Executing handoff for channel {} — {}",
-            record.channel_id, record.intent
+            record.channel_id,
+            record.intent
         );
 
         // Send a placeholder message in the channel
@@ -166,9 +169,10 @@ async fn execute_handoff_turns(
         {
             Ok(msg) => msg,
             Err(e) => {
-                println!(
+                tracing::info!(
                     "  [{ts}] ❌ Failed to send handoff placeholder for channel {}: {}",
-                    record.channel_id, e
+                    record.channel_id,
+                    e
                 );
                 let _ = update_handoff_state(provider, record.channel_id, "failed");
                 clear_handoff(provider, record.channel_id);
@@ -193,7 +197,7 @@ async fn execute_handoff_turns(
 
         let _ = update_handoff_state(provider, record.channel_id, "completed");
         clear_handoff(provider, record.channel_id);
-        println!(
+        tracing::info!(
             "  [{ts}] ✓ Handoff queued for channel {} (injected as intervention)",
             record.channel_id
         );
@@ -243,7 +247,9 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
             None => {
                 // No pid file — cannot determine boot time safely, skip recovery
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ⚠ #164: No dcserver.pid — skipping orphan dispatch recovery");
+                tracing::info!(
+                    "  [{ts}] ⚠ #164: No dcserver.pid — skipping orphan dispatch recovery"
+                );
                 return;
             }
         }
@@ -302,7 +308,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts}] 🔄 #164: Found {} orphan pending dispatch(es) to re-deliver",
         orphans.len()
     );
@@ -324,7 +330,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
         }
 
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}]   ↻ Re-delivering {dtype} dispatch {id} → {agent} (card {card})",
             id = &dispatch_id[..8],
             agent = agent_id,
@@ -347,7 +353,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
             }
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}]   ⚠ Recovery delivery failed for {id}: {e}",
                     id = &dispatch_id[..8],
                 );
@@ -356,7 +362,7 @@ async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts}] ✓ #164: Re-delivered {delivered}/{} orphan dispatch(es)",
         orphans.len()
     );
@@ -394,7 +400,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     if let Some(bot_name) = should_skip_agent_runtime_launch(token) {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] ⏭ BOT-LAUNCH: skipping utility bot '{}' in run_bot() — not mapped to any agent channel",
             bot_name
         );
@@ -411,13 +417,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     bot_settings.provider = provider.clone();
 
     match bot_settings.owner_user_id {
-        Some(owner_id) => println!("  ✓ Owner: {owner_id}"),
-        None => println!("  ⚠ No owner registered — first user will be registered as owner"),
+        Some(owner_id) => tracing::info!("  ✓ Owner: {owner_id}"),
+        None => tracing::info!("  ⚠ No owner registered — first user will be registered as owner"),
     }
 
     let initial_skills = scan_skills(&provider, None);
     let skill_count = initial_skills.len();
-    println!(
+    tracing::info!(
         "  ✓ {} bot ready — Skills loaded: {}",
         provider.display_name(),
         skill_count
@@ -496,12 +502,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 🔑 dcserver generation: {}",
             shared.current_generation
         );
         if !restored_model_overrides.is_empty() {
-            println!(
+            tracing::info!(
                 "  [{ts}] 🧩 restored model overrides: {} channel(s)",
                 restored_model_overrides.len()
             );
@@ -554,7 +560,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     .await;
                     if !allowed {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
+                        tracing::info!(
                             "  [{ts}] ⏭ CMD-GUARD: skipping /{} in channel {} for provider {}",
                             ctx.command().name,
                             ctx.channel_id(),
@@ -584,13 +590,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     if let Err(e) =
                         poise::builtins::register_in_guild(ctx, commands, guild.id).await
                     {
-                        eprintln!(
+                        tracing::warn!(
                             "  ⚠ Failed to register commands in guild {}: {}",
                             guild.id, e
                         );
                     }
                 }
-                println!(
+                tracing::info!(
                     "  ✓ Bot connected — Registered commands in {} guild(s)",
                     _ready.guilds.len()
                 );
@@ -623,7 +629,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                         .restart_pending
                                         .store(true, Ordering::SeqCst);
                                     let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!(
+                                    tracing::info!(
                                         "  [{ts}] ⏸ DRAIN: restart_pending detected, entering drain mode — new turns blocked"
                                     );
                                 }
@@ -645,7 +651,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             .await;
                             if queue_count > 0 {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!(
+                                tracing::info!(
                                     "  [{ts}] 📋 DRAIN: mailbox persisted {queue_count} pending queue item(s) before deferred restart"
                                 );
                             }
@@ -694,7 +700,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                             let count = merged.len();
                             *shared_for_skills.skills_cache.write().await = merged;
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!(
+                            tracing::info!(
                                 "  [{ts}] 🔄 Skills hot-reloaded: {count} skill(s) ({} files, mtime Δ)",
                                 fp.0
                             );
@@ -722,7 +728,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     if is_utility_bot {
                         mark_reconcile_complete(&shared_for_tmux2);
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] ✓ Utility bot reconcile — skipped recovery");
+                        tracing::info!("  [{ts}] ✓ Utility bot reconcile — skipped recovery");
                     } else {
                         // #429: Recover restart-gap messages first so new user input gets queued
                         // within seconds of bot ready instead of waiting behind slower
@@ -767,7 +773,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         }
                         if !restored_overrides.is_empty() {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!(
+                            tracing::info!(
                                 "  [{ts}] 📋 FLUSH: restored {} dispatch_role_override(s) from queue snapshots",
                                 restored_overrides.len()
                             );
@@ -810,7 +816,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                 .await;
                             }
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!(
+                            tracing::info!(
                                 "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped} duplicates)"
                             );
                         }
@@ -831,7 +837,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                                     .await;
                                 if checked > 0 || cleared > 0 {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!(
+                                    tracing::info!(
                                         "  [{ts}] 🧹 THREAD-MAP: validated {checked} mapping(s), cleared {cleared} stale binding(s)"
                                     );
                                 }
@@ -907,7 +913,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         // #122: Reconcile phase complete — open intake
                         mark_reconcile_complete(&shared_for_restart_reports);
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] ✓ Reconcile complete — intake open");
+                        tracing::info!("  [{ts}] ✓ Reconcile complete — intake open");
                     } // end of !is_utility_bot recovery block
 
                     // Kick off again to drain messages queued during reconcile window
@@ -924,7 +930,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     // reopening or queued-turn kickoff on it.
                     if let Some(db) = shared_for_tmux2.db.clone() {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] 🧹 THREAD-MAP: continuing validation in background");
+                        tracing::info!("  [{ts}] 🧹 THREAD-MAP: continuing validation in background");
                         spawn_startup_thread_map_validation(db, token_for_kickoff.clone());
                     }
 
@@ -1012,7 +1018,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                 sigterm.recv().await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] 🛑 SIGTERM received — graceful shutdown");
+                tracing::info!("  [{ts}] 🛑 SIGTERM received — graceful shutdown");
 
                 // Set global shutdown flag
                 shared_for_signal
@@ -1045,7 +1051,9 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
                 if queue_count > 0 {
                     let ts3 = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts3}] 📋 mailbox persisted {queue_count} pending queue item(s)");
+                    tracing::info!(
+                        "  [{ts3}] 📋 mailbox persisted {queue_count} pending queue item(s)"
+                    );
                 }
 
                 // Persist last_message_ids for catch-up polling after restart
@@ -1086,7 +1094,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                     report.channel_name = state.channel_name.clone();
                     report.user_msg_id = Some(state.user_msg_id);
                     if let Err(e) = restart_report::save_restart_report(&report) {
-                        eprintln!(
+                        tracing::warn!(
                             "  ⚠ failed to save restart report for channel {}: {e}",
                             state.channel_id
                         );
@@ -1094,7 +1102,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 }
                 if !inflight_states.is_empty() {
                     let ts2 = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts2}] 📝 saved {} restart report(s) for inflight channels",
                         inflight_states.len()
                     );
@@ -1126,21 +1134,24 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         {
                             Ok(Ok(_)) => {
                                 let ts_ok = chrono::Local::now().format("%H:%M:%S");
-                                println!(
+                                tracing::info!(
                                     "  [{ts_ok}] ✓ Updated placeholder msg {} in channel {}",
-                                    state.current_msg_id, state.channel_id
+                                    state.current_msg_id,
+                                    state.channel_id
                                 );
                             }
                             Ok(Err(e)) => {
-                                eprintln!(
+                                tracing::warn!(
                                     "  ⚠ Failed to update placeholder msg {} in channel {}: {e}",
-                                    state.current_msg_id, state.channel_id
+                                    state.current_msg_id,
+                                    state.channel_id
                                 );
                             }
                             Err(_) => {
-                                eprintln!(
+                                tracing::warn!(
                                     "  ⚠ Timeout updating placeholder msg {} in channel {}",
-                                    state.current_msg_id, state.channel_id
+                                    state.current_msg_id,
+                                    state.channel_id
                                 );
                             }
                         }
@@ -1156,7 +1167,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                         mailbox_restart_drain_all(&shared_for_signal, &provider_for_shutdown).await;
                     if queue_count > 0 {
                         let ts4 = chrono::Local::now().format("%H:%M:%S");
-                        println!(
+                        tracing::info!(
                             "  [{ts4}] 📋 mailbox final drain: {queue_count} pending queue item(s)"
                         );
                     }
@@ -1200,7 +1211,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     });
 
     if let Err(e) = client.start().await {
-        eprintln!("  ✗ {} bot error: {e}", provider_for_error.display_name());
+        tracing::warn!("  ✗ {} bot error: {e}", provider_for_error.display_name());
     }
 }
 
@@ -1210,12 +1221,12 @@ async fn gc_stale_thread_sessions_via_api(api_port: u16) {
     match super::internal_api::gc_stale_thread_sessions() {
         Ok(gc) if gc > 0 => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
+            tracing::info!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
         }
         Ok(_) => {}
         Err(err) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ Thread session GC error: {err}");
+            tracing::warn!("  [{ts}] ⚠ Thread session GC error: {err}");
         }
     }
 }
@@ -1232,7 +1243,7 @@ async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
             Ok(c) => c,
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ Fixed-session GC lock error: {e}");
+                tracing::warn!("  [{ts}] ⚠ Fixed-session GC lock error: {e}");
                 return;
             }
         };
@@ -1241,6 +1252,8 @@ async fn gc_stale_fixed_working_sessions(shared: &Arc<SharedData>) {
 
     if cleared > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] 🧹 GC: disconnected {cleared} stale fixed-channel working session(s)");
+        tracing::info!(
+            "  [{ts}] 🧹 GC: disconnected {cleared} stale fixed-channel working session(s)"
+        );
     }
 }

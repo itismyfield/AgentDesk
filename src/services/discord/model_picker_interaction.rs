@@ -31,9 +31,10 @@ pub(super) async fn handle_model_picker_interaction(
     let display_channel_id = component.channel_id;
     let user_id = component.user.id;
     let user_name = &component.user.name;
-    println!(
+    tracing::info!(
         "  [{ts}] ◀ [{}] model picker {}",
-        user_name, display_channel_id
+        user_name,
+        display_channel_id
     );
 
     if !check_auth(user_id, user_name, &data.shared, &data.token).await {

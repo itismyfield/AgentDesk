@@ -61,7 +61,7 @@ pub async fn register_handler(
             Ok(_) => {
                 let id = conn.last_insert_rowid();
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] [HTTP] dmReply.register -> user={user_id} agent={source_agent} (id={id})"
                 );
                 Ok(id)

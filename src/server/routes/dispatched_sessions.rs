@@ -1279,9 +1279,13 @@ pub(crate) async fn force_kill_session_impl_with_reason(
     };
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    eprintln!(
+    tracing::warn!(
         "  [{ts}] ⚡ force-kill: session={}, tmux_killed={}, inflight_cleared={}, dispatch_failed={:?}, lifecycle={}",
-        session_key, tmux_killed, inflight_cleared, active_dispatch_id, lifecycle.lifecycle_path
+        session_key,
+        tmux_killed,
+        inflight_cleared,
+        active_dispatch_id,
+        lifecycle.lifecycle_path
     );
 
     // Notify bot message for force-kill visibility

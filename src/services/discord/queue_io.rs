@@ -81,14 +81,14 @@ pub(super) fn schedule_deferred_idle_queue_kickoff(
             shared.cached_bot_token.get(),
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 🚀 Deferred drain: kicking off idle queues for channel {} ({reason})",
                 channel_id
             );
             super::kickoff_idle_queues(ctx, &shared, tok, &provider).await;
         } else {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ Deferred drain: missing cached context for channel {} ({reason})",
                 channel_id
             );

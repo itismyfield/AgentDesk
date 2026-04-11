@@ -596,6 +596,9 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
+    let dispatch_span =
+        crate::logging::dispatch_span("fail_dispatch_with_retry", Some(dispatch_id), None, None);
+    let _guard = dispatch_span.enter();
     let payload = crate::server::routes::dispatches::UpdateDispatchBody {
         status: Some("failed".to_string()),
         result: Some(serde_json::json!({
@@ -607,8 +610,7 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
             .await
         {
             Ok(_) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ Dispatch {dispatch_id} failed (transport error)");
+                tracing::warn!("marked dispatch as failed after transport error");
                 return;
             }
             _ => {
@@ -620,10 +622,7 @@ pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     }
     // Fallback: direct DB update to prevent orphan dispatch.
     // Also leave a reconciliation marker so onTick can run the hook chain later.
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    eprintln!(
-        "  [{ts}] ❌ PATCH failed after 3 retries, falling back to direct DB for {dispatch_id}"
-    );
+    tracing::error!("dispatch PATCH failed after retries; falling back to direct DB");
     if let Some(root) = crate::cli::agentdesk_runtime_root() {
         let db_path = root.join("data/agentdesk.sqlite");
         if let Ok(conn) = rusqlite::Connection::open(&db_path) {
@@ -660,6 +659,13 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
+    let turn_span = crate::logging::dispatch_span(
+        "complete_work_dispatch_on_turn_end",
+        Some(dispatch_id),
+        None,
+        None,
+    );
+    let _turn_guard = turn_span.enter();
     let Some(snapshot) = fetch_dispatch_snapshot(shared.api_port, dispatch_id).await else {
         fail_dispatch_with_retry(
             shared.api_port,
@@ -672,6 +678,13 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
     if !should_complete_work_dispatch(&snapshot) {
         return;
     }
+    let snapshot_span = crate::logging::dispatch_span(
+        "complete_work_dispatch_snapshot",
+        Some(dispatch_id),
+        snapshot.kanban_card_id.as_deref(),
+        None,
+    );
+    let _snapshot_guard = snapshot_span.enter();
 
     let explicit_work_outcome = turn_output.and_then(extract_explicit_work_outcome);
     let tracked_changes = tracked_change_summary(adk_cwd);
@@ -757,19 +770,12 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
                 completion_context.as_ref(),
             ) {
                 Ok(_) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id}",
-                        dtype = snapshot.dispatch_type,
-                    );
+                    tracing::info!(dispatch_type = %snapshot.dispatch_type, "explicitly completed dispatch");
                     crate::server::routes::dispatches::queue_dispatch_followup(db, dispatch_id);
                     return;
                 }
                 Err(e) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
-                        "  [{ts}] ⚠ finalize_dispatch failed for {dispatch_id} (attempt {attempt}/3): {e}"
-                    );
+                    tracing::warn!(attempt, error = %e, "finalize_dispatch failed");
                     if attempt < 3 {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
@@ -829,10 +835,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             };
             let ok = runtime_db_fallback_complete_with_result(dispatch_id, &fallback_result);
             if !ok {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
-                    "  [{ts}] 🔴 CRITICAL: all completion paths exhausted for dispatch {dispatch_id} — dispatch stranded"
-                );
+                tracing::error!("all completion paths exhausted; dispatch stranded");
             }
         }
     } else {
@@ -870,18 +873,11 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             .await
             {
                 Ok(_) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ✅ Explicitly completed {dtype} dispatch {dispatch_id}",
-                        dtype = snapshot.dispatch_type,
-                    );
+                    tracing::info!(dispatch_type = %snapshot.dispatch_type, "explicitly completed dispatch via API");
                     return;
                 }
                 Err(err) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
-                        "  [{ts}] ⚠ Explicit dispatch completion failed (attempt {attempt}/3): {err}",
-                    );
+                    tracing::warn!(attempt, error = %err, "explicit dispatch completion failed");
                 }
             }
             if attempt < 3 {
@@ -906,10 +902,7 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
             })
         };
         if !runtime_db_fallback_complete_with_result(dispatch_id, &runtime_result) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
-                "  [{ts}] 🔴 CRITICAL: all completion paths exhausted for dispatch {dispatch_id} — dispatch stranded"
-            );
+            tracing::error!("all completion paths exhausted; dispatch stranded");
         }
     }
 }

@@ -130,9 +130,12 @@ fn dm_reply_register_raw(
     match conn.execute(&sql, rusqlite::params![source_agent, user_id, ch, context]) {
         Ok(_) => {
             let id = conn.last_insert_rowid();
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] 📩 dmReply.register → user={user_id} agent={source_agent} (id={id})"
+            tracing::info!(
+                user_id,
+                agent_id = source_agent,
+                channel_id = ?ch,
+                reply_id = id,
+                "registered pending DM reply"
             );
             format!(r#"{{"ok":true,"id":{id}}}"#)
         }
@@ -171,8 +174,13 @@ fn dm_reply_consume_raw(db: &Db, user_id: &str) -> String {
                 }
                 _ => {}
             }
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ✉️ dmReply.consume → user={user_id} agent={source_agent} (id={id})");
+            tracing::info!(
+                user_id,
+                agent_id = source_agent,
+                channel_id = ?channel_id,
+                reply_id = id,
+                "consumed pending DM reply"
+            );
             let ctx: serde_json::Value =
                 serde_json::from_str(&context).unwrap_or(serde_json::json!({}));
             let mut resp = serde_json::json!({

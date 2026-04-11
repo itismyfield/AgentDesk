@@ -328,6 +328,9 @@ impl PolicyEngine {
     }
 
     fn fire_hook_inline(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {
+        let hook_name = hook.to_string();
+        let span = crate::logging::hook_span(&hook_name, &payload);
+        let _guard = span.enter();
         {
             let inner = self
                 .inner
@@ -353,8 +356,7 @@ impl PolicyEngine {
     }
 
     fn drain_startup_hooks_inline(&self) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] 🔄 [startup] draining legacy deferred hooks from DB");
+        tracing::info!("[startup] draining legacy deferred hooks from DB");
 
         // Record server boot time for orphan recovery grace period
         if let Ok(conn) = self.db.separate_conn() {
@@ -400,8 +402,9 @@ impl PolicyEngine {
             for (id, hook_name, payload_str) in &hooks {
                 let payload: serde_json::Value =
                     serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] 🔄 [startup] replaying deferred {hook_name} (id={id})");
+                let span = crate::logging::hook_span(hook_name, &payload);
+                let _guard = span.enter();
+                tracing::info!(deferred_hook_id = *id, "[startup] replaying deferred hook");
 
                 let fire_result = if let Some(hook) = Hook::from_str(hook_name) {
                     self.fire_hook_inline(hook, payload)
@@ -458,6 +461,8 @@ impl PolicyEngine {
         if let Some(h) = Hook::from_str(hook_name) {
             return self.fire_hook_inline(h, payload);
         }
+        let span = crate::logging::hook_span(hook_name, &payload);
+        let _guard = span.enter();
         {
             let inner = self
                 .inner
@@ -514,14 +519,8 @@ impl PolicyEngine {
             return Ok(());
         }
 
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            let names: Vec<&str> = hook_fns.iter().map(|(n, _)| n.as_str()).collect();
-            println!(
-                "  [{ts}] 🔥 fire_dynamic_hook({hook_name}) → {names:?} ({} policies)",
-                hook_fns.len()
-            );
-        }
+        let names: Vec<&str> = hook_fns.iter().map(|(n, _)| n.as_str()).collect();
+        tracing::info!(policy_count = hook_fns.len(), policies = ?names, "firing dynamic hook");
 
         inner.context.with(|ctx| -> Result<()> {
             let js_payload = json_to_js(&ctx, &payload)?;
@@ -546,9 +545,11 @@ impl PolicyEngine {
                             format!("{msg}\n{stack}")
                         })
                         .unwrap_or_else(|| format!("{e}"));
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!("  [{ts}] ❌ Dynamic hook {hook_name} in policy '{policy_name}' failed: {exception_detail}");
-                    tracing::error!("Dynamic hook {hook_name} in policy '{policy_name}' failed: {exception_detail}");
+                    tracing::error!(
+                        policy_name,
+                        error = %exception_detail,
+                        "dynamic hook execution failed"
+                    );
                 }
             }
 
@@ -590,14 +591,13 @@ impl PolicyEngine {
             return Ok(());
         }
 
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            let names: Vec<&str> = hook_fns.iter().map(|(n, _)| n.as_str()).collect();
-            println!(
-                "  [{ts}] 🔥 fire_hook({hook}) → {names:?} ({} policies)",
-                hook_fns.len()
-            );
-        }
+        let names: Vec<&str> = hook_fns.iter().map(|(n, _)| n.as_str()).collect();
+        tracing::info!(
+            policy_count = hook_fns.len(),
+            policies = ?names,
+            hook = %hook,
+            "firing hook"
+        );
 
         // Execute each hook function in the QuickJS context
         inner.context.with(|ctx| -> Result<()> {
@@ -619,16 +619,21 @@ impl PolicyEngine {
 
                 let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
                 if let Err(ref e) = result {
-                    let exception_detail = ctx.catch().into_exception()
+                    let exception_detail = ctx
+                        .catch()
+                        .into_exception()
                         .map(|ex| {
                             let msg = ex.message().unwrap_or_default();
                             let stack = ex.stack().unwrap_or_default();
                             format!("{msg}\n{stack}")
                         })
                         .unwrap_or_else(|| format!("{e}"));
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!("  [{ts}] ❌ Hook {hook} in policy '{policy_name}' failed: {exception_detail}");
-                    tracing::error!("Hook {hook} in policy '{policy_name}' failed: {exception_detail}");
+                    tracing::error!(
+                        policy_name,
+                        hook = %hook,
+                        error = %exception_detail,
+                        "hook execution failed"
+                    );
                 }
             }
 
@@ -659,8 +664,7 @@ impl PolicyEngine {
                     })
                     .collect(),
                 Err(ref e) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ⚠ take_pending_transitions_with_guard: JS eval error: {e}");
+                    tracing::warn!(error = %e, "failed to eval pending transitions");
                     Vec::new()
                 }
             }
@@ -685,18 +689,16 @@ impl PolicyEngine {
         let inner = match self.inner.lock() {
             Ok(g) => g,
             Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ⚠ drain_pending_transitions: engine lock poisoned: {e}");
+                tracing::warn!(error = %e, "failed to lock engine for pending transitions");
                 return Vec::new();
             }
         };
         let transitions = Self::take_pending_transitions_with_guard(&inner);
         if !transitions.is_empty() {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] 🔄 drain_pending_transitions: {} transition(s): {:?}",
-                transitions.len(),
-                transitions
+            tracing::info!(
+                transition_count = transitions.len(),
+                transitions = ?transitions,
+                "drained pending transitions"
             );
         }
         transitions
@@ -721,8 +723,7 @@ impl PolicyEngine {
         let inner = match self.inner.lock() {
             Ok(g) => g,
             Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ⚠ drain_pending_intents: engine lock poisoned: {e}");
+                tracing::warn!(error = %e, "failed to lock engine for pending intents");
                 return Self::empty_intent_result();
             }
         };
@@ -736,8 +737,7 @@ impl PolicyEngine {
             match result {
                 Ok(json) => json,
                 Err(e) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ⚠ drain_pending_intents: JS eval error: {e}");
+                    tracing::warn!(error = %e, "failed to eval pending intents");
                     "[]".to_string()
                 }
             }

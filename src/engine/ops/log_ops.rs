@@ -9,9 +9,7 @@ pub(super) fn register_log_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     log_obj.set(
         "info",
         Function::new(ctx.clone(), |msg: String| {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] 📜 [policy] {msg}");
-            tracing::info!(target: "policy", "{}", msg);
+            tracing::info!(target: "policy", message = %msg, "policy log");
         })?,
     )?;
 

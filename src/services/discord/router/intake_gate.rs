@@ -151,9 +151,10 @@ async fn handle_reaction_remove(
             .await;
             if removed.is_some() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] 📭 QUEUE-CANCEL: removed queued message {} in channel {} via reaction removal",
-                    removed_reaction.message_id, channel_id
+                    removed_reaction.message_id,
+                    channel_id
                 );
                 send_reaction_control_reply(
                     ctx,
@@ -191,9 +192,10 @@ async fn handle_reaction_remove(
                         "reaction remove ⏳",
                     );
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] 🛑 TURN-STOP: cancelled active turn for message {} in channel {} via reaction removal",
-                        removed_reaction.message_id, channel_id
+                        removed_reaction.message_id,
+                        channel_id
                     );
                     send_reaction_control_reply(
                         ctx,
@@ -252,7 +254,7 @@ pub(in crate::services::discord) async fn handle_event(
                     .await
                     {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
+                        tracing::info!(
                             "  [{ts}] ⏭ COMPONENT-GUARD: skipping model picker in channel {} for provider {}",
                             component.channel_id,
                             data.provider.as_str()
@@ -329,9 +331,10 @@ pub(in crate::services::discord) async fn handle_event(
                 };
                 if is_dup {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] ⏭ MSG-DEDUP: skipping duplicate message {} in channel {}",
-                        new_message.id, new_message.channel_id
+                        new_message.id,
+                        new_message.channel_id
                     );
                     return Ok(());
                 }
@@ -339,9 +342,11 @@ pub(in crate::services::discord) async fn handle_event(
 
             if !should_process_turn_message(new_message.kind) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ⏭ MSG-KIND: skipping {:?} message {} in channel {}",
-                    new_message.kind, new_message.id, new_message.channel_id
+                    new_message.kind,
+                    new_message.id,
+                    new_message.channel_id
                 );
                 return Ok(());
             }
@@ -433,9 +438,10 @@ pub(in crate::services::discord) async fn handle_event(
                 )
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ⏭ BOT-INTAKE: skipping non-turn bot message {} in channel {}",
-                    new_message.id, channel_id
+                    new_message.id,
+                    channel_id
                 );
                 return Ok(());
             }
@@ -449,7 +455,7 @@ pub(in crate::services::discord) async fn handle_event(
             // Handle file attachments — download regardless of session state
             if !new_message.attachments.is_empty() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ◀ [{user_name}] Upload: {} file(s)",
                     new_message.attachments.len()
                 );
@@ -547,9 +553,10 @@ pub(in crate::services::discord) async fn handle_event(
                 };
                 if is_duplicate {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] ⏭ DEDUP: skipping duplicate intake in channel {} (key={})",
-                        channel_id, dedup_key
+                        channel_id,
+                        dedup_key
                     );
                     return Ok(());
                 }
@@ -567,9 +574,10 @@ pub(in crate::services::discord) async fn handle_event(
                     let thread_active = mailbox_has_active_turn(&data.shared, thread_id).await;
                     if thread_active {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
+                        tracing::info!(
                             "  [{ts}] 🔀 THREAD-GUARD: bot message to parent {} queued (dispatch thread {} active)",
-                            channel_id, thread_id
+                            channel_id,
+                            thread_id
                         );
                         let _ = enqueue_soft_intervention(
                             data,
@@ -602,7 +610,7 @@ pub(in crate::services::discord) async fn handle_event(
                         enqueue_soft_intervention(data, channel_id, user_id, new_message.id, text)
                             .await;
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] 📬 DISPATCH-GUARD: queued dispatch message in channel {} (active turn in progress)",
                         channel_id
                     );
@@ -684,7 +692,7 @@ pub(in crate::services::discord) async fn handle_event(
                     .await;
 
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ⏸ DRAIN: queued message from [{user_name}] in channel {} (restart pending)",
                     channel_id
                 );
@@ -740,7 +748,7 @@ pub(in crate::services::discord) async fn handle_event(
             if let Some(inserted) = queued_behind_idle_backlog {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 if inserted {
-                    println!(
+                    tracing::info!(
                         "  [{ts}] 📬 IDLE-QUEUE: queued message from [{user_name}] in channel {} behind pending backlog",
                         channel_id
                     );
@@ -749,7 +757,7 @@ pub(in crate::services::discord) async fn handle_event(
                         .last_message_ids
                         .insert(channel_id, new_message.id.get());
                 } else {
-                    println!(
+                    tracing::info!(
                         "  [{ts}] ↪ IDLE-QUEUE: duplicate message from [{user_name}] already pending in channel {}",
                         channel_id
                     );
@@ -762,7 +770,7 @@ pub(in crate::services::discord) async fn handle_event(
             // Meeting command from text (e.g. announce bot sending "/meeting start ...")
             if text.starts_with("/meeting ") {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ◀ [{user_name}] Meeting cmd: {text}");
+                tracing::info!("  [{ts}] ◀ [{user_name}] Meeting cmd: {text}");
                 let http = ctx.http.clone();
                 if meeting::handle_meeting_command(
                     http,
@@ -781,7 +789,7 @@ pub(in crate::services::discord) async fn handle_event(
             if text.starts_with('!') {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 let preview = truncate_str(text, 60);
-                println!("  [{ts}] ◀ [{user_name}] Shell: {preview}");
+                tracing::info!("  [{ts}] ◀ [{user_name}] Shell: {preview}");
                 super::message_handler::handle_shell_command_raw(
                     ctx,
                     channel_id,
@@ -795,7 +803,7 @@ pub(in crate::services::discord) async fn handle_event(
             // Regular text → Claude AI
             let ts = chrono::Local::now().format("%H:%M:%S");
             let preview = truncate_str(text, 60);
-            println!("  [{ts}] ◀ [{user_name}] {preview}");
+            tracing::info!("  [{ts}] ◀ [{user_name}] {preview}");
 
             // Extract reply context if user replied to another message
             let reply_context = if let Some(ref_msg) = new_message.referenced_message.as_ref() {
