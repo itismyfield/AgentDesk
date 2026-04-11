@@ -131,7 +131,7 @@ fn category_description(category: &str) -> &'static str {
         "api-friction" => {
             "Structured API-friction events, repeated-pattern aggregation, and auto issue creation."
         }
-        "agents" => "Agent registry, channel bindings, turn control, and timelines.",
+        "agents" => "Agent registry, turn control, session views, and timelines.",
         "analytics" => "Operational analytics, receipts, machine status, and rate-limit views.",
         "auth" => "Current authentication session state.",
         "auto-queue" => {
@@ -140,7 +140,7 @@ fn category_description(category: &str) -> &'static str {
         "cron" => "Registered cron jobs per agent.",
         "departments" => "Department CRUD and ordering.",
         "discord" => "Discord delivery helpers, bindings, message reads, and DM reply hooks.",
-        "dispatches" => "Dispatch CRUD plus legacy cancellation flow.",
+        "dispatches" => "Dispatch CRUD operations.",
         "dispatched-sessions" => "Persisted dispatched-session lifecycle and cleanup helpers.",
         "docs" => "API documentation discovery and category drill-down.",
         "github" => "GitHub repository integration and sync entrypoints.",
@@ -158,7 +158,7 @@ fn category_description(category: &str) -> &'static str {
         "policies" => "Loaded policy inventory.",
         "queue" => "Pending dispatch queue views and live turn control.",
         "reviews" => "Review verdict submission, decisions, and tuning aggregation.",
-        "sessions" => "Sessions, transcript search, force-kill, and termination events.",
+        "sessions" => "Sessions, force-kill, and termination events.",
         "settings" => "Settings surfaces, live overrides, precedence, and onboarding contracts.",
         "skills" => "Skill catalog and usage ranking.",
         "stats" => "Aggregate system counters.",
@@ -187,70 +187,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ep("GET", "/api/health", "health", "Health check"),
         ep("POST", "/api/send", "discord", "Send a Discord channel message"),
         ep("POST", "/api/senddm", "discord", "Send a Discord direct message"),
-        ep(
-            "GET",
-            "/api/api-friction/events",
-            "api-friction",
-            "List recent API-friction events",
-        )
-        .with_params([(
-            "limit",
-            query_param("number", false, "Maximum number of events to return").with_default(20),
-        )])
-        .with_example(
-            json!({"query": {"limit": 10}}),
-            json!({"events": [{"fingerprint": "api-docs-kanban::docs-bypass", "endpoint": "/api/docs/kanban", "friction_type": "docs-bypass"}]}),
-        ),
-        ep(
-            "GET",
-            "/api/api-friction/patterns",
-            "api-friction",
-            "List repeated API-friction patterns",
-        )
-        .with_params([
-            (
-                "min_events",
-                query_param("number", false, "Minimum repeated count before returning a pattern")
-                    .with_default(2),
-            ),
-            (
-                "limit",
-                query_param("number", false, "Maximum number of patterns to return")
-                    .with_default(20),
-            ),
-        ])
-        .with_example(
-            json!({"query": {"min_events": 2, "limit": 20}}),
-            json!({"patterns": [{"fingerprint": "api-docs-kanban::docs-bypass", "event_count": 2, "issue_url": null}]}),
-        ),
-        ep(
-            "POST",
-            "/api/api-friction/process",
-            "api-friction",
-            "Aggregate repeated API-friction patterns and create GitHub issues",
-        )
-        .with_params([
-            (
-                "min_events",
-                body_param("number", false, "Minimum repeated count before issue creation")
-                    .with_default(2),
-            ),
-            (
-                "limit",
-                body_param("number", false, "Maximum number of patterns to process")
-                    .with_default(20),
-            ),
-        ])
-        .with_example(
-            json!({"body": {"min_events": 2, "limit": 10}}),
-            json!({"ok": true, "summary": {"processed_patterns": 1, "created_issues": [{"fingerprint": "api-docs-kanban::docs-bypass", "issue_number": 999}]}}),
-        ),
-        ep(
-            "POST",
-            "/api/session/start",
-            "sessions",
-            "Start a runtime session",
-        ),
         ep("GET", "/api/agents", "agents", "List all agents"),
         ep("POST", "/api/agents", "agents", "Create an agent"),
         ep("GET", "/api/agents/{id}", "agents", "Get agent by ID"),
@@ -297,12 +233,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "/api/onboarding/generate-prompt",
             "onboarding",
             "Generate onboarding prompt",
-        ),
-        ep(
-            "GET",
-            "/api/agent-channels",
-            "agents",
-            "List agent-to-channel bindings",
         ),
         ep(
             "GET",
@@ -353,16 +283,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Agent activity timeline",
         ),
         ep("GET", "/api/sessions", "sessions", "List sessions"),
-        ep(
-            "GET",
-            "/api/sessions/search",
-            "sessions",
-            "Search persisted session transcripts",
-        )
-        .with_params([(
-            "q",
-            query_param("string", true, "Search query for transcript lookup"),
-        )]),
         ep("GET", "/api/policies", "policies", "List policies"),
         ep(
             "GET",
@@ -917,17 +837,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/dispatch-cancel/{id}",
-            "dispatches",
-            "Cancel a dispatch and kill the associated session",
-        )
-        .with_params([("id", path_param("Dispatch ID"))])
-        .with_example(
-            json!({"path": {"id": "dispatch-1"}}),
-            json!({"ok": true, "dispatch_id": "dispatch-1", "agent_id": "agent-1", "session_killed": true}),
-        ),
-        ep(
-            "POST",
             "/api/internal/link-dispatch-thread",
             "internal",
             "Link dispatch to an existing Discord thread",
@@ -943,24 +852,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "/api/internal/pending-dispatch-for-thread",
             "internal",
             "Find pending dispatch bound to a thread",
-        ),
-        ep(
-            "GET",
-            "/api/pipeline-stages",
-            "pipeline",
-            "List pipeline stages (legacy path)",
-        ),
-        ep(
-            "POST",
-            "/api/pipeline-stages",
-            "pipeline",
-            "Create pipeline stage (legacy path)",
-        ),
-        ep(
-            "DELETE",
-            "/api/pipeline-stages/{id}",
-            "pipeline",
-            "Delete pipeline stage (legacy path)",
         ),
         ep(
             "GET",
@@ -1383,12 +1274,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "/api/dispatched-sessions/clear-session-id",
             "dispatched-sessions",
             "Clear Claude session id by session key",
-        ),
-        ep(
-            "POST",
-            "/api/sessions/force-kill",
-            "sessions",
-            "Legacy force-kill session endpoint",
         ),
         ep(
             "POST",
@@ -1858,27 +1743,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             json!({"ok": true, "created": 2, "run_id": "run-1", "message": "Queue active. Call POST /api/auto-queue/activate to start dispatching."}),
         ),
         ep(
-            "POST",
-            "/api/auto-queue/enqueue",
-            "auto-queue",
-            "Append one issue to a live auto-queue run",
-        )
-        .with_params([
-            ("repo", body_param("string", true, "Repository full name")),
-            (
-                "issue_number",
-                body_param("number", true, "GitHub issue number"),
-            ),
-            (
-                "agent_id",
-                body_param("string", false, "Target agent; falls back to repo default"),
-            ),
-        ])
-        .with_example(
-            json!({"body": {"repo": "test-repo", "issue_number": 423, "agent_id": "agent-1"}}),
-            json!({"ok": true, "card_id": "card-423", "agent_id": "agent-1"}),
-        ),
-        ep(
             "GET",
             "/api/channels/{id}/queue",
             "queue",
@@ -1950,7 +1814,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )
         .with_example(
             json!({}),
-            json!({"categories": [{"name": "auto-queue", "count": 15}], "endpoints": [{"method": "POST", "path": "/api/auto-queue/dispatch", "category": "auto-queue"}]}),
+            json!({"categories": [{"name": "auto-queue", "count": 14}], "endpoints": [{"method": "POST", "path": "/api/auto-queue/dispatch", "category": "auto-queue"}]}),
         ),
         ep(
             "GET",
@@ -1964,7 +1828,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         )])
         .with_example(
             json!({}),
-            json!({"categories": [{"name": "auto-queue", "count": 15, "description": "Auto-queue generation, activation, slot repair, and queue execution control."}]}),
+            json!({"categories": [{"name": "auto-queue", "count": 14, "description": "Auto-queue generation, activation, slot repair, and queue execution control."}]}),
         ),
         ep(
             "GET",

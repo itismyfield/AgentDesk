@@ -6,7 +6,7 @@ mod tests;
 mod thread_reuse;
 
 // ── Re-exports: CRUD routes ──────────────────────────────────
-pub use crud::{cancel_dispatch, create_dispatch, get_dispatch, list_dispatches, update_dispatch};
+pub use crud::{create_dispatch, get_dispatch, list_dispatches, update_dispatch};
 
 // ── Re-exports: Discord delivery ─────────────────────────────
 pub(crate) use discord_delivery::send_dispatch_to_discord;

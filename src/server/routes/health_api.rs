@@ -159,24 +159,6 @@ pub async fn senddm_handler(State(state): State<AppState>, body: Bytes) -> Respo
     (status, Json(json)).into_response()
 }
 
-/// POST /api/session/start — start a session via API.
-pub async fn session_start_handler(State(state): State<AppState>, body: Bytes) -> Response {
-    let Some(ref registry) = state.health_registry else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"ok": false, "error": "Discord not available (standalone mode)"})),
-        )
-            .into_response();
-    };
-
-    let body_str = String::from_utf8_lossy(&body);
-    let (status_str, response_body) = health::handle_session_start(registry, &body_str).await;
-    let status = parse_status_code(status_str);
-    let json: serde_json::Value =
-        serde_json::from_str(&response_body).unwrap_or(serde_json::json!({"error": "internal"}));
-    (status, Json(json)).into_response()
-}
-
 fn parse_status_code(s: &str) -> StatusCode {
     match s {
         "200 OK" => StatusCode::OK,

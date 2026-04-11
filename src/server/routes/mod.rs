@@ -1,7 +1,6 @@
 pub mod agents;
 mod agents_crud;
 pub mod analytics;
-pub mod api_friction;
 pub mod auth;
 pub mod auto_queue;
 pub mod cron_api;
@@ -122,7 +121,6 @@ pub fn api_router(
         .route("/health", get(health_api::health_handler))
         .route("/send", post(health_api::send_handler))
         .route("/senddm", post(health_api::senddm_handler))
-        .route("/session/start", post(health_api::session_start_handler))
         .route(
             "/agents",
             get(agents_crud::list_agents).post(agents_crud::create_agent),
@@ -152,7 +150,6 @@ pub fn api_router(
             "/onboarding/generate-prompt",
             post(onboarding::generate_prompt),
         )
-        .route("/agent-channels", get(agents::agent_channels))
         .route("/agents/{id}/offices", get(agents::agent_offices))
         .route("/agents/{id}/signal", post(agents::agent_signal))
         .route("/agents/{id}/cron", get(cron_api::agent_cron_jobs))
@@ -165,10 +162,6 @@ pub fn api_router(
         .route("/agents/{id}/turn/stop", post(agents::stop_agent_turn))
         .route("/agents/{id}/timeline", get(agents::agent_timeline))
         .route("/sessions", get(agents_crud::list_sessions))
-        .route(
-            "/sessions/search",
-            get(dispatched_sessions::search_session_transcripts),
-        )
         .route("/policies", get(agents_crud::list_policies))
         // Auth
         .route("/auth/session", get(auth::get_session))
@@ -242,7 +235,6 @@ pub fn api_router(
             "/dispatches/{id}",
             get(dispatches::get_dispatch).patch(dispatches::update_dispatch),
         )
-        .route("/dispatch-cancel/{id}", post(dispatches::cancel_dispatch))
         .route(
             "/internal/link-dispatch-thread",
             post(dispatches::link_dispatch_thread),
@@ -252,12 +244,6 @@ pub fn api_router(
             "/internal/pending-dispatch-for-thread",
             get(dispatches::get_pending_dispatch_for_thread),
         )
-        // Pipeline stages (legacy path)
-        .route(
-            "/pipeline-stages",
-            get(pipeline::list_stages).post(pipeline::create_stage),
-        )
-        .route("/pipeline-stages/{id}", delete(pipeline::delete_stage))
         // Pipeline stages (dashboard v2 path)
         .route(
             "/pipeline/stages",
@@ -391,10 +377,6 @@ pub fn api_router(
             post(dispatched_sessions::clear_session_id_by_key),
         )
         .route(
-            "/sessions/force-kill",
-            post(dispatched_sessions::force_kill_session_legacy),
-        )
-        .route(
             "/sessions/{session_key}/force-kill",
             post(dispatched_sessions::force_kill_session),
         )
@@ -488,7 +470,6 @@ pub fn api_router(
             "/auto-queue/runs/{id}/order",
             post(auto_queue::submit_order),
         )
-        .route("/auto-queue/enqueue", post(auto_queue::enqueue))
         // Analytics
         .route("/streaks", get(analytics::streaks))
         .route("/achievements", get(analytics::achievements))
@@ -498,13 +479,6 @@ pub fn api_router(
         .route("/rate-limits", get(analytics::rate_limits))
         .route("/receipt", get(receipt::get_receipt))
         .route("/skills-trend", get(analytics::skills_trend))
-        // API friction
-        .route("/api-friction/events", get(api_friction::list_events))
-        .route("/api-friction/patterns", get(api_friction::list_patterns))
-        .route(
-            "/api-friction/process",
-            post(api_friction::process_patterns),
-        )
         // Docs
         .route("/help", get(docs::api_help))
         .route("/docs", get(docs::api_docs))

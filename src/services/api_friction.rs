@@ -15,7 +15,6 @@ const DEFAULT_PATTERN_LIMIT: usize = 20;
 const MAX_REPORT_FIELD_CHARS: usize = 240;
 const MAX_MEMORY_CONTENT_CHARS: usize = 900;
 const MAX_ISSUE_EVIDENCE_ITEMS: usize = 5;
-const DEFAULT_EVENT_LIST_LIMIT: usize = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct ApiFrictionReport {
@@ -72,26 +71,6 @@ pub(crate) struct ApiFrictionRecordResult {
     pub memory_stored_count: usize,
     pub memory_errors: Vec<String>,
     pub token_usage: TokenUsage,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct ApiFrictionEvent {
-    pub id: String,
-    pub fingerprint: String,
-    pub endpoint: String,
-    pub friction_type: String,
-    pub summary: String,
-    pub workaround: Option<String>,
-    pub suggested_fix: Option<String>,
-    pub docs_category: Option<String>,
-    pub task_summary: Option<String>,
-    pub repo_id: Option<String>,
-    pub card_id: Option<String>,
-    pub github_issue_number: Option<i64>,
-    pub dispatch_id: Option<String>,
-    pub issue_url: Option<String>,
-    pub created_at: String,
-    pub memory_status: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -245,67 +224,7 @@ pub(crate) async fn record_api_friction_reports(
     Ok(result)
 }
 
-pub(crate) fn list_recent_api_friction_events(
-    db: &Db,
-    limit: Option<usize>,
-) -> Result<Vec<ApiFrictionEvent>, String> {
-    let limit = limit.unwrap_or(DEFAULT_EVENT_LIST_LIMIT).clamp(1, 100) as i64;
-    let conn = db
-        .read_conn()
-        .map_err(|err| format!("db read_conn: {err}"))?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT e.id,
-                    e.fingerprint,
-                    e.endpoint,
-                    e.friction_type,
-                    e.summary,
-                    e.workaround,
-                    e.suggested_fix,
-                    e.docs_category,
-                    e.task_summary,
-                    e.repo_id,
-                    e.card_id,
-                    e.github_issue_number,
-                    e.dispatch_id,
-                    e.created_at,
-                    e.memory_status,
-                    i.issue_url
-             FROM api_friction_events e
-             LEFT JOIN api_friction_issues i
-               ON i.fingerprint = e.fingerprint
-             ORDER BY e.created_at DESC, e.rowid DESC
-             LIMIT ?1",
-        )
-        .map_err(|err| format!("prepare api_friction_events: {err}"))?;
-
-    let rows = stmt
-        .query_map([limit], |row| {
-            Ok(ApiFrictionEvent {
-                id: row.get(0)?,
-                fingerprint: row.get(1)?,
-                endpoint: row.get(2)?,
-                friction_type: row.get(3)?,
-                summary: row.get(4)?,
-                workaround: row.get(5)?,
-                suggested_fix: row.get(6)?,
-                docs_category: row.get(7)?,
-                task_summary: row.get(8)?,
-                repo_id: row.get(9)?,
-                card_id: row.get(10)?,
-                github_issue_number: row.get(11)?,
-                dispatch_id: row.get(12)?,
-                created_at: row.get(13)?,
-                memory_status: row.get(14)?,
-                issue_url: row.get(15)?,
-            })
-        })
-        .map_err(|err| format!("query api_friction_events: {err}"))?;
-
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|err| format!("collect api_friction_events: {err}"))
-}
-
+#[cfg(test)]
 pub(crate) fn list_api_friction_patterns(
     db: &Db,
     min_events: Option<usize>,

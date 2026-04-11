@@ -1888,6 +1888,98 @@ async fn api_docs_flat_format_lists_routes_missing_from_legacy_docs() {
 }
 
 #[tokio::test]
+async fn api_docs_flat_format_omits_removed_legacy_routes() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/docs?format=flat")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let endpoints = json["endpoints"]
+        .as_array()
+        .expect("docs?format=flat must return endpoint array");
+
+    for path in [
+        "/api/agent-channels",
+        "/api/dispatch-cancel/{id}",
+        "/api/pipeline-stages",
+        "/api/pipeline-stages/{id}",
+        "/api/session/start",
+        "/api/sessions/search",
+        "/api/sessions/force-kill",
+        "/api/auto-queue/enqueue",
+        "/api/api-friction/events",
+        "/api/api-friction/patterns",
+        "/api/api-friction/process",
+    ] {
+        assert!(
+            endpoints.iter().all(|ep| ep["path"] != path),
+            "flat docs must omit removed route {path}"
+        );
+    }
+
+    assert!(
+        endpoints
+            .iter()
+            .any(|ep| ep["method"] == "POST" && ep["path"] == "/api/auto-queue/runs/{id}/order"),
+        "flat docs must keep the PM-assisted submit_order callback route"
+    );
+}
+
+#[tokio::test]
+async fn removed_legacy_routes_return_not_found() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = test_api_router(db, engine, None);
+
+    for (method, uri) in [
+        ("GET", "/agent-channels"),
+        ("POST", "/dispatch-cancel/dispatch-123"),
+        ("GET", "/pipeline-stages"),
+        ("POST", "/pipeline-stages"),
+        ("DELETE", "/pipeline-stages/legacy-stage"),
+        ("POST", "/session/start"),
+        ("GET", "/sessions/search"),
+        ("POST", "/sessions/force-kill"),
+        ("POST", "/auto-queue/enqueue"),
+        ("GET", "/api-friction/events"),
+        ("GET", "/api-friction/patterns"),
+        ("POST", "/api-friction/process"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {uri} should return 404 after route cleanup"
+        );
+    }
+}
+
+#[tokio::test]
 async fn api_help_exposes_detailed_endpoint_inventory() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -2346,160 +2438,6 @@ async fn github_repos_sync_not_registered() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
-
-// ── Pipeline Stages API tests ─────────────────────────────────
-
-#[tokio::test]
-async fn pipeline_stages_empty_list() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/pipeline-stages")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["stages"].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn pipeline_stages_create_and_list() {
-    let db = test_db();
-    let engine = test_engine(&db);
-
-    // Create
-    let app = test_api_router(db.clone(), engine.clone(), None);
-    let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/pipeline-stages")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"repo_id":"owner/repo","stage_name":"qa-test","stage_order":1,"trigger_after":"review_pass","entry_skill":"test","timeout_minutes":60}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["stage"]["stage_name"], "qa-test");
-    assert_eq!(json["stage"]["trigger_after"], "review_pass");
-    assert_eq!(json["stage"]["timeout_minutes"], 60);
-    let stage_id = json["stage"]["id"].as_i64().unwrap();
-
-    // List with filter
-    let app2 = test_api_router(db.clone(), engine.clone(), None);
-    let response2 = app2
-        .oneshot(
-            Request::builder()
-                .uri("/pipeline-stages?repo_id=owner/repo")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
-    assert_eq!(json2["stages"].as_array().unwrap().len(), 1);
-
-    // Delete
-    let app3 = test_api_router(db, engine, None);
-    let response3 = app3
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(&format!("/pipeline-stages/{stage_id}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response3.status(), StatusCode::OK);
-    let body3 = axum::body::to_bytes(response3.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json3: serde_json::Value = serde_json::from_slice(&body3).unwrap();
-    assert_eq!(json3["deleted"], true);
-}
-
-#[tokio::test]
-async fn pipeline_stages_delete_not_found() {
-    let db = test_db();
-    let engine = test_engine(&db);
-    let app = test_api_router(db, engine, None);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/pipeline-stages/9999")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn pipeline_stages_list_filtered_by_repo() {
-    let db = test_db();
-    let engine = test_engine(&db);
-
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, timeout_minutes) VALUES ('repo-a', 'test', 1, 'review_pass', 30)",
-                [],
-            ).unwrap();
-        conn.execute(
-                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, timeout_minutes) VALUES ('repo-b', 'deploy', 1, 'review_pass', 60)",
-                [],
-            ).unwrap();
-    }
-
-    let app = test_api_router(db, engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/pipeline-stages?repo_id=repo-a")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let stages = json["stages"].as_array().unwrap();
-    assert_eq!(stages.len(), 1);
-    assert_eq!(stages[0]["stage_name"], "test");
-}
-
 // ── Pipeline config hierarchy tests (#135) ──
 
 fn seed_repo(db: &Db, repo_id: &str) {
@@ -3051,23 +2989,6 @@ fn auto_queue_schema_migration_drops_legacy_max_concurrent_per_agent_column() {
     assert!(has_max_threads);
     assert!(has_thread_group_count);
     assert!(has_batch_phase);
-}
-
-fn seed_live_auto_queue_run(db: &Db, run_id: &str, agent_id: &str, existing_card_id: &str) {
-    ensure_auto_queue_tables(db);
-    let conn = db.lock().unwrap();
-    conn.execute(
-        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-         VALUES (?1, 'test-repo', ?2, 'active')",
-        rusqlite::params![run_id, agent_id],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
-         VALUES (?1, ?2, ?3, ?4, 'pending', 0)",
-        rusqlite::params![format!("entry-{run_id}"), run_id, existing_card_id, agent_id],
-    )
-    .unwrap();
 }
 
 fn seed_in_progress_stall_case(
@@ -5242,150 +5163,6 @@ async fn auto_queue_update_entry_moves_pending_entry_and_syncs_run_groups() {
     assert_eq!(run_meta, (2, 2));
 }
 
-#[tokio::test]
-async fn auto_queue_enqueue_rejects_backlog_card() {
-    crate::pipeline::ensure_loaded();
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-eq-backlog");
-    seed_auto_queue_card(&db, "card-eq-backlog", 1621, "backlog", "agent-eq-backlog");
-
-    let app = test_api_router(db.clone(), engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auto-queue/enqueue")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&serde_json::json!({
-                        "repo": "test-repo",
-                        "issue_number": 1621,
-                        "agent_id": "agent-eq-backlog",
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["status"], "backlog");
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("ready/requested/dispatchable"),
-        "error should explain that only prepared work can be enqueued"
-    );
-    let allowed_states = json["allowed_states"]
-        .as_array()
-        .expect("allowed_states should be an array");
-    assert!(
-        !allowed_states
-            .iter()
-            .any(|state| state.as_str() == Some("backlog")),
-        "backlog must not appear in allowed enqueue states"
-    );
-
-    let conn = db.lock().unwrap();
-    let dispatch_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-eq-backlog'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        dispatch_count, 0,
-        "rejected backlog enqueue must not create a side dispatch"
-    );
-    let queued_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM auto_queue_entries WHERE kanban_card_id = 'card-eq-backlog'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        queued_count, 0,
-        "rejected backlog enqueue must not create queue entries"
-    );
-}
-
-#[tokio::test]
-async fn auto_queue_enqueue_accepts_requested_without_active_dispatch() {
-    crate::pipeline::ensure_loaded();
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-eq-requested");
-    seed_auto_queue_card(
-        &db,
-        "card-live-requested",
-        9101,
-        "ready",
-        "agent-eq-requested",
-    );
-    seed_live_auto_queue_run(
-        &db,
-        "run-live-requested",
-        "agent-eq-requested",
-        "card-live-requested",
-    );
-    seed_auto_queue_card(
-        &db,
-        "card-eq-requested",
-        1622,
-        "requested",
-        "agent-eq-requested",
-    );
-
-    let app = test_api_router(db.clone(), engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auto-queue/enqueue")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&serde_json::json!({
-                        "repo": "test-repo",
-                        "issue_number": 1622,
-                        "agent_id": "agent-eq-requested",
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["ok"], true);
-
-    let conn = db.lock().unwrap();
-    let dispatch_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-eq-requested'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        dispatch_count, 0,
-        "enqueue must not create a side dispatch for requested cards"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
     crate::pipeline::ensure_loaded();
@@ -5629,213 +5406,6 @@ async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
     assert_eq!(
         dispatch_count, 1,
         "exactly one dispatch must be created for the walked card"
-    );
-}
-
-/// #162 DoD: ready-state backward compatibility — enqueue accepts ready cards
-/// without creating side dispatches.
-#[tokio::test]
-async fn auto_queue_enqueue_accepts_ready_cards_unchanged() {
-    crate::pipeline::ensure_loaded();
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-eq-ready");
-    seed_auto_queue_card(&db, "card-live-ready", 9102, "ready", "agent-eq-ready");
-    seed_live_auto_queue_run(&db, "run-live-ready", "agent-eq-ready", "card-live-ready");
-    seed_auto_queue_card(&db, "card-eq-ready", 1623, "ready", "agent-eq-ready");
-
-    let app = test_api_router(db.clone(), engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auto-queue/enqueue")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&serde_json::json!({
-                        "repo": "test-repo",
-                        "issue_number": 1623,
-                        "agent_id": "agent-eq-ready",
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["ok"], true);
-
-    let conn = db.lock().unwrap();
-    let dispatch_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-eq-ready'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        dispatch_count, 0,
-        "enqueue must not create a side dispatch — dispatch happens only at activate"
-    );
-    let entry_status: String = conn
-        .query_row(
-            "SELECT e.status FROM auto_queue_entries e WHERE e.kanban_card_id = 'card-eq-ready'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(entry_status, "pending");
-}
-
-/// #259 regression: enqueue must reject when there is no live active/pending run.
-/// A stale finished run left as `active` should be auto-completed first instead of
-/// silently absorbing new entries that will never dispatch.
-#[tokio::test]
-async fn auto_queue_enqueue_rejects_when_only_stale_finished_run_exists() {
-    crate::pipeline::ensure_loaded();
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-eq-stale");
-    ensure_auto_queue_tables(&db);
-    seed_auto_queue_card(&db, "card-stale-finished", 9103, "done", "agent-eq-stale");
-    seed_auto_queue_card(
-        &db,
-        "card-eq-stale-target",
-        16235,
-        "ready",
-        "agent-eq-stale",
-    );
-
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
-             VALUES ('run-stale-finished', 'test-repo', 'agent-eq-stale', 'active')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, completed_at)
-             VALUES ('entry-stale-finished', 'run-stale-finished', 'card-stale-finished', 'agent-eq-stale', 'done', 0, datetime('now'))",
-            [],
-        )
-        .unwrap();
-    }
-
-    let app = test_api_router(db.clone(), engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auto-queue/enqueue")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&serde_json::json!({
-                        "repo": "test-repo",
-                        "issue_number": 16235,
-                        "agent_id": "agent-eq-stale",
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("completed runs cannot accept enqueue"),
-        "error should explain that enqueue requires a live run"
-    );
-    assert_eq!(json["last_run_id"], "run-stale-finished");
-    assert_eq!(json["last_run_status"], "completed");
-
-    let conn = db.lock().unwrap();
-    let run_status: String = conn
-        .query_row(
-            "SELECT status FROM auto_queue_runs WHERE id = 'run-stale-finished'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        run_status, "completed",
-        "stale active run must be auto-completed before rejecting enqueue"
-    );
-    let queued_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM auto_queue_entries WHERE kanban_card_id = 'card-eq-stale-target'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        queued_count, 0,
-        "rejected enqueue must not create queue entries"
-    );
-}
-
-/// #162 DoD: active dispatch guard — rejects enqueue for cards with pending/dispatched dispatch.
-#[tokio::test]
-async fn auto_queue_enqueue_rejects_card_with_active_dispatch() {
-    crate::pipeline::ensure_loaded();
-    let db = test_db();
-    let engine = test_engine(&db);
-    seed_agent(&db, "agent-eq-dup");
-    seed_auto_queue_card(&db, "card-eq-dup", 1624, "ready", "agent-eq-dup");
-
-    // Pre-create an active dispatch for this card
-    {
-        let conn = db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, title, status, created_at) \
-             VALUES ('disp-dup', 'card-eq-dup', 'agent-eq-dup', 'implementation', 'test', 'pending', datetime('now'))",
-            [],
-        )
-        .unwrap();
-    }
-
-    let app = test_api_router(db.clone(), engine, None);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auto-queue/enqueue")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&serde_json::json!({
-                        "repo": "test-repo",
-                        "issue_number": 1624,
-                        "agent_id": "agent-eq-dup",
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(
-        json["error"].as_str().unwrap().contains("active dispatch"),
-        "must reject with active-dispatch error"
     );
 }
 

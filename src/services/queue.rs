@@ -1,7 +1,12 @@
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use crate::db::Db;
+use crate::services::discord::health::HealthRegistry;
+use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ServiceError, ServiceResult};
+use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
+use poise::serenity_prelude::ChannelId;
 
 #[derive(Clone)]
 pub struct QueueService {
@@ -110,30 +115,50 @@ impl QueueService {
         Ok(json!({"ok": true, "cancelled": count}))
     }
 
-    pub fn cancel_turn(&self, channel_id: &str) -> ServiceResult<Value> {
-        let session_info: Option<(String, Option<String>)> = self.db.lock().ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT session_key, active_dispatch_id FROM sessions \
+    pub async fn cancel_turn(
+        &self,
+        health_registry: Option<&Arc<HealthRegistry>>,
+        channel_id: &str,
+    ) -> ServiceResult<Value> {
+        let session_info: Option<(String, Option<String>, Option<String>)> =
+            self.db.lock().ok().and_then(|conn| {
+                conn.query_row(
+                    "SELECT session_key, active_dispatch_id, provider FROM sessions \
                  WHERE status = 'working' \
                  AND (session_key LIKE '%' || ?1 || '%' OR agent_id IN \
                       (SELECT id FROM agents WHERE
                           discord_channel_id = ?1 OR discord_channel_alt = ?1 OR
                           discord_channel_cc = ?1 OR discord_channel_cdx = ?1)) \
                  ORDER BY last_heartbeat DESC LIMIT 1",
-                [channel_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .ok()
-        });
+                    [channel_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .ok()
+            });
 
-        let Some((session_key, dispatch_id)) = session_info else {
+        let Some((session_key, dispatch_id, provider_name)) = session_info else {
             return Err(ServiceError::not_found(
                 "no active turn found for this channel",
             ));
         };
 
         let tmux_name = session_key.split(':').last().unwrap_or(&session_key);
-        let killed = crate::services::platform::tmux::kill_session(tmux_name);
+        let lifecycle = stop_turn_preserving_queue(
+            health_registry.map(Arc::as_ref),
+            &TurnLifecycleTarget {
+                provider: provider_name.as_deref().and_then(ProviderKind::from_str),
+                channel_id: channel_id.parse::<u64>().ok().map(ChannelId::new),
+                tmux_name: tmux_name.to_string(),
+            },
+            "queue-api cancel_turn",
+        )
+        .await;
 
         if let Some(dispatch_id) = dispatch_id.as_ref() {
             if let Ok(conn) = self.db.lock() {
@@ -155,18 +180,23 @@ impl QueueService {
         }
 
         tracing::info!(
-            "[queue-api] Cancelled turn: session={}, tmux={}, killed={}, dispatch={:?}",
+            "[queue-api] Cancelled turn: session={}, tmux={}, killed={}, dispatch={:?}, lifecycle={}",
             session_key,
             tmux_name,
-            killed,
-            dispatch_id
+            lifecycle.tmux_killed,
+            dispatch_id,
+            lifecycle.lifecycle_path,
         );
 
         Ok(json!({
             "ok": true,
             "session_key": session_key,
             "tmux_session": tmux_name,
-            "tmux_killed": killed,
+            "tmux_killed": lifecycle.tmux_killed,
+            "lifecycle_path": lifecycle.lifecycle_path,
+            "queued_remaining": lifecycle.queue_depth,
+            "queue_preserved": lifecycle.queue_preserved,
+            "inflight_cleared": lifecycle.inflight_cleared,
             "dispatch_cancelled": dispatch_id,
         }))
     }
