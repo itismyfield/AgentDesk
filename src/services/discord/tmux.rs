@@ -50,6 +50,7 @@ pub(super) struct WatcherLineOutcome {
     pub provider_overload_message: Option<String>,
     pub result_tokens: Option<u64>,
     pub stale_resume_detected: bool,
+    pub auto_compacted: bool,
 }
 
 fn is_prompt_too_long_message(text: &str) -> bool {
@@ -686,6 +687,28 @@ pub(super) async fn tmux_output_watcher(
             } else {
                 println!("  [{ts}] 👁 tmux session {tmux_session_name} ended, watcher stopping");
             }
+            // Notify: tmux session termination with reason
+            {
+                let reason_short = read_tmux_exit_reason(&tmux_session_name)
+                    .unwrap_or_else(|| "unknown".to_string());
+                // Strip timestamp prefix if present (format: "[YYYY-MM-DD HH:MM:SS] reason")
+                let reason_text = reason_short
+                    .strip_prefix('[')
+                    .and_then(|s| s.find("] ").map(|i| &s[i + 2..]))
+                    .unwrap_or(&reason_short);
+                let reason_truncated: String = reason_text.chars().take(100).collect();
+                if let Some(ref db) = shared.db {
+                    if let Ok(conn) = db.lock() {
+                        let _ = conn.execute(
+                            "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
+                            rusqlite::params![
+                                format!("channel:{}", channel_id.get()),
+                                format!("🔴 세션 종료: {reason_truncated}"),
+                            ],
+                        );
+                    }
+                }
+            }
             if !prompt_too_long_killed && !turn_result_relayed {
                 // Suppress warning for normal dispatch completion — not an error
                 let is_normal_completion = read_tmux_exit_reason(&tmux_session_name)
@@ -842,6 +865,20 @@ pub(super) async fn tmux_output_watcher(
                         }
                         if outcome.result_tokens.is_some() {
                             result_tokens = outcome.result_tokens;
+                        }
+                        // Notify when auto-compaction is detected in output
+                        if outcome.auto_compacted {
+                            if let Some(ref db) = shared.db {
+                                if let Ok(conn) = db.lock() {
+                                    let _ = conn.execute(
+                                        "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
+                                        rusqlite::params![
+                                            format!("channel:{}", channel_id.get()),
+                                            "🗜️ 자동 컨텍스트 압축 감지",
+                                        ],
+                                    );
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -1633,7 +1670,18 @@ pub(super) async fn tmux_output_watcher(
                         .ok();
                     }
                 }
-                // Do not self-route notify chatter back into the same channel.
+                // Notify: auto-compact triggered
+                if let Some(ref db) = shared.db {
+                    if let Ok(conn) = db.lock() {
+                        let _ = conn.execute(
+                            "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
+                            rusqlite::params![
+                                format!("channel:{}", channel_id.get()),
+                                format!("🗜️ 자동 컨텍스트 압축 (사용률: {pct}%)"),
+                            ],
+                        );
+                    }
+                }
             }
         }
     }
@@ -1932,6 +1980,23 @@ pub(super) fn process_watcher_lines(
 
                     state.final_result = Some(String::new());
                     outcome.found_result = true;
+                }
+                "system" => {
+                    // Detect auto-compaction events from Claude Code
+                    if let Some(msg) = val.get("message").and_then(|m| m.as_str()) {
+                        let lower = msg.to_ascii_lowercase();
+                        if lower.contains("compacted")
+                            || lower.contains("auto-compact")
+                            || lower.contains("conversation has been compressed")
+                        {
+                            outcome.auto_compacted = true;
+                        }
+                    }
+                    if let Some(subtype) = val.get("subtype").and_then(|s| s.as_str()) {
+                        if subtype == "compact" || subtype == "auto_compact" {
+                            outcome.auto_compacted = true;
+                        }
+                    }
                 }
                 _ => {}
             }
