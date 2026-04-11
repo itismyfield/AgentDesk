@@ -42,6 +42,15 @@ fn get_claude_path() -> Option<String> {
     resolve_claude_path()
 }
 
+fn apply_permission_mode(args: &mut Vec<String>, readonly_mode: bool) {
+    if readonly_mode {
+        args.push("--permission-mode".to_string());
+        args.push("dontAsk".to_string());
+    } else {
+        args.insert(1, "--dangerously-skip-permissions".to_string());
+    }
+}
+
 fn build_tmux_launch_env_lines(
     exec_path: Option<&str>,
     report_channel_id: Option<u64>,
@@ -186,12 +195,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 - Use headers (## Title) to organize longer responses
 - Keep formatting minimal and terminal-friendly"#.to_string(),
     ];
-    if readonly_mode {
-        args.push("--permission-mode".to_string());
-        args.push("plan".to_string());
-    } else {
-        args.insert(1, "--dangerously-skip-permissions".to_string());
-    }
+    apply_permission_mode(&mut args, readonly_mode);
 
     // Resume session if available
     if let Some(sid) = session_id {
@@ -500,12 +504,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         "--output-format".to_string(),
         "stream-json".to_string(),
     ];
-    if readonly_mode {
-        args.push("--permission-mode".to_string());
-        args.push("plan".to_string());
-    } else {
-        args.insert(1, "--dangerously-skip-permissions".to_string());
-    }
+    apply_permission_mode(&mut args, readonly_mode);
 
     // Apply model override if specified (e.g. "opus", "sonnet", "haiku")
     if let Some(model) = model_override {
@@ -1831,6 +1830,42 @@ mod tests {
         assert!(env_lines.contains("export PATH='/tmp/provider:/usr/bin'"));
         assert!(env_lines.contains(&format!("export {}=7", RESTART_REPORT_CHANNEL_ENV)));
         assert!(env_lines.contains(&format!("export {}=claude", RESTART_REPORT_PROVIDER_ENV)));
+    }
+
+    #[test]
+    fn test_apply_permission_mode_uses_dont_ask_for_readonly() {
+        let mut args = vec!["-p".to_string(), "--tools".to_string(), "Read".to_string()];
+        apply_permission_mode(&mut args, true);
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--permission-mode", "dontAsk"])
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions")
+        );
+    }
+
+    #[test]
+    fn test_apply_permission_mode_keeps_bypass_for_non_readonly() {
+        let mut args = vec![
+            "-p".to_string(),
+            "--tools".to_string(),
+            "Read,Edit".to_string(),
+        ];
+        apply_permission_mode(&mut args, false);
+
+        assert_eq!(
+            args.get(1).map(String::as_str),
+            Some("--dangerously-skip-permissions")
+        );
+        assert!(
+            !args
+                .windows(2)
+                .any(|pair| pair == ["--permission-mode", "dontAsk"])
+        );
     }
 
     #[test]

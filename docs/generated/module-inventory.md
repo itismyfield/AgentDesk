@@ -133,7 +133,7 @@
 | `server::ws` | `src/server/ws.rs` | 141 |  |
 | `services` | `src/services/mod.rs` | 29 |  |
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 155 |  |
-| `services::claude` | `src/services/claude.rs` | 2301 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 2336 | giant-file |
 | `services::codex` | `src/services/codex.rs` | 1246 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 572 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 4855 | giant-file |
