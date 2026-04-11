@@ -144,7 +144,7 @@
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 38 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1141 | giant-file |
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 518 |  |
-| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 717 |  |
+| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 796 |  |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 59 |  |
 | `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 105 |  |
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 183 |  |
@@ -155,7 +155,7 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 1315 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 257 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 1281 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 1346 | giant-file |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 260 |  |
 | `services::discord::meeting` | `src/services/discord/meeting.rs` | 2406 | giant-file |
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
