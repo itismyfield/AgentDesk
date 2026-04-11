@@ -53,7 +53,7 @@
 | `db::agents` | `src/db/agents.rs` | 666 |  |
 | `db::schema` | `src/db/schema.rs` | 1173 | giant-file |
 | `db::session_transcripts` | `src/db/session_transcripts.rs` | 335 |  |
-| `dispatch` | `src/dispatch/mod.rs` | 2723 | giant-file |
+| `dispatch` | `src/dispatch/mod.rs` | 2863 | giant-file |
 | `engine` | `src/engine/mod.rs` | 1208 | giant-file |
 | `engine::hooks` | `src/engine/hooks.rs` | 84 |  |
 | `engine::intent` | `src/engine/intent.rs` | 744 |  |
@@ -133,10 +133,10 @@
 | `server::ws` | `src/server/ws.rs` | 141 |  |
 | `services` | `src/services/mod.rs` | 29 |  |
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 155 |  |
-| `services::claude` | `src/services/claude.rs` | 2289 | giant-file |
-| `services::codex` | `src/services/codex.rs` | 1197 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 2301 | giant-file |
+| `services::codex` | `src/services/codex.rs` | 1219 | giant-file |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 572 |  |
-| `services::discord` | `src/services/discord/mod.rs` | 4848 | giant-file |
+| `services::discord` | `src/services/discord/mod.rs` | 4855 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 811 |  |
 | `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 675 |  |
 | `services::discord::bot_init` | `src/services/discord/bot_init.rs` | 2503 | giant-file |
@@ -144,7 +144,7 @@
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 38 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1141 | giant-file |
 | `services::discord::commands::control` | `src/services/discord/commands/control.rs` | 518 |  |
-| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 796 |  |
+| `services::discord::commands::diagnostics` | `src/services/discord/commands/diagnostics.rs` | 823 |  |
 | `services::discord::commands::help` | `src/services/discord/commands/help.rs` | 59 |  |
 | `services::discord::commands::meeting_cmd` | `src/services/discord/commands/meeting_cmd.rs` | 105 |  |
 | `services::discord::commands::model_picker` | `src/services/discord/commands/model_picker.rs` | 183 |  |
@@ -155,9 +155,9 @@
 | `services::discord::formatting` | `src/services/discord/formatting.rs` | 1315 | giant-file |
 | `services::discord::gateway` | `src/services/discord/gateway.rs` | 257 |  |
 | `services::discord::handoff` | `src/services/discord/handoff.rs` | 260 |  |
-| `services::discord::health` | `src/services/discord/health.rs` | 1346 | giant-file |
+| `services::discord::health` | `src/services/discord/health.rs` | 1357 | giant-file |
 | `services::discord::inflight` | `src/services/discord/inflight.rs` | 260 |  |
-| `services::discord::meeting` | `src/services/discord/meeting.rs` | 2406 | giant-file |
+| `services::discord::meeting` | `src/services/discord/meeting.rs` | 2436 | giant-file |
 | `services::discord::metrics` | `src/services/discord/metrics.rs` | 148 |  |
 | `services::discord::model_catalog` | `src/services/discord/model_catalog.rs` | 1081 | giant-file |
 | `services::discord::model_picker_interaction` | `src/services/discord/model_picker_interaction.rs` | 294 |  |
