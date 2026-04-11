@@ -75,7 +75,8 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
         return await res.json();
       } catch (error) {
         clearTimeout(timer);
-        const resolvedError = error instanceof Error ? error : new Error(String(error));
+        const resolvedError =
+          error instanceof Error ? error : new Error(String(error));
         if (resolvedError.name === "AbortError") {
           lastError = new Error(`Request timeout: ${url}`);
           if (isGet && attempt < MAX_RETRIES) continue;
@@ -100,7 +101,8 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
   if (isGet) inflightGets.set(url, promise);
 
   return promise.catch((error) => {
-    const resolvedError = error instanceof Error ? error : new Error(String(error));
+    const resolvedError =
+      error instanceof Error ? error : new Error(String(error));
     apiErrorListener?.(url, resolvedError);
     throw resolvedError;
   });
@@ -767,6 +769,52 @@ export async function getAgentDispatchedSessions(
     `/api/agents/${agentId}/dispatched-sessions`,
   );
   return data.sessions;
+}
+
+export interface AgentTurnToolEvent {
+  kind: "tool" | "thinking";
+  status: "running" | "success" | "error" | "info";
+  tool_name: string | null;
+  summary: string;
+  line: string;
+}
+
+export interface AgentTurnStatus {
+  agent_id: string;
+  status: "working" | "idle";
+  started_at: string | null;
+  updated_at: string | null;
+  recent_output: string | null;
+  recent_output_source: "tmux" | "inflight" | "none";
+  session_key: string | null;
+  tmux_session: string | null;
+  provider: string | null;
+  thread_channel_id: string | null;
+  active_dispatch_id: string | null;
+  last_heartbeat: string | null;
+  current_tool_line: string | null;
+  prev_tool_status: string | null;
+  tool_events: AgentTurnToolEvent[];
+  tool_count: number;
+}
+
+export interface StopAgentTurnResponse {
+  status: string;
+  agent_id: string;
+  session_key: string;
+  tmux_killed?: boolean;
+}
+
+export async function getAgentTurn(agentId: string): Promise<AgentTurnStatus> {
+  return request(`/api/agents/${agentId}/turn`);
+}
+
+export async function stopAgentTurn(
+  agentId: string,
+): Promise<StopAgentTurnResponse> {
+  return request(`/api/agents/${agentId}/turn/stop`, {
+    method: "POST",
+  });
 }
 
 // ── Agent Skills ──
