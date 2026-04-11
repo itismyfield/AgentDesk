@@ -8,6 +8,7 @@ use crate::services::memory::{
     resolve_memory_session_id,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
+use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq)]
