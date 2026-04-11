@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use super::AppState;
 use crate::services::provider::ProviderKind;
@@ -164,271 +164,6 @@ impl GenerateMode {
     fn enables_auto_grouping(self, parallel: Option<bool>) -> bool {
         parallel.unwrap_or(false)
     }
-}
-
-fn run_slot_pool_size(conn: &rusqlite::Connection, run_id: &str) -> i64 {
-    conn.query_row(
-        "SELECT COALESCE(max_concurrent_threads, 1)
-         FROM auto_queue_runs
-         WHERE id = ?1",
-        [run_id],
-        |row| row.get::<_, i64>(0),
-    )
-    .unwrap_or(1)
-    .clamp(1, 10)
-}
-
-pub(crate) fn ensure_agent_slot_pool_rows(
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-    slot_pool_size: i64,
-) -> rusqlite::Result<()> {
-    for slot_index in 0..slot_pool_size.clamp(1, 32) {
-        conn.execute(
-            "INSERT OR IGNORE INTO auto_queue_slots (agent_id, slot_index, thread_id_map)
-             VALUES (?1, ?2, '{}')",
-            rusqlite::params![agent_id, slot_index],
-        )?;
-    }
-    Ok(())
-}
-
-fn ensure_agent_slot_rows(
-    conn: &rusqlite::Connection,
-    run_id: &str,
-    agent_id: &str,
-) -> rusqlite::Result<()> {
-    ensure_agent_slot_pool_rows(conn, agent_id, run_slot_pool_size(conn, run_id))
-}
-
-fn clear_inactive_slot_assignments(conn: &rusqlite::Connection) {
-    conn.execute(
-        "UPDATE auto_queue_slots
-         SET assigned_run_id = NULL,
-             assigned_thread_group = NULL,
-             updated_at = datetime('now')
-         WHERE assigned_run_id IS NOT NULL
-           AND assigned_run_id NOT IN (
-               SELECT id FROM auto_queue_runs WHERE status IN ('active', 'paused')
-           )",
-        [],
-    )
-    .ok();
-}
-
-fn completed_group_slots(conn: &rusqlite::Connection, run_id: &str) -> Vec<(String, i64)> {
-    let mut stmt = match conn.prepare(
-        "SELECT agent_id, slot_index, assigned_thread_group
-         FROM auto_queue_slots
-         WHERE assigned_run_id = ?1",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return Vec::new(),
-    };
-    let assigned: Vec<(String, i64, i64)> = stmt
-        .query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .ok()
-        .map(|rows| rows.filter_map(|row| row.ok()).collect())
-        .unwrap_or_default();
-    drop(stmt);
-
-    let mut released = Vec::new();
-    for (agent_id, slot_index, thread_group) in assigned {
-        let still_active: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0
-                 FROM auto_queue_entries
-                 WHERE run_id = ?1
-                   AND agent_id = ?2
-                   AND COALESCE(thread_group, 0) = ?3
-                   AND status IN ('pending', 'dispatched')",
-                rusqlite::params![run_id, agent_id, thread_group],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if still_active {
-            continue;
-        }
-        released.push((agent_id, slot_index));
-    }
-
-    released
-}
-
-fn release_group_slots(conn: &rusqlite::Connection, slots: &[(String, i64)]) {
-    for (agent_id, slot_index) in slots {
-        conn.execute(
-            "UPDATE auto_queue_slots
-             SET assigned_run_id = NULL,
-                 assigned_thread_group = NULL,
-                 updated_at = datetime('now')
-             WHERE agent_id = ?1 AND slot_index = ?2",
-            rusqlite::params![agent_id, slot_index],
-        )
-        .ok();
-    }
-}
-
-fn release_run_slots(conn: &rusqlite::Connection, run_id: &str) {
-    conn.execute(
-        "UPDATE auto_queue_slots
-         SET assigned_run_id = NULL,
-             assigned_thread_group = NULL,
-             updated_at = datetime('now')
-         WHERE assigned_run_id = ?1",
-        [run_id],
-    )
-    .ok();
-}
-
-fn current_batch_phase(conn: &rusqlite::Connection, run_id: &str) -> Option<i64> {
-    conn.query_row(
-        "SELECT MIN(COALESCE(batch_phase, 0))
-         FROM auto_queue_entries
-         WHERE run_id = ?1
-           AND status IN ('pending', 'dispatched')
-           AND COALESCE(batch_phase, 0) > 0",
-        [run_id],
-        |row| row.get::<_, Option<i64>>(0),
-    )
-    .ok()
-    .flatten()
-}
-
-fn batch_phase_is_eligible(batch_phase: i64, current_phase: Option<i64>) -> bool {
-    if batch_phase == 0 {
-        return true;
-    }
-    match current_phase {
-        Some(phase) => batch_phase == phase,
-        None => true,
-    }
-}
-
-fn run_has_blocking_phase_gate(conn: &rusqlite::Connection, run_id: &str) -> bool {
-    let key_pattern = format!("aq_phase_gate:{run_id}:%");
-    conn.query_row(
-        "SELECT COUNT(*) > 0
-         FROM kv_meta
-         WHERE key LIKE ?1
-           AND json_extract(COALESCE(value, '{}'), '$.status') IN ('pending', 'failed')",
-        [key_pattern],
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
-}
-
-fn group_has_pending_entries(
-    conn: &rusqlite::Connection,
-    run_id: &str,
-    thread_group: i64,
-    current_phase: Option<i64>,
-) -> bool {
-    let mut stmt = match conn.prepare(
-        "SELECT COALESCE(batch_phase, 0)
-         FROM auto_queue_entries
-         WHERE run_id = ?1
-           AND COALESCE(thread_group, 0) = ?2
-           AND status = 'pending'
-         ORDER BY priority_rank ASC",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return false,
-    };
-    stmt.query_map(rusqlite::params![run_id, thread_group], |row| {
-        row.get::<_, i64>(0)
-    })
-    .ok()
-    .map(|rows| {
-        rows.filter_map(|row| row.ok())
-            .any(|batch_phase| batch_phase_is_eligible(batch_phase, current_phase))
-    })
-    .unwrap_or(false)
-}
-
-fn first_pending_entry_for_group(
-    conn: &rusqlite::Connection,
-    run_id: &str,
-    thread_group: i64,
-    current_phase: Option<i64>,
-) -> Option<(String, String, String)> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT e.id, e.kanban_card_id, e.agent_id, COALESCE(e.batch_phase, 0)
-             FROM auto_queue_entries e
-             WHERE e.run_id = ?1
-               AND COALESCE(e.thread_group, 0) = ?2
-               AND e.status = 'pending'
-             ORDER BY e.priority_rank ASC",
-        )
-        .ok()?;
-    stmt.query_map(rusqlite::params![run_id, thread_group], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-        ))
-    })
-    .ok()
-    .and_then(|rows| {
-        rows.filter_map(|row| row.ok())
-            .find_map(|(entry_id, card_id, agent_id, batch_phase)| {
-                batch_phase_is_eligible(batch_phase, current_phase)
-                    .then_some((entry_id, card_id, agent_id))
-            })
-    })
-}
-
-fn assigned_groups_with_pending_entries(
-    conn: &rusqlite::Connection,
-    run_id: &str,
-    current_phase: Option<i64>,
-) -> Vec<i64> {
-    let mut stmt = match conn.prepare(
-        "SELECT DISTINCT s.assigned_thread_group, COALESCE(e.batch_phase, 0)
-         FROM auto_queue_slots s
-         JOIN auto_queue_entries e
-           ON e.run_id = ?1
-          AND e.agent_id = s.agent_id
-          AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
-         WHERE s.assigned_run_id = ?1
-           AND s.assigned_thread_group IS NOT NULL
-           AND EXISTS (
-               SELECT 1
-               FROM auto_queue_entries e
-               WHERE e.run_id = ?1
-                 AND e.agent_id = s.agent_id
-                 AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
-                 AND e.status = 'pending'
-           )
-           AND NOT EXISTS (
-               SELECT 1
-               FROM auto_queue_entries e
-               WHERE e.run_id = ?1
-                 AND e.agent_id = s.agent_id
-                 AND COALESCE(e.thread_group, 0) = COALESCE(s.assigned_thread_group, 0)
-                 AND e.status = 'dispatched'
-           )
-         ORDER BY s.assigned_thread_group ASC, s.slot_index ASC, COALESCE(e.batch_phase, 0) ASC",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return Vec::new(),
-    };
-    let mut seen = HashSet::new();
-    stmt.query_map([run_id], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-    })
-    .ok()
-    .map(|rows| {
-        rows.filter_map(|row| row.ok())
-            .filter_map(|(thread_group, batch_phase)| {
-                (batch_phase_is_eligible(batch_phase, current_phase) && seen.insert(thread_group))
-                    .then_some(thread_group)
-            })
-            .collect()
-    })
-    .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -711,330 +446,6 @@ fn validate_dispatchable_cards(
     }
 
     Ok(())
-}
-
-fn allocate_slot_for_group_agent(
-    conn: &rusqlite::Connection,
-    run_id: &str,
-    thread_group: i64,
-    agent_id: &str,
-) -> Option<(i64, bool)> {
-    ensure_agent_slot_rows(conn, run_id, agent_id).ok()?;
-
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT slot_index
-             FROM auto_queue_slots
-             WHERE agent_id = ?1
-               AND assigned_run_id = ?2
-               AND COALESCE(assigned_thread_group, 0) = ?3
-             LIMIT 1",
-            rusqlite::params![agent_id, run_id, thread_group],
-            |row| row.get(0),
-        )
-        .ok();
-    if let Some(slot_index) = existing {
-        conn.execute(
-            "UPDATE auto_queue_entries
-             SET slot_index = ?1
-             WHERE run_id = ?2
-               AND agent_id = ?3
-               AND COALESCE(thread_group, 0) = ?4
-               AND slot_index IS NULL",
-            rusqlite::params![slot_index, run_id, agent_id, thread_group],
-        )
-        .ok();
-        return Some((slot_index, false));
-    }
-
-    let free_slot: Option<i64> = conn
-        .query_row(
-            "SELECT slot_index
-             FROM auto_queue_slots
-             WHERE agent_id = ?1
-               AND assigned_run_id IS NULL
-             ORDER BY slot_index ASC
-             LIMIT 1",
-            [agent_id],
-            |row| row.get(0),
-        )
-        .ok();
-    let Some(slot_index) = free_slot else {
-        return None;
-    };
-
-    conn.execute(
-        "UPDATE auto_queue_slots
-         SET assigned_run_id = ?1,
-             assigned_thread_group = ?2,
-             updated_at = datetime('now')
-         WHERE agent_id = ?3
-           AND slot_index = ?4
-           AND assigned_run_id IS NULL",
-        rusqlite::params![run_id, thread_group, agent_id, slot_index],
-    )
-    .ok()?;
-    conn.execute(
-        "UPDATE auto_queue_entries
-         SET slot_index = ?1
-         WHERE run_id = ?2
-           AND agent_id = ?3
-           AND COALESCE(thread_group, 0) = ?4
-           AND slot_index IS NULL",
-        rusqlite::params![slot_index, run_id, agent_id, thread_group],
-    )
-    .ok();
-    Some((slot_index, true))
-}
-
-#[derive(Debug, Clone)]
-struct RuntimeSlotClearTarget {
-    provider_name: String,
-    thread_channel_id: u64,
-    session_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SlotClearTarget {
-    thread_channel_ids: Vec<u64>,
-    runtime_targets: Vec<RuntimeSlotClearTarget>,
-}
-
-fn build_slot_clear_target(
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-    slot_index: i64,
-) -> SlotClearTarget {
-    let raw_map: String = conn
-        .query_row(
-            "SELECT COALESCE(thread_id_map, '{}')
-             FROM auto_queue_slots
-             WHERE agent_id = ?1 AND slot_index = ?2",
-            rusqlite::params![agent_id, slot_index],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "{}".to_string());
-
-    let mut thread_channel_ids: Vec<u64> = serde_json::from_str::<serde_json::Value>(&raw_map)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .map(|map| {
-            map.values()
-                .filter_map(|value| {
-                    value
-                        .as_str()
-                        .and_then(|raw| raw.trim().parse::<u64>().ok())
-                        .or_else(|| value.as_u64())
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    thread_channel_ids.sort_unstable();
-    thread_channel_ids.dedup();
-
-    let runtime_targets = thread_channel_ids
-        .iter()
-        .filter_map(|thread_channel_id| {
-            let row: Option<(Option<String>, Option<String>)> = conn
-                .query_row(
-                    "SELECT provider, session_key
-                     FROM sessions
-                     WHERE thread_channel_id = ?1
-                     ORDER BY CASE status WHEN 'working' THEN 0 WHEN 'idle' THEN 1 ELSE 2 END,
-                              COALESCE(last_heartbeat, created_at) DESC,
-                              rowid DESC
-                     LIMIT 1",
-                    [thread_channel_id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .ok();
-            let (provider_name, session_key) = row?;
-            let provider_name = provider_name
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| {
-                    session_key.as_deref().and_then(|key| {
-                        key.split_once(':').and_then(|(_, tmux_name)| {
-                            crate::services::provider::parse_provider_and_channel_from_tmux_name(
-                                tmux_name,
-                            )
-                            .map(|(provider, _)| provider.as_str().to_string())
-                        })
-                    })
-                })?;
-            Some(RuntimeSlotClearTarget {
-                provider_name,
-                thread_channel_id: *thread_channel_id,
-                session_key,
-            })
-        })
-        .collect();
-
-    SlotClearTarget {
-        thread_channel_ids,
-        runtime_targets,
-    }
-}
-
-pub(crate) fn clear_slot_sessions_db(
-    conn: &rusqlite::Connection,
-    thread_channel_ids: &[u64],
-) -> usize {
-    thread_channel_ids
-        .iter()
-        .map(|thread_channel_id| {
-            conn.execute(
-                "UPDATE sessions
-                 SET status = 'idle',
-                     active_dispatch_id = NULL,
-                     session_info = 'Slot thread reset',
-                     claude_session_id = NULL,
-                     tokens = 0,
-                     last_heartbeat = datetime('now')
-                 WHERE thread_channel_id = ?1
-                   AND status IN ('working', 'idle')",
-                [thread_channel_id.to_string()],
-            )
-            .unwrap_or(0)
-        })
-        .sum()
-}
-
-fn clear_slot_threads_for_slot(
-    state: &AppState,
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-    slot_index: i64,
-) -> usize {
-    let target = build_slot_clear_target(conn, agent_id, slot_index);
-    let cleared = clear_slot_sessions_db(conn, &target.thread_channel_ids);
-
-    if let Some(registry) = state.health_registry.clone() {
-        let runtime_targets = target.runtime_targets;
-        tokio::spawn(async move {
-            for runtime_target in runtime_targets {
-                crate::services::discord::health::clear_provider_channel_runtime(
-                    &registry,
-                    &runtime_target.provider_name,
-                    poise::serenity_prelude::ChannelId::new(runtime_target.thread_channel_id),
-                    runtime_target.session_key.as_deref(),
-                )
-                .await;
-            }
-        });
-    }
-
-    cleared
-}
-
-pub(crate) fn slot_has_active_dispatch(
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-    slot_index: i64,
-) -> bool {
-    let auto_queue_active: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0
-             FROM auto_queue_entries
-             WHERE agent_id = ?1
-               AND slot_index = ?2
-               AND status = 'dispatched'",
-            rusqlite::params![agent_id, slot_index],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if auto_queue_active {
-        return true;
-    }
-
-    conn.query_row(
-        "SELECT COUNT(*) > 0
-         FROM task_dispatches
-         WHERE to_agent_id = ?1
-           AND status IN ('pending', 'dispatched')
-           AND CAST(json_extract(COALESCE(context, '{}'), '$.slot_index') AS INTEGER) = ?2",
-        rusqlite::params![agent_id, slot_index],
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
-}
-
-fn clear_slot_thread_map(conn: &rusqlite::Connection, agent_id: &str, slot_index: i64) -> usize {
-    conn.execute(
-        "UPDATE auto_queue_slots
-         SET thread_id_map = '{}',
-             updated_at = datetime('now')
-         WHERE agent_id = ?1 AND slot_index = ?2",
-        rusqlite::params![agent_id, slot_index],
-    )
-    .unwrap_or(0)
-}
-
-async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, String> {
-    if thread_channel_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let token = crate::credential::read_bot_token("announce")
-        .ok_or_else(|| "no announce bot token".to_string())?;
-    let client = reqwest::Client::new();
-    let mut archived = 0usize;
-
-    for thread_channel_id in thread_channel_ids {
-        let thread_url = format!("https://discord.com/api/v10/channels/{thread_channel_id}");
-        match client
-            .patch(&thread_url)
-            .header("Authorization", format!("Bot {}", token))
-            .json(&serde_json::json!({"archived": true}))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND => {
-                archived += 1;
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(format!(
-                    "failed to archive slot thread {thread_channel_id}: {status} {body}"
-                ));
-            }
-            Err(err) => {
-                return Err(format!(
-                    "failed to archive slot thread {thread_channel_id}: {err}"
-                ));
-            }
-        }
-    }
-
-    Ok(archived)
-}
-
-pub(crate) async fn reset_slot_thread_bindings(
-    db: &crate::db::Db,
-    agent_id: &str,
-    slot_index: i64,
-) -> Result<(usize, usize, usize), String> {
-    let conn = db
-        .separate_conn()
-        .map_err(|err| format!("db open failed for slot reset: {err}"))?;
-    if slot_has_active_dispatch(&conn, agent_id, slot_index) {
-        return Err(format!(
-            "slot {slot_index} for agent {agent_id} has active dispatch"
-        ));
-    }
-    let target = build_slot_clear_target(&conn, agent_id, slot_index);
-    drop(conn);
-
-    let archived_threads = archive_slot_threads(&target.thread_channel_ids).await?;
-
-    let conn = db
-        .separate_conn()
-        .map_err(|err| format!("db reopen failed for slot reset: {err}"))?;
-    let cleared_sessions = clear_slot_sessions_db(&conn, &target.thread_channel_ids);
-    let cleared_bindings = clear_slot_thread_map(&conn, agent_id, slot_index);
-    drop(conn);
-
-    Ok((archived_threads, cleared_sessions, cleared_bindings))
 }
 
 fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<String> {
@@ -1447,432 +858,6 @@ fn build_group_plan(cards: &[GenerateCandidate], enable_similarity: bool) -> Gro
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ThreadLinkCandidate {
-    label: String,
-    channel_id: u64,
-}
-
-fn normalized_guild_id(guild_id: Option<&str>) -> Option<&str> {
-    guild_id.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn load_card_thread_bindings(
-    conn: &rusqlite::Connection,
-    card_id: &str,
-) -> (BTreeMap<u64, String>, Option<String>) {
-    let (channel_thread_map, active_thread_id): (Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT channel_thread_map, active_thread_id
-             FROM kanban_cards
-             WHERE id = ?1",
-            [card_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap_or((None, None));
-
-    let thread_map = channel_thread_map
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.as_object().cloned())
-        .map(|map| {
-            map.into_iter()
-                .filter_map(|(channel_id_raw, thread_value)| {
-                    let channel_id = channel_id_raw.parse::<u64>().ok()?;
-                    let thread_id = thread_value
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_string)
-                        .or_else(|| thread_value.as_u64().map(|value| value.to_string()))?;
-                    Some((channel_id, thread_id))
-                })
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
-
-    let active_thread_id = active_thread_id
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    (thread_map, active_thread_id)
-}
-
-fn build_thread_link_candidates(
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-) -> Vec<ThreadLinkCandidate> {
-    let Some(bindings) = crate::db::agents::load_agent_channel_bindings(conn, agent_id)
-        .ok()
-        .flatten()
-    else {
-        return Vec::new();
-    };
-
-    let work_channel = bindings
-        .primary_channel()
-        .as_deref()
-        .and_then(super::dispatches::parse_channel_id);
-    let review_channel = bindings
-        .counter_model_channel()
-        .as_deref()
-        .and_then(super::dispatches::parse_channel_id);
-
-    match (work_channel, review_channel) {
-        (Some(work_channel), Some(review_channel)) if work_channel == review_channel => {
-            vec![ThreadLinkCandidate {
-                label: "shared".to_string(),
-                channel_id: work_channel,
-            }]
-        }
-        (Some(work_channel), Some(review_channel)) => vec![
-            ThreadLinkCandidate {
-                label: "work".to_string(),
-                channel_id: work_channel,
-            },
-            ThreadLinkCandidate {
-                label: "review".to_string(),
-                channel_id: review_channel,
-            },
-        ],
-        (Some(work_channel), None) => vec![ThreadLinkCandidate {
-            label: "work".to_string(),
-            channel_id: work_channel,
-        }],
-        (None, Some(review_channel)) => vec![ThreadLinkCandidate {
-            label: "review".to_string(),
-            channel_id: review_channel,
-        }],
-        (None, None) => Vec::new(),
-    }
-}
-
-fn thread_link_json(
-    role: &str,
-    label: String,
-    channel_id: Option<u64>,
-    thread_id: &str,
-    guild_id: Option<&str>,
-) -> serde_json::Value {
-    let thread_id = thread_id.trim().to_string();
-    json!({
-        "role": role,
-        "label": label,
-        "channel_id": channel_id.map(|value| value.to_string()),
-        "thread_id": thread_id,
-        "url": normalized_guild_id(guild_id)
-            .map(|guild_id| format!("https://discord.com/channels/{guild_id}/{thread_id}")),
-    })
-}
-
-/// Fallback policy:
-/// - Use channel-thread bindings plus configured work/review channels whenever possible.
-/// - If only legacy `active_thread_id` exists, expose a single `active` link instead of
-///   guessing whether it was a work or review thread.
-/// - If guild_id is unavailable, return the thread id without synthesizing a Discord URL.
-fn build_entry_thread_links(
-    conn: &rusqlite::Connection,
-    card_id: &str,
-    agent_id: &str,
-    guild_id: Option<&str>,
-) -> Vec<serde_json::Value> {
-    let (thread_map, active_thread_id) = load_card_thread_bindings(conn, card_id);
-    let candidates = build_thread_link_candidates(conn, agent_id);
-
-    if !thread_map.is_empty() {
-        let mut links = Vec::new();
-        let mut used_channels = HashSet::new();
-
-        for candidate in &candidates {
-            let Some(thread_id) = thread_map.get(&candidate.channel_id) else {
-                continue;
-            };
-            used_channels.insert(candidate.channel_id);
-            links.push(thread_link_json(
-                candidate.label.as_str(),
-                candidate.label.clone(),
-                Some(candidate.channel_id),
-                thread_id,
-                guild_id,
-            ));
-        }
-
-        for (channel_id, thread_id) in &thread_map {
-            if used_channels.insert(*channel_id) {
-                links.push(thread_link_json(
-                    "channel",
-                    format!("channel:{channel_id}"),
-                    Some(*channel_id),
-                    thread_id,
-                    guild_id,
-                ));
-            }
-        }
-
-        return links;
-    }
-
-    active_thread_id
-        .map(|thread_id| {
-            vec![thread_link_json(
-                "active",
-                "active".to_string(),
-                None,
-                &thread_id,
-                guild_id,
-            )]
-        })
-        .unwrap_or_default()
-}
-
-fn entry_to_json_with_guild(
-    conn: &rusqlite::Connection,
-    entry_id: &str,
-    guild_id: Option<&str>,
-) -> serde_json::Value {
-    conn.query_row(
-        "SELECT e.id, e.agent_id, e.kanban_card_id, e.priority_rank, e.reason, e.status,
-                CAST(strftime('%s', e.created_at) AS INTEGER) * 1000,
-                CASE WHEN e.dispatched_at IS NOT NULL THEN CAST(strftime('%s', e.dispatched_at) AS INTEGER) * 1000 END,
-                CASE WHEN e.completed_at IS NOT NULL THEN CAST(strftime('%s', e.completed_at) AS INTEGER) * 1000 END,
-                kc.title, kc.github_issue_number, kc.github_issue_url,
-                COALESCE(e.thread_group, 0),
-                e.slot_index,
-                COALESCE(e.batch_phase, 0)
-         FROM auto_queue_entries e
-         LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id
-         WHERE e.id = ?1",
-        [entry_id],
-        |row| {
-            let entry_id = row.get::<_, String>(0)?;
-            let agent_id = row.get::<_, String>(1)?;
-            let card_id = row.get::<_, String>(2)?;
-            let priority_rank = row.get::<_, i64>(3)?;
-            let reason = row.get::<_, Option<String>>(4)?;
-            let status = row.get::<_, String>(5)?;
-            let created_at = row.get::<_, Option<i64>>(6)?.unwrap_or(0);
-            let dispatched_at = row.get::<_, Option<i64>>(7)?;
-            let completed_at = row.get::<_, Option<i64>>(8)?;
-            let card_title = row.get::<_, Option<String>>(9)?;
-            let github_issue_number = row.get::<_, Option<i64>>(10)?;
-            let github_repo = row.get::<_, Option<String>>(11)?;
-            let thread_group = row.get::<_, i64>(12)?;
-            let slot_index = row.get::<_, Option<i64>>(13)?;
-            let batch_phase = row.get::<_, i64>(14)?;
-
-            Ok(json!({
-                "id": entry_id,
-                "agent_id": agent_id,
-                "card_id": card_id,
-                "priority_rank": priority_rank,
-                "reason": reason,
-                "status": status,
-                "created_at": created_at,
-                "dispatched_at": dispatched_at,
-                "completed_at": completed_at,
-                "card_title": card_title,
-                "github_issue_number": github_issue_number,
-                "github_repo": github_repo,
-                "thread_group": thread_group,
-                "slot_index": slot_index,
-                "batch_phase": batch_phase,
-                "thread_links": build_entry_thread_links(conn, &card_id, &agent_id, guild_id),
-            }))
-        },
-    )
-    .unwrap_or(json!(null))
-}
-
-fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Value {
-    entry_to_json_with_guild(conn, entry_id, None)
-}
-
-fn run_to_json(conn: &rusqlite::Connection, run_id: &str) -> serde_json::Value {
-    conn.query_row(
-        "SELECT id, repo, agent_id, status, timeout_minutes,
-                ai_model, ai_rationale,
-                CAST(strftime('%s', created_at) AS INTEGER) * 1000,
-                CASE WHEN completed_at IS NOT NULL THEN CAST(strftime('%s', completed_at) AS INTEGER) * 1000 END,
-                unified_thread, unified_thread_id,
-                COALESCE(max_concurrent_threads, 1),
-                COALESCE(thread_group_count, 1)
-         FROM auto_queue_runs WHERE id = ?1",
-        [run_id],
-        |row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "repo": row.get::<_, Option<String>>(1)?,
-                "agent_id": row.get::<_, Option<String>>(2)?,
-                "status": row.get::<_, String>(3)?,
-                "timeout_minutes": row.get::<_, i64>(4)?,
-                "ai_model": row.get::<_, Option<String>>(5)?,
-                "ai_rationale": row.get::<_, Option<String>>(6)?,
-                "created_at": row.get::<_, Option<i64>>(7)?.unwrap_or(0),
-                "completed_at": row.get::<_, Option<i64>>(8)?,
-                "unified_thread": false,
-                "unified_thread_id": serde_json::Value::Null,
-                "max_concurrent_threads": row.get::<_, i64>(11)?,
-                "thread_group_count": row.get::<_, i64>(12)?,
-            }))
-        },
-    )
-    .unwrap_or(json!(null))
-}
-
-fn sync_run_group_metadata(conn: &rusqlite::Connection, run_id: &str) -> rusqlite::Result<()> {
-    let thread_group_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT COALESCE(thread_group, 0))
-             FROM auto_queue_entries
-             WHERE run_id = ?1",
-            [run_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0)
-        .max(1);
-
-    conn.execute(
-        "UPDATE auto_queue_runs
-         SET thread_group_count = ?1,
-             max_concurrent_threads = ?1
-         WHERE id = ?2",
-        rusqlite::params![thread_group_count, run_id],
-    )?;
-    Ok(())
-}
-
-fn queue_status_json(
-    conn: &rusqlite::Connection,
-    run_id: &str,
-    repo: Option<&str>,
-    agent_id: Option<&str>,
-    guild_id: Option<&str>,
-) -> Value {
-    let run = run_to_json(conn, run_id);
-
-    let entry_ids: Vec<String> = {
-        let mut entry_sql = String::from(
-            "SELECT e.id FROM auto_queue_entries e \
-             LEFT JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
-             WHERE e.run_id = ?1",
-        );
-        let mut entry_params: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(run_id.to_string())];
-        if let Some(agent_id) = agent_id.filter(|value| !value.is_empty()) {
-            entry_sql.push_str(&format!(" AND e.agent_id = ?{}", entry_params.len() + 1));
-            entry_params.push(Box::new(agent_id.to_string()));
-        }
-        if let Some(repo) = repo.filter(|value| !value.is_empty()) {
-            entry_sql.push_str(&format!(" AND kc.repo_id = ?{}", entry_params.len() + 1));
-            entry_params.push(Box::new(repo.to_string()));
-        }
-        entry_sql.push_str(" ORDER BY e.priority_rank ASC");
-
-        let entry_refs: Vec<&dyn rusqlite::types::ToSql> =
-            entry_params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = match conn.prepare(&entry_sql) {
-            Ok(stmt) => stmt,
-            Err(_) => {
-                return json!({
-                    "run": run,
-                    "entries": [],
-                    "agents": {},
-                    "thread_groups": {},
-                });
-            }
-        };
-        stmt.query_map(entry_refs.as_slice(), |row| row.get::<_, String>(0))
-            .ok()
-            .map(|rows| rows.filter_map(|row| row.ok()).collect())
-            .unwrap_or_default()
-    };
-
-    let entries: Vec<Value> = entry_ids
-        .iter()
-        .map(|entry_id| entry_to_json_with_guild(conn, entry_id, guild_id))
-        .collect();
-
-    let mut agents: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-    for entry in &entries {
-        let agent = entry["agent_id"].as_str().unwrap_or("unknown").to_string();
-        let entry_status = entry["status"].as_str().unwrap_or("pending");
-        let counter = agents
-            .entry(agent)
-            .or_insert_with(|| json!({"pending": 0, "dispatched": 0, "done": 0, "skipped": 0}));
-        if let Some(obj) = counter.as_object_mut() {
-            if let Some(val) = obj.get_mut(entry_status) {
-                *val = json!(val.as_i64().unwrap_or(0) + 1);
-            }
-        }
-    }
-
-    let mut thread_groups: std::collections::HashMap<i64, Value> = std::collections::HashMap::new();
-    for entry in &entries {
-        let group = entry["thread_group"].as_i64().unwrap_or(0);
-        let entry_status = entry["status"].as_str().unwrap_or("pending");
-        let counter = thread_groups.entry(group).or_insert_with(|| {
-            json!({
-                "pending": 0,
-                "dispatched": 0,
-                "done": 0,
-                "skipped": 0,
-                "entries": [],
-                "reason": Value::Null,
-            })
-        });
-        if let Some(obj) = counter.as_object_mut() {
-            if let Some(val) = obj.get_mut(entry_status) {
-                *val = json!(val.as_i64().unwrap_or(0) + 1);
-            }
-            if obj
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .map(|value| value.is_empty())
-                .unwrap_or(true)
-            {
-                if let Some(reason) = entry["reason"].as_str() {
-                    obj.insert("reason".to_string(), json!(reason));
-                }
-            }
-            if let Some(arr) = obj
-                .get_mut("entries")
-                .and_then(|value| value.as_array_mut())
-            {
-                arr.push(json!({
-                    "id": entry["id"],
-                    "card_id": entry["card_id"],
-                    "status": entry_status,
-                    "github_issue_number": entry["github_issue_number"],
-                    "batch_phase": entry["batch_phase"],
-                }));
-            }
-        }
-    }
-
-    let mut group_statuses = serde_json::Map::new();
-    for (group_num, summary) in &thread_groups {
-        let dispatched_count = summary["dispatched"].as_i64().unwrap_or(0);
-        let pending_count = summary["pending"].as_i64().unwrap_or(0);
-        let group_status = if dispatched_count > 0 {
-            "active"
-        } else if pending_count > 0 {
-            "pending"
-        } else {
-            "done"
-        };
-        let mut group_obj = summary.clone();
-        group_obj["status"] = json!(group_status);
-        group_statuses.insert(group_num.to_string(), group_obj);
-    }
-
-    json!({
-        "run": run,
-        "entries": entries,
-        "agents": agents,
-        "thread_groups": group_statuses,
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct QueueEntryOrder {
     id: String,
     status: String,
@@ -2106,7 +1091,10 @@ pub async fn generate(
         let run_id_for_spawn = run_id.clone();
         let card_list_text = card_summaries.join("\n");
         let repo_name = body.repo.clone().unwrap_or_else(|| "all".to_string());
-        let run = run_to_json(&conn, &run_id);
+        let run = state
+            .auto_queue_service()
+            .run_json(&run_id)
+            .unwrap_or(serde_json::Value::Null);
         drop(conn);
 
         // Async: send PMD request via announce bot
@@ -2405,10 +1393,18 @@ pub async fn generate(
             ],
         )
         .ok();
-        entries.push(entry_to_json_with_guild(&conn, &entry_id, guild_id));
+        entries.push(
+            state
+                .auto_queue_service()
+                .entry_json(&entry_id, guild_id)
+                .unwrap_or(serde_json::Value::Null),
+        );
     }
 
-    let run = run_to_json(&conn, &run_id);
+    let run = state
+        .auto_queue_service()
+        .run_json(&run_id)
+        .unwrap_or(serde_json::Value::Null);
 
     (
         StatusCode::OK,
@@ -2467,7 +1463,8 @@ pub async fn activate(
             .ok();
         match run_status.as_deref() {
             Some("paused") => {
-                let message = if run_has_blocking_phase_gate(&conn, &run_id) {
+                let message = if crate::db::auto_queue::run_has_blocking_phase_gate(&conn, &run_id)
+                {
                     "Run is waiting on phase gate"
                 } else {
                     "Run is paused"
@@ -2491,7 +1488,7 @@ pub async fn activate(
                 );
             }
         }
-        if run_has_blocking_phase_gate(&conn, &run_id) {
+        if crate::db::auto_queue::run_has_blocking_phase_gate(&conn, &run_id) {
             return (
                 StatusCode::OK,
                 Json(
@@ -2520,7 +1517,7 @@ pub async fn activate(
         );
     };
 
-    if run_has_blocking_phase_gate(&conn, &run_id) {
+    if crate::db::auto_queue::run_has_blocking_phase_gate(&conn, &run_id) {
         return (
             StatusCode::OK,
             Json(
@@ -2538,11 +1535,16 @@ pub async fn activate(
         .ok();
     }
 
-    clear_inactive_slot_assignments(&conn);
-    let completed_slots = completed_group_slots(&conn, &run_id);
+    crate::db::auto_queue::clear_inactive_slot_assignments(&conn);
+    let completed_slots = crate::db::auto_queue::completed_group_slots(&conn, &run_id);
     let mut cleared_slots: HashSet<(String, i64)> = HashSet::new();
     for (agent_id, slot_index) in &completed_slots {
-        let cleared = clear_slot_threads_for_slot(&state, &conn, agent_id, *slot_index);
+        let cleared = crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
+            state.health_registry.clone(),
+            &conn,
+            agent_id,
+            *slot_index,
+        );
         if cleared > 0 {
             tracing::info!(
                 "[auto-queue] cleared {cleared} slot thread session(s) before releasing {agent_id} slot {slot_index}"
@@ -2550,7 +1552,7 @@ pub async fn activate(
         }
         cleared_slots.insert((agent_id.clone(), *slot_index));
     }
-    release_group_slots(&conn, &completed_slots);
+    crate::db::auto_queue::release_group_slots(&conn, &completed_slots);
 
     // Stale empty run cleanup: after generate()/enqueue() fixes, normal paths never
     // leave an active run with 0 entries.  Any such run is legacy corruption — complete
@@ -2635,7 +1637,7 @@ pub async fn activate(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap_or((1, 1));
-    let current_phase = current_batch_phase(&conn, &run_id);
+    let current_phase = crate::db::auto_queue::current_batch_phase(&conn, &run_id);
 
     // Count currently active groups (groups with at least one 'dispatched' entry)
     let active_groups: Vec<i64> = {
@@ -2673,7 +1675,10 @@ pub async fn activate(
             rows.filter_map(|r| r.ok())
                 .filter_map(|(thread_group, batch_phase)| {
                     (!active_set.contains(&thread_group)
-                        && batch_phase_is_eligible(batch_phase, current_phase)
+                        && crate::db::auto_queue::batch_phase_is_eligible(
+                            batch_phase,
+                            current_phase,
+                        )
                         && seen.insert(thread_group))
                     .then_some(thread_group)
                 })
@@ -2690,7 +1695,8 @@ pub async fn activate(
 
     if let Some(group) = preferred_group {
         let conn = state.db.separate_conn().unwrap();
-        let has_pending = group_has_pending_entries(&conn, &run_id, group, current_phase);
+        let has_pending =
+            crate::db::auto_queue::group_has_pending_entries(&conn, &run_id, group, current_phase);
         let has_dispatched: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0
@@ -2709,7 +1715,11 @@ pub async fn activate(
 
     {
         let conn = state.db.separate_conn().unwrap();
-        for group in assigned_groups_with_pending_entries(&conn, &run_id, current_phase) {
+        for group in crate::db::auto_queue::assigned_groups_with_pending_entries(
+            &conn,
+            &run_id,
+            current_phase,
+        ) {
             if !groups_to_dispatch.contains(&group) {
                 groups_to_dispatch.push(group);
             }
@@ -2721,7 +1731,12 @@ pub async fn activate(
     {
         let conn = state.db.separate_conn().unwrap();
         for &grp in &active_groups {
-            let has_pending = group_has_pending_entries(&conn, &run_id, grp, current_phase);
+            let has_pending = crate::db::auto_queue::group_has_pending_entries(
+                &conn,
+                &run_id,
+                grp,
+                current_phase,
+            );
             let has_dispatched: bool = conn
                 .query_row(
                     "SELECT COUNT(*) > 0 FROM auto_queue_entries \
@@ -2753,7 +1768,12 @@ pub async fn activate(
     for group in &groups_to_dispatch {
         // Get first pending entry in this group
         let conn = state.db.separate_conn().unwrap();
-        let entry = first_pending_entry_for_group(&conn, &run_id, *group, current_phase);
+        let entry = crate::db::auto_queue::first_pending_entry_for_group(
+            &conn,
+            &run_id,
+            *group,
+            current_phase,
+        );
         drop(conn);
 
         let Some((entry_id, card_id, agent_id)) = entry else {
@@ -2971,7 +1991,12 @@ pub async fn activate(
                                 rusqlite::params![dispatch_id, entry_id],
                             )
                             .ok();
-                            dispatched.push(entry_to_json_with_guild(&conn, &entry_id, guild_id));
+                            dispatched.push(
+                                state
+                                    .auto_queue_service()
+                                    .entry_json(&entry_id, guild_id)
+                                    .unwrap_or(serde_json::Value::Null),
+                            );
                             drop(conn);
                             continue;
                         }
@@ -3003,7 +2028,8 @@ pub async fn activate(
 
         // Create dispatch
         let conn = state.db.separate_conn().unwrap();
-        let slot_allocation = allocate_slot_for_group_agent(&conn, &run_id, *group, &agent_id);
+        let slot_allocation =
+            crate::db::auto_queue::allocate_slot_for_group_agent(&conn, &run_id, *group, &agent_id);
         let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
         if slot_allocation.is_none() {
             tracing::info!(
@@ -3015,8 +2041,12 @@ pub async fn activate(
             let slot_key = (agent_id.clone(), assigned_slot);
             if !cleared_slots.contains(&slot_key) {
                 let clear_conn = state.db.separate_conn().unwrap();
-                let cleared =
-                    clear_slot_threads_for_slot(&state, &clear_conn, &agent_id, assigned_slot);
+                let cleared = crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
+                    state.health_registry.clone(),
+                    &clear_conn,
+                    &agent_id,
+                    assigned_slot,
+                );
                 if cleared > 0 {
                     tracing::info!(
                         "[auto-queue] cleared {cleared} slot thread session(s) before dispatching {agent_id} slot {assigned_slot} group {group}"
@@ -3069,7 +2099,12 @@ pub async fn activate(
         drop(conn);
 
         let conn = state.db.separate_conn().unwrap();
-        dispatched.push(entry_to_json_with_guild(&conn, &entry_id, guild_id));
+        dispatched.push(
+            state
+                .auto_queue_service()
+                .entry_json(&entry_id, guild_id)
+                .unwrap_or(serde_json::Value::Null),
+        );
         drop(conn);
     }
 
@@ -3084,7 +2119,7 @@ pub async fn activate(
         .unwrap_or(0);
 
     if remaining == 0 {
-        release_run_slots(&conn, &run_id);
+        crate::db::auto_queue::release_run_slots(&conn, &run_id);
         let still_dispatched: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1 AND status = 'dispatched'",
@@ -3282,22 +2317,24 @@ pub async fn dispatch(
         None
     };
 
-    let conn = match state.db.separate_conn() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-    let mut snapshot = queue_status_json(
-        &conn,
-        &run_id,
-        body.repo.as_deref(),
-        body.agent_id.as_deref(),
-        None,
-    );
+    let mut snapshot = state
+        .auto_queue_service()
+        .status_json_for_run(
+            &run_id,
+            crate::services::auto_queue::StatusInput {
+                repo: body.repo.clone(),
+                agent_id: body.agent_id.clone(),
+                guild_id: None,
+            },
+        )
+        .unwrap_or_else(|_| {
+            json!({
+                "run": null,
+                "entries": [],
+                "agents": {},
+                "thread_groups": {},
+            })
+        });
     if let Some(obj) = snapshot.as_object_mut() {
         obj.insert("activated".to_string(), json!(activate_now));
         obj.insert(
@@ -3412,7 +2449,7 @@ pub async fn update_entry(
     }
 
     if body.thread_group.is_some() {
-        if let Err(err) = sync_run_group_metadata(&conn, &run_id) {
+        if let Err(err) = crate::db::auto_queue::sync_run_group_metadata(&conn, &run_id) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("{err}")})),
@@ -3424,7 +2461,10 @@ pub async fn update_entry(
         StatusCode::OK,
         Json(json!({
             "ok": true,
-            "entry": entry_to_json(&conn, &id),
+            "entry": state
+                .auto_queue_service()
+                .entry_json(&id, None)
+                .unwrap_or(serde_json::Value::Null),
         })),
     )
 }
@@ -3515,7 +2555,11 @@ pub async fn reset_slot_thread(
     State(state): State<AppState>,
     Path((agent_id, slot_index)): Path<(String, i64)>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match reset_slot_thread_bindings(&state.db, &agent_id, slot_index).await {
+    match crate::services::auto_queue::runtime::reset_slot_thread_bindings(
+        &state.db, &agent_id, slot_index,
+    )
+    .await
+    {
         Ok((archived_threads, cleared_sessions, cleared_bindings)) => (
             StatusCode::OK,
             Json(json!({

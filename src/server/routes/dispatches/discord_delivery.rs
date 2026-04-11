@@ -6,9 +6,8 @@ use super::thread_reuse::{
 use crate::db::agents::{
     resolve_agent_channel_for_provider_on_conn, resolve_agent_dispatch_channel_on_conn,
 };
-use crate::server::routes::auto_queue::{
-    ensure_agent_slot_pool_rows, reset_slot_thread_bindings, slot_has_active_dispatch,
-};
+use crate::db::auto_queue::{ensure_agent_slot_pool_rows, slot_has_active_dispatch};
+use crate::services::auto_queue::runtime::reset_slot_thread_bindings;
 
 const SLOT_THREAD_RESET_MESSAGE_LIMIT: u64 = 500;
 const SLOT_THREAD_RESET_MAX_AGE_DAYS: i64 = 7;
