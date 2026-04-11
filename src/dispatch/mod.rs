@@ -10,6 +10,7 @@ use crate::services::provider::ProviderKind;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DispatchCreateOptions {
     pub skip_outbox: bool,
+    pub sidecar_dispatch: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +38,17 @@ fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a 
         .get(key)
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
+}
+
+fn dispatch_context_requests_sidecar(context: &serde_json::Value) -> bool {
+    context
+        .get("sidecar_dispatch")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || context
+            .get("phase_gate")
+            .and_then(|value| value.as_object())
+            .is_some()
 }
 
 fn is_card_scoped_worktree_path(path: &str, branch: Option<&str>) -> bool {
@@ -790,7 +802,7 @@ fn create_dispatch_core_internal(
     dispatch_type: &str,
     title: &str,
     context: &serde_json::Value,
-    options: DispatchCreateOptions,
+    mut options: DispatchCreateOptions,
 ) -> Result<(String, String, bool)> {
     // Use separate_conn to avoid blocking request handlers while
     // engine/onTick holds the main DB Mutex via QuickJS.
@@ -823,13 +835,16 @@ fn create_dispatch_core_internal(
         ));
     }
     validate_dispatch_target_on_conn(&conn, kanban_card_id, to_agent_id, dispatch_type)?;
+    if dispatch_context_requests_sidecar(context) {
+        options.sidecar_dispatch = true;
+    }
 
     // Guard: prevent ALL dispatches for terminal cards (pipeline-driven).
     crate::pipeline::ensure_loaded();
     let effective =
         crate::pipeline::resolve_for_card(&conn, card_repo_id.as_deref(), card_agent_id.as_deref());
     let is_terminal = effective.is_terminal(&old_status);
-    if is_terminal {
+    if is_terminal && !options.sidecar_dispatch {
         return Err(anyhow::anyhow!(
             "Cannot create {} dispatch for terminal card {} (status: {}) — cannot revert terminal card",
             dispatch_type,
@@ -888,7 +903,6 @@ fn create_dispatch_core_internal(
         }
         base
     };
-
     let is_review_type = dispatch_type == "review"
         || dispatch_type == "review-decision"
         || dispatch_type == "rework"
@@ -1075,6 +1089,10 @@ pub fn create_dispatch_with_options(
     context: &serde_json::Value,
     options: DispatchCreateOptions,
 ) -> Result<serde_json::Value> {
+    let options = DispatchCreateOptions {
+        sidecar_dispatch: options.sidecar_dispatch || dispatch_context_requests_sidecar(context),
+        ..options
+    };
     let (dispatch_id, old_status, reused) = create_dispatch_core_with_options(
         db,
         kanban_card_id,
@@ -1097,6 +1115,11 @@ pub fn create_dispatch_with_options(
         // Signal to HTTP handler that this was a dedup'd response
         d["__reused"] = json!(true);
         return Ok(d);
+    }
+
+    if options.sidecar_dispatch {
+        drop(conn);
+        return Ok(dispatch);
     }
 
     // Fire pipeline-defined on_enter hooks for the kickoff state (#134).
@@ -1311,7 +1334,7 @@ fn apply_dispatch_attached_intents(
         self, CardState, GateSnapshot, TransitionContext, TransitionEvent, TransitionOutcome,
     };
 
-    let kickoff_state = if !is_review_type {
+    let kickoff_state = if !is_review_type && !options.sidecar_dispatch {
         Some(effective.kickoff_for(old_status).unwrap_or_else(|| {
             tracing::error!("Pipeline has no kickoff state — check pipeline configuration");
             effective.initial_state().to_string()
@@ -1331,14 +1354,21 @@ fn apply_dispatch_attached_intents(
         gates: GateSnapshot::default(),
     };
 
-    let decision = transition::decide_transition(
-        &ctx,
-        &TransitionEvent::DispatchAttached {
-            dispatch_id: dispatch_id.to_string(),
-            dispatch_type: dispatch_type.to_string(),
-            kickoff_state,
-        },
-    );
+    let decision = if options.sidecar_dispatch {
+        transition::TransitionDecision {
+            outcome: transition::TransitionOutcome::Allowed,
+            intents: Vec::new(),
+        }
+    } else {
+        transition::decide_transition(
+            &ctx,
+            &TransitionEvent::DispatchAttached {
+                dispatch_id: dispatch_id.to_string(),
+                dispatch_type: dispatch_type.to_string(),
+                kickoff_state,
+            },
+        )
+    };
 
     if let TransitionOutcome::Blocked(reason) = &decision.outcome {
         return Err(anyhow::anyhow!("{}", reason));
@@ -2246,6 +2276,55 @@ mod tests {
     }
 
     #[test]
+    fn create_sidecar_phase_gate_for_terminal_card_preserves_card_state() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-phase-gate", "done");
+
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-phase-gate",
+            "agent-1",
+            "phase-gate",
+            "Phase Gate",
+            &json!({
+                "phase_gate": {
+                    "run_id": "run-sidecar",
+                    "batch_phase": 2,
+                    "pass_verdict": "phase_gate_passed",
+                }
+            }),
+        )
+        .expect("phase gate sidecar dispatch should be allowed for terminal cards");
+
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+        let conn = db.separate_conn().unwrap();
+        let (card_status, latest_dispatch_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = 'card-phase-gate'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(card_status, "done");
+        assert!(
+            latest_dispatch_id.is_none(),
+            "sidecar phase gate must not replace latest_dispatch_id"
+        );
+        assert_eq!(
+            count_notify_outbox(&conn, &dispatch_id),
+            1,
+            "sidecar phase gate must still enqueue a notify outbox row"
+        );
+        assert_eq!(
+            load_dispatch_events(&conn, &dispatch_id),
+            vec![(None, "pending".to_string(), "create_dispatch".to_string())],
+            "sidecar dispatch creation should still be audited"
+        );
+    }
+
+    #[test]
     fn create_dispatch_core_shares_invariants_with_create_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);
@@ -2348,7 +2427,10 @@ mod tests {
             "implementation",
             "Core with id skip outbox",
             &json!({}),
-            DispatchCreateOptions { skip_outbox: true },
+            DispatchCreateOptions {
+                skip_outbox: true,
+                ..Default::default()
+            },
         )
         .unwrap();
 

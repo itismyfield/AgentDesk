@@ -110,6 +110,7 @@ impl DispatchService {
         let context = input.context.unwrap_or_else(|| json!({}));
         let options = dispatch::DispatchCreateOptions {
             skip_outbox: input.skip_outbox.unwrap_or(false),
+            ..Default::default()
         };
 
         match dispatch::create_dispatch_with_options(

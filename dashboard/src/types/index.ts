@@ -504,6 +504,14 @@ export interface PipelineConfigFull {
   hooks: Record<string, { on_enter: string[]; on_exit: string[] }>;
   clocks: Record<string, { set: string; mode?: string }>;
   timeouts: Record<string, { duration: string; clock: string; max_retries?: number; on_exhaust?: string; condition?: string }>;
+  phase_gate: PhaseGateConfig;
+}
+
+export interface PhaseGateConfig {
+  dispatch_to: string;
+  dispatch_type: string;
+  pass_verdict: string;
+  checks: string[];
 }
 
 export interface PipelineOverride {
@@ -513,6 +521,7 @@ export interface PipelineOverride {
   hooks?: PipelineConfigFull["hooks"];
   clocks?: PipelineConfigFull["clocks"];
   timeouts?: PipelineConfigFull["timeouts"];
+  phase_gate?: PhaseGateConfig;
 }
 
 export interface KanbanRepoSource {

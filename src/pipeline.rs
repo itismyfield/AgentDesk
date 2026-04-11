@@ -156,6 +156,8 @@ pub struct PipelineOverride {
     pub clocks: Option<HashMap<String, ClockConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeouts: Option<HashMap<String, TimeoutConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_gate: Option<PhaseGateConfig>,
 }
 
 // ── Schema ───────────────────────────────────────────────────────
@@ -178,6 +180,8 @@ pub struct PipelineConfig {
     pub clocks: HashMap<String, ClockConfig>,
     #[serde(default)]
     pub timeouts: HashMap<String, TimeoutConfig>,
+    #[serde(default)]
+    pub phase_gate: PhaseGateConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +247,49 @@ pub struct TimeoutConfig {
     pub condition: Option<String>,
 }
 
+fn default_phase_gate_dispatch_to() -> String {
+    "self".to_string()
+}
+
+fn default_phase_gate_dispatch_type() -> String {
+    "phase-gate".to_string()
+}
+
+fn default_phase_gate_pass_verdict() -> String {
+    "phase_gate_passed".to_string()
+}
+
+fn default_phase_gate_checks() -> Vec<String> {
+    vec![
+        "merge_verified".to_string(),
+        "issue_closed".to_string(),
+        "build_passed".to_string(),
+    ]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhaseGateConfig {
+    #[serde(default = "default_phase_gate_dispatch_to")]
+    pub dispatch_to: String,
+    #[serde(default = "default_phase_gate_dispatch_type")]
+    pub dispatch_type: String,
+    #[serde(default = "default_phase_gate_pass_verdict")]
+    pub pass_verdict: String,
+    #[serde(default = "default_phase_gate_checks")]
+    pub checks: Vec<String>,
+}
+
+impl Default for PhaseGateConfig {
+    fn default() -> Self {
+        Self {
+            dispatch_to: default_phase_gate_dispatch_to(),
+            dispatch_type: default_phase_gate_dispatch_type(),
+            pass_verdict: default_phase_gate_pass_verdict(),
+            checks: default_phase_gate_checks(),
+        }
+    }
+}
+
 // ── Merge ────────────────────────────────────────────────────────
 
 impl PipelineConfig {
@@ -287,6 +334,10 @@ impl PipelineConfig {
                 .as_ref()
                 .cloned()
                 .unwrap_or_else(|| self.timeouts.clone()),
+            phase_gate: ovr
+                .phase_gate
+                .clone()
+                .unwrap_or_else(|| self.phase_gate.clone()),
         }
     }
 
@@ -304,14 +355,6 @@ impl PipelineConfig {
         self.transitions
             .iter()
             .find(|t| t.from == from && t.to == to)
-    }
-
-    /// Find the first gated transition target from a state.
-    pub fn next_gated_target(&self, from: &str) -> Option<&str> {
-        self.transitions
-            .iter()
-            .find(|t| t.from == from && t.transition_type == TransitionType::Gated)
-            .map(|t| t.to.as_str())
     }
 
     /// Check if a state is terminal (no outbound transitions allowed).
@@ -606,6 +649,19 @@ impl PipelineConfig {
             }
         }
 
+        if self.phase_gate.dispatch_to.trim().is_empty() {
+            anyhow::bail!("phase_gate.dispatch_to must not be empty");
+        }
+        if self.phase_gate.dispatch_type.trim().is_empty() {
+            anyhow::bail!("phase_gate.dispatch_type must not be empty");
+        }
+        if self.phase_gate.pass_verdict.trim().is_empty() {
+            anyhow::bail!("phase_gate.pass_verdict must not be empty");
+        }
+        if self.phase_gate.checks.is_empty() {
+            anyhow::bail!("phase_gate.checks must not be empty");
+        }
+
         Ok(())
     }
 
@@ -704,6 +760,7 @@ mod tests {
             events: HashMap::new(),
             clocks: HashMap::new(),
             timeouts: HashMap::new(),
+            phase_gate: PhaseGateConfig::default(),
         }
     }
 
@@ -731,6 +788,7 @@ mod tests {
         // Non-overridden sections preserved
         assert_eq!(merged.transitions.len(), 2);
         assert!(merged.gates.contains_key("review_passed"));
+        assert_eq!(merged.phase_gate.dispatch_type, "phase-gate");
     }
 
     #[test]
@@ -765,6 +823,7 @@ mod tests {
         assert_eq!(merged.states.len(), base.states.len());
         assert_eq!(merged.transitions.len(), base.transitions.len());
         assert_eq!(merged.gates.len(), base.gates.len());
+        assert_eq!(merged.phase_gate, base.phase_gate);
     }
 
     #[test]
@@ -831,10 +890,38 @@ mod tests {
 
     #[test]
     fn parse_override_valid_json() {
-        let json = r#"{"hooks":{"review":{"on_enter":["MyHook"],"on_exit":[]}}}"#;
+        let json = r#"{"hooks":{"review":{"on_enter":["MyHook"],"on_exit":[]}},"phase_gate":{"dispatch_to":"ch-qad","dispatch_type":"qa-gate","pass_verdict":"qa_passed","checks":["merge_verified","qa_passed"]}}"#;
         let ovr = parse_override(json).unwrap().unwrap();
         assert!(ovr.hooks.is_some());
         assert!(ovr.states.is_none());
+        assert_eq!(
+            ovr.phase_gate
+                .as_ref()
+                .map(|gate| gate.dispatch_to.as_str()),
+            Some("ch-qad")
+        );
+    }
+
+    #[test]
+    fn merge_override_replaces_phase_gate() {
+        let base = minimal_pipeline();
+        let ovr = PipelineOverride {
+            phase_gate: Some(PhaseGateConfig {
+                dispatch_to: "ch-qad".into(),
+                dispatch_type: "qa-gate".into(),
+                pass_verdict: "qa_passed".into(),
+                checks: vec!["merge_verified".into(), "qa_passed".into()],
+            }),
+            ..Default::default()
+        };
+        let merged = base.merge(&ovr);
+        assert_eq!(merged.phase_gate.dispatch_to, "ch-qad");
+        assert_eq!(merged.phase_gate.dispatch_type, "qa-gate");
+        assert_eq!(merged.phase_gate.pass_verdict, "qa_passed");
+        assert_eq!(
+            merged.phase_gate.checks,
+            vec!["merge_verified".to_string(), "qa_passed".to_string()]
+        );
     }
 
     #[test]

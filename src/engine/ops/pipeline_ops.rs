@@ -79,6 +79,24 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()>
                 return JSON.parse(rawResolve(cardId));
             };
 
+            agentdesk.pipeline.resolvePhaseGate = function(config) {
+                var cfg = config || agentdesk.pipeline.getConfig();
+                var gate = (cfg && cfg.phase_gate) ? cfg.phase_gate : {};
+                var checks = Array.isArray(gate.checks) && gate.checks.length > 0
+                    ? gate.checks.slice()
+                    : ["merge_verified", "issue_closed", "build_passed"];
+                return {
+                    dispatch_to: gate.dispatch_to || "self",
+                    dispatch_type: gate.dispatch_type || "phase-gate",
+                    pass_verdict: gate.pass_verdict || "phase_gate_passed",
+                    checks: checks
+                };
+            };
+
+            agentdesk.pipeline.resolvePhaseGateForCard = function(cardId) {
+                return agentdesk.pipeline.resolvePhaseGate(agentdesk.pipeline.resolveForCard(cardId));
+            };
+
             agentdesk.pipeline.isTerminal = function(state, config) {
                 var cfg = config || agentdesk.pipeline.getConfig();
                 if (!cfg || !cfg.states) return state === "done";

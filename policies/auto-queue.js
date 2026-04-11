@@ -59,20 +59,11 @@ var autoQueue = {
     var doneGroup = doneEntries[0].thread_group;
     var donePhase = doneEntries[0].batch_phase || 0;
 
-    // Check if the entire run is complete (no pending or dispatched entries remain)
     var remaining = agentdesk.db.query(
       "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status IN ('pending', 'dispatched')",
       [runId]
     );
-    if (remaining.length > 0 && remaining[0].cnt === 0) {
-      activateRun(runId, null);
-      var runInfo = agentdesk.db.query(
-        "SELECT repo, unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count FROM auto_queue_runs WHERE id = ?",
-        [runId]
-      );
-      notifyRunCompleted(runId, runInfo.length > 0 ? runInfo[0] : null);
-      return;
-    }
+    var remainingCount = (remaining.length > 0) ? remaining[0].cnt : 0;
 
     if (donePhase > 0) {
       var phaseRemaining = agentdesk.db.query(
@@ -88,6 +79,11 @@ var autoQueue = {
           [runId, donePhase]
         );
         var nextPhase = (nextPhaseRows.length > 0) ? nextPhaseRows[0].next_phase : null;
+        if (_phaseGateRequired(runId, donePhase)) {
+          var finalPhase = remainingCount === 0;
+          _createPhaseGateDispatches(runId, donePhase, nextPhase, finalPhase, payload.card_id);
+          return;
+        }
         if (nextPhase !== null && nextPhase !== undefined) {
           var nextPhaseCountRows = agentdesk.db.query(
             "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
@@ -100,6 +96,11 @@ var autoQueue = {
           return;
         }
       }
+    }
+
+    if (remainingCount === 0) {
+      completeRunAndNotify(runId);
+      return;
     }
 
     // #140: Check if the completed entry's GROUP is now done
@@ -134,6 +135,98 @@ var autoQueue = {
 
     activateRun(runId, null);
 
+  },
+
+  onDispatchCompleted: function(payload) {
+    var dispatches = agentdesk.db.query(
+      "SELECT id, kanban_card_id, dispatch_type, result, context FROM task_dispatches WHERE id = ?",
+      [payload.dispatch_id]
+    );
+    if (dispatches.length === 0) return;
+
+    var dispatch = dispatches[0];
+    var context = {};
+    try { context = JSON.parse(dispatch.context || "{}"); } catch (e) { context = {}; }
+    var gate = context.phase_gate;
+    if (!gate || !gate.run_id || !gate.batch_phase) return;
+
+    var phase = gate.batch_phase || 0;
+    var state = loadPhaseGateState(gate.run_id, phase);
+    if (!state || !Array.isArray(state.dispatch_ids) || state.dispatch_ids.indexOf(dispatch.id) < 0) {
+      return;
+    }
+    if (state.status === "failed") {
+      agentdesk.log.info("[auto-queue] Ignoring phase gate completion for failed run " + gate.run_id + " phase " + phase);
+      return;
+    }
+
+    var result = {};
+    try { result = JSON.parse(dispatch.result || "{}"); } catch (e) { result = {}; }
+    var verdict = result.verdict || result.decision || null;
+    var passVerdict = gate.pass_verdict || "phase_gate_passed";
+
+    if (verdict !== passVerdict) {
+      state.status = "failed";
+      state.failed_dispatch_id = dispatch.id;
+      state.failed_verdict = verdict;
+      state.failed_reason = result.summary || result.reason || ("expected " + passVerdict + ", got " + (verdict || "none"));
+      savePhaseGateState(gate.run_id, phase, state);
+      pauseRun(gate.run_id);
+      notifyPMD(state.anchor_card_id || dispatch.kanban_card_id, "[phase-gate] phase " + phase + " failed: " + state.failed_reason);
+      agentdesk.log.warn("[auto-queue] Phase gate failed for run " + gate.run_id + " phase " + phase + ": " + state.failed_reason);
+      return;
+    }
+
+    var gateDispatches = loadPhaseGateDispatches(state.dispatch_ids);
+    if (gateDispatches.length !== state.dispatch_ids.length) {
+      state.status = "failed";
+      state.failed_dispatch_id = dispatch.id;
+      state.failed_reason = "missing phase gate dispatch rows";
+      savePhaseGateState(gate.run_id, phase, state);
+      pauseRun(gate.run_id);
+      notifyPMD(state.anchor_card_id || dispatch.kanban_card_id, "[phase-gate] phase " + phase + " failed: missing gate dispatch rows");
+      return;
+    }
+
+    var pendingCount = 0;
+    for (var i = 0; i < gateDispatches.length; i++) {
+      var gateDispatch = gateDispatches[i];
+      if (gateDispatch.status === "pending" || gateDispatch.status === "dispatched") {
+        pendingCount++;
+        continue;
+      }
+      var gateContext = {};
+      var gateResult = {};
+      try { gateContext = JSON.parse(gateDispatch.context || "{}"); } catch (e) { gateContext = {}; }
+      try { gateResult = JSON.parse(gateDispatch.result || "{}"); } catch (e) { gateResult = {}; }
+      var expectedVerdict = (gateContext.phase_gate && gateContext.phase_gate.pass_verdict) || "phase_gate_passed";
+      var gateVerdict = gateResult.verdict || gateResult.decision || null;
+      if (gateDispatch.status !== "completed" || gateVerdict !== expectedVerdict) {
+        state.status = "failed";
+        state.failed_dispatch_id = gateDispatch.id;
+        state.failed_verdict = gateVerdict;
+        state.failed_reason = gateResult.summary || gateResult.reason || ("gate verdict mismatch for dispatch " + gateDispatch.id);
+        savePhaseGateState(gate.run_id, phase, state);
+        pauseRun(gate.run_id);
+        notifyPMD(state.anchor_card_id || dispatch.kanban_card_id, "[phase-gate] phase " + phase + " failed: " + state.failed_reason);
+        return;
+      }
+    }
+
+    if (pendingCount > 0) {
+      agentdesk.log.info("[auto-queue] Phase gate pass waiting for remaining dispatches: run " + gate.run_id + " phase " + phase + " pending=" + pendingCount);
+      return;
+    }
+
+    clearPhaseGateState(gate.run_id, phase);
+    if (state.final_phase || gate.final_phase) {
+      completeRunAndNotify(gate.run_id);
+      agentdesk.log.info("[auto-queue] Phase gate passed, completed run " + gate.run_id + " at phase " + phase);
+      return;
+    }
+
+    resumeRunAndActivate(gate.run_id, gate.next_phase);
+    agentdesk.log.info("[auto-queue] Phase gate passed, resumed run " + gate.run_id + " from phase " + phase + " to " + (gate.next_phase || "next"));
   },
 
   // ── Periodic recovery: dispatch next entry for idle agents (#110, #140, #179) ──
@@ -285,6 +378,259 @@ function _freePathToDispatchable(from, cfg) {
   }
 
   return null;
+}
+
+function phaseGateKey(runId, phase) {
+  return "aq_phase_gate:" + runId + ":" + phase;
+}
+
+function loadPhaseGateState(runId, phase) {
+  var rows = agentdesk.db.query(
+    "SELECT value FROM kv_meta WHERE key = ?",
+    [phaseGateKey(runId, phase)]
+  );
+  if (rows.length === 0 || !rows[0].value) return null;
+  try { return JSON.parse(rows[0].value); } catch (e) { return null; }
+}
+
+function savePhaseGateState(runId, phase, state) {
+  if (!state) return;
+  agentdesk.db.execute(
+    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+    [phaseGateKey(runId, phase), JSON.stringify(state)]
+  );
+}
+
+function clearPhaseGateState(runId, phase) {
+  agentdesk.db.execute(
+    "DELETE FROM kv_meta WHERE key = ?",
+    [phaseGateKey(runId, phase)]
+  );
+}
+
+function pauseRun(runId) {
+  agentdesk.db.execute(
+    "UPDATE auto_queue_runs SET status = 'paused' WHERE id = ? AND status = 'active'",
+    [runId]
+  );
+}
+
+function loadPhaseGateDispatches(dispatchIds) {
+  if (!dispatchIds || dispatchIds.length === 0) return [];
+  var placeholders = dispatchIds.map(function() { return "?"; }).join(",");
+  return agentdesk.db.query(
+    "SELECT id, status, result, context FROM task_dispatches WHERE id IN (" + placeholders + ")",
+    dispatchIds
+  );
+}
+
+function countPositiveBatchPhases(runId) {
+  var rows = agentdesk.db.query(
+    "SELECT COUNT(DISTINCT COALESCE(batch_phase, 0)) as cnt " +
+    "FROM auto_queue_entries WHERE run_id = ? AND COALESCE(batch_phase, 0) > 0",
+    [runId]
+  );
+  return (rows.length > 0) ? (rows[0].cnt || 0) : 0;
+}
+
+function _phaseGateRequired(runId, phase) {
+  return (phase || 0) > 0 && countPositiveBatchPhases(runId) > 1;
+}
+
+function completeRunAndNotify(runId) {
+  agentdesk.db.execute(
+    "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ? AND status = 'paused'",
+    [runId]
+  );
+  activateRun(runId, null);
+  var runInfo = agentdesk.db.query(
+    "SELECT repo, unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count FROM auto_queue_runs WHERE id = ?",
+    [runId]
+  );
+  notifyRunCompleted(runId, runInfo.length > 0 ? runInfo[0] : null);
+}
+
+function resumeRunAndActivate(runId, nextPhase) {
+  agentdesk.db.execute(
+    "UPDATE auto_queue_runs SET status = 'active', completed_at = NULL WHERE id = ? AND status = 'paused'",
+    [runId]
+  );
+  if (nextPhase !== null && nextPhase !== undefined) {
+    agentdesk.log.info("[auto-queue] Resuming run " + runId + " for phase " + nextPhase);
+  }
+  activateRun(runId, null);
+}
+
+function _buildPhaseGateGroups(runId, phase) {
+  var rows = agentdesk.db.query(
+    "SELECT e.id as entry_id, e.kanban_card_id, e.agent_id, e.status, e.priority_rank, " +
+    "kc.title, kc.github_issue_number, kc.repo_id, " +
+    "(SELECT td.result FROM task_dispatches td " +
+    " WHERE td.kanban_card_id = e.kanban_card_id " +
+    "   AND td.status = 'completed' " +
+    "   AND td.result IS NOT NULL " +
+    " ORDER BY td.completed_at DESC, td.rowid DESC LIMIT 1) as latest_result " +
+    "FROM auto_queue_entries e " +
+    "JOIN kanban_cards kc ON kc.id = e.kanban_card_id " +
+    "WHERE e.run_id = ? AND COALESCE(e.batch_phase, 0) = ? " +
+    "ORDER BY e.agent_id ASC, e.priority_rank ASC",
+    [runId, phase]
+  );
+  var groups = {};
+  var ordered = [];
+
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var gate = agentdesk.pipeline.resolvePhaseGateForCard(row.kanban_card_id);
+    var targetAgentId = gate.dispatch_to === "self" ? row.agent_id : gate.dispatch_to;
+    var checks = Array.isArray(gate.checks) ? gate.checks.slice() : [];
+    var key = [
+      row.agent_id || "",
+      targetAgentId || "",
+      gate.dispatch_type || "phase-gate",
+      gate.pass_verdict || "phase_gate_passed",
+      checks.join("|")
+    ].join("::");
+    if (!groups[key]) {
+      groups[key] = {
+        source_agent_id: row.agent_id,
+        target_agent_id: targetAgentId,
+        dispatch_type: gate.dispatch_type || "phase-gate",
+        pass_verdict: gate.pass_verdict || "phase_gate_passed",
+        checks: checks,
+        anchor_card_id: row.kanban_card_id,
+        repo_id: row.repo_id || null,
+        card_ids: [],
+        issue_numbers: [],
+        work_items: []
+      };
+      ordered.push(groups[key]);
+    }
+
+    var latestResult = {};
+    try { latestResult = JSON.parse(row.latest_result || "{}"); } catch (e) { latestResult = {}; }
+
+    groups[key].card_ids.push(row.kanban_card_id);
+    if (row.github_issue_number !== null && row.github_issue_number !== undefined) {
+      groups[key].issue_numbers.push(row.github_issue_number);
+    }
+    groups[key].work_items.push({
+      entry_id: row.entry_id,
+      card_id: row.kanban_card_id,
+      agent_id: row.agent_id,
+      status: row.status,
+      title: row.title || row.kanban_card_id,
+      issue_number: row.github_issue_number,
+      completed_branch: latestResult.completed_branch || null,
+      completed_worktree_path: latestResult.completed_worktree_path || null
+    });
+  }
+
+  return ordered;
+}
+
+function _phaseGateTitle(group, phase, runId) {
+  var issues = group.issue_numbers.filter(function(issue) {
+    return issue !== null && issue !== undefined;
+  });
+  var issueLabel = issues.slice(0, 3).map(function(issue) {
+    return "#" + issue;
+  }).join(", ");
+  if (issues.length > 3) {
+    issueLabel += " +" + (issues.length - 3);
+  }
+  if (!issueLabel) {
+    issueLabel = "run " + runId.substring(0, 8);
+  }
+  return "[" + group.dispatch_type + " P" + phase + "] " + issueLabel;
+}
+
+function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorCardId) {
+  var existing = loadPhaseGateState(runId, phase);
+  if (existing) {
+    pauseRun(runId);
+    agentdesk.log.info("[auto-queue] Phase gate already exists for run " + runId + " phase " + phase);
+    return existing;
+  }
+
+  var groups = _buildPhaseGateGroups(runId, phase);
+  var state = {
+    run_id: runId,
+    batch_phase: phase,
+    next_phase: nextPhase,
+    final_phase: !!finalPhase,
+    anchor_card_id: anchorCardId,
+    status: "pending",
+    dispatch_ids: [],
+    gates: [],
+    created_at: new Date().toISOString()
+  };
+  pauseRun(runId);
+
+  if (groups.length === 0) {
+    state.status = "failed";
+    state.failed_reason = "no phase gate targets found";
+    savePhaseGateState(runId, phase, state);
+    notifyPMD(anchorCardId, "[phase-gate] run " + runId.substring(0, 8) + " phase " + phase + " has no gate targets");
+    return state;
+  }
+
+  var errors = [];
+  for (var i = 0; i < groups.length; i++) {
+    var group = groups[i];
+    try {
+      var dispatchId = agentdesk.dispatch.create(
+        group.anchor_card_id || anchorCardId,
+        group.target_agent_id,
+        group.dispatch_type,
+        _phaseGateTitle(group, phase, runId),
+        {
+          auto_queue: true,
+          sidecar_dispatch: true,
+          phase_gate: {
+            run_id: runId,
+            batch_phase: phase,
+            next_phase: nextPhase,
+            final_phase: !!finalPhase,
+            source_agent_id: group.source_agent_id,
+            target_agent_id: group.target_agent_id,
+            dispatch_type: group.dispatch_type,
+            pass_verdict: group.pass_verdict,
+            checks: group.checks,
+            card_ids: group.card_ids,
+            issue_numbers: group.issue_numbers,
+            work_items: group.work_items,
+            expected_gate_count: groups.length
+          }
+        }
+      );
+      state.dispatch_ids.push(dispatchId);
+      state.gates.push({
+        dispatch_id: dispatchId,
+        source_agent_id: group.source_agent_id,
+        target_agent_id: group.target_agent_id,
+        dispatch_type: group.dispatch_type,
+        pass_verdict: group.pass_verdict,
+        checks: group.checks,
+        card_ids: group.card_ids
+      });
+    } catch (e) {
+      errors.push((group.target_agent_id || "unknown") + ": " + e);
+    }
+  }
+
+  if (errors.length > 0 || state.dispatch_ids.length === 0) {
+    state.status = "failed";
+    state.failed_reason = errors.join("; ") || "phase gate dispatch creation failed";
+    savePhaseGateState(runId, phase, state);
+    notifyPMD(anchorCardId, "[phase-gate] run " + runId.substring(0, 8) + " phase " + phase + " setup failed: " + state.failed_reason);
+    agentdesk.log.warn("[auto-queue] Phase gate setup failed for run " + runId + " phase " + phase + ": " + state.failed_reason);
+    return state;
+  }
+
+  savePhaseGateState(runId, phase, state);
+  agentdesk.log.info("[auto-queue] Created " + state.dispatch_ids.length + " phase gate dispatch(es) for run " + runId + " phase " + phase);
+  return state;
 }
 
 function activateRun(runId, threadGroup) {

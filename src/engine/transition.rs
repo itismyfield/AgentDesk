@@ -769,7 +769,8 @@ fn execute_audit_log(
 mod tests {
     use super::*;
     use crate::pipeline::{
-        ClockConfig, GateConfig, HookBindings, PipelineConfig, StateConfig, TransitionConfig,
+        ClockConfig, GateConfig, HookBindings, PhaseGateConfig, PipelineConfig, StateConfig,
+        TransitionConfig,
     };
     use std::collections::HashMap;
 
@@ -890,6 +891,7 @@ mod tests {
                 m
             },
             timeouts: HashMap::new(),
+            phase_gate: PhaseGateConfig::default(),
         }
     }
 

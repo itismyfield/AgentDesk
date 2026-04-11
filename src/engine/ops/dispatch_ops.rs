@@ -192,13 +192,25 @@ fn dispatch_create_sync(
             );
         }
     };
-    match crate::dispatch::create_dispatch_core(
+    let options = crate::dispatch::DispatchCreateOptions {
+        skip_outbox: false,
+        sidecar_dispatch: context
+            .get("sidecar_dispatch")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+            || context
+                .get("phase_gate")
+                .and_then(|value| value.as_object())
+                .is_some(),
+    };
+    match crate::dispatch::create_dispatch_core_with_options(
         db,
         card_id,
         agent_id,
         dispatch_type,
         title,
         &context,
+        options,
     ) {
         Ok((dispatch_id, _old_status, reused)) => {
             if reused {

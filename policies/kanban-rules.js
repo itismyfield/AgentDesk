@@ -94,6 +94,17 @@ function _autoMergeWorktreeBranch(cardId) {
     agentdesk.log.info("[kanban] #401: merged " + branch + " into main successfully");
     // Push main
     agentdesk.exec("git", ["-C", mainRepo, "push", "origin", "main"]);
+    if (repoDir && repoDir !== mainRepo && repoDir.indexOf("/worktrees/") >= 0) {
+      var mainRepoFromGit = agentdesk.exec("git", [
+        "-C", repoDir, "rev-parse", "--path-format=absolute", "--git-common-dir"
+      ]);
+      if (mainRepoFromGit && mainRepoFromGit.indexOf("ERROR") !== 0) {
+        mainRepo = mainRepoFromGit.replace(/\/.git\/?$/, "");
+      }
+      agentdesk.exec("git", ["-C", mainRepo, "worktree", "remove", repoDir, "--force"]);
+      agentdesk.exec("git", ["-C", mainRepo, "branch", "-D", branch]);
+      agentdesk.log.info("[kanban] #401: cleaned up worktree " + repoDir + " and branch " + branch);
+    }
   }
 }
 
@@ -351,11 +362,14 @@ var rules = {
   // ── Dispatch Completed — PM Decision Gate ─────────────────
   onDispatchCompleted: function(payload) {
     var dispatches = agentdesk.db.query(
-      "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, created_at, result FROM task_dispatches WHERE id = ?",
+      "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, created_at, result, context FROM task_dispatches WHERE id = ?",
       [payload.dispatch_id]
     );
     if (dispatches.length === 0) return;
     var dispatch = dispatches[0];
+    var dispatchContext = {};
+    try { dispatchContext = JSON.parse(dispatch.context || "{}"); } catch (e) { dispatchContext = {}; }
+    if (dispatchContext.phase_gate) return;
     if (!dispatch.kanban_card_id) return;
 
     var cards = agentdesk.db.query(
@@ -473,8 +487,6 @@ var rules = {
 
     // ── PM Decision Gate ──
     // Skip gate if dispatch context has skip_gate flag (e.g., PMD manual review)
-    var dispatchContext = {};
-    try { dispatchContext = JSON.parse(dispatch.context || "{}"); } catch(e) {}
     var pmGateEnabled = agentdesk.config.get("pm_decision_gate_enabled");
     if (dispatchContext.skip_gate) {
       agentdesk.log.info("[pm-gate] Skipped for card " + card.id + " (skip_gate flag)");

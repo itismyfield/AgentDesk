@@ -116,6 +116,19 @@ fn setup_test_repo() -> (tempfile::TempDir, RepoDirOverride) {
     )
 }
 
+fn write_repo_mapping_config(entries: &[(&str, &std::path::Path)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    for (repo_id, repo_dir) in entries {
+        config.github.repo_dirs.insert(
+            (*repo_id).to_string(),
+            repo_dir.to_string_lossy().to_string(),
+        );
+    }
+    crate::config::save_to_path(&dir.path().join("agentdesk.yaml"), &config).unwrap();
+    dir
+}
+
 fn git_commit(repo_dir: &std::path::Path, message: &str) -> String {
     let filename = format!(
         "commit-{}.txt",
@@ -8236,6 +8249,13 @@ async fn parallel_false_keeps_single_group_sequential() {
 async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() {
     crate::pipeline::ensure_loaded();
 
+    let (repo, _repo_guard) = setup_test_repo();
+    let config_dir = write_repo_mapping_config(&[("test-repo", repo.path())]);
+    let _config_guard = EnvVarGuard::set_path(
+        "AGENTDESK_CONFIG",
+        &config_dir.path().join("agentdesk.yaml"),
+    );
+
     let db = test_db();
     let engine = test_engine(&db);
     ensure_auto_queue_tables(&db);
@@ -8433,6 +8453,199 @@ async fn activate_waits_for_current_batch_phase_before_dispatching_next_phase() 
         )
         .unwrap();
     assert_eq!(phase_two_dispatched, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activate_run_id_blocks_phase_gate_paused_runs() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "agent-phase-gate");
+    seed_auto_queue_card(
+        &db,
+        "card-phase-gate-paused",
+        4381,
+        "ready",
+        "agent-phase-gate",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-phase-gate-paused', 'test-repo', 'agent-phase-gate', 'paused')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, batch_phase
+            ) VALUES (
+                'entry-phase-gate-paused', 'run-phase-gate-paused', 'card-phase-gate-paused',
+                'agent-phase-gate', 'pending', 0, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value)
+             VALUES (?1, ?2)",
+            rusqlite::params![
+                "aq_phase_gate:run-phase-gate-paused:1",
+                serde_json::json!({
+                    "run_id": "run-phase-gate-paused",
+                    "batch_phase": 1,
+                    "status": "pending",
+                    "dispatch_ids": ["dispatch-phase-gate-1"]
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/activate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "run_id": "run-phase-gate-paused",
+                        "active_only": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 0);
+    assert_eq!(json["message"], "Run is waiting on phase gate");
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-phase-gate-paused'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_status, "paused");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_run_skips_phase_gate_blocked_runs() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "agent-resume-gate");
+    seed_agent(&db, "agent-resume-free");
+    seed_auto_queue_card(&db, "card-resume-gate", 4382, "ready", "agent-resume-gate");
+    seed_auto_queue_card(&db, "card-resume-free", 4383, "ready", "agent-resume-free");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-resume-gate', 'test-repo', 'agent-resume-gate', 'paused')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-resume-free', 'test-repo', 'agent-resume-free', 'paused')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, batch_phase
+            ) VALUES (
+                'entry-resume-gate', 'run-resume-gate', 'card-resume-gate',
+                'agent-resume-gate', 'pending', 0, 2
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'entry-resume-free', 'run-resume-free', 'card-resume-free',
+                'agent-resume-free', 'pending', 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value)
+             VALUES (?1, ?2)",
+            rusqlite::params![
+                "aq_phase_gate:run-resume-gate:1",
+                serde_json::json!({
+                    "run_id": "run-resume-gate",
+                    "batch_phase": 1,
+                    "status": "failed",
+                    "dispatch_ids": ["dispatch-phase-gate-failed"]
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/resume")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["resumed_runs"], 1);
+    assert_eq!(json["blocked_runs"], 1);
+
+    let conn = db.lock().unwrap();
+    let blocked_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-resume-gate'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let resumed_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-resume-free'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(blocked_status, "paused");
+    assert_eq!(resumed_status, "active");
 }
 
 /// Regression test for #191: onTick1min recovery must reset stuck auto-queue

@@ -312,6 +312,19 @@ fn batch_phase_is_eligible(batch_phase: i64, current_phase: Option<i64>) -> bool
     }
 }
 
+fn run_has_blocking_phase_gate(conn: &rusqlite::Connection, run_id: &str) -> bool {
+    let key_pattern = format!("aq_phase_gate:{run_id}:%");
+    conn.query_row(
+        "SELECT COUNT(*) > 0
+         FROM kv_meta
+         WHERE key LIKE ?1
+           AND json_extract(COALESCE(value, '{}'), '$.status') IN ('pending', 'failed')",
+        [key_pattern],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
 fn group_has_pending_entries(
     conn: &rusqlite::Connection,
     run_id: &str,
@@ -2452,6 +2465,47 @@ pub async fn activate(
     }
 
     let run_id: Option<String> = if let Some(run_id) = body.run_id.clone() {
+        let run_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = ?1",
+                [&run_id],
+                |row| row.get(0),
+            )
+            .ok();
+        match run_status.as_deref() {
+            Some("paused") => {
+                let message = if run_has_blocking_phase_gate(&conn, &run_id) {
+                    "Run is waiting on phase gate"
+                } else {
+                    "Run is paused"
+                };
+                return (
+                    StatusCode::OK,
+                    Json(json!({ "dispatched": [], "count": 0, "message": message })),
+                );
+            }
+            Some(status) if active_only && status != "active" => {
+                return (
+                    StatusCode::OK,
+                    Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
+                );
+            }
+            Some(_) => {}
+            None => {
+                return (
+                    StatusCode::OK,
+                    Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
+                );
+            }
+        }
+        if run_has_blocking_phase_gate(&conn, &run_id) {
+            return (
+                StatusCode::OK,
+                Json(
+                    json!({ "dispatched": [], "count": 0, "message": "Run is waiting on phase gate" }),
+                ),
+            );
+        }
         Some(run_id)
     } else {
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -2472,6 +2526,15 @@ pub async fn activate(
             Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
         );
     };
+
+    if run_has_blocking_phase_gate(&conn, &run_id) {
+        return (
+            StatusCode::OK,
+            Json(
+                json!({ "dispatched": [], "count": 0, "message": "Run is waiting on phase gate" }),
+            ),
+        );
+    }
 
     if !active_only {
         // Promote pending/generated → active on explicit activation.
@@ -3226,7 +3289,6 @@ pub async fn dispatch(
         None
     };
 
-    let guild_id = state.config.discord.guild_id.as_deref();
     let conn = match state.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -3638,9 +3700,32 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
             );
         }
     };
+    let blocked_runs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM auto_queue_runs r
+             WHERE r.status = 'paused'
+               AND EXISTS (
+                   SELECT 1
+                   FROM kv_meta km
+                   WHERE km.key LIKE 'aq_phase_gate:' || r.id || ':%'
+                     AND json_extract(COALESCE(km.value, '{}'), '$.status') IN ('pending', 'failed')
+               )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
     let resumed = conn
         .execute(
-            "UPDATE auto_queue_runs SET status = 'active' WHERE status = 'paused'",
+            "UPDATE auto_queue_runs
+             SET status = 'active'
+             WHERE status = 'paused'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM kv_meta km
+                   WHERE km.key LIKE 'aq_phase_gate:' || auto_queue_runs.id || ':%'
+                     AND json_extract(COALESCE(km.value, '{}'), '$.status') IN ('pending', 'failed')
+               )",
             [],
         )
         .unwrap_or(0);
@@ -3663,13 +3748,17 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
         let dispatched = body.0.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
         return (
             StatusCode::OK,
-            Json(json!({"ok": true, "resumed_runs": resumed, "dispatched": dispatched})),
+            Json(
+                json!({"ok": true, "resumed_runs": resumed, "blocked_runs": blocked_runs, "dispatched": dispatched}),
+            ),
         );
     }
 
     (
         StatusCode::OK,
-        Json(json!({"ok": true, "resumed_runs": 0, "message": "No paused runs"})),
+        Json(
+            json!({"ok": true, "resumed_runs": 0, "blocked_runs": blocked_runs, "message": "No resumable runs"}),
+        ),
     )
 }
 
