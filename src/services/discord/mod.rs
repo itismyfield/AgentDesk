@@ -211,6 +211,10 @@ pub(super) async fn clear_watchdog_deadline_override(channel_id: u64) {
         handle.clear_timeout_override().await;
     }
 }
+
+pub(crate) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
+    inflight::clear_inflight_by_tmux_name(provider, tmux_name)
+}
 /// Check if a deferred restart has been requested and no active or finalizing turns remain
 /// **across all providers**.
 ///

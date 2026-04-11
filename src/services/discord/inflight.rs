@@ -144,6 +144,39 @@ pub(super) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) {
     let _ = fs::remove_file(path);
 }
 
+pub(super) fn clear_inflight_by_tmux_name(provider: &ProviderKind, tmux_name: &str) -> bool {
+    let Some(root) = inflight_runtime_root() else {
+        return false;
+    };
+
+    let provider_dir = inflight_provider_dir(&root, provider);
+    let Ok(entries) = fs::read_dir(&provider_dir) else {
+        return false;
+    };
+
+    let mut cleared = false;
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(state) = serde_json::from_str::<InflightTurnState>(&content) else {
+            continue;
+        };
+        if state.tmux_session_name.as_deref() != Some(tmux_name) {
+            continue;
+        }
+        if fs::remove_file(&path).is_ok() {
+            cleared = true;
+        }
+    }
+
+    cleared
+}
+
 /// Load a single inflight state by provider + channel_id (returns None if missing).
 pub(super) fn load_inflight_state(
     provider: &ProviderKind,

@@ -68,7 +68,7 @@ impl AppState {
     }
 
     pub fn queue_service(&self) -> crate::services::queue::QueueService {
-        crate::services::queue::QueueService::new(self.db.clone())
+        crate::services::queue::QueueService::new(self.db.clone(), self.health_registry.clone())
     }
 
     pub fn settings_service(&self) -> crate::services::settings::SettingsService {
@@ -375,6 +375,10 @@ pub fn api_router(
         .route(
             "/dispatched-sessions/clear-session-id",
             post(dispatched_sessions::clear_session_id_by_key),
+        )
+        .route(
+            "/sessions/force-kill",
+            post(dispatched_sessions::force_kill_session_legacy),
         )
         .route(
             "/sessions/{session_key}/force-kill",

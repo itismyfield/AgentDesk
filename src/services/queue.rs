@@ -1,5 +1,6 @@
-use serde_json::{Value, json};
 use std::sync::Arc;
+
+use serde_json::{Value, json};
 
 use crate::db::Db;
 use crate::services::discord::health::HealthRegistry;
@@ -11,11 +12,15 @@ use poise::serenity_prelude::ChannelId;
 #[derive(Clone)]
 pub struct QueueService {
     db: Db,
+    health_registry: Option<Arc<HealthRegistry>>,
 }
 
 impl QueueService {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, health_registry: Option<Arc<HealthRegistry>>) -> Self {
+        Self {
+            db,
+            health_registry,
+        }
     }
 
     pub fn cancel_dispatch(&self, dispatch_id: &str) -> ServiceResult<Value> {
@@ -173,7 +178,9 @@ impl QueueService {
 
         if let Ok(conn) = self.db.lock() {
             conn.execute(
-                "UPDATE sessions SET status = 'disconnected', active_dispatch_id = NULL WHERE session_key = ?1",
+                "UPDATE sessions
+                 SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+                 WHERE session_key = ?1",
                 [&session_key],
             )
             .ok();

@@ -1020,6 +1020,14 @@ pub async fn update_dispatched_session(
 }
 
 #[derive(Deserialize)]
+pub struct ForceKillBody {
+    pub session_key: String,
+    /// If true, mark the dispatch as 'failed' and create a retry dispatch.
+    #[serde(default)]
+    pub retry: bool,
+}
+
+#[derive(Deserialize)]
 pub struct ForceKillOptions {
     /// If true, mark the dispatch as 'failed' and create a retry dispatch.
     #[serde(default)]
@@ -1293,6 +1301,16 @@ pub async fn force_kill_session(
     force_kill_session_impl(&state, &session_key, body.retry).await
 }
 
+/// POST /api/sessions/force-kill
+///
+/// Legacy body-based wrapper retained for compatibility with older policy scripts.
+pub async fn force_kill_session_legacy(
+    State(state): State<AppState>,
+    Json(body): Json<ForceKillBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    force_kill_session_impl(&state, &body.session_key, body.retry).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,6 +1455,7 @@ mod tests {
         let body = response_json(body);
         let retry_dispatch_id = body["retry_dispatch_id"].as_str().unwrap().to_string();
         assert!(!retry_dispatch_id.is_empty());
+        assert_eq!(body["lifecycle_path"], "direct-fallback");
         assert_eq!(body["queue_activation_requested"], false);
 
         let conn = db.lock().unwrap();
@@ -1471,6 +1490,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn force_kill_session_legacy_wrapper_uses_same_core_without_retry() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+
+        {
+            let conn = db.lock().unwrap();
+            seed_agent(&conn, "agent-force-legacy");
+            seed_card(
+                &conn,
+                "card-force-legacy",
+                "dispatch-force-legacy",
+                "requested",
+            );
+            seed_dispatch(
+                &conn,
+                "dispatch-force-legacy",
+                "card-force-legacy",
+                "agent-force-legacy",
+            );
+            seed_session(
+                &conn,
+                "host:claude-agent-force-legacy",
+                "agent-force-legacy",
+                "dispatch-force-legacy",
+            );
+        }
+
+        let (status, body) = force_kill_session_legacy(
+            State(state),
+            Json(ForceKillBody {
+                session_key: "host:claude-agent-force-legacy".to_string(),
+                retry: false,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let body = response_json(body);
+        assert_eq!(body["lifecycle_path"], "direct-fallback");
+        assert!(body["retry_dispatch_id"].is_null());
+        assert_eq!(body["queue_activation_requested"], true);
+
+        let conn = db.lock().unwrap();
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = ?1",
+                ["dispatch-force-legacy"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatch_status, "failed");
+    }
+
+    #[tokio::test]
     async fn force_kill_session_clears_matching_inflight_and_live_tmux() {
         let _env_lock = env_lock();
         if Command::new("tmux").arg("-V").output().is_err() {
@@ -1491,8 +1565,24 @@ mod tests {
         std::fs::write(
             &inflight_path,
             serde_json::to_string(&json!({
+                "version": 1,
+                "provider": "codex",
+                "channel_id": 123456789012345678u64,
+                "channel_name": "force-kill",
+                "request_owner_user_id": 1u64,
+                "user_msg_id": 2u64,
+                "current_msg_id": 3u64,
+                "current_msg_len": 0,
+                "user_text": "kill this",
+                "session_id": null,
                 "tmux_session_name": tmux_name,
-                "channel_id": "123456789012345678"
+                "output_path": null,
+                "input_fifo_path": null,
+                "last_offset": 0u64,
+                "full_response": "",
+                "response_sent_offset": 0,
+                "started_at": "2026-04-06 10:20:00",
+                "updated_at": "2026-04-06 10:20:01"
             }))
             .unwrap(),
         )
@@ -1538,6 +1628,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["tmux_killed"], true);
         assert_eq!(body["inflight_cleared"], true);
+        assert_eq!(body["lifecycle_path"], "direct-fallback");
         assert_eq!(body["queue_activation_requested"], true);
         assert!(
             !tmux_still_alive,

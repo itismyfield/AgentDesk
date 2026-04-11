@@ -384,6 +384,7 @@ pub(crate) struct ChannelMailboxSnapshot {
 pub(crate) struct FinishTurnResult {
     pub(crate) removed_token: Option<Arc<CancelToken>>,
     pub(crate) has_pending: bool,
+    pub(crate) mailbox_online: bool,
 }
 
 pub(crate) struct ClearChannelResult {
@@ -600,6 +601,19 @@ impl ChannelMailboxHandle {
             FinishTurnResult {
                 removed_token: None,
                 has_pending: false,
+                mailbox_online: false,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn hard_stop(&self) -> FinishTurnResult {
+        self.request(
+            |reply| ChannelMailboxMsg::HardStop { reply },
+            FinishTurnResult {
+                removed_token: None,
+                has_pending: false,
+                mailbox_online: false,
             },
         )
         .await
@@ -801,6 +815,9 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
     },
+    HardStop {
+        reply: oneshot::Sender<FinishTurnResult>,
+    },
     Clear {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<ClearChannelResult>,
@@ -832,6 +849,7 @@ struct ChannelMailboxState {
     active_request_owner: Option<UserId>,
     active_user_message_id: Option<MessageId>,
     intervention_queue: Vec<Intervention>,
+    last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
     watchdog_deadline_override_ms: Option<i64>,
 }
@@ -848,6 +866,30 @@ fn persist_queue(
         queue,
         persistence.dispatch_role_override,
     );
+}
+
+fn finalize_turn_state(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: Option<&QueuePersistenceContext>,
+) -> FinishTurnResult {
+    let removed_token = state.cancel_token.take();
+    state.active_request_owner = None;
+    state.active_user_message_id = None;
+    state.recovery_started_at = None;
+    state.watchdog_deadline_override_ms = None;
+    let previous_len = state.intervention_queue.len();
+    let has_pending = has_soft_intervention(&mut state.intervention_queue);
+    if let Some(persistence) = persistence {
+        if state.intervention_queue.len() != previous_len || !state.intervention_queue.is_empty() {
+            persist_queue(channel_id, &state.intervention_queue, persistence);
+        }
+    }
+    FinishTurnResult {
+        removed_token,
+        has_pending,
+        mailbox_online: true,
+    }
 }
 
 fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
@@ -941,12 +983,14 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     persistence,
                     reply,
                 } => {
+                    state.last_persistence = Some(persistence.clone());
                     let enqueued =
                         enqueue_intervention(&mut state.intervention_queue, intervention);
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(enqueued);
                 }
                 ChannelMailboxMsg::HasPendingSoftQueue { persistence, reply } => {
+                    state.last_persistence = Some(persistence.clone());
                     let previous_len = state.intervention_queue.len();
                     let has_pending = has_soft_intervention(&mut state.intervention_queue);
                     if state.intervention_queue.len() != previous_len {
@@ -955,6 +999,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let _ = reply.send(HasPendingSoftQueueResult { has_pending });
                 }
                 ChannelMailboxMsg::TakeNextSoft { persistence, reply } => {
+                    state.last_persistence = Some(persistence.clone());
                     let next = dequeue_next_soft_intervention(&mut state.intervention_queue);
                     let has_more = has_soft_intervention(&mut state.intervention_queue);
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
@@ -965,6 +1010,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     persistence,
                     reply,
                 } => {
+                    state.last_persistence = Some(persistence.clone());
                     requeue_intervention_front(&mut state.intervention_queue, intervention);
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(());
@@ -974,6 +1020,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     persistence,
                     reply,
                 } => {
+                    state.last_persistence = Some(persistence.clone());
                     let removed = cancel_soft_intervention_by_message_id(
                         &mut state.intervention_queue,
                         message_id,
@@ -984,22 +1031,23 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let _ = reply.send(removed);
                 }
                 ChannelMailboxMsg::FinishTurn { persistence, reply } => {
-                    let removed_token = state.cancel_token.take();
-                    state.active_request_owner = None;
-                    state.active_user_message_id = None;
-                    state.recovery_started_at = None;
-                    state.watchdog_deadline_override_ms = None;
-                    let previous_len = state.intervention_queue.len();
-                    let has_pending = has_soft_intervention(&mut state.intervention_queue);
-                    if state.intervention_queue.len() != previous_len {
-                        persist_queue(channel_id, &state.intervention_queue, &persistence);
-                    }
-                    let _ = reply.send(FinishTurnResult {
-                        removed_token,
-                        has_pending,
-                    });
+                    state.last_persistence = Some(persistence.clone());
+                    let _ = reply.send(finalize_turn_state(
+                        &mut state,
+                        channel_id,
+                        Some(&persistence),
+                    ));
+                }
+                ChannelMailboxMsg::HardStop { reply } => {
+                    let persistence = state.last_persistence.clone();
+                    let _ = reply.send(finalize_turn_state(
+                        &mut state,
+                        channel_id,
+                        persistence.as_ref(),
+                    ));
                 }
                 ChannelMailboxMsg::Clear { persistence, reply } => {
+                    state.last_persistence = Some(persistence.clone());
                     let removed_token = state.cancel_token.take();
                     state.active_request_owner = None;
                     state.active_user_message_id = None;
@@ -1014,11 +1062,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     persistence,
                     reply,
                 } => {
+                    state.last_persistence = Some(persistence.clone());
                     state.intervention_queue = queue;
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(());
                 }
                 ChannelMailboxMsg::RestartDrain { persistence, reply } => {
+                    state.last_persistence = Some(persistence.clone());
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
                     let _ = reply.send(RestartDrainResult {
                         queued_count: state.intervention_queue.len(),
@@ -1166,6 +1216,55 @@ mod tests {
         let result = handle.finish_turn(persistence).await;
         assert!(result.removed_token.is_some());
         assert!(result.has_pending);
+        assert!(result.mailbox_online);
+
+        let snapshot = handle.snapshot().await;
+        assert!(snapshot.cancel_token.is_none());
+        assert_eq!(snapshot.active_user_message_id, None);
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+
+        let items = read_saved_items(tmp.path(), &provider, token_hash, channel_id);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "fresh");
+
+        unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
+    }
+
+    #[tokio::test]
+    async fn hard_stop_reuses_last_persistence_and_persists_pruned_queue_state() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+
+        let provider = ProviderKind::Claude;
+        let token_hash = "mailbox-prune-hard-stop";
+        let channel_id = ChannelId::new(47);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+        let now = Instant::now();
+
+        handle
+            .replace_queue(
+                vec![
+                    make_intervention(1, "stale", now - INTERVENTION_TTL - Duration::from_secs(1)),
+                    make_intervention(2, "fresh", now),
+                ],
+                persistence,
+            )
+            .await;
+        handle
+            .restore_active_turn(
+                Arc::new(CancelToken::new()),
+                UserId::new(8),
+                MessageId::new(88),
+            )
+            .await;
+
+        let result = handle.hard_stop().await;
+        assert!(result.removed_token.is_some());
+        assert!(result.has_pending);
+        assert!(result.mailbox_online);
 
         let snapshot = handle.snapshot().await;
         assert!(snapshot.cancel_token.is_none());
@@ -1268,6 +1367,7 @@ mod tests {
 
         let finished = handle.finish_turn(persistence).await;
         assert!(finished.removed_token.is_some());
+        assert!(finished.mailbox_online);
         assert!(handle.snapshot().await.recovery_started_at.is_none());
 
         unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };

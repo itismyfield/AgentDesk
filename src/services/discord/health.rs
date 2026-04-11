@@ -272,6 +272,216 @@ pub async fn active_request_owner_for_channel(
     None
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HardStopRuntimeResult {
+    pub cleanup_path: &'static str,
+    pub had_active_turn: bool,
+    pub has_pending_queue: bool,
+    pub runtime_session_cleared: bool,
+}
+
+impl Default for HardStopRuntimeResult {
+    fn default() -> Self {
+        Self {
+            cleanup_path: "runtime_unavailable_fallback",
+            had_active_turn: false,
+            has_pending_queue: false,
+            runtime_session_cleared: false,
+        }
+    }
+}
+
+struct RuntimeChannelMatch {
+    provider: ProviderKind,
+    shared: Arc<SharedData>,
+    channel_id: ChannelId,
+}
+
+async fn find_runtime_channel_match(
+    registry: &HealthRegistry,
+    provider_name: Option<&str>,
+    channel_id: Option<ChannelId>,
+    tmux_name: Option<&str>,
+) -> Option<RuntimeChannelMatch> {
+    let preferred_provider = provider_name.and_then(ProviderKind::from_str);
+    let providers: Vec<_> = registry
+        .providers
+        .lock()
+        .await
+        .iter()
+        .filter_map(|entry| {
+            let provider = ProviderKind::from_str(&entry.name)?;
+            if preferred_provider
+                .as_ref()
+                .is_some_and(|preferred| preferred != &provider)
+            {
+                return None;
+            }
+            Some((provider, entry.shared.clone()))
+        })
+        .collect();
+
+    for (provider, shared) in providers {
+        if let Some(channel_id) = channel_id {
+            let has_session = {
+                let data = shared.core.lock().await;
+                data.sessions.contains_key(&channel_id)
+            };
+            if has_session || super::ChannelMailboxRegistry::global_handle(channel_id).is_some() {
+                return Some(RuntimeChannelMatch {
+                    provider,
+                    shared,
+                    channel_id,
+                });
+            }
+            continue;
+        }
+
+        let Some(tmux_name) = tmux_name else {
+            continue;
+        };
+        let matched_channel_id = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .iter()
+                .find_map(|(candidate_channel_id, session)| {
+                    session.channel_name.as_ref().and_then(|channel_name| {
+                        let expected_tmux_name = provider.build_tmux_session_name(channel_name);
+                        (expected_tmux_name == tmux_name).then_some(*candidate_channel_id)
+                    })
+                })
+        };
+        if let Some(channel_id) = matched_channel_id {
+            return Some(RuntimeChannelMatch {
+                provider,
+                shared,
+                channel_id,
+            });
+        }
+    }
+
+    None
+}
+
+async fn apply_runtime_hard_stop_cleanup(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    finish: &super::FinishTurnResult,
+    stop_source: &'static str,
+) -> bool {
+    if let Some(token) = finish.removed_token.as_ref() {
+        token.cancelled.store(true, Ordering::Relaxed);
+        shared.global_active.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    super::clear_watchdog_deadline_override(channel_id.get()).await;
+    shared
+        .dispatch_thread_parents
+        .retain(|_, thread| *thread != channel_id);
+    shared.recovering_channels.remove(&channel_id);
+    shared.turn_start_times.remove(&channel_id);
+
+    if !finish.has_pending {
+        shared.dispatch_role_overrides.remove(&channel_id);
+    }
+
+    if let Some((_, watcher)) = shared.tmux_watchers.remove(&channel_id) {
+        watcher.cancel.store(true, Ordering::Relaxed);
+    }
+
+    let runtime_session_cleared = {
+        let mut data = shared.core.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.clear_provider_session();
+            true
+        } else {
+            false
+        }
+    };
+
+    if finish.mailbox_online && finish.has_pending {
+        super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            stop_source,
+        );
+    }
+
+    runtime_session_cleared
+}
+
+pub async fn hard_stop_runtime_turn(
+    registry: Option<&HealthRegistry>,
+    provider_name: Option<&str>,
+    channel_id: Option<u64>,
+    tmux_name: Option<&str>,
+    stop_source: &'static str,
+) -> HardStopRuntimeResult {
+    let channel_id = channel_id.map(ChannelId::new);
+
+    if let Some(registry) = registry
+        && let Some(runtime) =
+            find_runtime_channel_match(registry, provider_name, channel_id, tmux_name).await
+    {
+        let finish = if let Some(handle) =
+            super::ChannelMailboxRegistry::global_handle(runtime.channel_id)
+        {
+            handle
+                .finish_turn(super::queue_persistence_context(
+                    &runtime.shared,
+                    &runtime.provider,
+                    runtime.channel_id,
+                ))
+                .await
+        } else {
+            super::FinishTurnResult {
+                removed_token: None,
+                has_pending: false,
+                mailbox_online: false,
+            }
+        };
+        let runtime_session_cleared = apply_runtime_hard_stop_cleanup(
+            &runtime.shared,
+            &runtime.provider,
+            runtime.channel_id,
+            &finish,
+            stop_source,
+        )
+        .await;
+        return HardStopRuntimeResult {
+            cleanup_path: if finish.mailbox_online {
+                "mailbox_canonical"
+            } else {
+                "mailbox_fallback"
+            },
+            had_active_turn: finish.removed_token.is_some(),
+            has_pending_queue: finish.has_pending,
+            runtime_session_cleared,
+        };
+    }
+
+    if let Some(channel_id) = channel_id
+        && let Some(handle) = super::ChannelMailboxRegistry::global_handle(channel_id)
+    {
+        let finish = handle.hard_stop().await;
+        super::clear_watchdog_deadline_override(channel_id.get()).await;
+        return HardStopRuntimeResult {
+            cleanup_path: if finish.mailbox_online {
+                "mailbox_canonical"
+            } else {
+                "mailbox_fallback"
+            },
+            had_active_turn: finish.removed_token.is_some(),
+            has_pending_queue: finish.has_pending,
+            runtime_session_cleared: false,
+        };
+    }
+
+    HardStopRuntimeResult::default()
+}
+
 /// Best-effort runtime-side equivalent of `/clear` for an existing Discord channel session.
 /// Used by auto-queue slot recycling so pooled unified-thread slots start the next group fresh
 /// without killing the shared thread itself.
@@ -499,6 +709,7 @@ fn recovery_duration_secs(shared: &SharedData) -> f64 {
 
 #[cfg(test)]
 pub(crate) struct TestHealthHarness {
+    provider: ProviderKind,
     registry: Arc<HealthRegistry>,
     shared: Arc<SharedData>,
 }
@@ -506,17 +717,23 @@ pub(crate) struct TestHealthHarness {
 #[cfg(test)]
 impl TestHealthHarness {
     pub(crate) async fn new() -> Self {
+        Self::new_with_provider(ProviderKind::Claude).await
+    }
+
+    pub(crate) async fn new_with_provider(provider: ProviderKind) -> Self {
         let registry = Arc::new(HealthRegistry::new());
         let global_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let global_finalizing = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let shutdown_remaining = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let mut settings = super::DiscordBotSettings::default();
+        settings.provider = provider.clone();
         let shared = Arc::new(SharedData {
             core: tokio::sync::Mutex::new(super::CoreState {
                 sessions: std::collections::HashMap::new(),
                 active_meetings: std::collections::HashMap::new(),
             }),
             mailboxes: super::ChannelMailboxRegistry::default(),
-            settings: tokio::sync::RwLock::new(super::DiscordBotSettings::default()),
+            settings: tokio::sync::RwLock::new(settings),
             api_timestamps: dashmap::DashMap::new(),
             skills_cache: tokio::sync::RwLock::new(Vec::new()),
             tmux_watchers: dashmap::DashMap::new(),
@@ -553,9 +770,13 @@ impl TestHealthHarness {
         });
         super::mark_reconcile_complete(&shared);
         registry
-            .register("claude".to_string(), shared.clone())
+            .register(provider.as_str().to_string(), shared.clone())
             .await;
-        Self { registry, shared }
+        Self {
+            provider,
+            registry,
+            shared,
+        }
     }
 
     pub(crate) fn registry(&self) -> Arc<HealthRegistry> {
@@ -621,6 +842,34 @@ impl TestHealthHarness {
             .len()
     }
 
+    pub(crate) async fn seed_channel_session(
+        &self,
+        channel_id: u64,
+        channel_name: &str,
+        session_id: Option<&str>,
+    ) {
+        let mut data = self.shared.core.lock().await;
+        data.sessions.insert(
+            ChannelId::new(channel_id),
+            super::DiscordSession {
+                session_id: session_id.map(str::to_string),
+                memento_context_loaded: session_id.is_some(),
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id),
+                channel_name: Some(channel_name.to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+            },
+        );
+    }
+
     pub(crate) async fn start_active_turn(
         &self,
         channel_id: u64,
@@ -644,6 +893,73 @@ impl TestHealthHarness {
         assert!(started, "test active turn should start");
         self.shared.global_active.fetch_add(1, Ordering::Relaxed);
         token
+    }
+
+    pub(crate) async fn seed_active_turn(
+        &self,
+        channel_id: u64,
+        request_owner: u64,
+        user_message_id: u64,
+    ) {
+        let started = self
+            .shared
+            .mailbox(ChannelId::new(channel_id))
+            .try_start_turn(
+                Arc::new(crate::services::provider::CancelToken::new()),
+                serenity::UserId::new(request_owner),
+                serenity::MessageId::new(user_message_id),
+            )
+            .await;
+        assert!(started, "test harness expected an idle mailbox");
+        self.shared.global_active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) async fn seed_queue(&self, channel_id: u64, queue_items: &[(u64, &str)]) {
+        let queue = queue_items
+            .iter()
+            .map(|(message_id, text)| super::Intervention {
+                author_id: serenity::UserId::new(1),
+                message_id: serenity::MessageId::new(*message_id),
+                text: (*text).to_string(),
+                mode: super::InterventionMode::Soft,
+                created_at: Instant::now(),
+            })
+            .collect::<Vec<_>>();
+        super::mailbox_replace_queue(
+            &self.shared,
+            &self.provider,
+            ChannelId::new(channel_id),
+            queue,
+        )
+        .await;
+    }
+
+    pub(crate) async fn mailbox_state(&self, channel_id: u64) -> (bool, usize, Option<String>) {
+        let snapshot = super::mailbox_snapshot(&self.shared, ChannelId::new(channel_id)).await;
+        let session_id = {
+            let data = self.shared.core.lock().await;
+            data.sessions
+                .get(&ChannelId::new(channel_id))
+                .and_then(|session| session.session_id.clone())
+        };
+        (
+            snapshot.cancel_token.is_some(),
+            snapshot.intervention_queue.len(),
+            session_id,
+        )
+    }
+
+    pub(crate) fn has_dispatch_role_override(&self, channel_id: u64) -> bool {
+        self.shared
+            .dispatch_role_overrides
+            .contains_key(&ChannelId::new(channel_id))
+    }
+
+    pub(crate) fn insert_dispatch_role_override(&self, channel_id: u64, override_channel_id: u64) {
+        self.shared.dispatch_role_overrides.insert(
+            ChannelId::new(channel_id),
+            ChannelId::new(override_channel_id),
+        );
     }
 }
 
@@ -1204,6 +1520,73 @@ mod tests {
             err,
             SendTargetResolutionError::NotFound("unknown agent target: missing".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn hard_stop_runtime_turn_uses_mailbox_canonical_cleanup_when_runtime_online() {
+        let harness = TestHealthHarness::new().await;
+        let channel_id = 123_456_789_012_345_678;
+        harness
+            .seed_channel_session(channel_id, "hard-stop-runtime", Some("session-live"))
+            .await;
+        harness.seed_active_turn(channel_id, 99, 101).await;
+        harness
+            .seed_queue(channel_id, &[(7001, "preserve me")])
+            .await;
+        harness.insert_dispatch_role_override(channel_id, 987_654_321_098_765_432);
+
+        let registry = harness.registry();
+        let result = hard_stop_runtime_turn(
+            Some(registry.as_ref()),
+            Some("claude"),
+            Some(channel_id),
+            None,
+            "test hard stop",
+        )
+        .await;
+
+        assert_eq!(result.cleanup_path, "mailbox_canonical");
+        assert!(result.had_active_turn);
+        assert!(result.has_pending_queue);
+        assert!(result.runtime_session_cleared);
+
+        let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_id).await;
+        assert!(!has_active_turn);
+        assert_eq!(queue_depth, 1);
+        assert_eq!(session_id, None);
+        assert!(harness.has_dispatch_role_override(channel_id));
+    }
+
+    #[tokio::test]
+    async fn hard_stop_runtime_turn_removes_dispatch_override_when_queue_is_empty() {
+        let harness = TestHealthHarness::new().await;
+        let channel_id = 223_456_789_012_345_678;
+        harness
+            .seed_channel_session(channel_id, "hard-stop-empty", Some("session-empty"))
+            .await;
+        harness.seed_active_turn(channel_id, 77, 88).await;
+        harness.insert_dispatch_role_override(channel_id, 887_654_321_098_765_432);
+
+        let registry = harness.registry();
+        let result = hard_stop_runtime_turn(
+            Some(registry.as_ref()),
+            Some("claude"),
+            Some(channel_id),
+            None,
+            "test hard stop",
+        )
+        .await;
+
+        assert_eq!(result.cleanup_path, "mailbox_canonical");
+        assert!(result.had_active_turn);
+        assert!(!result.has_pending_queue);
+        assert!(result.runtime_session_cleared);
+
+        let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_id).await;
+        assert!(!has_active_turn);
+        assert_eq!(queue_depth, 0);
+        assert_eq!(session_id, None);
+        assert!(!harness.has_dispatch_role_override(channel_id));
     }
 
     #[tokio::test]

@@ -387,10 +387,25 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
     std::fs::write(
         inflight_dir.join("1485506232256168011.json"),
         serde_json::to_string(&json!({
+            "version": 1,
+            "provider": "codex",
+            "channel_id": 1485506232256168011u64,
+            "channel_name": "adk-cdx",
+            "request_owner_user_id": 1u64,
+            "user_msg_id": 2u64,
+            "current_msg_id": 3u64,
+            "current_msg_len": 0,
+            "user_text": "show me output",
+            "session_id": null,
             "tmux_session_name": tmux_name,
+            "output_path": null,
+            "input_fifo_path": null,
+            "last_offset": 0u64,
             "started_at": "2026-04-06 10:11:12",
+            "updated_at": "2026-04-06 10:11:13",
             "current_tool_line": "⚙ Bash: rg -n turn src",
             "full_response": "partial output\nOPENAI_API_KEY=sk-secret",
+            "response_sent_offset": 0,
         }))
         .unwrap(),
     )
@@ -498,8 +513,24 @@ async fn stop_agent_turn_force_kills_matching_tmux_session() {
     std::fs::write(
         &inflight_path,
         serde_json::to_string(&json!({
+            "version": 1,
+            "provider": "codex",
+            "channel_id": 1485506232256168011u64,
+            "channel_name": "agent-stop",
+            "request_owner_user_id": 1u64,
+            "user_msg_id": 2u64,
+            "current_msg_id": 3u64,
+            "current_msg_len": 0,
+            "user_text": "stop now",
+            "session_id": null,
             "tmux_session_name": tmux_name,
+            "output_path": null,
+            "input_fifo_path": null,
+            "last_offset": 0u64,
+            "full_response": "",
+            "response_sent_offset": 0,
             "started_at": "2026-04-06 10:20:00",
+            "updated_at": "2026-04-06 10:20:01",
         }))
         .unwrap(),
     )
@@ -563,6 +594,7 @@ async fn stop_agent_turn_force_kills_matching_tmux_session() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "stopped");
     assert_eq!(json["tmux_killed"], true);
+    assert_eq!(json["lifecycle_path"], "direct-fallback");
     assert!(
         !tmux_still_alive,
         "tmux session should be gone after /turn/stop"
@@ -571,6 +603,87 @@ async fn stop_agent_turn_force_kills_matching_tmux_session() {
         !inflight_path.exists(),
         "matching inflight state should be removed by /turn/stop"
     );
+
+    let conn = db.lock().unwrap();
+    let session_status: String = conn
+        .query_row(
+            "SELECT status FROM sessions WHERE session_key = ?1",
+            [session_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(session_status, "disconnected");
+}
+
+#[tokio::test]
+async fn stop_agent_turn_preserves_pending_queue_via_mailbox_canonical_cleanup() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
+        crate::services::provider::ProviderKind::Codex,
+    )
+    .await;
+    let channel_id = "1485506232256168012";
+    let channel_num = channel_id.parse::<u64>().unwrap();
+    let tmux_name = "AgentDesk-codex-stop-canonical";
+    let session_key = format!("mac-mini:{tmux_name}");
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ('agent-stop-canonical', 'Agent Stop Canonical', 'codex', ?1, datetime('now'), datetime('now'))",
+            [channel_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES (?1, 'agent-stop-canonical', 'codex', 'working', datetime('now'), datetime('now'))",
+            [session_key.as_str()],
+        )
+        .unwrap();
+    }
+
+    harness
+        .seed_channel_session(
+            channel_num,
+            "stop-canonical",
+            Some("session-stop-canonical"),
+        )
+        .await;
+    harness.seed_active_turn(channel_num, 9, 91).await;
+    harness
+        .seed_queue(channel_num, &[(1_001, "preserve stop queue")])
+        .await;
+    harness.insert_dispatch_role_override(channel_num, 1485506232256168999);
+
+    let app = test_api_router(db.clone(), engine, Some(harness.registry()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agents/agent-stop-canonical/turn/stop")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "stopped");
+    assert_eq!(json["lifecycle_path"], "canonical");
+    assert_eq!(json["queue_preserved"], true);
+
+    let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_num).await;
+    assert!(!has_active_turn);
+    assert_eq!(queue_depth, 1);
+    assert_eq!(session_id, None);
+    assert!(harness.has_dispatch_role_override(channel_num));
 
     let conn = db.lock().unwrap();
     let session_status: String = conn
@@ -666,6 +779,7 @@ async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
     assert_eq!(json["session_key"], session_key);
     assert_eq!(json["tmux_session"], tmux_name);
     assert_eq!(json["tmux_killed"], true);
+    assert_eq!(json["lifecycle_path"], "direct-fallback");
     assert_eq!(json["dispatch_cancelled"], "dispatch-turn-cancel");
     assert!(
         !tmux_still_alive,
@@ -691,6 +805,84 @@ async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
         )
         .unwrap();
     assert_eq!(dispatch_status, "cancelled");
+}
+
+#[tokio::test]
+async fn cancel_turn_preserves_pending_queue_via_mailbox_canonical_cleanup() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let harness = crate::services::discord::health::TestHealthHarness::new().await;
+    let channel_id = "1485506232256168013";
+    let channel_num = channel_id.parse::<u64>().unwrap();
+    let session_key = "mac-mini:AgentDesk-claude-cancel-canonical";
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, discord_channel_id, created_at, updated_at)
+             VALUES ('agent-cancel-canonical', 'Agent Cancel Canonical', 'claude', ?1, datetime('now'), datetime('now'))",
+            [channel_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, last_heartbeat, created_at)
+             VALUES (?1, 'agent-cancel-canonical', 'claude', 'working', datetime('now'), datetime('now'))",
+            [session_key],
+        )
+        .unwrap();
+    }
+
+    harness
+        .seed_channel_session(
+            channel_num,
+            "cancel-canonical",
+            Some("session-cancel-canonical"),
+        )
+        .await;
+    harness.seed_active_turn(channel_num, 11, 111).await;
+    harness
+        .seed_queue(channel_num, &[(2_001, "preserve cancel queue")])
+        .await;
+    harness.insert_dispatch_role_override(channel_num, 1485506232256168998);
+
+    let app = test_api_router(db.clone(), engine, Some(harness.registry()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/turns/{channel_id}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["session_key"], session_key);
+    assert_eq!(json["lifecycle_path"], "canonical");
+    assert_eq!(json["queue_preserved"], true);
+    assert!(json["dispatch_cancelled"].is_null());
+
+    let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_num).await;
+    assert!(!has_active_turn);
+    assert_eq!(queue_depth, 1);
+    assert_eq!(session_id, None);
+    assert!(harness.has_dispatch_role_override(channel_num));
+
+    let conn = db.lock().unwrap();
+    let session_status: String = conn
+        .query_row(
+            "SELECT status FROM sessions WHERE session_key = ?1",
+            [session_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(session_status, "disconnected");
 }
 
 #[tokio::test]
