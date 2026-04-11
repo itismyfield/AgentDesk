@@ -99,7 +99,9 @@ var autoQueue = {
     }
 
     if (remainingCount === 0) {
-      completeRunAndNotify(runId);
+      if (!finalizeRunWithoutPhaseGate(runId)) {
+        completeRunAndNotify(runId);
+      }
       return;
     }
 
@@ -261,6 +263,20 @@ var autoQueue = {
       );
     }
 
+    var finishedRuns = agentdesk.db.query(
+      "SELECT r.id " +
+      "FROM auto_queue_runs r " +
+      "WHERE r.status IN ('active', 'paused') " +
+      "AND NOT EXISTS (" +
+      "  SELECT 1 FROM auto_queue_entries e " +
+      "  WHERE e.run_id = r.id AND e.status IN ('pending', 'dispatched')" +
+      ")",
+      []
+    );
+    for (var fr = 0; fr < finishedRuns.length; fr++) {
+      finalizeRunWithoutPhaseGate(finishedRuns[fr].id);
+    }
+
     // Find active runs with pending entries
     var activeRuns = agentdesk.db.query(
       "SELECT DISTINCT r.id " +
@@ -406,6 +422,60 @@ function clearPhaseGateState(runId, phase) {
     "DELETE FROM kv_meta WHERE key = ?",
     [phaseGateKey(runId, phase)]
   );
+}
+
+function loadRunInfo(runId) {
+  var rows = agentdesk.db.query(
+    "SELECT status, repo, unified_thread_id, unified_thread_channel_id, COALESCE(thread_group_count, 1) as group_count " +
+    "FROM auto_queue_runs WHERE id = ?",
+    [runId]
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+function runHasBlockingPhaseGate(runId) {
+  var rows = agentdesk.db.query(
+    "SELECT COUNT(*) as cnt FROM kv_meta " +
+    "WHERE key LIKE ? " +
+    "AND json_extract(COALESCE(value, '{}'), '$.status') IN ('pending', 'failed')",
+    ["aq_phase_gate:" + runId + ":%"]
+  );
+  return rows.length > 0 && rows[0].cnt > 0;
+}
+
+function remainingRunnableEntryCount(runId) {
+  var rows = agentdesk.db.query(
+    "SELECT COUNT(*) as cnt FROM auto_queue_entries " +
+    "WHERE run_id = ? AND status IN ('pending', 'dispatched')",
+    [runId]
+  );
+  return rows.length > 0 ? (rows[0].cnt || 0) : 0;
+}
+
+function finalizeRunWithoutPhaseGate(runId) {
+  if (!runId) return false;
+
+  var runInfo = loadRunInfo(runId);
+  if (!runInfo) return false;
+  if (runInfo.status !== "active" && runInfo.status !== "paused") return false;
+  if (runHasBlockingPhaseGate(runId)) return false;
+  if (remainingRunnableEntryCount(runId) > 0) return false;
+
+  agentdesk.db.execute(
+    "UPDATE auto_queue_slots " +
+    "SET assigned_run_id = NULL, assigned_thread_group = NULL, updated_at = datetime('now') " +
+    "WHERE assigned_run_id = ?",
+    [runId]
+  );
+  agentdesk.db.execute(
+    "UPDATE auto_queue_runs " +
+    "SET status = 'completed', completed_at = datetime('now') " +
+    "WHERE id = ? AND status IN ('active', 'paused')",
+    [runId]
+  );
+  agentdesk.log.info("[auto-queue] Finalized non-phase-gate run " + runId + " and released its slots");
+  notifyRunCompleted(runId, runInfo);
+  return true;
 }
 
 function pauseRun(runId) {

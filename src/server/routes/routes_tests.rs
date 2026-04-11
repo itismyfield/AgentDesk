@@ -8774,6 +8774,211 @@ fn auto_queue_recovery_skips_terminal_pending_entries() {
     );
 }
 
+#[test]
+fn auto_queue_recovery_completes_finished_non_phase_gate_runs_and_releases_slots() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+
+    seed_agent(&db, "agent-finished-recovery");
+    seed_auto_queue_card(
+        &db,
+        "card-finished-done",
+        9015,
+        "done",
+        "agent-finished-recovery",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-finished-skipped",
+        9016,
+        "done",
+        "agent-finished-recovery",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-finished-recovery', 'test-repo', 'agent-finished-recovery', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, completed_at
+            ) VALUES (
+                'entry-finished-done', 'run-finished-recovery', 'card-finished-done',
+                'agent-finished-recovery', 'done', 0, 0, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, completed_at
+            ) VALUES (
+                'entry-finished-skipped', 'run-finished-recovery', 'card-finished-skipped',
+                'agent-finished-recovery', 'skipped', 1, 1, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-finished-recovery', 0, 'run-finished-recovery', 0, '{}'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-finished-recovery', 1, 'run-finished-recovery', 1, '{}'
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    engine
+        .fire_hook(
+            crate::engine::hooks::Hook::OnTick1min,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-finished-recovery'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        run_status, "completed",
+        "finished non-phase-gate run must be completed by onTick1min backstop"
+    );
+
+    for slot_index in [0, 1] {
+        let slot: (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT assigned_run_id, assigned_thread_group
+                 FROM auto_queue_slots
+                 WHERE agent_id = 'agent-finished-recovery' AND slot_index = ?1",
+                [slot_index],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            slot,
+            (None, None),
+            "completed run must release slot {slot_index}"
+        );
+    }
+}
+
+#[test]
+fn auto_queue_recovery_keeps_finished_phase_gate_runs_blocked_until_gate_resolves() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+
+    seed_agent(&db, "agent-finished-gate");
+    seed_auto_queue_card(
+        &db,
+        "card-finished-gate",
+        9017,
+        "done",
+        "agent-finished-gate",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-finished-gate', 'test-repo', 'agent-finished-gate', 'paused')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group, batch_phase, completed_at
+            ) VALUES (
+                'entry-finished-gate', 'run-finished-gate', 'card-finished-gate',
+                'agent-finished-gate', 'done', 0, 0, 1, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_slots (
+                agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+            ) VALUES (
+                'agent-finished-gate', 0, 'run-finished-gate', 0, '{}'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value)
+             VALUES (?1, ?2)",
+            rusqlite::params![
+                "aq_phase_gate:run-finished-gate:1",
+                serde_json::json!({
+                    "run_id": "run-finished-gate",
+                    "batch_phase": 1,
+                    "status": "pending",
+                    "dispatch_ids": ["dispatch-phase-gate-finished"]
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    }
+
+    engine
+        .fire_hook(
+            crate::engine::hooks::Hook::OnTick1min,
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let conn = db.lock().unwrap();
+    let run_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = 'run-finished-gate'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        run_status, "paused",
+        "finished phase-gate run must stay paused until the gate resolves"
+    );
+
+    let slot: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-finished-gate' AND slot_index = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        slot,
+        (Some("run-finished-gate".to_string()), Some(0)),
+        "phase-gate blocked run must retain its slot assignment"
+    );
+}
+
 // ── #265: Dispatch status validation ──────────────────────────
 
 /// #265: PATCH /dispatches/:id with an invalid status like "done" must return
