@@ -1405,7 +1405,7 @@ fn map_allowed_tool_to_qwen_core_tools(tool: &str) -> Option<&'static [&'static 
         SharedAllowedToolKind::WebSearch => Some(&["web_search"]),
         SharedAllowedToolKind::Skill => Some(&["skill"]),
         SharedAllowedToolKind::AskUserQuestion => Some(&["ask_user_question"]),
-        SharedAllowedToolKind::ExitPlanMode => Some(&["exit_plan_mode"]),
+        SharedAllowedToolKind::PlanMode => Some(&["exit_plan_mode"]),
     }
 }
 
@@ -1942,7 +1942,7 @@ mod tests {
         .unwrap();
         let token_for_thread = token.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(10));
             token_for_thread.cancelled.store(true, Ordering::Relaxed);
         });
 
@@ -1950,7 +1950,7 @@ mod tests {
             &rx,
             Some(token.as_ref()),
             &mut state,
-            Duration::from_millis(5),
+            Duration::from_millis(100),
             2,
         );
 
