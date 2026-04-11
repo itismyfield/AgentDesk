@@ -138,7 +138,7 @@
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 572 |  |
 | `services::discord` | `src/services/discord/mod.rs` | 4855 | giant-file |
 | `services::discord::adk_session` | `src/services/discord/adk_session.rs` | 811 |  |
-| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 675 |  |
+| `services::discord::agentdesk_config` | `src/services/discord/agentdesk_config.rs` | 723 |  |
 | `services::discord::bot_init` | `src/services/discord/bot_init.rs` | 2503 | giant-file |
 | `services::discord::channel_mailbox` | `src/services/discord/channel_mailbox.rs` | 905 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 38 |  |
@@ -174,7 +174,7 @@
 | `services::discord::router::message_handler` | `src/services/discord/router/message_handler.rs` | 2904 | giant-file |
 | `services::discord::router::thread_binding` | `src/services/discord/router/thread_binding.rs` | 106 |  |
 | `services::discord::runtime_store` | `src/services/discord/runtime_store.rs` | 329 |  |
-| `services::discord::settings` | `src/services/discord/settings.rs` | 2852 | giant-file |
+| `services::discord::settings` | `src/services/discord/settings.rs` | 2933 | giant-file |
 | `services::discord::shared_memory` | `src/services/discord/shared_memory.rs` | 59 |  |
 | `services::discord::shared_state` | `src/services/discord/shared_state.rs` | 370 |  |
 | `services::discord::tmux` | `src/services/discord/tmux.rs` | 3165 | giant-file |
