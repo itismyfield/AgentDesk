@@ -1842,7 +1842,7 @@ mod tests {
         );
 
         let tmux_invocations = fs::read_to_string(&tmux_log).unwrap();
-        println!("[test] deploy tmux invocations:\n{tmux_invocations}");
+        tracing::info!("[test] deploy tmux invocations:\n{tmux_invocations}");
         assert!(
             tmux_invocations.contains(&correct_worktree.display().to_string()),
             "deploy command must use card-scoped worktree path from dispatch context"

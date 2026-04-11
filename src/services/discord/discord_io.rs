@@ -17,7 +17,7 @@ pub(super) async fn check_auth(
             settings.owner_user_id = Some(user_id.get());
             save_bot_settings(token, &settings);
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ★ Owner registered: {user_name} (id:{})",
                 user_id.get()
             );
@@ -29,7 +29,7 @@ pub(super) async fn check_auth(
                 true
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ✗ Rejected: {user_name} (id:{})", uid);
+                tracing::info!("  [{ts}] ✗ Rejected: {user_name} (id:{})", uid);
                 false
             }
         }
@@ -73,7 +73,7 @@ pub(super) async fn try_handle_pending_dm_reply(
     match result {
         Ok(Some(info)) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ✉️ DM reply consumed: user={} agent={} id={}",
                 msg.author.id.get(),
                 info.source_agent,
@@ -91,7 +91,7 @@ pub(super) async fn try_handle_pending_dm_reply(
             )
             .await
             {
-                eprintln!("  [dm-reply] notify source agent failed: {e}");
+                tracing::warn!("  [dm-reply] notify source agent failed: {e}");
                 // Record failure in context so readConsumed can detect it
                 let db3 = info.db.clone();
                 let reply_id = info.id;
@@ -113,7 +113,7 @@ pub(super) async fn try_handle_pending_dm_reply(
         }
         Ok(None) => false,
         Err(e) => {
-            eprintln!("  [dm-reply] consume task error: {e}");
+            tracing::warn!("  [dm-reply] consume task error: {e}");
             false
         }
     }
@@ -236,10 +236,10 @@ pub async fn retry_failed_dm_notifications(db: &crate::db::Db) {
                 })
                 .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] ✉️ DM reply retry OK: id={id} agent={source_agent}");
+                tracing::info!("  [{ts}] ✉️ DM reply retry OK: id={id} agent={source_agent}");
             }
             Err(e) => {
-                eprintln!("  [dm-reply] retry still failing id={id}: {e}");
+                tracing::warn!("  [dm-reply] retry still failing id={id}: {e}");
             }
         }
     }
@@ -333,7 +333,7 @@ pub(super) async fn add_reaction(
         .await
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!(
+        tracing::warn!(
             "  [{ts}] ⚠ Failed to add reaction '{emoji}' to msg {message_id} in channel {channel_id}: {e}"
         );
     }

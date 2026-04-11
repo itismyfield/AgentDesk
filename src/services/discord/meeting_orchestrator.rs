@@ -1534,12 +1534,12 @@ pub(super) async fn handle_meeting_command(
             {
                 Ok(Some(id)) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ✅ Meeting completed: {id}");
+                    tracing::info!("  [{ts}] ✅ Meeting completed: {id}");
                 }
                 Ok(None) => {}
                 Err(e) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ❌ Meeting error: {e}");
+                    tracing::info!("  [{ts}] ❌ Meeting error: {e}");
                     rate_limit_wait(&shared_clone, channel_id).await;
                     let _ = channel_id
                         .send_message(

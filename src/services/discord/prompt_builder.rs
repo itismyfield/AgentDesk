@@ -227,7 +227,7 @@ pub(super) fn build_system_prompt(
             // Full profile: inject complete shared agent prompt (AGENTS.md)
             system_prompt_owned.push_str("\n\n[Shared Agent Rules]\n");
             system_prompt_owned.push_str(&shared_prompt);
-            eprintln!(
+            tracing::warn!(
                 "  [role-map] Injected shared prompt ({} chars) for channel {}",
                 shared_prompt.len(),
                 channel_id.get()
@@ -244,14 +244,14 @@ pub(super) fn build_system_prompt(
                      unless the user explicitly asks you to audit or compare role definitions.\n\n",
                 );
                 system_prompt_owned.push_str(&role_prompt);
-                eprintln!(
+                tracing::warn!(
                     "  [role-map] Applied role '{}' for channel {}",
                     binding.role_id,
                     channel_id.get()
                 );
             }
             None => {
-                eprintln!(
+                tracing::warn!(
                     "  [role-map] Failed to load prompt file '{}' for role '{}' (channel {})",
                     binding.prompt_file,
                     binding.role_id,
@@ -315,7 +315,7 @@ pub(super) fn build_system_prompt(
 
     if profile == DispatchProfile::ReviewLite {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 📉 ReviewLite prompt: {} chars (channel {})",
             system_prompt_owned.len(),
             channel_id.get()

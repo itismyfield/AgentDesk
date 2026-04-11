@@ -22,7 +22,9 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), Strin
         match crate::services::platform::git_head_commit(&repo_dir) {
             Some(c) => c,
             None => {
-                eprintln!("stamp_review_passed_marker: git rev-parse HEAD failed, skipping marker");
+                tracing::warn!(
+                    "stamp_review_passed_marker: git rev-parse HEAD failed, skipping marker"
+                );
                 return Ok(());
             }
         }
@@ -32,10 +34,10 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) -> Result<(), Strin
     })?;
     let dir = root.join("runtime").join("review_passed");
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("stamp_review_passed_marker: failed to create dir: {e}");
+        tracing::warn!("stamp_review_passed_marker: failed to create dir: {e}");
     }
     if let Err(e) = std::fs::write(dir.join(&commit), "") {
-        eprintln!("stamp_review_passed_marker: failed to write marker: {e}");
+        tracing::warn!("stamp_review_passed_marker: failed to write marker: {e}");
     }
     Ok(())
 }

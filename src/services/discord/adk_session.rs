@@ -184,7 +184,7 @@ pub(super) async fn post_adk_session_status(
 
     if let Err(err) = super::internal_api::hook_session(body).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!("  [{ts}] ⚠ ADK session POST failed: {err}");
+        tracing::warn!("  [{ts}] ⚠ ADK session POST failed: {err}");
     }
 }
 
@@ -193,7 +193,7 @@ pub(super) async fn post_adk_session_status(
 pub(super) async fn delete_adk_session(session_key: &str, _api_port: u16) {
     if let Err(err) = super::internal_api::delete_session(session_key).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!("  [{ts}] ⚠ ADK session DELETE failed: {err}");
+        tracing::warn!("  [{ts}] ⚠ ADK session DELETE failed: {err}");
     }
 
     if let Some(legacy_key) = legacy_session_key_from_namespaced(session_key) {
@@ -206,7 +206,7 @@ pub(super) async fn delete_adk_session(session_key: &str, _api_port: u16) {
 pub(super) async fn clear_provider_session_id(session_key: &str, _api_port: u16) {
     if let Err(err) = super::internal_api::clear_session_id(session_key).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!("  [{ts}] ⚠ clear_provider_session_id failed: {err}");
+        tracing::warn!("  [{ts}] ⚠ clear_provider_session_id failed: {err}");
     }
 
     if let Some(legacy_key) = legacy_session_key_from_namespaced(session_key) {
@@ -238,7 +238,7 @@ pub(super) async fn save_provider_session_id(
     };
     if let Err(err) = super::internal_api::hook_session(body).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!("  [{ts}] ⚠ save_provider_session_id failed: {err}");
+        tracing::warn!("  [{ts}] ⚠ save_provider_session_id failed: {err}");
     }
 }
 

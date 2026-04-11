@@ -963,12 +963,12 @@ pub fn load_graceful() -> Config {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
             Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
+                tracing::warn!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
                 Config::default()
             }
         },
         Err(_) => {
-            eprintln!("  ⚠ {path_display} not found — using defaults");
+            tracing::warn!("  ⚠ {path_display} not found — using defaults");
             Config::default()
         }
     };

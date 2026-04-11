@@ -465,7 +465,7 @@ pub(in crate::services::discord) async fn cmd_allowedtools(ctx: Context<'_>) -> 
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /allowedtools");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /allowedtools");
 
     let tools = {
         let settings = ctx.data().shared.settings.read().await;
@@ -505,7 +505,7 @@ pub(in crate::services::discord) async fn cmd_allowed(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /allowed {action}");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /allowed {action}");
 
     let arg = action.trim();
     let (op, raw_name) = if let Some(name) = arg.strip_prefix('+') {
@@ -589,7 +589,7 @@ pub(in crate::services::discord) async fn cmd_adduser(
     let target_name = &user.name;
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{author_name}] /adduser {target_name}");
+    tracing::info!("  [{ts}] ◀ [{author_name}] /adduser {target_name}");
 
     {
         let mut settings = ctx.data().shared.settings.write().await;
@@ -604,7 +604,7 @@ pub(in crate::services::discord) async fn cmd_adduser(
 
     ctx.say(format!("Added `{}` as authorized user.", target_name))
         .await?;
-    println!("  [{ts}] ▶ Added user: {target_name} (id:{target_id})");
+    tracing::info!("  [{ts}] ▶ Added user: {target_name} (id:{target_id})");
     Ok(())
 }
 
@@ -635,7 +635,7 @@ pub(in crate::services::discord) async fn cmd_removeuser(
     let target_name = &user.name;
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{author_name}] /removeuser {target_name}");
+    tracing::info!("  [{ts}] ◀ [{author_name}] /removeuser {target_name}");
 
     {
         let mut settings = ctx.data().shared.settings.write().await;
@@ -651,7 +651,7 @@ pub(in crate::services::discord) async fn cmd_removeuser(
 
     ctx.say(format!("Removed `{}` from authorized users.", target_name))
         .await?;
-    println!("  [{ts}] ▶ Removed user: {target_name} (id:{target_id})");
+    tracing::info!("  [{ts}] ▶ Removed user: {target_name} (id:{target_id})");
     Ok(())
 }
 
@@ -679,7 +679,7 @@ pub(in crate::services::discord) async fn cmd_allowall(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{author_name}] /allowall {enabled}");
+    tracing::info!("  [{ts}] ◀ [{author_name}] /allowall {enabled}");
 
     let response = {
         let mut settings = ctx.data().shared.settings.write().await;
@@ -695,7 +695,7 @@ pub(in crate::services::discord) async fn cmd_allowall(
     };
 
     ctx.say(&response).await?;
-    println!("  [{ts}] ▶ {response}");
+    tracing::info!("  [{ts}] ▶ {response}");
     Ok(())
 }
 

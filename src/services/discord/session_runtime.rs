@@ -74,9 +74,10 @@ impl DiscordSession {
             return Some(current_path.clone());
         }
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] ⚠ Ignoring stale local session path for channel {}: {}",
-            channel_id, current_path
+            channel_id,
+            current_path
         );
         self.current_path = None;
         self.worktree = None;
@@ -200,9 +201,10 @@ pub(super) fn create_git_worktree(
     }
 
     let ts_log = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts_log}] 🌿 Created worktree: {} (branch: {})",
-        wt_path, branch
+        wt_path,
+        branch
     );
     Ok((wt_path, branch))
 }
@@ -235,13 +237,14 @@ pub(super) fn cleanup_git_worktree(wt_info: &WorktreeInfo) {
     };
 
     if has_changes || has_commits {
-        println!(
+        tracing::info!(
             "  [{ts}] 🌿 Worktree {} has changes/commits — keeping for manual merge",
             wt_info.worktree_path
         );
-        println!(
+        tracing::info!(
             "  [{ts}] 🌿 Branch: {} | Original: {}",
-            wt_info.branch_name, wt_info.original_path
+            wt_info.branch_name,
+            wt_info.original_path
         );
     } else {
         let _ = std::process::Command::new("git")
@@ -263,7 +266,7 @@ pub(super) fn cleanup_git_worktree(wt_info: &WorktreeInfo) {
             ])
             .output();
         let _ = std::fs::remove_dir_all(&wt_info.worktree_path);
-        println!("  [{ts}] 🧹 Cleaned up worktree: {}", wt_info.worktree_path);
+        tracing::info!("  [{ts}] 🧹 Cleaned up worktree: {}", wt_info.worktree_path);
     }
 }
 
@@ -333,9 +336,11 @@ pub(super) async fn auto_restore_session(
             && configured != restored
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ Ignoring restored DB cwd for channel {}: {} (configured workspace: {})",
-                channel_id, restored, configured
+                channel_id,
+                restored,
+                configured
             );
         }
 
@@ -405,7 +410,7 @@ pub(super) async fn auto_restore_session(
             .as_ref()
             .map(|n| format!(" (remote: {})", n))
             .unwrap_or_default();
-        println!("  [{ts}] ↻ Auto-restored session: {last_path}{remote_info}");
+        tracing::info!("  [{ts}] ↻ Auto-restored session: {last_path}{remote_info}");
     }
 }
 
@@ -460,9 +465,10 @@ pub(super) async fn bootstrap_thread_session(
         match create_git_worktree(parent_path, ch, &provider_str) {
             Ok((wt_path, branch)) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] 🌿 Thread worktree created: {} (branch: {})",
-                    wt_path, branch
+                    wt_path,
+                    branch
                 );
                 session.worktree = Some(WorktreeInfo {
                     original_path: parent_path.to_string(),
@@ -473,7 +479,7 @@ pub(super) async fn bootstrap_thread_session(
             }
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ⚠ Thread worktree creation failed: {e}, falling back to parent path"
                 );
                 parent_path.to_string()
@@ -482,7 +488,7 @@ pub(super) async fn bootstrap_thread_session(
     };
     session.current_path = Some(effective_path.clone());
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ↻ Bootstrapped thread session: {effective_path}");
+    tracing::info!("  [{ts}] ↻ Bootstrapped thread session: {effective_path}");
 }
 
 /// Resolve the channel name and parent category name for a Discord channel.
@@ -512,7 +518,7 @@ pub(super) async fn resolve_channel_category(
                 serenity::model::channel::Channel::Guild(cat) => Some(cat.name.clone()),
                 _ => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] ⚠ Category channel {parent_id} is not a Guild channel for #{}",
                         gc.name
                     );
@@ -521,7 +527,7 @@ pub(super) async fn resolve_channel_category(
             }
         } else {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ Failed to resolve category {parent_id} for #{}",
                 gc.name
             );
@@ -529,7 +535,7 @@ pub(super) async fn resolve_channel_category(
         }
     } else {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] ⚠ No parent_id for #{}", gc.name);
+        tracing::info!("  [{ts}] ⚠ No parent_id for #{}", gc.name);
         None
     };
     (ch_name, cat_name)

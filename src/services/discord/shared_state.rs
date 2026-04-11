@@ -61,7 +61,7 @@ impl DiscordSession {
             return Some(current_path.clone());
         }
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] ⚠ Ignoring stale local session path for channel {}: {}",
             channel_id, current_path
         );

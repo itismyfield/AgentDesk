@@ -1521,6 +1521,9 @@ fn complete_dispatch_inner(
     dispatch_id: &str,
     result: &serde_json::Value,
 ) -> Result<serde_json::Value> {
+    let dispatch_span =
+        crate::logging::dispatch_span("complete_dispatch", Some(dispatch_id), None, None);
+    let _guard = dispatch_span.enter();
     let conn = db
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
@@ -1550,10 +1553,7 @@ fn complete_dispatch_inner(
             )
             .unwrap_or(false);
         if exists {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ complete_dispatch: {dispatch_id} already completed/cancelled, skipping hooks"
-            );
+            tracing::info!("skipping completion hooks because dispatch is already finalized");
             let dispatch = query_dispatch_row(&conn, dispatch_id)?;
             drop(conn);
             return Ok(dispatch);

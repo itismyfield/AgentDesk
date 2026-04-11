@@ -24,7 +24,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     static RETRY_PENDING: LazyLock<dashmap::DashSet<u64>> =
         LazyLock::new(|| dashmap::DashSet::new());
     if !RETRY_PENDING.insert(channel_id.get()) {
-        eprintln!("  [{ts}] ⏭ auto-retry: skipped (dedup) for channel {channel_id}");
+        tracing::warn!("  [{ts}] ⏭ auto-retry: skipped (dedup) for channel {channel_id}");
         return;
     }
     // Clean up guard after 30 seconds (allow future retries)
@@ -34,7 +34,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         RETRY_PENDING.remove(&ch_id);
     });
 
-    eprintln!("  [{ts}] ↻ auto-retry: fetching last 10 messages for channel {channel_id}");
+    tracing::warn!("  [{ts}] ↻ auto-retry: fetching last 10 messages for channel {channel_id}");
 
     // Fetch last 10 messages from Discord
     let history = match channel_id
@@ -57,7 +57,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
             }
         }
         Err(e) => {
-            eprintln!("  [{ts}] ⚠ auto-retry: failed to fetch history: {e}");
+            tracing::warn!("  [{ts}] ⚠ auto-retry: failed to fetch history: {e}");
             None
         }
     };
@@ -86,6 +86,6 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     )
     .await;
     if !enqueued {
-        eprintln!("  [{ts}] ⏭ auto-retry: follow-up deduped for channel {channel_id}");
+        tracing::warn!("  [{ts}] ⏭ auto-retry: follow-up deduped for channel {channel_id}");
     }
 }

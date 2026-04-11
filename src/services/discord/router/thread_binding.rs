@@ -61,7 +61,9 @@ pub(super) async fn verify_thread_accessible(
                             poise::serenity_prelude::builder::EditThread::new().archived(false);
                         if let Err(e) = thread_id.edit_thread(&ctx.http, edit).await {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!("  [{ts}] ⚠️ Failed to unarchive thread {thread_id}: {e}");
+                            tracing::info!(
+                                "  [{ts}] ⚠️ Failed to unarchive thread {thread_id}: {e}"
+                            );
                             return false;
                         }
                     }

@@ -92,15 +92,16 @@ pub fn execute_intents(db: &crate::db::Db, intents: Vec<Intent>) -> IntentExecut
         return result;
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] 📋 execute_intents: {} intent(s)", intents.len());
+    tracing::info!(intent_count = intents.len(), "executing queued intents");
 
     for intent in intents {
         match intent {
             Intent::TransitionCard { card_id, from, to } => {
+                let intent_span =
+                    crate::logging::dispatch_span("intent_transition", None, Some(&card_id), None);
+                let _guard = intent_span.enter();
                 if let Err(e) = execute_transition(db, &card_id, &from, &to) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ⚠ intent TransitionCard({card_id} {from}→{to}) failed: {e}");
+                    tracing::warn!(from, to, error = %e, "transition intent failed");
                     result.errors += 1;
                 } else {
                     result.transitions.push((card_id, from, to));
@@ -113,6 +114,13 @@ pub fn execute_intents(db: &crate::db::Db, intents: Vec<Intent>) -> IntentExecut
                 dispatch_type,
                 title,
             } => {
+                let intent_span = crate::logging::dispatch_span(
+                    "intent_create_dispatch",
+                    Some(&dispatch_id),
+                    Some(&card_id),
+                    Some(&agent_id),
+                );
+                let _guard = intent_span.enter();
                 match execute_create_dispatch(
                     db,
                     &dispatch_id,
@@ -123,18 +131,14 @@ pub fn execute_intents(db: &crate::db::Db, intents: Vec<Intent>) -> IntentExecut
                 ) {
                     Ok(created) => result.created_dispatches.push(created),
                     Err(e) => {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
-                            "  [{ts}] ⚠ intent CreateDispatch({dispatch_id} {card_id}→{agent_id}) failed: {e}"
-                        );
+                        tracing::warn!(dispatch_type, title, error = %e, "create-dispatch intent failed");
                         result.errors += 1;
                     }
                 }
             }
             Intent::ExecuteSQL { sql, params } => {
                 if let Err(e) = execute_sql(db, &sql, &params) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ⚠ intent ExecuteSQL failed: {e}");
+                    tracing::warn!(error = %e, sql, "execute-sql intent failed");
                     result.errors += 1;
                 }
             }
@@ -145,8 +149,7 @@ pub fn execute_intents(db: &crate::db::Db, intents: Vec<Intent>) -> IntentExecut
                 source,
             } => {
                 if let Err(e) = execute_queue_message(db, &target, &content, &bot, &source) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ⚠ intent QueueMessage failed: {e}");
+                    tracing::warn!(target, bot, source, error = %e, "queue-message intent failed");
                     result.errors += 1;
                 }
             }
@@ -156,27 +159,24 @@ pub fn execute_intents(db: &crate::db::Db, intents: Vec<Intent>) -> IntentExecut
                 ttl_seconds,
             } => {
                 if let Err(e) = execute_set_kv(db, &key, &value, ttl_seconds) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ⚠ intent SetKV({key}) failed: {e}");
+                    tracing::warn!(key, ttl_seconds, error = %e, "set-kv intent failed");
                     result.errors += 1;
                 }
             }
             Intent::DeleteKV { key } => {
                 if let Err(e) = execute_delete_kv(db, &key) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ⚠ intent DeleteKV({key}) failed: {e}");
+                    tracing::warn!(key, error = %e, "delete-kv intent failed");
                     result.errors += 1;
                 }
             }
         }
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
-        "  [{ts}] ✅ execute_intents done: {} transitions, {} dispatches, {} errors",
-        result.transitions.len(),
-        result.created_dispatches.len(),
-        result.errors
+    tracing::info!(
+        transition_count = result.transitions.len(),
+        created_dispatch_count = result.created_dispatches.len(),
+        error_count = result.errors,
+        "finished executing queued intents"
     );
 
     result
@@ -190,6 +190,9 @@ fn execute_transition(
     expected_from: &str,
     to: &str,
 ) -> anyhow::Result<()> {
+    let transition_span =
+        crate::logging::dispatch_span("execute_transition", None, Some(card_id), None);
+    let _guard = transition_span.enter();
     let conn = db.separate_conn()?;
 
     // Verify current status matches expected
@@ -203,9 +206,11 @@ fn execute_transition(
 
     if current != expected_from {
         // Status changed between intent push and execution — skip
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
-            "  [{ts}] ⏭ TransitionCard({card_id}): expected from={expected_from} but current={current}, skipping"
+        tracing::info!(
+            expected_from,
+            current,
+            to,
+            "skipping transition intent due to stale source status"
         );
         return Ok(());
     }
@@ -272,8 +277,7 @@ fn execute_transition(
         );
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] 🔄 TransitionCard: {card_id} {expected_from}→{to}");
+    tracing::info!(from = expected_from, to, "applied transition intent");
     Ok(())
 }
 
@@ -285,6 +289,13 @@ fn execute_create_dispatch(
     dispatch_type: &str,
     title: &str,
 ) -> anyhow::Result<CreatedDispatch> {
+    let dispatch_span = crate::logging::dispatch_span(
+        "execute_create_dispatch",
+        Some(pre_id),
+        Some(card_id),
+        Some(agent_id),
+    );
+    let _guard = dispatch_span.enter();
     // Delegate to the authoritative dispatch creation path.
     // create_dispatch_core generates its own UUID — we override by using a
     // variant that accepts a pre-assigned ID.
@@ -378,9 +389,14 @@ fn execute_queue_message(
         "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, ?3, ?4)",
         rusqlite::params![target, content, bot, source],
     )?;
-    let ts = chrono::Local::now().format("%H:%M:%S");
     let id = conn.last_insert_rowid();
-    println!("  [{ts}] 📨 QueueMessage → {target} (bot={bot}, id={id})");
+    tracing::info!(
+        target,
+        bot,
+        source,
+        message_id = id,
+        "queued message intent"
+    );
     Ok(())
 }
 

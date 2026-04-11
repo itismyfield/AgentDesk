@@ -22,7 +22,7 @@ pub fn record_termination(
     let conn = match db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("  [termination_audit] failed to open separate conn: {e}");
+            tracing::warn!("  [termination_audit] failed to open separate conn: {e}");
             return;
         }
     };
@@ -41,7 +41,7 @@ pub fn record_termination(
             tmux_alive.map(|v| v as i32),
         ],
     ) {
-        eprintln!("  [termination_audit] insert failed: {e}");
+        tracing::warn!("  [termination_audit] insert failed: {e}");
     }
 }
 

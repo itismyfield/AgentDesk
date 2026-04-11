@@ -136,7 +136,9 @@ pub(super) async fn reset_session_for_auto_retry(
         .and_then(|guard| guard.clone())
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!("  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})");
+        tracing::warn!(
+            "  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})"
+        );
         crate::services::termination_audit::record_termination_for_tmux(
             &name,
             None,

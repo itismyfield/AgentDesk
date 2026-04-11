@@ -271,7 +271,7 @@ pub(crate) fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
         let path = entry.path();
         if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("json") {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
+            tracing::warn!(
                 "  [{ts}] ⚠ LEGACY-QUEUE: found legacy pending queue file '{}' — \
                 predates bot-identity namespacing and will NOT be restored. \
                 Remove manually if no longer needed.",
