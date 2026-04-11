@@ -82,6 +82,172 @@ function parseLocalTimestampMs(value) {
   return isNaN(parsed) ? 0 : parsed;
 }
 
+function normalizedText(value) {
+  if (value === null || value === undefined) return null;
+  var trimmed = String(value).trim();
+  return trimmed ? trimmed : null;
+}
+
+function parseSessionTmuxName(sessionKey) {
+  var raw = normalizedText(sessionKey);
+  if (!raw) return null;
+  var idx = raw.lastIndexOf(":");
+  return idx >= 0 ? normalizedText(raw.substring(idx + 1)) : raw;
+}
+
+function parseSessionChannelName(sessionKey, provider) {
+  var tmuxName = parseSessionTmuxName(sessionKey);
+  if (!tmuxName) return null;
+  var prefix = "AgentDesk-" + (normalizedText(provider) || "") + "-";
+  var channelName = tmuxName.indexOf(prefix) === 0
+    ? tmuxName.substring(prefix.length)
+    : tmuxName.replace(/^AgentDesk-[^-]+-/, "");
+  if (channelName.slice(-4) === "-dev") {
+    channelName = channelName.substring(0, channelName.length - 4);
+  }
+  return normalizedText(channelName);
+}
+
+function parseParentChannelName(channelName) {
+  var raw = normalizedText(channelName);
+  if (!raw) return null;
+  var match = /^(.*)-t\d{15,}$/.exec(raw);
+  return match ? normalizedText(match[1]) : raw;
+}
+
+function parseSessionThreadId(sessionKey, provider) {
+  var channelName = parseSessionChannelName(sessionKey, provider);
+  var match = channelName ? /-t(\d{15,})$/.exec(channelName) : null;
+  return match ? match[1] : null;
+}
+
+function loadAgentDirectory() {
+  return agentdesk.db.query(
+    "SELECT id, name, name_ko, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx FROM agents"
+  );
+}
+
+function agentDisplayName(agent) {
+  if (!agent) return null;
+  return normalizedText(agent.name_ko) || normalizedText(agent.name) || normalizedText(agent.id);
+}
+
+function findAgentById(agents, agentId) {
+  var target = normalizedText(agentId);
+  if (!target) return null;
+  for (var i = 0; i < agents.length; i++) {
+    if (normalizedText(agents[i].id) === target) return agents[i];
+  }
+  return null;
+}
+
+function channelMatchesCandidate(candidate, channel) {
+  var left = normalizedText(candidate);
+  var right = normalizedText(channel);
+  if (!left || !right) return false;
+  return left === right || left.indexOf(right) === 0 || right.indexOf(left) === 0;
+}
+
+function findAgentByChannelValue(agents, channelValue) {
+  for (var i = 0; i < agents.length; i++) {
+    var agent = agents[i];
+    var channels = [
+      agent.discord_channel_id,
+      agent.discord_channel_alt,
+      agent.discord_channel_cc,
+      agent.discord_channel_cdx
+    ];
+    for (var c = 0; c < channels.length; c++) {
+      if (channelMatchesCandidate(channelValue, channels[c])) {
+        return agent;
+      }
+    }
+  }
+  return null;
+}
+
+function lookupDispatchTargetAgentId(dispatchId) {
+  var target = normalizedText(dispatchId);
+  if (!target) return null;
+  var rows = agentdesk.db.query(
+    "SELECT to_agent_id FROM task_dispatches WHERE id = ? LIMIT 1",
+    [target]
+  );
+  return rows.length > 0 ? normalizedText(rows[0].to_agent_id) : null;
+}
+
+function lookupThreadTargetAgentId(threadId) {
+  var target = normalizedText(threadId);
+  if (!target) return null;
+  var rows = agentdesk.db.query(
+    "SELECT to_agent_id FROM task_dispatches " +
+    "WHERE thread_id = ? AND to_agent_id IS NOT NULL AND TRIM(to_agent_id) != '' " +
+    "ORDER BY created_at DESC LIMIT 1",
+    [target]
+  );
+  return rows.length > 0 ? normalizedText(rows[0].to_agent_id) : null;
+}
+
+function resolveSessionAgentContext(sessionRow, agents) {
+  var storedAgentId = normalizedText(sessionRow.agent_id);
+  var resolvedAgent = findAgentById(agents, storedAgentId);
+  var dispatchAgentId = lookupDispatchTargetAgentId(sessionRow.active_dispatch_id);
+  if (!resolvedAgent && dispatchAgentId) {
+    resolvedAgent = findAgentById(agents, dispatchAgentId);
+  }
+
+  var threadChannelId = normalizedText(sessionRow.thread_channel_id) ||
+    parseSessionThreadId(sessionRow.session_key, sessionRow.provider);
+  if (!resolvedAgent && threadChannelId) {
+    resolvedAgent = findAgentByChannelValue(agents, threadChannelId);
+    if (!resolvedAgent) {
+      var threadAgentId = lookupThreadTargetAgentId(threadChannelId);
+      if (threadAgentId) {
+        resolvedAgent = findAgentById(agents, threadAgentId);
+      }
+    }
+  }
+
+  var sessionChannelName = parseParentChannelName(
+    parseSessionChannelName(sessionRow.session_key, sessionRow.provider)
+  );
+  if (!resolvedAgent && sessionChannelName) {
+    resolvedAgent = findAgentByChannelValue(agents, sessionChannelName);
+  }
+
+  var resolvedAgentId = resolvedAgent
+    ? normalizedText(resolvedAgent.id)
+    : (storedAgentId || null);
+  var resolvedLabel = agentDisplayName(resolvedAgent) ||
+    sessionChannelName ||
+    parseSessionTmuxName(sessionRow.session_key) ||
+    "unknown-session";
+
+  return {
+    agent_id: resolvedAgentId,
+    agent_label: resolvedLabel,
+    thread_channel_id: threadChannelId,
+    session_channel_name: sessionChannelName
+  };
+}
+
+function backfillMissingSessionAgentIds(agents) {
+  var rows = agentdesk.db.query(
+    "SELECT session_key, agent_id, provider, active_dispatch_id, thread_channel_id " +
+    "FROM sessions " +
+    "WHERE provider IN ('claude', 'codex', 'qwen') " +
+    "AND (agent_id IS NULL OR TRIM(agent_id) = '')"
+  );
+  for (var i = 0; i < rows.length; i++) {
+    var resolved = resolveSessionAgentContext(rows[i], agents);
+    if (!resolved.agent_id) continue;
+    agentdesk.db.execute(
+      "UPDATE sessions SET agent_id = ? WHERE session_key = ? AND (agent_id IS NULL OR TRIM(agent_id) = '')",
+      [resolved.agent_id, rows[i].session_key]
+    );
+  }
+}
+
 function findRecentInflightForSession(sessionKey, tmuxName) {
   var inflights = [];
   try {
@@ -729,7 +895,9 @@ var timeouts = {
           agentdesk.log.warn("[deadlock] Failed to mark dispatch for " + swKey + ": " + dispErr);
         }
         agentdesk.db.execute(
-          "UPDATE sessions SET status = 'idle', active_dispatch_id = NULL WHERE session_key = ? AND status = 'working'",
+          "UPDATE sessions " +
+          "SET status = 'idle', active_dispatch_id = NULL, last_heartbeat = datetime('now') " +
+          "WHERE session_key = ? AND status = 'working'",
           [swKey]
         );
         agentdesk.log.info("[deadlock] Fixed stale working session → idle: " + swKey);
@@ -794,7 +962,9 @@ var timeouts = {
       // (턴 완료 후 세션 상태가 working으로 남은 stale 케이스)
       if (!tmuxAlive || (!inflightProgress.channel_id && !inflightProgress.recent)) {
         agentdesk.db.execute(
-          "UPDATE sessions SET status = 'idle' WHERE session_key = ? AND status = 'working'",
+          "UPDATE sessions " +
+          "SET status = 'idle', last_heartbeat = datetime('now') " +
+          "WHERE session_key = ? AND status = 'working'",
           [sess.session_key]
         );
         agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [deadlockKey]);
@@ -1239,9 +1409,12 @@ var timeouts = {
       agentdesk.log.error("[idle-kill] server_port missing — cannot call force-kill API");
       return;
     }
+    var agents = loadAgentDirectory();
+    backfillMissingSessionAgentIds(agents);
 
     var sessions = agentdesk.db.query(
-      "SELECT session_key, agent_id, provider, COALESCE(last_heartbeat, created_at) AS last_seen_at " +
+      "SELECT session_key, agent_id, provider, active_dispatch_id, thread_channel_id, " +
+      "COALESCE(last_heartbeat, created_at) AS last_seen_at " +
       "FROM sessions " +
       "WHERE status = 'idle' " +
       "AND provider IN ('claude', 'codex', 'qwen') " +
@@ -1279,12 +1452,14 @@ var timeouts = {
 
       agentdesk.log.info("[idle-kill] Killed idle session after " + idleMin + "min: " + s.session_key);
 
-      var primaryChannel = s.agent_id ? agentdesk.agents.resolvePrimaryChannel(s.agent_id) : null;
+      var agentContext = resolveSessionAgentContext(s, agents);
+      var primaryChannel = agentContext.agent_id ? agentdesk.agents.resolvePrimaryChannel(agentContext.agent_id) : null;
       var notifyTarget = primaryChannel ? ("channel:" + primaryChannel) : getPMDChannel();
       if (notifyTarget) {
         sendNotifyAlert(
           notifyTarget,
-          "💤 [Idle 세션 자동 종료] " + (s.agent_id || "unknown-agent") + "\n" +
+          "💤 [Idle 세션 자동 종료] " + agentContext.agent_label + "\n" +
+          "agent_id: `" + (agentContext.agent_id || "unknown") + "`\n" +
           "provider: `" + (s.provider || "unknown") + "`\n" +
           "session_key: `" + s.session_key + "`\n" +
           "idle: `" + idleMin + "분`\n" +
