@@ -1275,12 +1275,30 @@ pub(crate) async fn force_kill_session_impl(
 
     // Notify bot message for force-kill visibility
     if let Some(ref channel_id_str) = runtime_channel_id {
+        // Build human-readable message: agent name + reason from tmux exit file
+        let agent_label = agent_id.as_deref().unwrap_or("unknown");
+        let exit_reason = crate::services::tmux_diagnostics::read_tmux_exit_reason(&tmux_name)
+            .map(|r| {
+                // Strip timestamp prefix "[2026-...] " if present
+                let trimmed = if let Some(idx) = r.find("] ") {
+                    &r[idx + 2..]
+                } else {
+                    &r
+                };
+                let s = trimmed.trim();
+                if s.len() > 80 {
+                    format!("{}…", &s[..80])
+                } else {
+                    s.to_string()
+                }
+            })
+            .unwrap_or_else(|| lifecycle.lifecycle_path.to_string());
         if let Ok(conn) = state.db.lock() {
             let _ = conn.execute(
                 "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
                 rusqlite::params![
                     format!("channel:{channel_id_str}"),
-                    format!("⚡ 세션 강제 종료: {session_key}"),
+                    format!("⚡ 세션 강제 종료: {agent_label}\n사유: {exit_reason}"),
                 ],
             );
         }
