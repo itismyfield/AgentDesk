@@ -67,6 +67,54 @@ fn test_engine_db_execute_op() {
 }
 
 #[test]
+fn test_engine_db_execute_warns_and_blocks_core_table_sql() {
+    let db = test_db();
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+        let result: String = ctx
+            .eval(
+                r#"
+                    (function() {
+                        var warnings = [];
+                        agentdesk.log.warn = function(msg) { warnings.push(msg); };
+                        var outcome;
+                        try {
+                            agentdesk.db.execute("DELETE FROM task_dispatches WHERE id = ?", ["dispatch-1"]);
+                            outcome = "unexpected_success";
+                        } catch (e) {
+                            outcome = e.message;
+                        }
+                        return JSON.stringify({
+                            outcome: outcome,
+                            warning: warnings[0] || null
+                        });
+                    })()
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            parsed["outcome"]
+                .as_str()
+                .unwrap_or("")
+                .contains("task_dispatches"),
+            "blocked error must mention task_dispatches: {parsed}"
+        );
+        let warning = parsed["warning"].as_str().unwrap_or("");
+        assert!(
+            warning.contains("[policy-sql-guard]"),
+            "warning log must include guard prefix: {warning}"
+        );
+        assert!(
+            warning.contains("task_dispatches"),
+            "warning log must name the guarded table: {warning}"
+        );
+    });
+}
+
+#[test]
 fn test_engine_log_ops() {
     let db = test_db();
     let rt = rquickjs::Runtime::new().unwrap();

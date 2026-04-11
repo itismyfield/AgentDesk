@@ -7,6 +7,7 @@
 //! Mutation operations (setStatus, dispatch.create, db.execute) are deferred.
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// A single intent produced by a JS policy hook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,45 +351,9 @@ fn json_to_sqlite(val: &serde_json::Value) -> rusqlite::types::Value {
 }
 
 fn execute_sql(db: &crate::db::Db, sql: &str, params: &[serde_json::Value]) -> anyhow::Result<()> {
-    // Block direct kanban_cards status/review_status/latest_dispatch_id UPDATE (#155)
-    let sql_upper = sql.to_uppercase();
-    if sql_upper.contains("UPDATE") && sql_upper.contains("KANBAN_CARDS") {
-        let re_status = regex::Regex::new(r"(?i)(?:^|[\s,])status\s*=").unwrap();
-        if re_status.is_match(sql) {
-            return Err(anyhow::anyhow!(
-                "Direct kanban_cards status UPDATE is blocked. Use TransitionCard intent."
-            ));
-        }
-        let re_review = regex::Regex::new(r"(?i)(?:^|[\s,])review_status\s*=").unwrap();
-        if re_review.is_match(sql) {
-            return Err(anyhow::anyhow!(
-                "Direct kanban_cards review_status UPDATE is blocked. Use the transition reducer."
-            ));
-        }
-        let re_dispatch = regex::Regex::new(r"(?i)(?:^|[\s,])latest_dispatch_id\s*=").unwrap();
-        if re_dispatch.is_match(sql) {
-            return Err(anyhow::anyhow!(
-                "Direct kanban_cards latest_dispatch_id UPDATE is blocked. Use the transition reducer."
-            ));
-        }
-    }
-    // Block direct task_dispatches mutation (same guard as ops.rs)
-    if sql_upper.contains("TASK_DISPATCHES")
-        && (sql_upper.contains("INSERT") || sql_upper.contains("UPDATE"))
-    {
-        return Err(anyhow::anyhow!(
-            "Direct task_dispatches mutation is blocked. Use CreateDispatch intent."
-        ));
-    }
-    // Block direct card_review_state mutation (#158 — same guard as ops.rs)
-    let re_review_state = regex::Regex::new(
-        r"(?i)\b(?:INSERT(?:\s+OR\s+REPLACE)?\s+INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+card_review_state\b",
-    )
-    .unwrap();
-    if re_review_state.is_match(sql) {
-        return Err(anyhow::anyhow!(
-            "Direct card_review_state mutation is blocked. Use reviewState.sync bridge."
-        ));
+    if let Some(violation) = crate::engine::sql_guard::detect_core_table_write(sql) {
+        warn!("{}", violation.warning_message("ExecuteSQL intent", sql));
+        return Err(anyhow::anyhow!(violation.error_message()));
     }
 
     let conn = db.separate_conn()?;
@@ -569,6 +534,17 @@ mod tests {
         let db = test_db();
         let intents = vec![Intent::ExecuteSQL {
             sql: "UPDATE kanban_cards SET latest_dispatch_id = 'abc' WHERE id = 'x'".into(),
+            params: vec![],
+        }];
+        let result = execute_intents(&db, intents);
+        assert_eq!(result.errors, 1);
+    }
+
+    #[test]
+    fn test_blocked_task_dispatches_delete_sql() {
+        let db = test_db();
+        let intents = vec![Intent::ExecuteSQL {
+            sql: "DELETE FROM task_dispatches WHERE id = 'dispatch-1'".into(),
             params: vec![],
         }];
         let result = execute_intents(&db, intents);
