@@ -359,20 +359,37 @@ agentdesk doctor                                 # System diagnostics
 agentdesk discord-sendfile <PATH> --channel <ID> --key <HASH>
 agentdesk discord-sendmessage --channel <ID> --message <TEXT>
 agentdesk discord-senddm --user <ID> --message <TEXT>
+agentdesk send --target channel:<ID> --content <TEXT>
+agentdesk discord read <CHANNEL_ID> [--limit <N>]
 
-# Kanban & dispatch
+# Review / docs / sessions
+agentdesk review-verdict --dispatch <ID> --verdict pass|improve|rework|reject|approved
+agentdesk review-decision --card <CARD_ID> --decision approve|rework|escalate
+agentdesk docs [CATEGORY]
+agentdesk force-kill --session-key <KEY>
+
+# Kanban / dispatch / auto-queue
 agentdesk cards                                  # List kanban cards
-agentdesk dispatch                               # Dispatch operations
+agentdesk card create --from-issue <NUMBER> [--status ready] [--agent <ID>]
+agentdesk card status <CARD_ID|ISSUE_NUMBER>
+agentdesk dispatch <ISSUE_GROUPS...>             # Dispatch issue groups
+agentdesk dispatch list
+agentdesk dispatch retry <CARD_ID>
+agentdesk dispatch redispatch <CARD_ID>
 agentdesk resume                                 # Resume stuck cards
 agentdesk advance                                # Promote card to review
-agentdesk retry                                  # Retry failed dispatch
-agentdesk redispatch                             # Cancel + re-dispatch
 agentdesk queue                                  # Auto-queue status
+agentdesk auto-queue activate [--run <ID>] [--agent <ID>]
+agentdesk auto-queue add <CARD_ID> [--run <ID>] [--priority <N>] [--phase <N>]
+agentdesk auto-queue config --max-concurrent <N> [--run <ID>]
 
-# Runtime
+# Git / runtime
+agentdesk github-sync [--repo <OWNER/REPO>]
+agentdesk cherry-merge <BRANCH> [--close-issue]
 agentdesk status                                 # Runtime health summary
-agentdesk config get <KEY>                       # Read runtime config
-agentdesk config set <KEY> <VALUE>               # Set runtime config
+agentdesk config get                             # Read runtime config
+agentdesk config set '<JSON>'                    # Set runtime config
+agentdesk config audit [--dry-run]               # Reconcile yaml/DB drift
 agentdesk agents                                 # List agents
 agentdesk terminations                           # Session termination events
 agentdesk api GET /api/health                    # Direct API call
