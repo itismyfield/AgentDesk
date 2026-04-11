@@ -5377,6 +5377,156 @@ async fn auto_queue_dispatch_prepares_backlog_cards_and_auto_assigns_agent() {
 }
 
 #[tokio::test]
+async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "project-agentdesk");
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-existing",
+        4901,
+        "ready",
+        "project-agentdesk",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-backlog",
+        4902,
+        "backlog",
+        "project-agentdesk",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-ready",
+        4903,
+        "ready",
+        "project-agentdesk",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at
+            ) VALUES (
+                'run-dispatch-active', 'test-repo', 'project-agentdesk', 'active', 1, 1, datetime('now', '-1 minute')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-dispatch-existing', 'run-dispatch-active', 'card-dispatch-existing', 'project-agentdesk', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/dispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "project-agentdesk",
+                        "groups": [
+                            {"issues": [4903], "thread_group": 0, "batch_phase": 1},
+                            {"issues": [4902], "thread_group": 7, "batch_phase": 3}
+                        ],
+                        "activate": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["run"]["id"], "run-dispatch-active");
+    assert_eq!(json["run"]["status"], "active");
+    assert_eq!(json["activated"], false);
+
+    let conn = db.lock().unwrap();
+    let total_runs: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auto_queue_runs", [], |row| row.get(0))
+        .unwrap();
+    let active_runs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(total_runs, 1, "dispatch must reuse the existing active run");
+    assert_eq!(
+        active_runs, 1,
+        "dispatch must not create a second active run"
+    );
+
+    let backlog_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-dispatch-backlog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(backlog_status, "ready");
+
+    let entry_layout: Vec<(i64, i64, i64, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT kc.github_issue_number, e.thread_group, e.priority_rank, COALESCE(e.batch_phase, 0)
+                 FROM auto_queue_entries e
+                 JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+                 WHERE e.run_id = 'run-dispatch-active'
+                 ORDER BY kc.github_issue_number ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+    };
+    assert_eq!(
+        entry_layout,
+        vec![(4901, 0, 0, 0), (4902, 7, 0, 3), (4903, 0, 1, 1)]
+    );
+
+    let run_meta: (i64, i64) = conn
+        .query_row(
+            "SELECT max_concurrent_threads, thread_group_count
+             FROM auto_queue_runs
+             WHERE id = 'run-dispatch-active'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(run_meta, (2, 2));
+}
+
+#[tokio::test]
 async fn auto_queue_update_entry_moves_pending_entry_and_syncs_run_groups() {
     let db = test_db();
     let engine = test_engine(&db);

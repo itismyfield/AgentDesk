@@ -419,6 +419,124 @@ fn validate_dispatchable_cards(
     Ok(())
 }
 
+fn find_matching_active_run_id(
+    conn: &rusqlite::Connection,
+    repo: Option<&str>,
+    agent_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let mut sql = String::from("SELECT id FROM auto_queue_runs WHERE status = 'active'");
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
+        params.push(Box::new(repo.to_string()));
+        sql.push_str(&format!(
+            " AND (repo = ?{} OR repo IS NULL OR repo = '')",
+            params.len()
+        ));
+    }
+    if let Some(agent_id) = agent_id.map(str::trim).filter(|value| !value.is_empty()) {
+        params.push(Box::new(agent_id.to_string()));
+        sql.push_str(&format!(
+            " AND (agent_id = ?{} OR agent_id IS NULL OR agent_id = '')",
+            params.len()
+        ));
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT 1");
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    match conn.query_row(&sql, param_refs.as_slice(), |row| row.get::<_, String>(0)) {
+        Ok(run_id) => Ok(Some(run_id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(format!("lookup active run: {err}")),
+    }
+}
+
+fn enqueue_dispatch_entries_into_run(
+    conn: &mut rusqlite::Connection,
+    run_id: &str,
+    requested_entries: &[GenerateEntryBody],
+    cards_by_issue: &HashMap<i64, ResolvedDispatchCard>,
+) -> Result<usize, String> {
+    let existing_live_cards: HashSet<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT kanban_card_id
+                 FROM auto_queue_entries
+                 WHERE run_id = ?1
+                   AND status IN ('pending', 'dispatched')",
+            )
+            .map_err(|err| format!("prepare existing queued cards: {err}"))?;
+        stmt.query_map([run_id], |row| row.get::<_, String>(0))
+            .map_err(|err| format!("query existing queued cards: {err}"))?
+            .filter_map(|row| row.ok())
+            .collect()
+    };
+
+    let mut next_rank_by_group: HashMap<i64, i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT COALESCE(thread_group, 0), COALESCE(MAX(priority_rank), -1) + 1
+                 FROM auto_queue_entries
+                 WHERE run_id = ?1
+                 GROUP BY COALESCE(thread_group, 0)",
+            )
+            .map_err(|err| format!("prepare group ranks: {err}"))?;
+        stmt.query_map([run_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|err| format!("query group ranks: {err}"))?
+        .filter_map(|row| row.ok())
+        .collect()
+    };
+    let mut existing_live_cards = existing_live_cards;
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("begin enqueue transaction: {err}"))?;
+    let mut inserted = 0usize;
+
+    for entry in requested_entries {
+        let Some(card) = cards_by_issue.get(&entry.issue_number) else {
+            continue;
+        };
+        if existing_live_cards.contains(&card.card_id) {
+            continue;
+        }
+
+        let thread_group = entry.thread_group.unwrap_or(0);
+        let priority_rank = *next_rank_by_group.entry(thread_group).or_insert(0);
+        next_rank_by_group.insert(thread_group, priority_rank + 1);
+
+        tx.execute(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, batch_phase
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7
+             )",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                run_id,
+                card.card_id,
+                card.assigned_agent_id.as_deref().unwrap_or(""),
+                priority_rank,
+                thread_group,
+                entry.batch_phase.unwrap_or(0)
+            ],
+        )
+        .map_err(|err| format!("insert auto-queue entry: {err}"))?;
+        existing_live_cards.insert(card.card_id.clone());
+        inserted += 1;
+    }
+
+    if inserted > 0 {
+        crate::db::auto_queue::sync_run_group_metadata(&tx, run_id)
+            .map_err(|err| format!("sync run group metadata: {err}"))?;
+    }
+
+    tx.commit()
+        .map_err(|err| format!("commit enqueue transaction: {err}"))?;
+    Ok(inserted)
+}
+
 fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<String> {
     let mut states: Vec<String> = pipeline
         .dispatchable_states()
@@ -2013,7 +2131,110 @@ pub async fn dispatch(
     if let Err(err) = validate_dispatchable_cards(&conn, &cards_by_issue) {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
     }
+
+    let existing_active_run_id =
+        match find_matching_active_run_id(&conn, body.repo.as_deref(), body.agent_id.as_deref()) {
+            Ok(run_id) => run_id,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": err})),
+                );
+            }
+        };
     drop(conn);
+
+    if let Some(run_id) = existing_active_run_id {
+        let prepare_result = state.auto_queue_service().prepare_generate_cards(
+            &crate::services::auto_queue::PrepareGenerateInput {
+                repo: body.repo.clone(),
+                agent_id: body.agent_id.clone(),
+                issue_numbers: Some(issue_numbers.clone()),
+            },
+        );
+        if let Err(error) = prepare_result {
+            return error.into_json_response();
+        }
+
+        let mut conn = match state.db.separate_conn() {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{e}")})),
+                );
+            }
+        };
+        if let Err(err) = enqueue_dispatch_entries_into_run(
+            &mut conn,
+            &run_id,
+            &requested_entries,
+            &cards_by_issue,
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": err})),
+            );
+        }
+        drop(conn);
+
+        let activate_now = body.activate.unwrap_or(true);
+        let activation = if activate_now {
+            let (activate_status, activate_body) = activate(
+                State(state.clone()),
+                Json(ActivateBody {
+                    run_id: Some(run_id.clone()),
+                    repo: body.repo.clone(),
+                    agent_id: body.agent_id.clone(),
+                    thread_group: None,
+                    unified_thread: body.unified_thread,
+                    active_only: Some(true),
+                }),
+            )
+            .await;
+            if activate_status != StatusCode::OK {
+                return (activate_status, activate_body);
+            }
+            Some(activate_body.0)
+        } else {
+            None
+        };
+
+        let mut snapshot = state
+            .auto_queue_service()
+            .status_json_for_run(
+                &run_id,
+                crate::services::auto_queue::StatusInput {
+                    repo: body.repo.clone(),
+                    agent_id: body.agent_id.clone(),
+                    guild_id: None,
+                },
+            )
+            .unwrap_or_else(|_| {
+                json!({
+                    "run": null,
+                    "entries": [],
+                    "agents": {},
+                    "thread_groups": {},
+                })
+            });
+        if let Some(obj) = snapshot.as_object_mut() {
+            obj.insert("activated".to_string(), json!(activate_now));
+            obj.insert(
+                "requested".to_string(),
+                json!({
+                    "groups": body.groups.len(),
+                    "issues": issue_numbers,
+                    "auto_assign_agent": auto_assign_agent,
+                }),
+            );
+            if let Some(activation) = activation {
+                obj.insert("dispatch".to_string(), activation);
+            }
+        }
+
+        return (StatusCode::OK, Json(snapshot));
+    }
 
     let distinct_groups = requested_entries
         .iter()
