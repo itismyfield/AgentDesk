@@ -1304,7 +1304,7 @@ export default function SettingsView({
 
             <div className="flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "rgba(148,163,184,0.16)", background: "rgba(15,23,42,0.28)" }}>
               <p className="text-sm leading-6" style={{ color: "var(--th-text-muted)" }}>
-                {tr("런타임 설정은 저장 즉시 적용됩니다. 값 조정이 잦다면 먼저 작은 폭으로 바꾸고 Pulse/영수증/로그 반응을 확인하는 편이 안전합니다.", "Runtime config applies immediately. If you tune frequently, prefer small changes first and verify Pulse, receipts, and logs before making larger moves.")}
+                {tr("런타임 설정은 저장 즉시 적용됩니다. 값 조정이 잦다면 먼저 작은 폭으로 바꾸고 대시보드/영수증/로그 반응을 확인하는 편이 안전합니다.", "Runtime config applies immediately. If you tune frequently, prefer small changes first and verify dashboard, receipts, and logs before making larger moves.")}
               </p>
               <button
                 onClick={handleRcSave}

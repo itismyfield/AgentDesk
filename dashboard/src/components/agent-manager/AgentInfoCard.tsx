@@ -358,8 +358,11 @@ export default function AgentInfoCard({
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "var(--th-modal-overlay)" }}
+      className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-4"
+      style={{
+        background: "var(--th-modal-overlay)",
+        paddingTop: "calc(1rem + env(safe-area-inset-top))",
+      }}
       onClick={(e) => {
         if (e.target === overlayRef.current) onClose();
       }}
@@ -368,11 +371,12 @@ export default function AgentInfoCard({
         role="dialog"
         aria-modal="true"
         aria-label={`${localeName(locale, agent)} — ${tr("직원 상세", "Agent Details")}`}
-        className="w-full max-w-lg max-h-[90vh] overflow-y-auto overscroll-contain rounded-2xl shadow-2xl animate-in fade-in zoom-in-95 duration-200"
+        className="w-full max-w-lg max-h-full overflow-y-auto overscroll-contain rounded-t-3xl shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[90vh] sm:rounded-2xl"
         style={{
           background: "var(--th-card-bg)",
           border: "1px solid var(--th-card-border)",
           backdropFilter: "blur(20px)",
+          paddingBottom: "max(env(safe-area-inset-bottom), 0px)",
         }}
       >
         {/* Header */}

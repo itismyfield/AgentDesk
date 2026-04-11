@@ -30,6 +30,11 @@ pub(super) async fn fetch_dispatch_snapshot(
     })
 }
 
+fn should_complete_work_dispatch(snapshot: &DispatchSnapshot) -> bool {
+    matches!(snapshot.status.as_str(), "pending" | "dispatched")
+        && matches!(snapshot.dispatch_type.as_str(), "implementation" | "rework")
+}
+
 fn normalize_review_decision_text(text: &str) -> String {
     text.to_lowercase()
         .split_whitespace()
@@ -569,6 +574,10 @@ fn noop_completion_context(
         "completed_without_changes".to_string(),
         serde_json::Value::Bool(true),
     );
+    obj.insert(
+        "card_status_target".to_string(),
+        serde_json::Value::String("ready".to_string()),
+    );
     if let Some(response) = full_response {
         let trimmed = response.trim();
         if !trimmed.is_empty() {
@@ -679,12 +688,8 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         .await;
         return;
     };
-    if snapshot.status != "pending" {
+    if !should_complete_work_dispatch(&snapshot) {
         return;
-    }
-    match snapshot.dispatch_type.as_str() {
-        "implementation" | "rework" => {}
-        _ => return,
     }
 
     let explicit_work_outcome = turn_output.and_then(extract_explicit_work_outcome);
@@ -1031,5 +1036,54 @@ mod tests {
             context["completed_worktree_path"].as_str(),
             repo_dir.to_str()
         );
+    }
+
+    #[test]
+    fn should_complete_work_dispatch_accepts_pending_implementation() {
+        let snapshot = DispatchSnapshot {
+            dispatch_type: "implementation".to_string(),
+            status: "pending".to_string(),
+            kanban_card_id: None,
+        };
+
+        assert!(should_complete_work_dispatch(&snapshot));
+    }
+
+    #[test]
+    fn should_complete_work_dispatch_accepts_dispatched_rework() {
+        let snapshot = DispatchSnapshot {
+            dispatch_type: "rework".to_string(),
+            status: "dispatched".to_string(),
+            kanban_card_id: None,
+        };
+
+        assert!(should_complete_work_dispatch(&snapshot));
+    }
+
+    #[test]
+    fn should_complete_work_dispatch_rejects_non_work_statuses() {
+        let completed_work = DispatchSnapshot {
+            dispatch_type: "implementation".to_string(),
+            status: "completed".to_string(),
+            kanban_card_id: None,
+        };
+        let dispatched_review = DispatchSnapshot {
+            dispatch_type: "review".to_string(),
+            status: "dispatched".to_string(),
+            kanban_card_id: None,
+        };
+
+        assert!(!should_complete_work_dispatch(&completed_work));
+        assert!(!should_complete_work_dispatch(&dispatched_review));
+    }
+
+    #[test]
+    fn noop_completion_context_targets_ready_without_changes() {
+        let result = noop_completion_context(None, Some("OUTCOME: noop\nalready satisfied"));
+
+        assert_eq!(result["work_outcome"], "noop");
+        assert_eq!(result["completed_without_changes"], true);
+        assert_eq!(result["card_status_target"], "ready");
+        assert_eq!(result["notes"], "OUTCOME: noop\nalready satisfied");
     }
 }

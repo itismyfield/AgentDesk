@@ -381,6 +381,45 @@ fn resolve_restart_handoff_scope(
     }
 }
 
+fn resolve_dispatched_thread_dispatch_from_conn(
+    conn: &rusqlite::Connection,
+    thread_channel_id: u64,
+) -> Option<String> {
+    let thread_channel_id = thread_channel_id.to_string();
+
+    conn.query_row(
+        "SELECT id FROM task_dispatches
+         WHERE status = 'dispatched' AND thread_id = ?1
+         ORDER BY datetime(created_at) DESC, rowid DESC
+         LIMIT 1",
+        [thread_channel_id.as_str()],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .or_else(|| {
+        conn.query_row(
+            "SELECT active_dispatch_id FROM sessions
+             WHERE thread_channel_id = ?1
+               AND status = 'working'
+               AND active_dispatch_id IS NOT NULL
+             ORDER BY datetime(COALESCE(last_heartbeat, created_at)) DESC, id DESC
+             LIMIT 1",
+            [thread_channel_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    })
+}
+
+fn resolve_dispatched_thread_dispatch_from_db(
+    db: Option<&crate::db::Db>,
+    thread_channel_id: u64,
+) -> Option<String> {
+    let db = db?;
+    let conn = db.separate_conn().ok()?;
+    resolve_dispatched_thread_dispatch_from_conn(&conn, thread_channel_id)
+}
+
 pub(super) async fn start_restart_handoff_from_state(
     channel_id: ChannelId,
     http: &Arc<serenity::Http>,
@@ -1240,9 +1279,11 @@ pub(super) async fn tmux_output_watcher(
             full_response = String::new();
         }
 
+        let has_assistant_response = !full_response.trim().is_empty();
+
         // Send the terminal response to Discord
         // #225 P1-2: Track relay success across branches
-        let relay_ok = if !full_response.trim().is_empty() {
+        let relay_ok = if has_assistant_response {
             let formatted = super::formatting::format_for_discord_with_provider(
                 &full_response,
                 &watcher_provider,
@@ -1304,126 +1345,130 @@ pub(super) async fn tmux_output_watcher(
             false
         };
 
-        // Mark user message as completed: ⏳ → ✅
-        // Read user_msg_id from inflight state (turn_bridge stores it there)
-        if let Some((provider_kind, _)) =
-            parse_provider_and_channel_from_tmux_name(&tmux_session_name)
-        {
-            if let Some(state) =
-                super::inflight::load_inflight_state(&provider_kind, channel_id.get())
-            {
-                let user_msg_id = serenity::MessageId::new(state.user_msg_id);
-                super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
-                super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
+        let provider_kind = watcher_provider.clone();
+        let inflight_state = super::inflight::load_inflight_state(&provider_kind, channel_id.get());
+        if inflight_state.is_none() {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!(
+                "  [{ts}] ⚠ watcher: inflight state missing for channel {} — using DB dispatch fallback",
+                channel_id.get()
+            );
+        }
 
-                // Finalize implementation/rework dispatches only — review
-                // dispatches require the verdict flow (review_verdict.rs).
-                // #225 P1-4: Use DB lookup for dispatch ID (text parsing fails in unified threads)
-                // #431: Add DB session fallback for slot thread reuse where user_text
-                // may not contain the current DISPATCH: message.
-                let resolved_did = super::adk_session::parse_dispatch_id(&state.user_text)
+        // Mark user message as completed: ⏳ → ✅ when inflight metadata is available.
+        if let Some(state) = inflight_state.as_ref() {
+            let user_msg_id = serenity::MessageId::new(state.user_msg_id);
+            super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
+            super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '✅').await;
+
+            if has_assistant_response && let Some(db) = shared.db.as_ref() {
+                let turn_id = format!("discord:{}:{}", channel_id.get(), state.user_msg_id);
+                let channel_id_text = channel_id.get().to_string();
+                let resolved_did = inflight_state
+                    .as_ref()
+                    .and_then(|s| s.dispatch_id.clone())
+                    .or_else(|| super::adk_session::parse_dispatch_id(&state.user_text))
                     .or(super::adk_session::lookup_pending_dispatch_for_thread(
                         shared.api_port,
                         channel_id.get(),
                     )
                     .await)
                     .or_else(|| {
-                        // Fallback: resolve from DB session's last active dispatch
-                        shared.db.as_ref().and_then(|db| {
-                            db.separate_conn().ok().and_then(|conn| {
-                                conn.query_row(
-                                    "SELECT td.id FROM task_dispatches td \
-                                     WHERE td.status = 'dispatched' \
-                                     AND td.thread_id = ?1 \
-                                     ORDER BY td.created_at DESC LIMIT 1",
-                                    [&channel_id.get().to_string()],
-                                    |row| row.get::<_, String>(0),
-                                )
-                                .ok()
-                            })
-                        })
+                        resolve_dispatched_thread_dispatch_from_db(
+                            shared.db.as_ref(),
+                            channel_id.get(),
+                        )
                     });
-                let has_assistant_response = !full_response.trim().is_empty();
-                if has_assistant_response && let Some(db) = shared.db.as_ref() {
-                    let turn_id = format!("discord:{}:{}", channel_id.get(), state.user_msg_id);
-                    let channel_id_text = channel_id.get().to_string();
-                    if let Err(e) = crate::db::session_transcripts::persist_turn(
-                        db,
-                        crate::db::session_transcripts::PersistSessionTranscript {
-                            turn_id: &turn_id,
-                            session_key: state.session_key.as_deref(),
-                            channel_id: Some(channel_id_text.as_str()),
-                            agent_id: None,
-                            provider: Some(provider_kind.as_str()),
-                            dispatch_id: resolved_did.as_deref().or(state.dispatch_id.as_deref()),
-                            user_message: &state.user_text,
-                            assistant_message: &full_response,
-                        },
-                    ) {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!("  [{ts}] ⚠ watcher: failed to persist session transcript: {e}");
-                    }
+                if let Err(e) = crate::db::session_transcripts::persist_turn(
+                    db,
+                    crate::db::session_transcripts::PersistSessionTranscript {
+                        turn_id: &turn_id,
+                        session_key: state.session_key.as_deref(),
+                        channel_id: Some(channel_id_text.as_str()),
+                        agent_id: None,
+                        provider: Some(provider_kind.as_str()),
+                        dispatch_id: resolved_did.as_deref().or(state.dispatch_id.as_deref()),
+                        user_message: &state.user_text,
+                        assistant_message: &full_response,
+                    },
+                ) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    eprintln!("  [{ts}] ⚠ watcher: failed to persist session transcript: {e}");
                 }
+            }
+        }
 
-                let work_completion_context = has_assistant_response
-                    .then(|| serde_json::json!({ "agent_response_present": true }));
+        let resolved_did = inflight_state
+            .as_ref()
+            .and_then(|state| state.dispatch_id.clone())
+            .or_else(|| {
+                inflight_state
+                    .as_ref()
+                    .and_then(|state| super::adk_session::parse_dispatch_id(&state.user_text))
+            })
+            .or(super::adk_session::lookup_pending_dispatch_for_thread(
+                shared.api_port,
+                channel_id.get(),
+            )
+            .await)
+            .or_else(|| {
+                resolve_dispatched_thread_dispatch_from_db(shared.db.as_ref(), channel_id.get())
+            });
 
-                let dispatch_ok = if let Some(did) = resolved_did {
-                    let dispatch_type = shared.db.as_ref().and_then(|db| {
-                        db.separate_conn().ok().and_then(|conn| {
-                            conn.query_row(
-                                "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
-                                [did.as_str()],
-                                |row| row.get::<_, String>(0),
-                            )
-                            .ok()
-                        })
-                    });
+        if resolved_did.is_none() && has_assistant_response {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!(
+                "  [{ts}] ⚠ watcher: no dispatch id resolved for channel {} after terminal success",
+                channel_id.get()
+            );
+        }
 
-                    match dispatch_type.as_deref() {
-                        Some("implementation") | Some("rework") => {
-                            if !has_assistant_response {
+        let work_completion_context =
+            has_assistant_response.then(|| serde_json::json!({ "agent_response_present": true }));
+
+        let dispatch_ok = if let Some(did) = resolved_did.as_deref() {
+            let dispatch_type = shared.db.as_ref().and_then(|db| {
+                db.separate_conn().ok().and_then(|conn| {
+                    conn.query_row(
+                        "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
+                        [did],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+                })
+            });
+
+            match dispatch_type.as_deref() {
+                Some("implementation") | Some("rework") => {
+                    if !has_assistant_response {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!(
+                            "  [{ts}] ⚠ watcher: refusing to complete work dispatch {did} without assistant response"
+                        );
+                        false
+                    } else if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
+                        match crate::dispatch::finalize_dispatch(
+                            db,
+                            engine,
+                            did,
+                            "watcher_completed",
+                            work_completion_context.as_ref(),
+                        ) {
+                            Ok(_) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!(
+                                    "  [{ts}] ✓ watcher: completed dispatch {did} via finalize_dispatch"
+                                );
+                                crate::server::routes::dispatches::queue_dispatch_followup(db, did);
+                                true
+                            }
+                            Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 eprintln!(
-                                    "  [{ts}] ⚠ watcher: refusing to complete work dispatch {did} without assistant response"
+                                    "  [{ts}] ⚠ watcher: finalize_dispatch failed for {did}: {e}"
                                 );
-                                false
-                            } else if let (Some(db), Some(engine)) = (&shared.db, &shared.engine) {
-                                match crate::dispatch::finalize_dispatch(
-                                    db,
-                                    engine,
-                                    &did,
-                                    "watcher_completed",
-                                    work_completion_context.as_ref(),
-                                ) {
-                                    Ok(_) => {
-                                        let ts = chrono::Local::now().format("%H:%M:%S");
-                                        println!(
-                                            "  [{ts}] ✓ watcher: completed dispatch {did} via finalize_dispatch"
-                                        );
-                                        crate::server::routes::dispatches::queue_dispatch_followup(
-                                            db, &did,
-                                        );
-                                        true
-                                    }
-                                    Err(e) => {
-                                        let ts = chrono::Local::now().format("%H:%M:%S");
-                                        eprintln!(
-                                            "  [{ts}] ⚠ watcher: finalize_dispatch failed for {did}: {e}"
-                                        );
-                                        super::turn_bridge::runtime_db_fallback_complete_with_result(
-                                            &did,
-                                            &serde_json::json!({
-                                                "completion_source": "watcher_db_fallback",
-                                                "needs_reconcile": true,
-                                                "agent_response_present": true,
-                                            }),
-                                        )
-                                    }
-                                }
-                            } else {
                                 super::turn_bridge::runtime_db_fallback_complete_with_result(
-                                    &did,
+                                    did,
                                     &serde_json::json!({
                                         "completion_source": "watcher_db_fallback",
                                         "needs_reconcile": true,
@@ -1432,73 +1477,81 @@ pub(super) async fn tmux_output_watcher(
                                 )
                             }
                         }
-                        Some(_) => {
-                            // Non-work dispatches — leave for their own completion flow
-                            true
-                        }
-                        None => {
-                            // DB unavailable — preserve inflight for retry
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!(
-                                "  [{ts}] ⚠ watcher: cannot determine dispatch type for {did} — preserving state"
-                            );
-                            false
-                        }
-                    }
-                } else {
-                    true
-                };
-
-                // #225 P1-2: Only mark relayed + clear inflight if Discord relay succeeded.
-                // If relay failed, preserve retry/handoff path for next startup.
-                if relay_ok {
-                    if has_assistant_response {
-                        let mut data = shared.core.lock().await;
-                        if let Some(session) = data.sessions.get_mut(&channel_id) {
-                            if !session.cleared {
-                                session.history.push(crate::ui::ai_screen::HistoryItem {
-                                    item_type: crate::ui::ai_screen::HistoryType::User,
-                                    content: state.user_text.clone(),
-                                });
-                                session.history.push(crate::ui::ai_screen::HistoryItem {
-                                    item_type: crate::ui::ai_screen::HistoryType::Assistant,
-                                    content: full_response.clone(),
-                                });
-                            }
-                        }
-                        drop(data);
-                    }
-                    turn_result_relayed = true;
-                    if dispatch_ok {
-                        super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
-                    }
-                    let mailbox = shared.mailbox(channel_id);
-                    let has_active_turn = mailbox.has_active_turn().await;
-                    let should_kickoff_queue = if has_active_turn {
-                        false
                     } else {
-                        mailbox
-                            .has_pending_soft_queue(super::queue_persistence_context(
-                                &shared,
-                                &provider_kind,
-                                channel_id,
-                            ))
-                            .await
-                            .has_pending
-                    };
-                    if dispatch_ok && should_kickoff_queue {
-                        super::schedule_deferred_idle_queue_kickoff(
-                            shared.clone(),
-                            provider_kind.clone(),
-                            channel_id,
-                            "watcher completed with queued backlog",
-                        );
+                        super::turn_bridge::runtime_db_fallback_complete_with_result(
+                            did,
+                            &serde_json::json!({
+                                "completion_source": "watcher_db_fallback",
+                                "needs_reconcile": true,
+                                "agent_response_present": true,
+                            }),
+                        )
                     }
-                } else {
+                }
+                Some(_) => {
+                    // Non-work dispatches — leave for their own completion flow
+                    true
+                }
+                None => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
+                    eprintln!(
+                        "  [{ts}] ⚠ watcher: cannot determine dispatch type for {did} — preserving state"
+                    );
+                    false
                 }
             }
+        } else {
+            true
+        };
+
+        // #225 P1-2: Only mark relayed + clear inflight if Discord relay succeeded.
+        // If relay failed, preserve retry/handoff path for next startup.
+        if relay_ok {
+            if has_assistant_response && let Some(state) = inflight_state.as_ref() {
+                let mut data = shared.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    if !session.cleared {
+                        session.history.push(crate::ui::ai_screen::HistoryItem {
+                            item_type: crate::ui::ai_screen::HistoryType::User,
+                            content: state.user_text.clone(),
+                        });
+                        session.history.push(crate::ui::ai_screen::HistoryItem {
+                            item_type: crate::ui::ai_screen::HistoryType::Assistant,
+                            content: full_response.clone(),
+                        });
+                    }
+                }
+                drop(data);
+            }
+            turn_result_relayed = true;
+            if dispatch_ok {
+                super::inflight::clear_inflight_state(&provider_kind, channel_id.get());
+            }
+            let mailbox = shared.mailbox(channel_id);
+            let has_active_turn = mailbox.has_active_turn().await;
+            let should_kickoff_queue = if has_active_turn {
+                false
+            } else {
+                mailbox
+                    .has_pending_soft_queue(super::queue_persistence_context(
+                        &shared,
+                        &provider_kind,
+                        channel_id,
+                    ))
+                    .await
+                    .has_pending
+            };
+            if dispatch_ok && should_kickoff_queue {
+                super::schedule_deferred_idle_queue_kickoff(
+                    shared.clone(),
+                    provider_kind.clone(),
+                    channel_id,
+                    "watcher completed with queued backlog",
+                );
+            }
+        } else {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
         }
 
         // Update session tokens from result event and auto-compact if threshold exceeded
@@ -2677,7 +2730,8 @@ mod tests {
         WatcherToolState, clear_provider_overload_retry_state, detect_provider_overload_message,
         is_auth_error_message, is_prompt_too_long_message, normalized_retry_payload_text,
         process_watcher_lines, provider_overload_fingerprint, provider_overload_retry_delay,
-        record_provider_overload_retry, resolve_restart_handoff_scope,
+        record_provider_overload_retry, resolve_dispatched_thread_dispatch_from_conn,
+        resolve_restart_handoff_scope,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
@@ -2721,6 +2775,70 @@ mod tests {
             "/tmp/new-output.jsonl",
         );
         assert_eq!(scope, RestartHandoffScope::ProviderChannelScopedFallback);
+    }
+
+    #[test]
+    fn watcher_dispatch_db_fallback_prefers_dispatched_thread_row() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                thread_id TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT,
+                active_dispatch_id TEXT,
+                created_at TEXT,
+                last_heartbeat TEXT,
+                thread_channel_id TEXT
+            );
+            INSERT INTO task_dispatches (id, status, thread_id, created_at)
+            VALUES
+                ('older-dispatch', 'dispatched', '1492091375422930966', '2026-04-11 00:15:42'),
+                ('latest-dispatch', 'dispatched', '1492091375422930966', '2026-04-11 00:15:43');
+            INSERT INTO sessions (status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
+            VALUES ('working', 'session-dispatch', '2026-04-11 00:15:40', '2026-04-11 00:24:21', '1492091375422930966');
+            ",
+        )
+        .unwrap();
+
+        let resolved =
+            resolve_dispatched_thread_dispatch_from_conn(&conn, 1_492_091_375_422_930_966);
+        assert_eq!(resolved.as_deref(), Some("latest-dispatch"));
+    }
+
+    #[test]
+    fn watcher_dispatch_db_fallback_uses_session_when_thread_row_missing() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE task_dispatches (
+                id TEXT PRIMARY KEY,
+                status TEXT,
+                thread_id TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT,
+                active_dispatch_id TEXT,
+                created_at TEXT,
+                last_heartbeat TEXT,
+                thread_channel_id TEXT
+            );
+            INSERT INTO sessions (status, active_dispatch_id, created_at, last_heartbeat, thread_channel_id)
+            VALUES ('working', 'session-dispatch', '2026-04-11 00:15:40', '2026-04-11 00:24:21', '1492091380045189131');
+            ",
+        )
+        .unwrap();
+
+        let resolved =
+            resolve_dispatched_thread_dispatch_from_conn(&conn, 1_492_091_380_045_189_131);
+        assert_eq!(resolved.as_deref(), Some("session-dispatch"));
     }
 
     #[test]
