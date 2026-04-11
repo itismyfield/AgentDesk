@@ -6,6 +6,8 @@ use super::super::AppState;
 use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed};
 
+const ADVANCE_REVIEW_ROUND_HINT_KEY: &str = "advance_review_round_on_next_review";
+
 // ── Review Decision (agent's response to counter-model review) ──────────────
 
 #[cfg(test)]
@@ -115,6 +117,65 @@ fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
         )
         .ok()
     })
+}
+
+fn load_card_metadata_map_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let metadata_raw: Option<String> = conn.query_row(
+        "SELECT metadata FROM kanban_cards WHERE id = ?1",
+        [card_id],
+        |row| row.get(0),
+    )?;
+
+    match metadata_raw {
+        Some(raw) if !raw.trim().is_empty() => {
+            let value: serde_json::Value = serde_json::from_str(&raw)?;
+            Ok(value.as_object().cloned().unwrap_or_default())
+        }
+        _ => Ok(serde_json::Map::new()),
+    }
+}
+
+fn save_card_metadata_map_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    if metadata.is_empty() {
+        conn.execute(
+            "UPDATE kanban_cards SET metadata = NULL WHERE id = ?1",
+            [card_id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
+            rusqlite::params![serde_json::to_string(metadata)?, card_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn set_advance_review_round_hint_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
+    metadata.insert(
+        ADVANCE_REVIEW_ROUND_HINT_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    save_card_metadata_map_on_conn(conn, card_id, &metadata)
+}
+
+fn clear_advance_review_round_hint_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> anyhow::Result<()> {
+    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
+    metadata.remove(ADVANCE_REVIEW_ROUND_HINT_KEY);
+    save_card_metadata_map_on_conn(conn, card_id, &metadata)
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,51 +451,83 @@ pub async fn submit_review_decision(
                         true,
                     ) {
                         Ok(_) => {
-                            // Step 2: Transition to review — fires OnReviewEnter
-                            match crate::kanban::transition_status_with_opts(
-                                &state.db,
-                                &state.engine,
-                                &body.card_id,
-                                review_st,
-                                "review_decision_accept_skip_rework_step2",
-                                true,
-                            ) {
-                                Ok(_) => {
-                                    let followups =
-                                        active_accept_followups(&state.db, &body.card_id);
-                                    if followups.review > 0 {
-                                        tracing::info!(
-                                            "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
-                                            body.card_id,
-                                            card_status_now,
-                                            rework_target,
-                                            review_st
-                                        );
-                                        true
-                                    } else {
-                                        accept_failures.push(format!(
+                            let hint_ready = state
+                                .db
+                                .lock()
+                                .map_err(|e| anyhow::anyhow!(e.to_string()))
+                                .and_then(|conn| {
+                                    set_advance_review_round_hint_on_conn(&conn, &body.card_id)
+                                });
+                            if let Err(err) = hint_ready {
+                                accept_failures.push(format!(
+                                    "direct review could not arm review-round hint: {err}"
+                                ));
+                                tracing::warn!(
+                                    "[review-decision] #487 Failed to arm review-round hint for card {}: {err}",
+                                    body.card_id
+                                );
+                                false
+                            } else {
+                                // Step 2: Transition to review — fires OnReviewEnter
+                                match crate::kanban::transition_status_with_opts(
+                                    &state.db,
+                                    &state.engine,
+                                    &body.card_id,
+                                    review_st,
+                                    "review_decision_accept_skip_rework_step2",
+                                    true,
+                                ) {
+                                    Ok(_) => {
+                                        if let Ok(conn) = state.db.lock() {
+                                            clear_advance_review_round_hint_on_conn(
+                                                &conn,
+                                                &body.card_id,
+                                            )
+                                            .ok();
+                                        }
+                                        let followups =
+                                            active_accept_followups(&state.db, &body.card_id);
+                                        if followups.review > 0 {
+                                            tracing::info!(
+                                                "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
+                                                body.card_id,
+                                                card_status_now,
+                                                rework_target,
+                                                review_st
+                                            );
+                                            true
+                                        } else {
+                                            accept_failures.push(format!(
                                         "direct review transition reached {} but no active review dispatch was created",
                                         review_st
                                     ));
-                                        tracing::warn!(
-                                            "[review-decision] #339 Direct review re-entry for card {} reached {} but no active review dispatch exists",
-                                            body.card_id,
+                                            tracing::warn!(
+                                                "[review-decision] #339 Direct review re-entry for card {} reached {} but no active review dispatch exists",
+                                                body.card_id,
+                                                review_st
+                                            );
+                                            false
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Ok(conn) = state.db.lock() {
+                                            clear_advance_review_round_hint_on_conn(
+                                                &conn,
+                                                &body.card_id,
+                                            )
+                                            .ok();
+                                        }
+                                        accept_failures.push(format!(
+                                            "direct review step2 transition to {} failed: {e}",
                                             review_st
+                                        ));
+                                        tracing::warn!(
+                                            "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
+                                            review_st,
+                                            body.card_id
                                         );
                                         false
                                     }
-                                }
-                                Err(e) => {
-                                    accept_failures.push(format!(
-                                        "direct review step2 transition to {} failed: {e}",
-                                        review_st
-                                    ));
-                                    tracing::warn!(
-                                        "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
-                                        review_st,
-                                        body.card_id
-                                    );
-                                    false
                                 }
                             }
                         }

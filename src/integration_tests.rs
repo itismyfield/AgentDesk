@@ -2985,6 +2985,20 @@ mod tests {
         let engine = test_engine(&db);
         seed_agent(&db);
         seed_card(&db, "card-195b", "in_progress");
+        seed_completed_work_dispatch_for_review(
+            &db,
+            "impl-195b-initial",
+            "card-195b",
+            "implementation",
+        );
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET review_round = 1 WHERE id = 'card-195b'",
+                [],
+            )
+            .unwrap();
+        }
 
         // Create and complete a rework dispatch — simulates the rework turn finishing
         seed_dispatch(&db, "rw-195b", "card-195b", "rework", "pending");
@@ -3023,6 +3037,31 @@ mod tests {
         assert_eq!(
             review_count, 1,
             "#195: rework completion must trigger OnReviewEnter → review dispatch"
+        );
+        let review_round: i64 = conn
+            .query_row(
+                "SELECT review_round FROM kanban_cards WHERE id = 'card-195b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            review_round, 2,
+            "#487: rework completion must advance review_round for the next review cycle"
+        );
+        let review_title: String = conn
+            .query_row(
+                "SELECT title FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-195b' AND dispatch_type = 'review' \
+                 AND status IN ('pending', 'dispatched') \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            review_title, "[Review R2] card-195b",
+            "#487: rework completion must create an R2 review dispatch title"
         );
     }
 

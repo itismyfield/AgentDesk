@@ -3,6 +3,8 @@ use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use rusqlite::OptionalExtension;
 use serde_json::json;
 
+const ADVANCE_REVIEW_ROUND_HINT_KEY: &str = "advance_review_round_on_next_review";
+
 pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let review_obj = Object::new(ctx.clone())?;
@@ -60,6 +62,16 @@ pub(super) fn register_review_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     )?;
 
     Ok(())
+}
+
+fn metadata_requests_review_round_advance(metadata_raw: Option<&str>) -> bool {
+    metadata_raw
+        .filter(|raw| !raw.trim().is_empty())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .and_then(|metadata| metadata.get(ADVANCE_REVIEW_ROUND_HINT_KEY).cloned())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 fn review_get_verdict_raw(db: &Db, card_id: &str) -> String {
@@ -136,15 +148,36 @@ fn review_entry_context_raw(db: &Db, card_id: &str) -> String {
                         (SELECT COUNT(*) FROM task_dispatches td \
                          WHERE td.kanban_card_id = kc.id \
                            AND td.dispatch_type IN ('implementation', 'rework') \
-                           AND td.status = 'completed') \
+                           AND td.status = 'completed'), \
+                        (SELECT MAX(COALESCE(td.completed_at, td.updated_at)) FROM task_dispatches td \
+                         WHERE td.kanban_card_id = kc.id \
+                           AND td.dispatch_type IN ('implementation', 'rework') \
+                           AND td.status = 'completed'), \
+                        (SELECT MAX(COALESCE(td.completed_at, td.updated_at)) FROM task_dispatches td \
+                         WHERE td.kanban_card_id = kc.id \
+                           AND td.dispatch_type = 'review' \
+                           AND td.status = 'completed'), \
+                        kc.metadata \
                  FROM kanban_cards kc \
                  WHERE kc.id = ?1",
                 [card_id],
                 |row| {
                     let current_round = row.get::<_, i64>(0)?;
                     let completed_work_count = row.get::<_, i64>(1)?;
-                    let should_advance_round =
-                        current_round == 0 || completed_work_count > current_round;
+                    let latest_work_completed_at = row.get::<_, Option<String>>(2)?;
+                    let latest_review_completed_at = row.get::<_, Option<String>>(3)?;
+                    let should_advance_round = current_round == 0
+                        || completed_work_count > current_round
+                        || matches!(
+                            (
+                                latest_work_completed_at.as_deref(),
+                                latest_review_completed_at.as_deref()
+                            ),
+                            (Some(work), Some(review)) if work > review
+                        )
+                        || metadata_requests_review_round_advance(
+                            row.get::<_, Option<String>>(4)?.as_deref(),
+                        );
                     let next_round = if should_advance_round {
                         current_round + 1
                     } else {

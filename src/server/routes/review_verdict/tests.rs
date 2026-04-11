@@ -1719,9 +1719,9 @@ async fn accept_direct_review_preserves_reviewing_status() {
         ).unwrap();
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
-             review_status, suggestion_pending_at, github_issue_number, created_at, updated_at) \
+             review_status, review_round, suggestion_pending_at, github_issue_number, created_at, updated_at) \
              VALUES ('card-266dr', 'Direct Review Path', 'review', 'agent-1', 'rd-266dr', \
-             'suggestion_pending', datetime('now', '-10 minutes'), 266, datetime('now'), datetime('now'))",
+             'suggestion_pending', 1, datetime('now', '-10 minutes'), 266, datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         // Completed review dispatch with reviewed_commit (needed for skip_rework detection)
@@ -1778,5 +1778,30 @@ async fn accept_direct_review_preserves_reviewing_status() {
         review_status,
         Some("reviewing".to_string()),
         "#266: direct-review accept must preserve review_status='reviewing' set by OnReviewEnter"
+    );
+    let review_round: i64 = conn
+        .query_row(
+            "SELECT review_round FROM kanban_cards WHERE id = 'card-266dr'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        review_round, 2,
+        "#487: direct-review accept must advance review_round for the new review cycle"
+    );
+    let review_title: String = conn
+        .query_row(
+            "SELECT title FROM task_dispatches \
+             WHERE kanban_card_id = 'card-266dr' AND dispatch_type = 'review' \
+             AND status IN ('pending', 'dispatched') \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        review_title, "[Review R2] card-266dr",
+        "#487: direct-review accept must create an R2 review dispatch title"
     );
 }
