@@ -96,6 +96,103 @@ enum Commands {
         #[arg(long)]
         key: Option<String>,
     },
+    /// Send a routed Discord message without HTTP server dependency
+    Send {
+        /// Target route such as channel:<id>, user:<id>, role:<name>
+        #[arg(long)]
+        target: String,
+        /// Source label recorded in the send envelope
+        #[arg(long)]
+        source: Option<String>,
+        /// Preferred Discord bot name
+        #[arg(long)]
+        bot: Option<String>,
+        /// Message body
+        #[arg(long)]
+        content: String,
+    },
+    /// Submit a review verdict without HTTP server dependency
+    ReviewVerdict {
+        /// Review dispatch ID
+        #[arg(long = "dispatch")]
+        dispatch_id: String,
+        /// Verdict: pass, improve, rework, reject, approved
+        #[arg(long = "verdict")]
+        verdict: String,
+        /// Optional verdict notes
+        #[arg(long)]
+        notes: Option<String>,
+        /// Optional detailed feedback
+        #[arg(long)]
+        feedback: Option<String>,
+        /// Reviewer provider id for counter-model reviews
+        #[arg(long)]
+        provider: Option<String>,
+        /// Reviewed commit SHA
+        #[arg(long)]
+        commit: Option<String>,
+    },
+    /// Submit a review decision without HTTP server dependency
+    ReviewDecision {
+        /// Kanban card ID
+        #[arg(long = "card")]
+        card_id: String,
+        /// Decision: approve, rework, escalate, accept, dispute, dismiss, requeue, resume
+        #[arg(long = "decision")]
+        decision: String,
+        /// Optional decision comment
+        #[arg(long)]
+        comment: Option<String>,
+        /// Optional dispatch scope for agent reply decisions
+        #[arg(long = "dispatch")]
+        dispatch_id: Option<String>,
+    },
+    /// Read API documentation without HTTP server dependency
+    Docs {
+        /// Optional docs category
+        category: Option<String>,
+        /// Emit flat endpoint list
+        #[arg(long)]
+        flat: bool,
+    },
+    /// Auto-queue operations without HTTP server dependency
+    AutoQueue {
+        #[command(subcommand)]
+        action: AutoQueueAction,
+    },
+    /// Force-kill a session without HTTP server dependency
+    ForceKill {
+        /// Session key
+        #[arg(long = "session-key")]
+        session_key: String,
+        /// Requeue card after force-kill
+        #[arg(long)]
+        retry: bool,
+    },
+    /// Sync GitHub issues without HTTP server dependency
+    GithubSync {
+        /// Repository in owner/repo form. Omit to sync all registered sync-enabled repos.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Discord utility commands without HTTP server dependency
+    Discord {
+        #[command(subcommand)]
+        action: DiscordAction,
+    },
+    /// Kanban utility commands without HTTP server dependency
+    Card {
+        #[command(subcommand)]
+        action: CardAction,
+    },
+    /// Cherry-pick a worktree branch into main and optionally close its issue
+    CherryMerge {
+        /// Source branch to merge into main
+        branch: String,
+        /// Close the linked GitHub issue when it can be inferred uniquely
+        #[arg(long)]
+        close_issue: bool,
+    },
     /// tmux + Claude CLI integration wrapper (Unix only)
     #[cfg(unix)]
     TmuxWrapper {
@@ -290,6 +387,102 @@ enum DispatchAction {
     },
 }
 
+#[derive(Subcommand)]
+enum AutoQueueAction {
+    /// Activate an auto-queue run
+    Activate {
+        /// Auto-queue run ID
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        /// Target agent ID
+        #[arg(long = "agent")]
+        agent_id: Option<String>,
+        /// Repository in owner/repo form
+        #[arg(long)]
+        repo: Option<String>,
+        /// Restrict activation to already-live entries
+        #[arg(long)]
+        active_only: bool,
+    },
+    /// Add a card to an auto-queue run
+    Add {
+        /// Card ID or issue number
+        card_id: String,
+        /// Auto-queue run ID
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        /// Explicit priority rank
+        #[arg(long)]
+        priority: Option<i64>,
+        /// Batch phase
+        #[arg(long)]
+        phase: Option<i64>,
+        /// Agent override
+        #[arg(long = "agent")]
+        agent_id: Option<String>,
+    },
+    /// Update auto-queue runtime config
+    Config {
+        /// Auto-queue run ID
+        #[arg(long = "run")]
+        run_id: Option<String>,
+        /// Repository in owner/repo form
+        #[arg(long)]
+        repo: Option<String>,
+        /// Target agent ID
+        #[arg(long = "agent")]
+        agent_id: Option<String>,
+        /// Max concurrently active threads
+        #[arg(long = "max-concurrent")]
+        max_concurrent_threads: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum DiscordAction {
+    /// Read channel messages
+    Read {
+        /// Discord channel ID
+        channel_id: String,
+        /// Max messages to return
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Read messages before this message ID
+        #[arg(long)]
+        before: Option<String>,
+        /// Read messages after this message ID
+        #[arg(long)]
+        after: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CardAction {
+    /// Create a card from a GitHub issue
+    Create {
+        /// GitHub issue number to import
+        #[arg(long = "from-issue")]
+        issue_number: i64,
+        /// Repository in owner/repo form
+        #[arg(long)]
+        repo: Option<String>,
+        /// Target status: backlog or ready
+        #[arg(long)]
+        status: Option<String>,
+        /// Agent assignment for ready cards
+        #[arg(long = "agent")]
+        agent_id: Option<String>,
+    },
+    /// Inspect a card and connected lifecycle state
+    Status {
+        /// Card ID or GitHub issue number
+        card_ref: String,
+        /// Repository in owner/repo form
+        #[arg(long)]
+        repo: Option<String>,
+    },
+}
+
 #[derive(Args)]
 struct DispatchArgs {
     #[command(subcommand)]
@@ -420,6 +613,144 @@ fn main() -> Result<()> {
                 cli::handle_discord_senddm(&message, user, key.as_deref());
                 return Ok(());
             }
+            Some(Commands::Send {
+                target,
+                source,
+                bot,
+                content,
+            }) => {
+                return exit_for_cli(cli::direct::run_async(cli::direct::cmd_send(
+                    &target,
+                    source.as_deref(),
+                    bot.as_deref(),
+                    &content,
+                )));
+            }
+            Some(Commands::ReviewVerdict {
+                dispatch_id,
+                verdict,
+                notes,
+                feedback,
+                provider,
+                commit,
+            }) => {
+                return exit_for_cli(cli::direct::run_async(cli::direct::cmd_review_verdict(
+                    &dispatch_id,
+                    &verdict,
+                    notes.as_deref(),
+                    feedback.as_deref(),
+                    provider.as_deref(),
+                    commit.as_deref(),
+                )));
+            }
+            Some(Commands::ReviewDecision {
+                card_id,
+                decision,
+                comment,
+                dispatch_id,
+            }) => {
+                return exit_for_cli(cli::direct::run_async(cli::direct::cmd_review_decision(
+                    &card_id,
+                    &decision,
+                    comment.as_deref(),
+                    dispatch_id.as_deref(),
+                )));
+            }
+            Some(Commands::Docs { category, flat }) => {
+                return exit_for_cli(cli::direct::run_async(cli::direct::cmd_docs(
+                    category.as_deref(),
+                    flat,
+                )));
+            }
+            Some(Commands::AutoQueue { action }) => {
+                return exit_for_cli(match action {
+                    AutoQueueAction::Activate {
+                        run_id,
+                        agent_id,
+                        repo,
+                        active_only,
+                    } => cli::direct::run_async(cli::direct::cmd_auto_queue_activate(
+                        run_id.as_deref(),
+                        agent_id.as_deref(),
+                        repo.as_deref(),
+                        active_only,
+                    )),
+                    AutoQueueAction::Add {
+                        card_id,
+                        run_id,
+                        priority,
+                        phase,
+                        agent_id,
+                    } => cli::direct::run_async(cli::direct::cmd_auto_queue_add(
+                        &card_id,
+                        run_id.as_deref(),
+                        priority,
+                        phase,
+                        agent_id.as_deref(),
+                    )),
+                    AutoQueueAction::Config {
+                        run_id,
+                        repo,
+                        agent_id,
+                        max_concurrent_threads,
+                    } => cli::direct::run_async(cli::direct::cmd_auto_queue_config(
+                        run_id.as_deref(),
+                        repo.as_deref(),
+                        agent_id.as_deref(),
+                        max_concurrent_threads,
+                    )),
+                });
+            }
+            Some(Commands::ForceKill { session_key, retry }) => {
+                return exit_for_cli(cli::direct::run_async(cli::direct::cmd_force_kill(
+                    &session_key,
+                    retry,
+                )));
+            }
+            Some(Commands::GithubSync { repo }) => {
+                return exit_for_cli(cli::direct::run_async(cli::direct::cmd_github_sync(
+                    repo.as_deref(),
+                )));
+            }
+            Some(Commands::Discord { action }) => {
+                return exit_for_cli(match action {
+                    DiscordAction::Read {
+                        channel_id,
+                        limit,
+                        before,
+                        after,
+                    } => cli::direct::run_async(cli::direct::cmd_discord_read(
+                        &channel_id,
+                        limit,
+                        before.as_deref(),
+                        after.as_deref(),
+                    )),
+                });
+            }
+            Some(Commands::Card { action }) => {
+                return exit_for_cli(match action {
+                    CardAction::Create {
+                        issue_number,
+                        repo,
+                        status,
+                        agent_id,
+                    } => cli::direct::run_async(cli::direct::cmd_card_create_from_issue(
+                        issue_number,
+                        repo.as_deref(),
+                        status.as_deref(),
+                        agent_id.as_deref(),
+                    )),
+                    CardAction::Status { card_ref, repo } => cli::direct::run_async(
+                        cli::direct::cmd_card_status(&card_ref, repo.as_deref()),
+                    ),
+                });
+            }
+            Some(Commands::CherryMerge {
+                branch,
+                close_issue,
+            }) => {
+                return exit_for_cli(cli::direct::cmd_cherry_merge(&branch, close_issue));
+            }
             #[cfg(unix)]
             Some(Commands::TmuxWrapper {
                 output_file,
@@ -526,10 +857,10 @@ fn main() -> Result<()> {
                 return exit_for_cli(match args.action {
                     Some(DispatchAction::List) => cli::client::cmd_dispatch_list(),
                     Some(DispatchAction::Retry { card_id }) => {
-                        cli::client::cmd_dispatch_retry(&card_id)
+                        cli::direct::run_async(cli::direct::cmd_dispatch_retry(&card_id))
                     }
                     Some(DispatchAction::Redispatch { card_id }) => {
-                        cli::client::cmd_dispatch_redispatch(&card_id)
+                        cli::direct::run_async(cli::direct::cmd_dispatch_redispatch(&card_id))
                     }
                     None => cli::client::cmd_dispatch(
                         &args.issue_groups,
