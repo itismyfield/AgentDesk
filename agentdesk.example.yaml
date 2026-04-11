@@ -78,7 +78,6 @@ kanban:
 
 review:
   enabled: true
-  counter_model_enabled: true
   max_rounds: 3
 
 runtime:

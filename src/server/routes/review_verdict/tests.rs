@@ -963,7 +963,7 @@ async fn accept_on_done_card_fails_closed_without_stranding() {
 }
 
 #[tokio::test]
-async fn accept_skip_rework_falls_back_to_rework_when_direct_review_creates_no_dispatch() {
+async fn accept_skip_rework_auto_approves_when_direct_review_has_no_alternate_reviewer() {
     let _env_lock = crate::services::discord::runtime_store::lock_test_env();
     let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
     let db = test_db();
@@ -1017,16 +1017,25 @@ async fn accept_skip_rework_falls_back_to_rework_when_direct_review_creates_no_d
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK, "accept should fall back to rework");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "single-provider skip_rework accept should auto-approve: {body:?}"
+    );
     assert_eq!(
         body.0["direct_review_created"],
         serde_json::Value::Bool(false),
-        "skip_rework fallback should not report a direct review dispatch"
+        "single-provider auto-approve should not report a direct review dispatch"
     );
     assert_eq!(
         body.0["rework_dispatch_created"],
+        serde_json::Value::Bool(false),
+        "single-provider auto-approve must not create a rework dispatch"
+    );
+    assert_eq!(
+        body.0["review_auto_approved"],
         serde_json::Value::Bool(true),
-        "skip_rework fallback must create a rework dispatch"
+        "single-provider auto-approve must be reported explicitly"
     );
 
     let conn = db.lock().unwrap();
@@ -1044,21 +1053,35 @@ async fn accept_skip_rework_falls_back_to_rework_when_direct_review_creates_no_d
             |row| row.get(0),
         )
         .unwrap();
+    let rd_result: Option<String> = conn
+        .query_row(
+            "SELECT result FROM task_dispatches WHERE id = 'rd-skip-fallback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     drop(conn);
 
-    assert_eq!(card_status, "in_progress");
-    assert_eq!(rd_status, "completed");
+    assert_eq!(card_status, "done");
+    assert_eq!(rd_status, "cancelled");
+    assert_eq!(
+        rd_result.as_deref(),
+        Some("{\"reason\":\"auto_cancelled_on_terminal_card\"}")
+    );
     assert_eq!(
         count_active_dispatches(&db, "card-skip-fallback", "review"),
-        0
+        0,
+        "single-provider auto-approve must not leave an active review dispatch behind"
     );
     assert_eq!(
         count_active_dispatches(&db, "card-skip-fallback", "rework"),
-        1
+        0,
+        "single-provider auto-approve must not create a rework dispatch"
     );
     assert_eq!(
         count_active_dispatches(&db, "card-skip-fallback", "review-decision"),
-        0
+        0,
+        "single-provider auto-approve must consume the pending review-decision"
     );
 }
 

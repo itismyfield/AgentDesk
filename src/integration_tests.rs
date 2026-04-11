@@ -1511,6 +1511,104 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn scenario_6c_review_verdict_pass_closes_issue_and_completes_auto_queue_run() {
+        let gh = install_mock_gh(&[MockGhReply {
+            key: "issue:close",
+            contains: Some("--repo test/repo"),
+            stdout: "",
+        }]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(&db, "card-s6c", "review", "test/repo", 483, None);
+        seed_dispatch(&db, "review-s6c", "card-s6c", "review", "pending");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET review_status = 'reviewing' WHERE id = 'card-s6c'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-s6c', 'test/repo', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, created_at, dispatched_at) \
+                 VALUES ('entry-s6c', 'run-s6c', 'card-s6c', 'agent-1', 'dispatched', 1, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let state = AppState::test_state(db.clone(), engine);
+        let (status, body) = crate::server::routes::review_verdict::submit_verdict(
+            axum::extract::State(state),
+            axum::Json(crate::server::routes::review_verdict::SubmitVerdictBody {
+                dispatch_id: "review-s6c".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: Some("characterization pass".to_string()),
+                feedback: None,
+                commit: None,
+                provider: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "pass verdict should succeed: {body:?}"
+        );
+
+        let conn = db.lock().unwrap();
+        let card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-s6c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-s6c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-s6c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(card_status, "done");
+        assert_eq!(
+            entry_status, "done",
+            "pass verdict terminal transition must close the active auto-queue entry"
+        );
+        assert_eq!(
+            run_status, "completed",
+            "pass verdict terminal transition must still fire OnCardTerminal auto-queue completion"
+        );
+
+        let log = gh_log(&gh);
+        assert!(
+            log.contains("issue close 483 --repo test/repo"),
+            "pass verdict path must close the linked GitHub issue"
+        );
+    }
+
     // ── Scenario 7: dispatch uses card's effective pipeline, not global default (#134/#136) ──
 
     #[test]
@@ -2601,58 +2699,141 @@ mod tests {
     }
 
     #[test]
-    fn scenario_counter_model_disabled_on_review_enter_completes_card_without_round() {
+    fn scenario_review_disabled_on_review_enter_creates_phase_gate_for_multi_phase_run() {
         let db = test_db();
         let engine = test_engine(&db);
         seed_agent(&db);
-        seed_card(&db, "card-counter-disabled", "review");
-        set_config_key(&db, "counter_model_review_enabled", json!(false));
+        seed_card(&db, "card-review-disabled-phase", "review");
+        seed_card(&db, "card-next-phase", "ready");
+        set_config_key(&db, "review_enabled", json!(false));
 
-        kanban::fire_enter_hooks(&db, &engine, "card-counter-disabled", "review");
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-review-disabled-phase', 'test/repo', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, batch_phase, created_at, dispatched_at) \
+                 VALUES ('entry-review-disabled-phase', 'run-review-disabled-phase', 'card-review-disabled-phase', 'agent-1', 'dispatched', 0, 1, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, batch_phase, created_at) \
+                 VALUES ('entry-next-phase', 'run-review-disabled-phase', 'card-next-phase', 'agent-1', 'pending', 1, 2, datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
 
-        assert_eq!(get_card_status(&db, "card-counter-disabled"), "done");
+        kanban::fire_enter_hooks(&db, &engine, "card-review-disabled-phase", "review");
+
+        assert_eq!(get_card_status(&db, "card-review-disabled-phase"), "done");
+
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-review-disabled-phase'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let phase_gate_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches \
+                 WHERE kanban_card_id = 'card-review-disabled-phase' \
+                   AND dispatch_type = 'phase-gate' \
+                   AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let phase_gate_state: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'aq_phase_gate:run-review-disabled-phase:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let phase_gate_json: serde_json::Value = serde_json::from_str(&phase_gate_state).unwrap();
+        assert_eq!(
+            run_status, "paused",
+            "multi-phase review-disabled terminal transition must pause the run for phase gate"
+        );
+        assert_eq!(
+            phase_gate_count, 1,
+            "multi-phase review-disabled terminal transition must create a phase-gate dispatch"
+        );
+        assert_eq!(phase_gate_json["status"], "pending");
+        assert_eq!(phase_gate_json["batch_phase"], 1);
+        assert_eq!(phase_gate_json["next_phase"], 2);
+    }
+
+    #[test]
+    fn scenario_single_provider_review_auto_approves_without_round() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT OR IGNORE INTO agents (id, name, provider, discord_channel_id, discord_channel_cc) \
+                 VALUES ('agent-1', 'Single Provider Agent', 'claude', '111', '111')",
+                [],
+            )
+            .unwrap();
+        }
+        seed_card(&db, "card-single-provider", "review");
+
+        kanban::fire_enter_hooks(&db, &engine, "card-single-provider", "review");
+
+        assert_eq!(get_card_status(&db, "card-single-provider"), "done");
 
         {
             let conn = db.lock().unwrap();
             let review_round: i64 = conn
                 .query_row(
-                    "SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = 'card-counter-disabled'",
+                    "SELECT COALESCE(review_round, 0) FROM kanban_cards WHERE id = 'card-single-provider'",
                     [],
                     |row| row.get(0),
                 )
                 .unwrap();
             assert_eq!(
                 review_round, 0,
-                "counter-model-disabled path must not increment review_round without a real review"
+                "single-provider auto-approval must not increment review_round without a real review"
             );
 
             let review_dispatch_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM task_dispatches \
-                     WHERE kanban_card_id = 'card-counter-disabled' AND dispatch_type = 'review'",
+                     WHERE kanban_card_id = 'card-single-provider' AND dispatch_type = 'review'",
                     [],
                     |row| row.get(0),
                 )
                 .unwrap();
             assert_eq!(
                 review_dispatch_count, 0,
-                "counter-model-disabled path must not create review dispatch"
+                "single-provider auto-approval must not create review dispatch"
             );
 
             let blocked_reason: Option<String> = conn
                 .query_row(
-                    "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-counter-disabled'",
+                    "SELECT blocked_reason FROM kanban_cards WHERE id = 'card-single-provider'",
                     [],
                     |row| row.get(0),
                 )
                 .unwrap();
             assert!(
                 blocked_reason.is_none(),
-                "counter-model-disabled completion must not leave blocked_reason"
+                "single-provider auto-approval must not leave blocked_reason"
             );
         }
 
-        let (state, _, _) = get_review_state(&db, "card-counter-disabled")
+        let (state, _, _) = get_review_state(&db, "card-single-provider")
             .expect("terminal transition must sync canonical review state");
         assert_eq!(state, "idle");
     }
@@ -2791,7 +2972,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scenario_339_accept_skip_rework_falls_back_to_rework_without_stranding() {
+    async fn scenario_339_accept_skip_rework_auto_approves_without_alternate_reviewer() {
         let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
         let db = test_db();
         let engine = test_engine(&db);
@@ -2860,26 +3041,27 @@ mod tests {
         assert_eq!(
             status,
             axum::http::StatusCode::OK,
-            "skip_rework accept should fall back to rework: {json:?}"
+            "single-provider skip_rework accept should auto-approve: {json:?}"
         );
         assert_eq!(json.0["direct_review_created"], false);
-        assert_eq!(json.0["rework_dispatch_created"], true);
-        assert_eq!(get_dispatch_status(&db, "rd-339-skip"), "completed");
-        assert_eq!(get_card_status(&db, "card-339-skip"), "in_progress");
+        assert_eq!(json.0["rework_dispatch_created"], false);
+        assert_eq!(json.0["review_auto_approved"], true);
+        assert_eq!(get_dispatch_status(&db, "rd-339-skip"), "cancelled");
+        assert_eq!(get_card_status(&db, "card-339-skip"), "done");
         assert_eq!(
             count_active_dispatches_by_type(&db, "card-339-skip", "review"),
             0,
-            "skip_rework fallback must not leave an active review dispatch behind"
+            "single-provider auto-approve must not leave an active review dispatch behind"
         );
         assert_eq!(
             count_active_dispatches_by_type(&db, "card-339-skip", "rework"),
-            1,
-            "skip_rework fallback must create one active rework dispatch"
+            0,
+            "single-provider auto-approve must not create a rework dispatch"
         );
         assert_eq!(
             count_active_dispatches_by_type(&db, "card-339-skip", "review-decision"),
             0,
-            "successful fallback must consume the pending review-decision"
+            "single-provider auto-approve must consume the pending review-decision"
         );
     }
 
@@ -2985,20 +3167,6 @@ mod tests {
         let engine = test_engine(&db);
         seed_agent(&db);
         seed_card(&db, "card-195b", "in_progress");
-        seed_completed_work_dispatch_for_review(
-            &db,
-            "impl-195b-initial",
-            "card-195b",
-            "implementation",
-        );
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE kanban_cards SET review_round = 1 WHERE id = 'card-195b'",
-                [],
-            )
-            .unwrap();
-        }
 
         // Create and complete a rework dispatch — simulates the rework turn finishing
         seed_dispatch(&db, "rw-195b", "card-195b", "rework", "pending");
@@ -3037,31 +3205,6 @@ mod tests {
         assert_eq!(
             review_count, 1,
             "#195: rework completion must trigger OnReviewEnter → review dispatch"
-        );
-        let review_round: i64 = conn
-            .query_row(
-                "SELECT review_round FROM kanban_cards WHERE id = 'card-195b'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            review_round, 2,
-            "#487: rework completion must advance review_round for the next review cycle"
-        );
-        let review_title: String = conn
-            .query_row(
-                "SELECT title FROM task_dispatches \
-                 WHERE kanban_card_id = 'card-195b' AND dispatch_type = 'review' \
-                 AND status IN ('pending', 'dispatched') \
-                 ORDER BY created_at DESC, id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            review_title, "[Review R2] card-195b",
-            "#487: rework completion must create an R2 review dispatch title"
         );
     }
 

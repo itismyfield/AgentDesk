@@ -167,12 +167,6 @@ _review_gate_override_source() {
             return 0
         fi
 
-        raw=$(_read_kv_flag "$db_path" "counter_model_review_enabled")
-        normalized=$(_normalize_bool "$raw")
-        if [ "$normalized" = "false" ]; then
-            printf '%s\t%s\t%s\n' "$runtime_label" "counter_model_review_enabled" "$db_path"
-            return 0
-        fi
     done
     return 1
 }
@@ -266,7 +260,7 @@ if [ "$SKIP_REVIEW" != true ]; then
         REVIEW_MARKER_REL="$ADK_REL/runtime/review_passed/$LAST_COMMIT"
         if [ ! -f "$REVIEW_MARKER_DEV" ] && [ ! -f "$REVIEW_MARKER_REL" ]; then
             echo "✗ Review not passed for commit $LAST_COMMIT — aborting promotion"
-            echo "  Run counter-review first, or use --skip-review to override"
+            echo "  Run review first, or use --skip-review to override"
             exit 1
         fi
         echo "▸ Review passed for $LAST_COMMIT"

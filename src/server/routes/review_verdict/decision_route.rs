@@ -6,8 +6,6 @@ use super::super::AppState;
 use super::review_state_repo::update_card_review_state;
 use super::tuning_aggregate::{record_decision_tuning, spawn_aggregate_if_needed};
 
-const ADVANCE_REVIEW_ROUND_HINT_KEY: &str = "advance_review_round_on_next_review";
-
 // ── Review Decision (agent's response to counter-model review) ──────────────
 
 #[cfg(test)]
@@ -119,63 +117,18 @@ fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
     })
 }
 
-fn load_card_metadata_map_on_conn(
-    conn: &rusqlite::Connection,
-    card_id: &str,
-) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
-    let metadata_raw: Option<String> = conn.query_row(
-        "SELECT metadata FROM kanban_cards WHERE id = ?1",
-        [card_id],
-        |row| row.get(0),
-    )?;
-
-    match metadata_raw {
-        Some(raw) if !raw.trim().is_empty() => {
-            let value: serde_json::Value = serde_json::from_str(&raw)?;
-            Ok(value.as_object().cloned().unwrap_or_default())
-        }
-        _ => Ok(serde_json::Map::new()),
-    }
-}
-
-fn save_card_metadata_map_on_conn(
-    conn: &rusqlite::Connection,
-    card_id: &str,
-    metadata: &serde_json::Map<String, serde_json::Value>,
-) -> anyhow::Result<()> {
-    if metadata.is_empty() {
-        conn.execute(
-            "UPDATE kanban_cards SET metadata = NULL WHERE id = ?1",
-            [card_id],
-        )?;
-    } else {
-        conn.execute(
-            "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
-            rusqlite::params![serde_json::to_string(metadata)?, card_id],
-        )?;
-    }
-    Ok(())
-}
-
-fn set_advance_review_round_hint_on_conn(
-    conn: &rusqlite::Connection,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
-    metadata.insert(
-        ADVANCE_REVIEW_ROUND_HINT_KEY.to_string(),
-        serde_json::Value::Bool(true),
-    );
-    save_card_metadata_map_on_conn(conn, card_id, &metadata)
-}
-
-fn clear_advance_review_round_hint_on_conn(
-    conn: &rusqlite::Connection,
-    card_id: &str,
-) -> anyhow::Result<()> {
-    let mut metadata = load_card_metadata_map_on_conn(conn, card_id)?;
-    metadata.remove(ADVANCE_REVIEW_ROUND_HINT_KEY);
-    save_card_metadata_map_on_conn(conn, card_id, &metadata)
+fn dispatch_status_and_result(
+    db: &crate::db::Db,
+    dispatch_id: &str,
+) -> Option<(String, Option<String>)> {
+    db.lock().ok().and_then(|conn| {
+        conn.query_row(
+            "SELECT status, result FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -423,6 +376,7 @@ pub async fn submit_review_decision(
             };
 
             let mut accept_failures = Vec::new();
+            let mut direct_review_auto_approved = false;
 
             // #246: If agent already committed new work, skip rework and re-enter
             // review via a two-step transition (rework_target → review) so that
@@ -451,83 +405,62 @@ pub async fn submit_review_decision(
                         true,
                     ) {
                         Ok(_) => {
-                            let hint_ready = state
-                                .db
-                                .lock()
-                                .map_err(|e| anyhow::anyhow!(e.to_string()))
-                                .and_then(|conn| {
-                                    set_advance_review_round_hint_on_conn(&conn, &body.card_id)
-                                });
-                            if let Err(err) = hint_ready {
-                                accept_failures.push(format!(
-                                    "direct review could not arm review-round hint: {err}"
-                                ));
-                                tracing::warn!(
-                                    "[review-decision] #487 Failed to arm review-round hint for card {}: {err}",
-                                    body.card_id
-                                );
-                                false
-                            } else {
-                                // Step 2: Transition to review — fires OnReviewEnter
-                                match crate::kanban::transition_status_with_opts(
-                                    &state.db,
-                                    &state.engine,
-                                    &body.card_id,
-                                    review_st,
-                                    "review_decision_accept_skip_rework_step2",
-                                    true,
-                                ) {
-                                    Ok(_) => {
-                                        if let Ok(conn) = state.db.lock() {
-                                            clear_advance_review_round_hint_on_conn(
-                                                &conn,
-                                                &body.card_id,
-                                            )
-                                            .ok();
-                                        }
-                                        let followups =
-                                            active_accept_followups(&state.db, &body.card_id);
-                                        if followups.review > 0 {
-                                            tracing::info!(
-                                                "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
-                                                body.card_id,
-                                                card_status_now,
-                                                rework_target,
-                                                review_st
-                                            );
-                                            true
-                                        } else {
-                                            accept_failures.push(format!(
-                                        "direct review transition reached {} but no active review dispatch was created",
-                                        review_st
-                                    ));
-                                            tracing::warn!(
-                                                "[review-decision] #339 Direct review re-entry for card {} reached {} but no active review dispatch exists",
-                                                body.card_id,
-                                                review_st
-                                            );
-                                            false
-                                        }
-                                    }
-                                    Err(e) => {
-                                        if let Ok(conn) = state.db.lock() {
-                                            clear_advance_review_round_hint_on_conn(
-                                                &conn,
-                                                &body.card_id,
-                                            )
-                                            .ok();
-                                        }
-                                        accept_failures.push(format!(
-                                            "direct review step2 transition to {} failed: {e}",
+                            // Step 2: Transition to review — fires OnReviewEnter
+                            match crate::kanban::transition_status_with_opts(
+                                &state.db,
+                                &state.engine,
+                                &body.card_id,
+                                review_st,
+                                "review_decision_accept_skip_rework_step2",
+                                true,
+                            ) {
+                                Ok(_) => {
+                                    let followups =
+                                        active_accept_followups(&state.db, &body.card_id);
+                                    if followups.review > 0 {
+                                        tracing::info!(
+                                            "[review-decision] #246 Direct review re-entry for card {}: {} → {} → {} (rework skipped)",
+                                            body.card_id,
+                                            card_status_now,
+                                            rework_target,
                                             review_st
-                                        ));
-                                        tracing::warn!(
-                                            "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
-                                            review_st,
+                                        );
+                                        true
+                                    } else if current_card_status(&state.db, &body.card_id)
+                                        .as_deref()
+                                        .map(|status| effective_pipeline.is_terminal(status))
+                                        .unwrap_or(false)
+                                    {
+                                        direct_review_auto_approved = true;
+                                        tracing::info!(
+                                            "[review-decision] #483 Direct review re-entry for card {} auto-approved without review dispatch (no alternate reviewer)",
                                             body.card_id
                                         );
                                         false
+                                    } else {
+                                        accept_failures.push(format!(
+                                        "direct review transition reached {} but no active review dispatch was created",
+                                        review_st
+                                    ));
+                                        tracing::warn!(
+                                            "[review-decision] #339 Direct review re-entry for card {} reached {} but no active review dispatch exists",
+                                            body.card_id,
+                                            review_st
+                                        );
+                                        false
                                     }
+                                }
+                                Err(e) => {
+                                    accept_failures.push(format!(
+                                        "direct review step2 transition to {} failed: {e}",
+                                        review_st
+                                    ));
+                                    tracing::warn!(
+                                        "[review-decision] #246 Step 2 transition to {} failed for card {}: {e}",
+                                        review_st,
+                                        body.card_id
+                                    );
+                                    false
                                 }
                             }
                         }
@@ -557,7 +490,7 @@ pub async fn submit_review_decision(
 
             // Create rework dispatch on the normal accept path, or as a fallback when
             // direct review re-entry fails / produces no active review dispatch.
-            if !direct_review_created {
+            if !direct_review_created && !direct_review_auto_approved {
                 let card_status_before_rework = current_card_status(&state.db, &body.card_id);
                 let rework_transition_ready = card_status_before_rework.as_deref()
                     == Some(rework_target.as_str())
@@ -629,8 +562,16 @@ pub async fn submit_review_decision(
             let followups = active_accept_followups(&state.db, &body.card_id);
             direct_review_created = followups.review > 0;
             let rework_dispatch_created = followups.rework > 0;
+            let terminal_auto_approved = direct_review_attempted
+                && (direct_review_auto_approved
+                    || (!direct_review_created
+                        && !rework_dispatch_created
+                        && current_card_status(&state.db, &body.card_id)
+                            .as_deref()
+                            .map(|status| effective_pipeline.is_terminal(status))
+                            .unwrap_or(false)));
 
-            if !followups.has_followup() {
+            if !followups.has_followup() && !terminal_auto_approved {
                 let card_status_after = current_card_status(&state.db, &body.card_id);
                 tracing::error!(
                     card_id = %body.card_id,
@@ -676,23 +617,55 @@ pub async fn submit_review_decision(
                 ) {
                     Ok(1) => {}
                     Ok(_) => {
-                        let live_dispatches = active_accept_followups(&state.db, &body.card_id);
-                        tracing::error!(
-                            card_id = %body.card_id,
-                            pending_rd_id = %rd_id,
-                            active_review = live_dispatches.review,
-                            active_rework = live_dispatches.rework,
-                            active_review_decision = live_dispatches.review_decision,
-                            "[review-decision] #339 accept created a follow-up dispatch but failed to finalize the pending review-decision"
-                        );
-                        return (
-                            StatusCode::CONFLICT,
-                            Json(json!({
-                                "error": "failed to finalize pending review-decision after follow-up dispatch creation",
-                                "card_id": body.card_id,
-                                "pending_dispatch_id": rd_id,
-                            })),
-                        );
+                        let dispatch_consumed_by_terminal_cleanup = terminal_auto_approved
+                            && dispatch_status_and_result(&state.db, rd_id)
+                                .map(|(status, result)| {
+                                    if status == "completed" {
+                                        return true;
+                                    }
+                                    if status != "cancelled" {
+                                        return false;
+                                    }
+                                    result
+                                        .as_deref()
+                                        .and_then(|raw| {
+                                            serde_json::from_str::<serde_json::Value>(raw).ok()
+                                        })
+                                        .and_then(|value| {
+                                            value
+                                                .get("reason")
+                                                .and_then(|reason| reason.as_str())
+                                                .map(str::to_string)
+                                        })
+                                        .as_deref()
+                                        == Some("auto_cancelled_on_terminal_card")
+                                })
+                                .unwrap_or(false);
+                        if dispatch_consumed_by_terminal_cleanup {
+                            tracing::info!(
+                                "[review-decision] #483 pending review-decision {} for card {} was already consumed by terminal auto-approval",
+                                rd_id,
+                                body.card_id
+                            );
+                        } else {
+                            let live_dispatches = active_accept_followups(&state.db, &body.card_id);
+                            tracing::error!(
+                                card_id = %body.card_id,
+                                pending_rd_id = %rd_id,
+                                active_review = live_dispatches.review,
+                                active_rework = live_dispatches.rework,
+                                active_review_decision = live_dispatches.review_decision,
+                                "[review-decision] #339 accept created a follow-up dispatch but failed to finalize the pending review-decision"
+                            );
+                            return (
+                                StatusCode::CONFLICT,
+                                Json(json!({
+                                    "error": "failed to finalize pending review-decision after follow-up dispatch creation",
+                                    "card_id": body.card_id,
+                                    "pending_dispatch_id": rd_id,
+                                })),
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::error!(
@@ -722,7 +695,7 @@ pub async fn submit_review_decision(
             // Guard: when direct_review_created, OnReviewEnter already set
             // review_status='reviewing' — clearing it would break the live review.
             if let Ok(c) = state.db.lock() {
-                if !direct_review_created {
+                if !direct_review_created && !terminal_auto_approved {
                     use crate::engine::transition::{TransitionIntent, execute_intent_on_conn};
                     execute_intent_on_conn(
                         &c,
@@ -747,7 +720,7 @@ pub async fn submit_review_decision(
             // #117: Update canonical review state.
             // For direct review: OnReviewEnter already set the state, so skip the
             // rework_pending override that would conflict with the live review dispatch.
-            if !direct_review_created {
+            if !direct_review_created && !terminal_auto_approved {
                 update_card_review_state(
                     &state.db,
                     &body.card_id,
@@ -766,7 +739,9 @@ pub async fn submit_review_decision(
                     crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
                 }
             }
-            let message = if direct_review_created {
+            let message = if terminal_auto_approved {
+                "Review-decision accepted, review auto-approved (no alternate reviewer)"
+            } else if direct_review_created {
                 "Review-decision accepted, direct review dispatch created (rework skipped)"
             } else {
                 "Review-decision accepted, rework dispatch created"
@@ -779,6 +754,7 @@ pub async fn submit_review_decision(
                     "decision": "accept",
                     "rework_dispatch_created": rework_dispatch_created,
                     "direct_review_created": direct_review_created,
+                    "review_auto_approved": terminal_auto_approved,
                     "message": message,
                 })),
             );
