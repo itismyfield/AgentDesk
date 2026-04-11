@@ -26,8 +26,12 @@ pub struct GenerateBody {
     pub agent_id: Option<String>,
     pub issue_numbers: Option<Vec<i64>>,
     pub entries: Option<Vec<GenerateEntryBody>>,
-    pub mode: Option<String>, // "priority-sort" (default), "dependency-aware", "similarity-aware", or "pm-assisted"
+    // Legacy compatibility only. Accepted from callers, but ignored.
+    #[allow(dead_code)]
+    pub mode: Option<String>,
     pub unified_thread: Option<bool>,
+    // Legacy compatibility only. Accepted from callers, but ignored.
+    #[allow(dead_code)]
     pub parallel: Option<bool>,
     pub max_concurrent_threads: Option<i64>,
     // Legacy compatibility only. Accepted from callers, but ignored.
@@ -104,7 +108,6 @@ struct GenerateCandidate {
     description: Option<String>,
     metadata: Option<String>,
     github_issue_number: Option<i64>,
-    batch_phase: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +115,7 @@ struct PlannedEntry {
     card_idx: usize,
     thread_group: i64,
     priority_rank: i64,
+    batch_phase: i64,
     reason: String,
 }
 
@@ -131,39 +135,6 @@ enum GroupKind {
     Similarity,
     Dependency,
     Mixed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GenerateMode {
-    PrioritySort,
-    DependencyAware,
-    SimilarityAware,
-    PmAssisted,
-}
-
-impl GenerateMode {
-    fn parse(raw: Option<&str>) -> Result<Self, String> {
-        match raw.unwrap_or("priority-sort") {
-            "priority-sort" => Ok(Self::PrioritySort),
-            "dependency-aware" => Ok(Self::DependencyAware),
-            "similarity-aware" => Ok(Self::SimilarityAware),
-            "pm-assisted" => Ok(Self::PmAssisted),
-            other => Err(format!(
-                "mode must be one of: priority-sort, dependency-aware, similarity-aware, pm-assisted (got {other})"
-            )),
-        }
-    }
-
-    fn uses_similarity(self) -> bool {
-        matches!(self, Self::SimilarityAware)
-    }
-
-    /// Whether auto-grouping should be used. Requires `parallel=true` explicitly;
-    /// `parallel=None` (unspecified) always defaults to sequential to preserve
-    /// backward compatibility with existing callers like auto-queue.js.
-    fn enables_auto_grouping(self, parallel: Option<bool>) -> bool {
-        parallel.unwrap_or(false)
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -632,7 +603,7 @@ fn build_group_reason(
     }
 }
 
-fn build_group_plan(cards: &[GenerateCandidate], enable_similarity: bool) -> GroupPlan {
+fn build_group_plan(cards: &[GenerateCandidate]) -> GroupPlan {
     const SIMILARITY_THRESHOLD: f64 = 0.5;
     if cards.is_empty() {
         return GroupPlan {
@@ -652,11 +623,8 @@ fn build_group_plan(cards: &[GenerateCandidate], enable_similarity: bool) -> Gro
         }
     }
 
-    let similarity_paths_per_card: Vec<HashSet<String>> = if enable_similarity {
-        cards.iter().map(similarity_paths).collect()
-    } else {
-        vec![HashSet::new(); cards.len()]
-    };
+    let similarity_paths_per_card: Vec<HashSet<String>> =
+        cards.iter().map(similarity_paths).collect();
     let dependency_numbers: Vec<Vec<i64>> = cards.iter().map(extract_dependency_numbers).collect();
     let path_backed_card_count = similarity_paths_per_card
         .iter()
@@ -808,6 +776,7 @@ fn build_group_plan(cards: &[GenerateCandidate], enable_similarity: bool) -> Gro
             (false, false) => GroupKind::Independent,
         };
         let group_reason = build_group_reason(kind, &path_labels, &dep_nums, members.len());
+        let mut phases_by_member: HashMap<usize, i64> = HashMap::new();
 
         for (priority_rank, idx) in sorted.into_iter().enumerate() {
             let mut entry_reason = group_reason.clone();
@@ -816,6 +785,12 @@ fn build_group_plan(cards: &[GenerateCandidate], enable_similarity: bool) -> Gro
                 .copied()
                 .filter(|dep_num| issue_to_idx.contains_key(dep_num))
                 .collect();
+            let batch_phase = deps_in_queue
+                .iter()
+                .filter_map(|dep_num| issue_to_idx.get(dep_num).copied())
+                .map(|dep_idx| phases_by_member.get(&dep_idx).copied().unwrap_or(0) + 1)
+                .max()
+                .unwrap_or(0);
             if !deps_in_queue.is_empty() {
                 let refs = deps_in_queue
                     .iter()
@@ -824,10 +799,12 @@ fn build_group_plan(cards: &[GenerateCandidate], enable_similarity: bool) -> Gro
                     .join(", ");
                 entry_reason = format!("{entry_reason} · 선행 {refs}");
             }
+            phases_by_member.insert(idx, batch_phase);
             planned_entries.push(PlannedEntry {
                 card_idx: idx,
                 thread_group: group_num as i64,
                 priority_rank: priority_rank as i64,
+                batch_phase,
                 reason: entry_reason,
             });
         }
@@ -987,7 +964,6 @@ pub async fn generate(
                 description: card.description,
                 metadata: card.metadata,
                 github_issue_number: card.github_issue_number,
-                batch_phase: card.batch_phase,
             })
             .collect(),
         Err(error) => return error.into_json_response(),
@@ -1000,13 +976,6 @@ pub async fn generate(
                 .map(|(index, _, _)| index)
                 .unwrap_or(usize::MAX)
         });
-        for card in &mut cards {
-            card.batch_phase = card
-                .github_issue_number
-                .and_then(|issue_number| requested_entry_meta.get(&issue_number).copied())
-                .map(|(_, batch_phase, _)| batch_phase)
-                .unwrap_or(0);
-        }
     }
 
     if cards.is_empty() {
@@ -1047,159 +1016,38 @@ pub async fn generate(
             );
         }
     };
-    let mode = match GenerateMode::parse(body.mode.as_deref()) {
-        Ok(mode) => mode,
-        Err(err) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
-        }
-    };
-
-    // PM-assisted mode: send card list to PMD for async analysis
-    if mode == GenerateMode::PmAssisted {
-        // Create pending run
-        let run_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, unified_thread) VALUES (?1, ?2, ?3, 'pending', 'pm-assisted', ?4, 0)",
-            rusqlite::params![
-                run_id,
-                body.repo,
-                body.agent_id,
-                format!("PMD 분석 대기 중 — {}개 카드 제출", cards.len())
-            ],
-        )
-        .ok();
-
-        // Collect card info for PMD request
-        let mut card_summaries = Vec::new();
-        for card in &cards {
-            let (title, issue_num): (String, Option<i64>) = conn
+    let issue_to_idx: HashMap<i64, usize> = cards
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, card)| {
+            card.github_issue_number
+                .map(|issue_number| (issue_number, idx))
+        })
+        .collect();
+    let mut filtered_cards = Vec::with_capacity(cards.len());
+    let mut excluded_count = 0usize;
+    for card in &cards {
+        let dep_numbers = extract_dependency_numbers(card);
+        let has_unresolved_external_dependency = dep_numbers.iter().any(|dep_num| {
+            if issue_to_idx.contains_key(dep_num) {
+                return false;
+            }
+            let dep_status: Option<String> = conn
                 .query_row(
-                    "SELECT title, github_issue_number FROM kanban_cards WHERE id = ?1",
-                    [&card.card_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    "SELECT status FROM kanban_cards WHERE github_issue_number = ?1",
+                    [dep_num],
+                    |row| row.get(0),
                 )
-                .unwrap_or_default();
-            card_summaries.push(format!(
-                "- #{} {} (priority: {}, agent: {})",
-                issue_num.unwrap_or(0),
-                title,
-                card.priority,
-                card.agent_id
-            ));
-        }
-
-        let run_id_for_spawn = run_id.clone();
-        let card_list_text = card_summaries.join("\n");
-        let repo_name = body.repo.clone().unwrap_or_else(|| "all".to_string());
-        let run = state
-            .auto_queue_service()
-            .run_json(&run_id)
-            .unwrap_or(serde_json::Value::Null);
-        drop(conn);
-
-        // Async: send PMD request via announce bot
-        tokio::spawn(async move {
-            let token = match crate::credential::read_bot_token("announce") {
-                Some(t) => t,
-                None => return,
-            };
-
-            // Kanban manager channel from config (kv_meta)
-            let km_channel: Option<String> = {
-                let conn = state.db.separate_conn().ok();
-                conn.and_then(|c| {
-                    c.query_row(
-                        "SELECT value FROM kv_meta WHERE key = 'kanban_manager_channel_id'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .ok()
-                })
-            };
-            let Some(km_channel) = km_channel else {
-                tracing::warn!(
-                    "[auto-queue] No kanban_manager_channel_id configured, skipping PM request"
-                );
-                return;
-            };
-
-            // Resolve channel name to ID if needed
-            let km_channel_num: u64 = match km_channel.parse() {
-                Ok(n) => n,
-                Err(_) => {
-                    match crate::server::routes::dispatches::resolve_channel_alias_pub(&km_channel)
-                    {
-                        Some(n) => n,
-                        None => return,
-                    }
-                }
-            };
-
-            let message = format!(
-                "[칸반매니저] 자동큐 순서 분석 요청\n\n\
-                 repo: {}\n\
-                 run_id: {}\n\n\
-                 아래 일감들의 실행 순서를 분석해주세요.\n\
-                 의존관계, 긴급도, 작업 내용을 고려하여 순서를 결정하고,\n\
-                 `POST /api/auto-queue/runs/{}/order`에 결과를 전달해주세요.\n\n\
-                 {}",
-                repo_name, run_id_for_spawn, run_id_for_spawn, card_list_text
-            );
-
-            let client = reqwest::Client::new();
-            let _ = client
-                .post(format!(
-                    "https://discord.com/api/v10/channels/{km_channel_num}/messages"
-                ))
-                .header("Authorization", format!("Bot {}", token))
-                .json(&serde_json::json!({"content": message}))
-                .send()
-                .await;
+                .ok();
+            dep_status.as_deref() != Some("done")
         });
 
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "run": run,
-                "entries": [],
-                "message": "PMD 분석 요청 전송됨. 응답 대기 중.",
-            })),
-        );
-    }
-
-    // Dependency-aware mode: filter out cards with incomplete dependencies.
-    // SimilarityAware does NOT filter — it uses dependency edges only for
-    // grouping/ordering inside build_group_plan() union-find, not exclusion.
-    let (filtered_cards, excluded_count) = if mode == GenerateMode::DependencyAware {
-        let mut filtered = Vec::new();
-        let mut excluded = 0usize;
-        for card in &cards {
-            let dep_numbers = extract_dependency_numbers(card);
-            let mut all_deps_done = true;
-            for dep_num in &dep_numbers {
-                let dep_status: Option<String> = conn
-                    .query_row(
-                        "SELECT status FROM kanban_cards WHERE github_issue_number = ?1",
-                        [dep_num],
-                        |row| row.get(0),
-                    )
-                    .ok();
-                if dep_status.as_deref() != Some("done") {
-                    all_deps_done = false;
-                    break;
-                }
-            }
-
-            if all_deps_done {
-                filtered.push(card.clone());
-            } else {
-                excluded += 1;
-            }
+        if has_unresolved_external_dependency {
+            excluded_count += 1;
+        } else {
+            filtered_cards.push(card.clone());
         }
-        (filtered, excluded)
-    } else {
-        (cards.clone(), 0)
-    };
+    }
 
     if filtered_cards.is_empty() {
         return (
@@ -1207,152 +1055,100 @@ pub async fn generate(
             Json(json!({
                 "run": null,
                 "entries": [],
-                "message": format!("No cards available ({}개 의존성 미충족으로 제외)", excluded_count)
+                "message": format!("No cards available ({}개 외부 의존성 미충족으로 제외)", excluded_count)
             })),
         );
     }
 
-    let force_sequential = body.parallel == Some(false);
-    let auto_group = !force_sequential && mode.enables_auto_grouping(body.parallel);
-    let analyzed_plan =
-        auto_group.then(|| build_group_plan(&filtered_cards, mode.uses_similarity()));
-    let mut max_concurrent = match analyzed_plan.as_ref() {
-        Some(plan) => body
-            .max_concurrent_threads
-            .unwrap_or(plan.recommended_parallel_threads)
-            .clamp(1, 10)
-            .min(plan.thread_group_count.max(1)),
-        None => 1,
-    };
+    let plan = build_group_plan(&filtered_cards);
+    let mut grouped_entries = plan.entries.clone();
+    let mut thread_group_count = plan.thread_group_count.max(1);
+    let mut recommended_parallel_threads = plan.recommended_parallel_threads.max(1);
+    let dependency_edges = plan.dependency_edges;
+    let similarity_edges = plan.similarity_edges;
+    let path_backed_card_count = plan.path_backed_card_count;
+    let mut max_concurrent = body
+        .max_concurrent_threads
+        .unwrap_or(recommended_parallel_threads)
+        .clamp(1, 10)
+        .min(thread_group_count.max(1));
 
-    let (
-        mut grouped_entries,
-        mut thread_group_count,
-        recommended_parallel_threads,
-        dependency_edges,
-        similarity_edges,
-        path_backed_card_count,
-    ) = if let Some(plan) = analyzed_plan.as_ref() {
-        (
-            plan.entries.clone(),
-            plan.thread_group_count,
-            plan.recommended_parallel_threads,
-            plan.dependency_edges,
-            plan.similarity_edges,
-            plan.path_backed_card_count,
-        )
-    } else {
-        let result: Vec<PlannedEntry> = filtered_cards
-            .iter()
-            .enumerate()
-            .map(|(idx, _)| PlannedEntry {
-                card_idx: idx,
-                thread_group: 0,
-                priority_rank: idx as i64,
-                reason: "순차 실행".to_string(),
-            })
-            .collect();
-        (result, 1i64, 1i64, 0usize, 0usize, 0usize)
-    };
-
-    let ai_rationale = match (mode, auto_group, force_sequential) {
-        (GenerateMode::SimilarityAware, _, true) => format!(
-            "파일 경로 유사도 분석을 건너뛰고 순차 실행으로 고정 ({}개 카드)",
-            filtered_cards.len()
-        ),
-        (GenerateMode::DependencyAware, _, true) => format!(
-            "의존관계 기반 필터링 후 순차 실행. {}개 큐잉, {}개 의존성 미충족 제외",
-            filtered_cards.len(),
-            excluded_count
-        ),
-        (GenerateMode::PrioritySort, _, true) => format!(
-            "우선순위 기반 순차 실행 (urgent > high > medium > low), {}개 카드 큐잉",
-            filtered_cards.len()
-        ),
-        (GenerateMode::SimilarityAware, true, false) if path_backed_card_count == 0 => format!(
-            "description/metadata에서 파일 경로를 찾지 못해 dependency-only 그룹으로 fallback. 의존성 {}건, {}개 그룹, 추천 병렬 {}개, 적용 {}개",
-            dependency_edges, thread_group_count, recommended_parallel_threads, max_concurrent
-        ),
-        (GenerateMode::SimilarityAware, true, false) => format!(
-            "파일 경로 유사도 {}건 + 의존성 {}건으로 {}개 그룹 생성. 파일 경로 추출 카드 {}개, 추천 병렬 {}개, 적용 {}개",
-            similarity_edges,
-            dependency_edges,
-            thread_group_count,
-            path_backed_card_count,
-            recommended_parallel_threads,
-            max_concurrent
-        ),
-        (GenerateMode::DependencyAware, true, false) => format!(
-            "의존관계 기반 필터링 + dependency 그룹 분석. {}개 큐잉, {}개 의존성 미충족 제외, {}개 그룹, 적용 {}개",
-            filtered_cards.len(),
-            excluded_count,
-            thread_group_count,
-            max_concurrent
-        ),
-        (GenerateMode::PrioritySort, true, false) => format!(
-            "의존성 기반 그룹 분석. {}개 카드, {}개 그룹, 추천 병렬 {}개, 적용 {}개",
-            filtered_cards.len(),
-            thread_group_count,
-            recommended_parallel_threads,
-            max_concurrent
-        ),
-        (GenerateMode::DependencyAware, false, false) => format!(
-            "의존관계 기반 필터링 + 우선순위 정렬. {}개 큐잉, {}개 의존성 미충족 제외",
-            filtered_cards.len(),
-            excluded_count
-        ),
-        (GenerateMode::SimilarityAware, false, false) => format!(
-            "유사도 분석 모드이지만 parallel 미지정으로 순차 실행. {}개 카드, {}개 의존성 미충족 제외",
-            filtered_cards.len(),
-            excluded_count
-        ),
-        (GenerateMode::PrioritySort, false, false) => format!(
-            "우선순위 기반 정렬 (urgent > high > medium > low), {}개 카드 큐잉",
-            filtered_cards.len()
-        ),
-        (GenerateMode::PmAssisted, _, _) => unreachable!("pm-assisted handled above"),
-    };
-
-    // Apply explicit thread_group overrides from API entries
+    // Apply explicit batch_phase/thread_group overrides from API entries.
     if !requested_entry_meta.is_empty() {
         let mut has_explicit_groups = false;
         for planned in &mut grouped_entries {
             let card = &filtered_cards[planned.card_idx];
             if let Some(issue_number) = card.github_issue_number {
-                if let Some(&(_, _, Some(tg))) = requested_entry_meta.get(&issue_number) {
-                    planned.thread_group = tg;
-                    has_explicit_groups = true;
+                if let Some(&(_, batch_phase, thread_group)) =
+                    requested_entry_meta.get(&issue_number)
+                {
+                    planned.batch_phase = batch_phase;
+                    if let Some(tg) = thread_group {
+                        planned.thread_group = tg;
+                        has_explicit_groups = true;
+                    }
                 }
             }
         }
         if has_explicit_groups {
-            // Recalculate thread_group_count and max_concurrent from explicit groups
             thread_group_count = grouped_entries
                 .iter()
                 .map(|e| e.thread_group)
                 .collect::<std::collections::HashSet<_>>()
                 .len() as i64;
+            recommended_parallel_threads = thread_group_count.clamp(1, 4);
             if let Some(requested_max) = body.max_concurrent_threads {
-                max_concurrent = requested_max;
+                max_concurrent = requested_max.clamp(1, 10).min(thread_group_count.max(1));
             } else {
-                max_concurrent = thread_group_count;
+                max_concurrent = recommended_parallel_threads;
             }
         }
     }
 
+    let batch_phase_count = grouped_entries
+        .iter()
+        .map(|entry| entry.batch_phase)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let ai_rationale = if path_backed_card_count == 0 && dependency_edges == 0 {
+        format!(
+            "스마트 플래너: 의존성/파일 경로 신호가 약해 {}개 독립 그룹, {}개 페이즈로 계획. {}개 카드 큐잉, 추천 병렬 {}개, 적용 {}개",
+            thread_group_count,
+            batch_phase_count,
+            filtered_cards.len(),
+            recommended_parallel_threads,
+            max_concurrent
+        )
+    } else if path_backed_card_count == 0 {
+        format!(
+            "스마트 플래너: 파일 경로 신호 없이 의존성 {}건으로 {}개 그룹, {}개 페이즈 계획. {}개 카드 큐잉, {}개 외부 의존성 미충족 제외, 추천 병렬 {}개, 적용 {}개",
+            dependency_edges,
+            thread_group_count,
+            batch_phase_count,
+            filtered_cards.len(),
+            excluded_count,
+            recommended_parallel_threads,
+            max_concurrent
+        )
+    } else {
+        format!(
+            "스마트 플래너: 파일 경로 유사도 {}건 + 의존성 {}건으로 {}개 그룹, {}개 페이즈 계획. 파일 경로 추출 카드 {}개, {}개 카드 큐잉, {}개 외부 의존성 미충족 제외, 추천 병렬 {}개, 적용 {}개",
+            similarity_edges,
+            dependency_edges,
+            thread_group_count,
+            batch_phase_count,
+            path_backed_card_count,
+            filtered_cards.len(),
+            excluded_count,
+            recommended_parallel_threads,
+            max_concurrent
+        )
+    };
+
     // Create run
     let run_id = uuid::Uuid::new_v4().to_string();
-    let ai_model = match (mode, auto_group, force_sequential) {
-        (GenerateMode::SimilarityAware, _, true) => "similarity-aware-sequential",
-        (GenerateMode::SimilarityAware, true, false) => "similarity-aware-thread-group",
-        (GenerateMode::SimilarityAware, false, false) => "similarity-aware-sequential",
-        (GenerateMode::DependencyAware, true, false) => "dependency-aware-thread-group",
-        (GenerateMode::DependencyAware, _, _) => "dependency-aware-sort",
-        (GenerateMode::PrioritySort, true, false) => "parallel-thread-group",
-        (GenerateMode::PrioritySort, _, _) => "priority-sort",
-        (GenerateMode::PmAssisted, _, _) => unreachable!("pm-assisted handled above"),
-    };
-    let ai_model_str = ai_model.to_string();
+    let ai_model_str = "smart-planner".to_string();
     conn.execute(
         "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale, unified_thread, max_concurrent_threads, thread_group_count) \
          VALUES (?1, ?2, ?3, 'generated', ?4, ?5, 0, ?6, ?7)",
@@ -1389,7 +1185,7 @@ pub async fn generate(
                 planned.priority_rank,
                 planned.thread_group,
                 planned.reason,
-                card.batch_phase
+                planned.batch_phase
             ],
         )
         .ok();
@@ -2230,9 +2026,9 @@ pub async fn dispatch(
         agent_id: body.agent_id.clone(),
         issue_numbers: None,
         entries: Some(requested_entries.clone()),
-        mode: Some("priority-sort".to_string()),
+        mode: None,
         unified_thread: body.unified_thread,
-        parallel: Some(distinct_groups > 1),
+        parallel: None,
         max_concurrent_threads: Some(
             body.max_concurrent_threads
                 .unwrap_or(distinct_groups)

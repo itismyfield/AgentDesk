@@ -1231,16 +1231,9 @@ export interface AutoQueueStatus {
   thread_groups?: Record<string, ThreadGroupStatus>;
 }
 
-export type AutoQueueGenerateMode =
-  | "priority-sort"
-  | "dependency-aware"
-  | "similarity-aware"
-  | "pm-assisted";
-
 export async function generateAutoQueue(
   repo?: string | null,
   agentId?: string | null,
-  mode?: AutoQueueGenerateMode | null,
 ): Promise<{
   run: AutoQueueRun;
   entries: DispatchQueueEntry[];
@@ -1248,8 +1241,6 @@ export async function generateAutoQueue(
   const body: Record<string, unknown> = {
     repo: repo ?? null,
     agent_id: agentId ?? null,
-    mode: mode ?? "priority-sort",
-    parallel: mode === "similarity-aware" || undefined,
   };
   return request("/api/auto-queue/generate", {
     method: "POST",

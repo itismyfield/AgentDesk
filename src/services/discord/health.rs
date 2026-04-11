@@ -7,8 +7,8 @@ use serde::Serialize;
 use serenity::ChannelId;
 
 use super::{
-    SharedData, clear_inflight_state, clear_watchdog_deadline_override, mailbox_cancel_active_turn,
-    mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_finish_turn,
+    SharedData, clear_inflight_state, mailbox_cancel_active_turn, mailbox_clear_channel,
+    mailbox_clear_recovery_marker, mailbox_finish_turn,
 };
 use crate::db::Db;
 use crate::services::provider::ProviderKind;
@@ -223,24 +223,23 @@ pub async fn stop_provider_channel_runtime(
     }
 
     let finish = mailbox_finish_turn(&shared, &provider, channel_id).await;
-    if let Some(token) = finish.removed_token {
-        super::turn_bridge::cancel_active_token(&token, true, reason);
-        decrement_counter(shared.global_active.as_ref());
+    if let Some(token) = finish.removed_token.as_ref() {
+        super::turn_bridge::cancel_active_token(token, true, reason);
     }
-    if !finish.has_pending {
-        shared.dispatch_role_overrides.remove(&channel_id);
-    }
+    apply_runtime_hard_stop_cleanup(
+        &shared,
+        &provider,
+        channel_id,
+        &finish,
+        "runtime_stop_fallback",
+    )
+    .await;
     let queue_depth = shared
         .mailbox(channel_id)
         .snapshot()
         .await
         .intervention_queue
         .len();
-
-    clear_watchdog_deadline_override(channel_id.get()).await;
-    shared
-        .dispatch_thread_parents
-        .retain(|_, thread| *thread != channel_id);
     mailbox_clear_recovery_marker(&shared, channel_id).await;
     clear_inflight_state(&provider, channel_id.get());
 

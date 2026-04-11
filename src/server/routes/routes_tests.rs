@@ -97,6 +97,8 @@ fn run_git(repo_dir: &std::path::Path, args: &[&str]) {
 struct RepoDirOverride {
     _lock: MutexGuard<'static, ()>,
     _env: EnvVarGuard,
+    _config_dir: tempfile::TempDir,
+    _config: EnvVarGuard,
 }
 
 fn setup_test_repo() -> (tempfile::TempDir, RepoDirOverride) {
@@ -107,11 +109,16 @@ fn setup_test_repo() -> (tempfile::TempDir, RepoDirOverride) {
     run_git(repo.path(), &["config", "user.name", "Test"]);
     run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
     let env = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
+    let config_dir = write_repo_mapping_config(&[("test-repo", repo.path())]);
+    let config_path = config_dir.path().join("agentdesk.yaml");
+    let config = EnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
     (
         repo,
         RepoDirOverride {
             _lock: lock,
             _env: env,
+            _config_dir: config_dir,
+            _config: config,
         },
     )
 }
@@ -707,7 +714,7 @@ async fn stop_agent_turn_force_kills_matching_tmux_session() {
 }
 
 #[tokio::test]
-async fn stop_agent_turn_preserves_pending_queue_via_mailbox_canonical_cleanup() {
+async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     let db = test_db();
     let engine = test_engine(&db);
     let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
@@ -767,7 +774,7 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_canonical_cleanup()
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "stopped");
-    assert_eq!(json["lifecycle_path"], "canonical");
+    assert_eq!(json["lifecycle_path"], "runtime-fallback");
     assert_eq!(json["queue_preserved"], true);
 
     let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_num).await;
@@ -899,7 +906,7 @@ async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
 }
 
 #[tokio::test]
-async fn cancel_turn_preserves_pending_queue_via_mailbox_canonical_cleanup() {
+async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     let db = test_db();
     let engine = test_engine(&db);
     let harness = crate::services::discord::health::TestHealthHarness::new().await;
@@ -955,7 +962,7 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_canonical_cleanup() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["session_key"], session_key);
-    assert_eq!(json["lifecycle_path"], "canonical");
+    assert_eq!(json["lifecycle_path"], "runtime-fallback");
     assert_eq!(json["queue_preserved"], true);
     assert!(json["dispatch_cancelled"].is_null());
 
@@ -2061,14 +2068,13 @@ async fn api_docs_category_exposes_auto_queue_params_and_examples() {
         .iter()
         .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/auto-queue/generate")
         .expect("auto-queue generate endpoint must be present");
-    assert_eq!(generate["params"]["mode"]["type"], "string");
     assert!(
-        generate["params"]["mode"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "similarity-aware"),
-        "generate docs must expose supported mode enum"
+        generate["params"].get("mode").is_none(),
+        "generate docs should not expose legacy mode selection"
+    );
+    assert!(
+        generate["params"].get("parallel").is_none(),
+        "generate docs should not expose legacy parallel toggle"
     );
     assert_eq!(
         generate["example"]["response"]["run"]["unified_thread"],
@@ -4352,6 +4358,11 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
     run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
     let expected_commit = git_commit(repo.path(), "fix: review target (#269)");
     let _repo_dir = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
+    let _config_dir = write_repo_mapping_config(&[("test-repo", repo.path())]);
+    let _config = EnvVarGuard::set_path(
+        "AGENTDESK_CONFIG",
+        &_config_dir.path().join("agentdesk.yaml"),
+    );
 
     let completed_commit = "1111111111111111111111111111111111111269";
     {
@@ -5449,6 +5460,7 @@ async fn auto_queue_update_entry_moves_pending_entry_and_syncs_run_groups() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-active-only");
@@ -5549,6 +5561,7 @@ async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_requested_card_not_blocked_by_own_status() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-req-self");
@@ -5617,6 +5630,7 @@ async fn auto_queue_activate_requested_card_not_blocked_by_own_status() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-walk");
@@ -5696,6 +5710,7 @@ async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_legacy_unified_thread_run_dispatches_via_slot_pool() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-unified");
@@ -5808,6 +5823,7 @@ async fn auto_queue_activate_legacy_unified_thread_run_dispatches_via_slot_pool(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-consult");
@@ -5904,6 +5920,7 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_consult_required_prefers_registry_counterpart_provider() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-qwen");
@@ -6072,6 +6089,7 @@ async fn auto_queue_activate_already_applied_skips_entry_and_completes_run() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_reuses_released_slot_for_next_group() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-slot");
@@ -6382,6 +6400,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-same-group");
@@ -6544,6 +6563,7 @@ async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_is_active() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-same-group-guard");
@@ -6703,6 +6723,7 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-slot-expand");
@@ -7095,7 +7116,7 @@ fn seed_similarity_group_cards(db: &Db) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn parallel_generate_creates_correct_thread_groups() {
+async fn smart_generate_creates_correct_thread_groups_and_batch_phases() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_parallel_test_cards(&db);
@@ -7110,7 +7131,6 @@ async fn parallel_generate_creates_correct_thread_groups() {
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
-                        "parallel": true,
                         "max_concurrent_threads": 3,
                         "max_concurrent_per_agent": 3,
                     }))
@@ -7130,22 +7150,25 @@ async fn parallel_generate_creates_correct_thread_groups() {
     let entries = json["entries"].as_array().expect("entries must be array");
     assert_eq!(entries.len(), 7, "all 7 cards should be queued");
 
-    // Verify run has correct parallel config
+    // Verify run keeps the requested concurrency cap while ignoring the
+    // legacy max_concurrent_per_agent input.
     let run = &json["run"];
     assert_eq!(run["max_concurrent_threads"], 3);
     assert!(run.get("max_concurrent_per_agent").is_none());
+    assert_eq!(run["ai_model"], "smart-planner");
 
-    // Collect thread_group assignments per issue number
-    let mut groups: std::collections::HashMap<i64, Vec<(i64, i64)>> =
+    // Collect thread_group assignments per issue number.
+    let mut groups: std::collections::HashMap<i64, Vec<(i64, i64, i64)>> =
         std::collections::HashMap::new();
     for entry in entries {
         let issue_num = entry["github_issue_number"].as_i64().unwrap();
         let thread_group = entry["thread_group"].as_i64().unwrap();
         let priority_rank = entry["priority_rank"].as_i64().unwrap();
+        let batch_phase = entry["batch_phase"].as_i64().unwrap();
         groups
             .entry(thread_group)
             .or_default()
-            .push((issue_num, priority_rank));
+            .push((issue_num, priority_rank, batch_phase));
     }
 
     let group_count = run["thread_group_count"].as_i64().unwrap();
@@ -7165,6 +7188,10 @@ async fn parallel_generate_creates_correct_thread_groups() {
                 [1, 2, 3].contains(&issue),
                 "single-member group should be an independent card, got issue #{issue}"
             );
+            assert_eq!(
+                members[0].2, 0,
+                "independent cards should start in batch phase 0"
+            );
             independent_groups += 1;
         } else {
             // This must be the dependency chain group
@@ -7180,8 +7207,9 @@ async fn parallel_generate_creates_correct_thread_groups() {
     // Verify the chain group: issues 4,5,6,7 in topological order
     let chain = chain_group.expect("dependency chain group must exist");
     let mut chain_members = groups[&chain].clone();
-    chain_members.sort_by_key(|(_, rank)| *rank);
-    let chain_issues: Vec<i64> = chain_members.iter().map(|(num, _)| *num).collect();
+    chain_members.sort_by_key(|(_, rank, _)| *rank);
+    let chain_issues: Vec<i64> = chain_members.iter().map(|(num, _, _)| *num).collect();
+    let chain_phases: Vec<i64> = chain_members.iter().map(|(_, _, phase)| *phase).collect();
     // Issue #4 must come first (rank 0), #5 second, then #6 and #7 (order between 6,7 may vary
     // since #7 depends on both #5 and #6, making #6 and #7 at different levels)
     assert_eq!(chain_issues[0], 4, "chain start (#4) must have lowest rank");
@@ -7189,6 +7217,11 @@ async fn parallel_generate_creates_correct_thread_groups() {
     // #6 depends on #5, #7 depends on #5 and #6 — so #6 before #7
     assert_eq!(chain_issues[2], 6, "#6 depends on #5, must be third");
     assert_eq!(chain_issues[3], 7, "#7 depends on #5 and #6, must be last");
+    assert_eq!(
+        chain_phases,
+        vec![0, 1, 2, 3],
+        "dependency chain should advance one batch phase at a time"
+    );
 }
 
 #[tokio::test]
@@ -7738,7 +7771,7 @@ async fn auto_queue_generate_entries_payload_persists_batch_phases() {
 }
 
 #[tokio::test]
-async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads() {
+async fn generate_smart_planner_groups_by_file_paths_and_recommends_threads() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_similarity_group_cards(&db);
@@ -7754,8 +7787,6 @@ async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads()
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
-                        "mode": "similarity-aware",
-                        "parallel": true,
                     }))
                     .unwrap(),
                 ))
@@ -7787,10 +7818,7 @@ async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads()
         3,
         "recommended concurrency should match the number of distinct runnable groups"
     );
-    assert_eq!(
-        run["ai_model"].as_str().unwrap(),
-        "similarity-aware-thread-group"
-    );
+    assert_eq!(run["ai_model"].as_str().unwrap(), "smart-planner");
 
     let similarity_reason_count = entries
         .iter()
@@ -7835,7 +7863,7 @@ async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn generate_similarity_aware_without_file_paths_falls_back_to_dependency_only_groups() {
+async fn generate_smart_planner_without_file_paths_uses_dependency_only_groups() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_parallel_test_cards(&db);
@@ -7850,8 +7878,6 @@ async fn generate_similarity_aware_without_file_paths_falls_back_to_dependency_o
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
-                        "mode": "similarity-aware",
-                        "parallel": true,
                     }))
                     .unwrap(),
                 ))
@@ -7876,16 +7902,13 @@ async fn generate_similarity_aware_without_file_paths_falls_back_to_dependency_o
     assert_eq!(
         run["thread_group_count"].as_i64().unwrap(),
         4,
-        "without file paths, similarity-aware must fall back to dependency-only grouping"
+        "without file paths, smart planner must fall back to dependency-only grouping"
     );
-    assert_eq!(
-        run["ai_model"].as_str().unwrap(),
-        "similarity-aware-thread-group"
-    );
+    assert_eq!(run["ai_model"].as_str().unwrap(), "smart-planner");
     assert!(
         run["ai_rationale"]
             .as_str()
-            .map(|text| text.contains("fallback"))
+            .map(|text| text.contains("파일 경로 신호 없이"))
             .unwrap_or(false),
         "rationale should explain the dependency-only fallback"
     );
@@ -7901,7 +7924,7 @@ async fn generate_similarity_aware_without_file_paths_falls_back_to_dependency_o
 }
 
 #[tokio::test]
-async fn priority_sort_default_keeps_similarity_candidates_in_single_group() {
+async fn generate_ignores_legacy_mode_and_still_uses_smart_planner() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_similarity_group_cards(&db);
@@ -7916,6 +7939,7 @@ async fn priority_sort_default_keeps_similarity_candidates_in_single_group() {
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
+                        "mode": "pm-assisted",
                     }))
                     .unwrap(),
                 ))
@@ -7932,20 +7956,25 @@ async fn priority_sort_default_keeps_similarity_candidates_in_single_group() {
 
     let run = &json["run"];
     let entries = json["entries"].as_array().expect("entries must be array");
-    assert_eq!(run["thread_group_count"], 1);
-    assert_eq!(run["max_concurrent_threads"], 1);
-    assert_eq!(run["ai_model"], "priority-sort");
+    assert_eq!(run["thread_group_count"], 3);
+    assert_eq!(run["max_concurrent_threads"], 3);
+    assert_eq!(run["ai_model"], "smart-planner");
     assert!(
-        entries
-            .iter()
-            .all(|entry| entry["thread_group"].as_i64().unwrap() == 0),
-        "default priority-sort should keep a single sequential group"
+        !entries.is_empty(),
+        "legacy mode input should be ignored rather than triggering PM-assisted flow"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn parallel_activate_dispatches_multiple_groups() {
+async fn smart_activate_dispatches_multiple_groups() {
     crate::pipeline::ensure_loaded();
+
+    let (repo, _repo_guard) = setup_test_repo();
+    let config_dir = write_repo_mapping_config(&[("test-repo", repo.path())]);
+    let _config_guard = EnvVarGuard::set_path(
+        "AGENTDESK_CONFIG",
+        &config_dir.path().join("agentdesk.yaml"),
+    );
 
     let db = test_db();
     let engine = test_engine(&db);
@@ -7953,7 +7982,7 @@ async fn parallel_activate_dispatches_multiple_groups() {
 
     let app = test_api_router(db.clone(), engine.clone(), None);
 
-    // Step 1: Generate with parallel mode (no agent_id filter — cards have mixed agents)
+    // Step 1: Generate with the smart planner (no agent_id filter — cards have mixed agents)
     let resp = app
         .clone()
         .oneshot(
@@ -7964,7 +7993,6 @@ async fn parallel_activate_dispatches_multiple_groups() {
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
-                        "parallel": true,
                         "max_concurrent_threads": 3,
                         "max_concurrent_per_agent": 3,
                     }))
@@ -8052,14 +8080,13 @@ async fn parallel_activate_dispatches_multiple_groups() {
 }
 
 #[tokio::test]
-async fn parallel_false_keeps_single_group_sequential() {
+async fn generate_ignores_legacy_parallel_toggle_and_keeps_smart_groups() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_parallel_test_cards(&db);
 
     let app = test_api_router(db, engine, None);
 
-    // Generate WITHOUT parallel — should put all entries in group 0
     let resp = app
         .oneshot(
             Request::builder()
@@ -8086,16 +8113,18 @@ async fn parallel_false_keeps_single_group_sequential() {
     let entries = json["entries"].as_array().unwrap();
     let run = &json["run"];
 
-    // All entries should be in thread_group 0
-    for entry in entries {
-        assert_eq!(
-            entry["thread_group"].as_i64().unwrap(),
-            0,
-            "non-parallel mode: all entries must be in group 0"
-        );
-    }
-    assert_eq!(run["thread_group_count"], 1);
-    assert_eq!(run["max_concurrent_threads"], 1);
+    let distinct_groups = entries
+        .iter()
+        .map(|entry| entry["thread_group"].as_i64().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(run["thread_group_count"], 4);
+    assert_eq!(run["max_concurrent_threads"], 4);
+    assert_eq!(run["ai_model"], "smart-planner");
+    assert_eq!(
+        distinct_groups.len(),
+        4,
+        "legacy parallel=false should be ignored in favor of smart grouping"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8507,6 +8536,7 @@ async fn resume_run_skips_phase_gate_blocked_runs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_ignores_legacy_max_concurrent_per_agent() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
 
     let db = test_db();
     let engine = test_engine(&db);
@@ -9313,6 +9343,7 @@ async fn rereview_clears_stale_review_fields() {
 #[tokio::test]
 async fn rereview_resets_repeated_finding_round_markers() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-acr-reset");
@@ -9473,6 +9504,7 @@ async fn idle_sync_preserves_repeated_finding_round_markers() {
 #[tokio::test]
 async fn rereview_backlog_card_transitions_to_review_with_dispatch() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-backlog-rr");
