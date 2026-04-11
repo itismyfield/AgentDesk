@@ -1,4 +1,7 @@
+pub mod runtime;
+
 use serde::Serialize;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 
 use crate::db::{
@@ -232,96 +235,103 @@ impl AutoQueueService {
             .map_err(|error| ServiceError::internal(format!("count cards: {error}")))
     }
 
-    pub fn status(&self, input: StatusInput) -> ServiceResult<AutoQueueStatusResponse> {
+    pub fn run_view(&self, run_id: &str) -> ServiceResult<Option<AutoQueueRunView>> {
         let conn = self
             .db
             .read_conn()
             .map_err(|error| ServiceError::internal(format!("{error}")))?;
-        let filter = StatusFilter {
-            repo: input.repo.clone(),
-            agent_id: input.agent_id.clone(),
-        };
-        let Some(run_id) = auto_queue::find_latest_run_id(&conn, &filter)
-            .map_err(|error| ServiceError::internal(format!("load latest run: {error}")))?
+        auto_queue::get_run(&conn, run_id)
+            .map(|record| record.map(AutoQueueRunView::from))
+            .map_err(|error| ServiceError::internal(format!("load run: {error}")))
+    }
+
+    pub fn run_json(&self, run_id: &str) -> ServiceResult<Value> {
+        Ok(self
+            .run_view(run_id)?
+            .map(|run| json!(run))
+            .unwrap_or(Value::Null))
+    }
+
+    pub fn entry_view(
+        &self,
+        entry_id: &str,
+        guild_id: Option<&str>,
+    ) -> ServiceResult<Option<AutoQueueStatusEntryView>> {
+        let conn = self
+            .db
+            .read_conn()
+            .map_err(|error| ServiceError::internal(format!("{error}")))?;
+        let Some(record) = auto_queue::get_status_entry(&conn, entry_id)
+            .map_err(|error| ServiceError::internal(format!("load status entry: {error}")))?
         else {
-            return Ok(AutoQueueStatusResponse::default());
+            return Ok(None);
         };
-        let Some(run) = auto_queue::get_run(&conn, &run_id)
+        let mut agent_bindings_cache = HashMap::new();
+        Ok(Some(build_entry_view(
+            &conn,
+            record,
+            guild_id,
+            &mut agent_bindings_cache,
+        )?))
+    }
+
+    pub fn entry_json(&self, entry_id: &str, guild_id: Option<&str>) -> ServiceResult<Value> {
+        Ok(self
+            .entry_view(entry_id, guild_id)?
+            .map(|entry| json!(entry))
+            .unwrap_or(Value::Null))
+    }
+
+    pub fn status_for_run(
+        &self,
+        run_id: &str,
+        input: StatusInput,
+    ) -> ServiceResult<AutoQueueStatusResponse> {
+        let conn = self
+            .db
+            .read_conn()
+            .map_err(|error| ServiceError::internal(format!("{error}")))?;
+        let Some(run) = auto_queue::get_run(&conn, run_id)
             .map_err(|error| ServiceError::internal(format!("load run: {error}")))?
         else {
             return Ok(AutoQueueStatusResponse::default());
         };
+        let records = auto_queue::list_status_entries(
+            &conn,
+            run_id,
+            &StatusFilter {
+                repo: input.repo.clone(),
+                agent_id: input.agent_id.clone(),
+            },
+        )
+        .map_err(|error| ServiceError::internal(format!("load status entries: {error}")))?;
 
-        let records = auto_queue::list_status_entries(&conn, &run_id, &filter)
-            .map_err(|error| ServiceError::internal(format!("load status entries: {error}")))?;
+        build_status_response(&conn, run, records, input.guild_id.as_deref())
+    }
 
-        let mut agent_bindings_cache: HashMap<
-            String,
-            Option<crate::db::agents::AgentChannelBindings>,
-        > = HashMap::new();
-        let mut entries = Vec::with_capacity(records.len());
-        for record in records {
-            let bindings = if let Some(cached) = agent_bindings_cache.get(&record.agent_id) {
-                cached.clone()
-            } else {
-                let loaded =
-                    crate::db::agents::load_agent_channel_bindings(&conn, &record.agent_id)
-                        .map_err(|error| {
-                            ServiceError::internal(format!("load agent channel bindings: {error}"))
-                        })?;
-                agent_bindings_cache.insert(record.agent_id.clone(), loaded.clone());
-                loaded
-            };
-            let thread_links =
-                build_entry_thread_links(&record, bindings.as_ref(), input.guild_id.as_deref());
-            entries.push(AutoQueueStatusEntryView::from_record(record, thread_links));
-        }
+    pub fn status_json_for_run(&self, run_id: &str, input: StatusInput) -> ServiceResult<Value> {
+        Ok(json!(self.status_for_run(run_id, input)?))
+    }
 
-        let mut agents = BTreeMap::<String, AutoQueueStatusCounts>::new();
-        let mut thread_groups = BTreeMap::<String, AutoQueueThreadGroupView>::new();
-        for entry in &entries {
-            increment_status_counts(
-                agents.entry(entry.agent_id.clone()).or_default(),
-                entry.status.as_str(),
-            );
-
-            let group = thread_groups
-                .entry(entry.thread_group.to_string())
-                .or_default();
-            increment_thread_group_counts(group, entry.status.as_str());
-            if group
-                .reason
-                .as_deref()
-                .map(|value| value.is_empty())
-                .unwrap_or(true)
-            {
-                group.reason = entry.reason.clone();
-            }
-            group.entries.push(AutoQueueThreadGroupEntryView {
-                id: entry.id.clone(),
-                card_id: entry.card_id.clone(),
-                status: entry.status.clone(),
-                github_issue_number: entry.github_issue_number,
-                batch_phase: entry.batch_phase,
-            });
-        }
-
-        for group in thread_groups.values_mut() {
-            group.status = if group.dispatched > 0 {
-                "active".to_string()
-            } else if group.pending > 0 {
-                "pending".to_string()
-            } else {
-                "done".to_string()
-            };
-        }
-
-        Ok(AutoQueueStatusResponse {
-            run: Some(AutoQueueRunView::from(run)),
-            entries,
-            agents,
-            thread_groups,
-        })
+    pub fn status(&self, input: StatusInput) -> ServiceResult<AutoQueueStatusResponse> {
+        let run_id = {
+            let conn = self
+                .db
+                .read_conn()
+                .map_err(|error| ServiceError::internal(format!("{error}")))?;
+            auto_queue::find_latest_run_id(
+                &conn,
+                &StatusFilter {
+                    repo: input.repo.clone(),
+                    agent_id: input.agent_id.clone(),
+                },
+            )
+            .map_err(|error| ServiceError::internal(format!("load latest run: {error}")))?
+        };
+        let Some(run_id) = run_id else {
+            return Ok(AutoQueueStatusResponse::default());
+        };
+        self.status_for_run(&run_id, input)
     }
 }
 
@@ -380,6 +390,91 @@ impl AutoQueueStatusEntryView {
             thread_links,
         }
     }
+}
+
+fn build_status_response(
+    conn: &rusqlite::Connection,
+    run: AutoQueueRunRecord,
+    records: Vec<StatusEntryRecord>,
+    guild_id: Option<&str>,
+) -> ServiceResult<AutoQueueStatusResponse> {
+    let mut agent_bindings_cache: HashMap<String, Option<crate::db::agents::AgentChannelBindings>> =
+        HashMap::new();
+    let mut entries = Vec::with_capacity(records.len());
+    for record in records {
+        entries.push(build_entry_view(
+            conn,
+            record,
+            guild_id,
+            &mut agent_bindings_cache,
+        )?);
+    }
+
+    let mut agents = BTreeMap::<String, AutoQueueStatusCounts>::new();
+    let mut thread_groups = BTreeMap::<String, AutoQueueThreadGroupView>::new();
+    for entry in &entries {
+        increment_status_counts(
+            agents.entry(entry.agent_id.clone()).or_default(),
+            entry.status.as_str(),
+        );
+
+        let group = thread_groups
+            .entry(entry.thread_group.to_string())
+            .or_default();
+        increment_thread_group_counts(group, entry.status.as_str());
+        if group
+            .reason
+            .as_deref()
+            .map(|value| value.is_empty())
+            .unwrap_or(true)
+        {
+            group.reason = entry.reason.clone();
+        }
+        group.entries.push(AutoQueueThreadGroupEntryView {
+            id: entry.id.clone(),
+            card_id: entry.card_id.clone(),
+            status: entry.status.clone(),
+            github_issue_number: entry.github_issue_number,
+            batch_phase: entry.batch_phase,
+        });
+    }
+
+    for group in thread_groups.values_mut() {
+        group.status = if group.dispatched > 0 {
+            "active".to_string()
+        } else if group.pending > 0 {
+            "pending".to_string()
+        } else {
+            "done".to_string()
+        };
+    }
+
+    Ok(AutoQueueStatusResponse {
+        run: Some(AutoQueueRunView::from(run)),
+        entries,
+        agents,
+        thread_groups,
+    })
+}
+
+fn build_entry_view(
+    conn: &rusqlite::Connection,
+    record: StatusEntryRecord,
+    guild_id: Option<&str>,
+    agent_bindings_cache: &mut HashMap<String, Option<crate::db::agents::AgentChannelBindings>>,
+) -> ServiceResult<AutoQueueStatusEntryView> {
+    let bindings = if let Some(cached) = agent_bindings_cache.get(&record.agent_id) {
+        cached.clone()
+    } else {
+        let loaded = crate::db::agents::load_agent_channel_bindings(conn, &record.agent_id)
+            .map_err(|error| {
+                ServiceError::internal(format!("load agent channel bindings: {error}"))
+            })?;
+        agent_bindings_cache.insert(record.agent_id.clone(), loaded.clone());
+        loaded
+    };
+    let thread_links = build_entry_thread_links(&record, bindings.as_ref(), guild_id);
+    Ok(AutoQueueStatusEntryView::from_record(record, thread_links))
 }
 
 fn enqueueable_states_for(pipeline: &crate::pipeline::PipelineConfig) -> Vec<String> {
