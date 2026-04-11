@@ -75,7 +75,7 @@ interface KanbanTabProps {
     payload: Parameters<typeof api.patchKanbanDeferDod>[1],
   ) => Promise<void>;
   externalStatusFocus?: "review" | "blocked" | "requested" | "stalled" | null;
-  onClearPulseFocus?: () => void;
+  onClearSignalFocus?: () => void;
 }
 
 const TIMELINE_KIND_STYLE: Record<string, { bg: string; text: string }> = {
@@ -101,7 +101,7 @@ export default function KanbanTab({
   onDeleteCard,
   onPatchDeferDod,
   externalStatusFocus,
-  onClearPulseFocus,
+  onClearSignalFocus,
 }: KanbanTabProps) {
   const [repoSources, setRepoSources] = useState<KanbanRepoSource[]>([]);
   const [repoInput, setRepoInput] = useState("");
@@ -113,7 +113,7 @@ export default function KanbanTab({
   const [agentFilter, setAgentFilter] = useState("all");
   const [deptFilter, setDeptFilter] = useState("all");
   const [cardTypeFilter, setCardTypeFilter] = useState<"all" | "issue" | "review">("all");
-  const [pulseStatusFilter, setPulseStatusFilter] = useState<"all" | "review" | "blocked" | "requested" | "stalled">("all");
+  const [signalStatusFilter, setSignalStatusFilter] = useState<"all" | "review" | "blocked" | "requested" | "stalled">("all");
   const [search, setSearch] = useState("");
   const [showClosed, setShowClosed] = useState(false);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
@@ -380,7 +380,7 @@ export default function KanbanTab({
   useEffect(() => {
     if (!externalStatusFocus) return;
     setSettingsOpen(true);
-    setPulseStatusFilter(externalStatusFocus);
+    setSignalStatusFilter(externalStatusFocus);
     if (externalStatusFocus === "review") {
       setCardTypeFilter("review");
       setMobileColumnStatus("review");
@@ -391,8 +391,8 @@ export default function KanbanTab({
     } else {
       setMobileColumnStatus("in_progress");
     }
-    onClearPulseFocus?.();
-  }, [externalStatusFocus, onClearPulseFocus]);
+    onClearSignalFocus?.();
+  }, [externalStatusFocus, onClearSignalFocus]);
 
   const getAgentLabel = (agentId: string | null | undefined) => {
     if (!agentId) return tr("미할당", "Unassigned");
@@ -506,11 +506,11 @@ export default function KanbanTab({
       }
       if (cardTypeFilter === "issue" && isReviewCard(card)) return false;
       if (cardTypeFilter === "review" && !isReviewCard(card)) return false;
-      if (pulseStatusFilter === "review" && card.status !== "review") return false;
-      if (pulseStatusFilter === "blocked" && card.status !== "blocked") return false;
-      if (pulseStatusFilter === "requested" && card.status !== "requested") return false;
+      if (signalStatusFilter === "review" && card.status !== "review") return false;
+      if (signalStatusFilter === "blocked" && card.status !== "blocked") return false;
+      if (signalStatusFilter === "requested" && card.status !== "requested") return false;
       if (
-        pulseStatusFilter === "stalled"
+        signalStatusFilter === "stalled"
         && !(card.status === "in_progress" && Boolean(card.started_at) && Date.now() - ((card.started_at ?? 0) < 1e12 ? (card.started_at ?? 0) * 1000 : (card.started_at ?? 0)) > STALE_IN_PROGRESS_MS)
       ) {
         return false;
@@ -522,7 +522,7 @@ export default function KanbanTab({
         getAgentLabel(card.assignee_agent_id).toLowerCase().includes(needle)
       );
     });
-  }, [agentFilter, agentMap, cardTypeFilter, deptFilter, getAgentLabel, pulseStatusFilter, repoCards, search, selectedAgentId, showClosed]);
+  }, [agentFilter, agentMap, cardTypeFilter, deptFilter, getAgentLabel, signalStatusFilter, repoCards, search, selectedAgentId, showClosed]);
 
   const recentDoneCards = useMemo(() => {
     return repoCards
@@ -882,11 +882,11 @@ export default function KanbanTab({
   };
 
   const showDesktopDetailPanel = Boolean(selectedCard && !compactBoard);
-  const pulseFilterLabel =
-    pulseStatusFilter === "review" ? tr("리뷰 대기", "Review queue")
-      : pulseStatusFilter === "blocked" ? tr("블록됨", "Blocked")
-        : pulseStatusFilter === "requested" ? tr("수락 대기", "Waiting acceptance")
-          : pulseStatusFilter === "stalled" ? tr("진행 정체", "Stale in progress")
+  const signalFilterLabel =
+    signalStatusFilter === "review" ? tr("리뷰 대기", "Review queue")
+      : signalStatusFilter === "blocked" ? tr("블록됨", "Blocked")
+        : signalStatusFilter === "requested" ? tr("수락 대기", "Waiting acceptance")
+          : signalStatusFilter === "stalled" ? tr("진행 정체", "Stale in progress")
             : null;
 
   return (
@@ -1013,7 +1013,7 @@ export default function KanbanTab({
           </button>
         </div>
 
-        {pulseFilterLabel && (
+        {signalFilterLabel && (
           <div
             className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2"
             style={{
@@ -1022,11 +1022,11 @@ export default function KanbanTab({
             }}
           >
             <div className="text-xs" style={{ color: "#fbbf24" }}>
-              {tr("Pulse 포커스", "Pulse focus")}: {pulseFilterLabel}
+              {tr("대시보드 포커스", "Dashboard focus")}: {signalFilterLabel}
             </div>
             <button
               type="button"
-              onClick={() => setPulseStatusFilter("all")}
+              onClick={() => setSignalStatusFilter("all")}
               className="rounded-lg px-2.5 py-1 text-[11px]"
               style={{ color: "var(--th-text-muted)", border: "1px solid rgba(255,255,255,0.08)" }}
             >
@@ -1253,12 +1253,12 @@ export default function KanbanTab({
                 <option value="review">{tr("리뷰만", "Reviews only")}</option>
               </select>
               <select
-                value={pulseStatusFilter}
-                onChange={(event) => setPulseStatusFilter(event.target.value as "all" | "review" | "blocked" | "requested" | "stalled")}
+                value={signalStatusFilter}
+                onChange={(event) => setSignalStatusFilter(event.target.value as "all" | "review" | "blocked" | "requested" | "stalled")}
                 className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
                 style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
               >
-                <option value="all">{tr("Pulse 상태 전체", "All pulse states")}</option>
+                <option value="all">{tr("대시보드 신호 전체", "All dashboard signals")}</option>
                 <option value="review">{tr("리뷰 대기", "Review queue")}</option>
                 <option value="blocked">{tr("블록됨", "Blocked")}</option>
                 <option value="requested">{tr("수락 대기", "Waiting acceptance")}</option>

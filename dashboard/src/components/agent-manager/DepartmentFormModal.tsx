@@ -200,8 +200,11 @@ export default function DepartmentFormModal({
   return (
     <div
       ref={overlayRef}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "var(--th-modal-overlay)" }}
+      className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-4"
+      style={{
+        background: "var(--th-modal-overlay)",
+        paddingTop: "calc(1rem + env(safe-area-inset-top))",
+      }}
       onClick={(e) => {
         if (e.target === overlayRef.current) onClose();
       }}
@@ -210,11 +213,12 @@ export default function DepartmentFormModal({
         role="dialog"
         aria-modal="true"
         aria-label={isEdit ? tr("부서 정보 수정", "Edit Department") : tr("신규 부서 추가", "Add Department")}
-        className="w-full max-w-lg rounded-2xl p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200 max-h-[85vh] overflow-y-auto"
+        className="w-full max-w-lg max-h-full overflow-y-auto rounded-t-3xl p-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200 sm:max-h-[85vh] sm:rounded-2xl sm:p-6"
         style={{
           background: "var(--th-card-bg)",
           border: "1px solid var(--th-card-border)",
           backdropFilter: "blur(20px)",
+          paddingBottom: "max(1.25rem, calc(1.25rem + env(safe-area-inset-bottom)))",
         }}
       >
         {/* Header */}

@@ -455,14 +455,19 @@ var rules = {
       var noopMeta = _loadCardMetadata(dispatch.kanban_card_id);
       noopMeta.work_resolution_status = "noop";
       noopMeta.work_resolution_result = workResult;
+      var noopCardStatusTarget = workResult.card_status_target || "ready";
       agentdesk.db.execute(
         "UPDATE kanban_cards SET metadata = ?, blocked_reason = NULL WHERE id = ?",
         [JSON.stringify(noopMeta), dispatch.kanban_card_id]
       );
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE dispatch_id = ? AND status IN ('pending', 'dispatched')",
+        [dispatch.id]
+      );
       agentdesk.kanban.setReviewStatus(card.id, null, {suggestion_pending_at: null, awaiting_dod_at: null});
       agentdesk.reviewState.sync(card.id, "idle");
-      agentdesk.kanban.setStatus(card.id, "done", true);
-      agentdesk.log.info("[kanban] " + card.id + " " + dispatch.dispatch_type + " noop → done");
+      agentdesk.kanban.setStatus(card.id, noopCardStatusTarget, true);
+      agentdesk.log.info("[kanban] " + card.id + " " + dispatch.dispatch_type + " noop → " + noopCardStatusTarget + " (auto-queue done)");
       return;
     }
 
