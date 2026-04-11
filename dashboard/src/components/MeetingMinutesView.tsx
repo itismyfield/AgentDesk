@@ -143,7 +143,7 @@ export function pruneFixedParticipantRoleIdsForLoadedChannel(
 ): string[] {
   if (loadingChannels || !selectedChannel) return previous;
   const availableExperts = selectedChannel.available_experts ?? [];
-  if (availableExperts.length === 0) return previous;
+  if (availableExperts.length === 0) return previous.length === 0 ? previous : [];
 
   const availableRoleIds = new Set(availableExperts.map((expert) => expert.role_id));
   const next = previous.filter((roleId) => availableRoleIds.has(roleId));

@@ -1452,13 +1452,122 @@ pub fn query_dispatch_row(
 }
 
 pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
-    let _ = dispatch_id;
-    false
+    let root = match crate::cli::agentdesk_runtime_root() {
+        Some(r) => r,
+        None => return false,
+    };
+    let db_path = root.join("data/agentdesk.sqlite");
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let result: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 \
+             FROM auto_queue_entries e \
+             JOIN auto_queue_runs r ON e.run_id = r.id \
+             WHERE e.run_id = ( \
+                 SELECT e2.run_id FROM auto_queue_entries e2 \
+                 WHERE e2.dispatch_id = ?1 \
+                 ORDER BY CASE e2.status WHEN 'dispatched' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END \
+                 LIMIT 1 \
+             ) \
+             AND r.status IN ('active', 'paused') \
+             AND e.status IN ('pending', 'dispatched') \
+             AND r.unified_thread_id IS NOT NULL",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    let has_slot_table: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'auto_queue_slots'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_slot_table {
+        return result;
+    }
+    let slot_result: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 \
+             FROM auto_queue_entries e \
+             JOIN auto_queue_slots s
+               ON s.agent_id = e.agent_id
+              AND s.slot_index = e.slot_index \
+             WHERE e.dispatch_id = ?1 \
+               AND e.slot_index IS NOT NULL \
+               AND COALESCE(s.thread_id_map, '') != ''",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    result || slot_result
 }
 
 pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
-    let _ = channel_id;
-    false
+    let root = match crate::cli::agentdesk_runtime_root() {
+        Some(r) => r,
+        None => return false,
+    };
+    let db_path = root.join("data/agentdesk.sqlite");
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let channel_str = channel_id.to_string();
+    let quoted = format!("\"{}\"", channel_str);
+    let has_slot_table: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'auto_queue_slots'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if has_slot_table {
+        let slot_match: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0
+                 FROM auto_queue_slots
+                 WHERE COALESCE(thread_id_map, '') != ''
+                   AND INSTR(thread_id_map, ?1) > 0",
+                [&quoted],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if slot_match {
+            return true;
+        }
+    }
+    let scalar_match: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 \
+             FROM auto_queue_entries e \
+             JOIN auto_queue_runs r ON e.run_id = r.id \
+             WHERE r.unified_thread_channel_id = ?1 \
+             AND r.status IN ('active', 'paused') \
+             AND e.status IN ('pending', 'dispatched') \
+             AND r.unified_thread_id IS NOT NULL",
+            [&channel_str],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if scalar_match {
+        return true;
+    }
+    conn.query_row(
+        "SELECT COUNT(*) > 0 \
+         FROM auto_queue_entries e \
+         JOIN auto_queue_runs r ON e.run_id = r.id \
+         WHERE r.status IN ('active', 'paused') \
+         AND e.status IN ('pending', 'dispatched') \
+         AND r.unified_thread_id IS NOT NULL \
+         AND INSTR(r.unified_thread_id, ?1) > 0",
+        [&quoted],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
 }
 
 /// Extract thread channel ID from a channel name's `-t{15+digit}` suffix.
@@ -1479,12 +1588,43 @@ pub fn extract_thread_channel_id(channel_name: &str) -> Option<u64> {
 /// unified-thread auto-queue run. Extracts the thread channel ID from the
 /// `-t{15+digit}` suffix in the channel name.
 pub fn is_unified_thread_channel_name_active(channel_name: &str) -> bool {
-    let _ = channel_name;
-    false
+    let Some(thread_channel_id) = extract_thread_channel_id(channel_name) else {
+        return false;
+    };
+    is_unified_thread_channel_active(thread_channel_id)
 }
 
 pub fn drain_unified_thread_kill_signals() -> Vec<String> {
-    Vec::new()
+    let root = match crate::cli::agentdesk_runtime_root() {
+        Some(r) => r,
+        None => return vec![],
+    };
+    let db_path = root.join("data/agentdesk.sqlite");
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let mut stmt = match conn
+        .prepare("SELECT key, value FROM kv_meta WHERE key LIKE 'kill_unified_thread:%'")
+    {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    let entries: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    let mut channels = Vec::new();
+    for (key, _run_id) in &entries {
+        if let Some(ch) = key.strip_prefix("kill_unified_thread:") {
+            channels.push(ch.to_string());
+        }
+        conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
+            .ok();
+    }
+    channels
 }
 
 /// Determine provider from a Discord channel name suffix.

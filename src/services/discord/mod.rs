@@ -841,13 +841,16 @@ pub(super) fn mark_reconcile_complete(shared: &SharedData) {
 pub(super) type Error = Box<dyn std::error::Error + Send + Sync>;
 pub(super) type Context<'a> = poise::Context<'a, Data, Error>;
 
-fn prune_interventions(queue: &mut Vec<Intervention>) {
-    let now = Instant::now();
-    queue.retain(|i| now.duration_since(i.created_at) <= INTERVENTION_TTL);
+fn prune_interventions_at(queue: &mut Vec<Intervention>, now: Instant) {
+    queue.retain(|i| now.saturating_duration_since(i.created_at) <= INTERVENTION_TTL);
     if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
         let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
         queue.drain(0..overflow);
     }
+}
+
+fn prune_interventions(queue: &mut Vec<Intervention>) {
+    prune_interventions_at(queue, Instant::now());
 }
 
 pub(super) fn enqueue_intervention(
@@ -874,7 +877,11 @@ pub(super) fn enqueue_intervention(
 }
 
 pub(super) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> bool {
-    prune_interventions(queue);
+    has_soft_intervention_at(queue, Instant::now())
+}
+
+pub(super) fn has_soft_intervention_at(queue: &mut Vec<Intervention>, now: Instant) -> bool {
+    prune_interventions_at(queue, now);
     queue.iter().any(|item| item.mode == InterventionMode::Soft)
 }
 

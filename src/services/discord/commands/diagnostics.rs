@@ -10,7 +10,7 @@ use super::super::inflight::load_inflight_states;
 use super::super::metrics;
 use super::super::runtime_store;
 use super::super::{
-    Context, Error, Intervention, PendingQueueItem, SharedData, check_auth, has_soft_intervention,
+    Context, Error, Intervention, PendingQueueItem, SharedData, check_auth,
     mailbox_queue_snapshots, mailbox_snapshot,
 };
 use crate::services::claude;
@@ -28,7 +28,11 @@ fn tmux_session_exists(_name: &str) -> bool {
 }
 
 fn normalized_pending_queue(mut queue: Vec<Intervention>) -> Vec<Intervention> {
-    if has_soft_intervention(&mut queue) {
+    normalized_pending_queue_at(queue, Instant::now())
+}
+
+fn normalized_pending_queue_at(mut queue: Vec<Intervention>, now: Instant) -> Vec<Intervention> {
+    if crate::services::discord::has_soft_intervention_at(&mut queue, now) {
         queue
     } else {
         Vec::new()
@@ -39,13 +43,24 @@ fn pending_queue_len(queue: &[Intervention]) -> usize {
     normalized_pending_queue(queue.to_vec()).len()
 }
 
+fn pending_queue_len_at(queue: &[Intervention], now: Instant) -> usize {
+    normalized_pending_queue_at(queue.to_vec(), now).len()
+}
+
 fn normalize_pending_queues(
     queues: std::collections::HashMap<ChannelId, Vec<Intervention>>,
+) -> std::collections::HashMap<ChannelId, Vec<Intervention>> {
+    normalize_pending_queues_at(queues, Instant::now())
+}
+
+fn normalize_pending_queues_at(
+    queues: std::collections::HashMap<ChannelId, Vec<Intervention>>,
+    now: Instant,
 ) -> std::collections::HashMap<ChannelId, Vec<Intervention>> {
     queues
         .into_iter()
         .filter_map(|(channel_id, queue)| {
-            let queue = normalized_pending_queue(queue);
+            let queue = normalized_pending_queue_at(queue, now);
             if queue.is_empty() {
                 None
             } else {
@@ -753,39 +768,51 @@ mod tests {
     use crate::services::discord::InterventionMode;
     use poise::serenity_prelude::{MessageId, UserId};
 
-    fn intervention(age_secs: u64, message_id: u64, text: &str) -> Intervention {
+    fn intervention(
+        snapshot_now: Instant,
+        age_secs: u64,
+        message_id: u64,
+        text: &str,
+    ) -> Intervention {
         Intervention {
             author_id: UserId::new(1),
             message_id: MessageId::new(message_id),
             text: text.to_string(),
             mode: InterventionMode::Soft,
-            created_at: Instant::now() - Duration::from_secs(age_secs),
+            created_at: snapshot_now
+                .checked_sub(Duration::from_secs(age_secs))
+                .expect("snapshot instant should be offset far enough for the requested age"),
         }
     }
 
     #[test]
     fn pending_queue_len_prunes_expired_items() {
+        let snapshot_now = Instant::now() + Duration::from_secs(10 * 60 + 5);
         let queue = vec![
-            intervention(10 * 60 + 5, 1, "expired"),
-            intervention(30, 2, "fresh"),
+            intervention(snapshot_now, 10 * 60 + 5, 1, "expired"),
+            intervention(snapshot_now, 30, 2, "fresh"),
         ];
 
-        assert_eq!(pending_queue_len(&queue), 1);
+        assert_eq!(pending_queue_len_at(&queue, snapshot_now), 1);
     }
 
     #[test]
     fn normalize_pending_queues_drops_channels_without_live_items() {
+        let snapshot_now = Instant::now() + Duration::from_secs(10 * 60 + 1);
         let expired_channel = ChannelId::new(1);
         let fresh_channel = ChannelId::new(2);
         let queues = HashMap::from([
             (
                 expired_channel,
-                vec![intervention(10 * 60 + 1, 1, "expired-only")],
+                vec![intervention(snapshot_now, 10 * 60 + 1, 1, "expired-only")],
             ),
-            (fresh_channel, vec![intervention(15, 2, "fresh")]),
+            (
+                fresh_channel,
+                vec![intervention(snapshot_now, 15, 2, "fresh")],
+            ),
         ]);
 
-        let normalized = normalize_pending_queues(queues);
+        let normalized = normalize_pending_queues_at(queues, snapshot_now);
 
         assert!(!normalized.contains_key(&expired_channel));
         assert_eq!(

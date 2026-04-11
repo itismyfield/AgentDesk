@@ -13,7 +13,7 @@ use crate::services::discord::restart_report::{
 use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
-    fold_read_output_result, register_child_pid,
+    fold_read_output_result, is_readonly_tool_policy, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
@@ -85,7 +85,7 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let args = base_exec_args(None, prompt, None);
+    let args = base_exec_args(None, prompt, None, false);
     let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let mut command = Command::new(&codex_bin);
@@ -162,6 +162,7 @@ pub fn execute_command_streaming(
     model: Option<&str>,
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
+    let readonly_mode = is_readonly_tool_policy(allowed_tools);
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
 
     if let Some(profile) = remote_profile {
@@ -238,6 +239,7 @@ pub fn execute_command_streaming(
         cancel_token,
         report_channel_id,
         report_provider,
+        readonly_mode,
         compact_token_limit,
     )
 }
@@ -259,6 +261,7 @@ fn execute_streaming_direct(
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    readonly_mode: bool,
     compact_token_limit: Option<u64>,
 ) -> Result<(), String> {
     let resolution = resolve_codex_binary();
@@ -266,7 +269,7 @@ fn execute_streaming_direct(
         .resolved_path
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let mut args = base_exec_args(session_id, prompt, model);
+    let mut args = base_exec_args(session_id, prompt, model, readonly_mode);
     if let Some(limit) = compact_token_limit.filter(|&l| l > 0) {
         // Insert -c config before the "exec" subcommand.
         let exec_pos = args.iter().position(|a| a == "exec").unwrap_or(0);
@@ -808,7 +811,12 @@ fn execute_streaming_local_process_codex(
     Ok(())
 }
 
-fn base_exec_args(session_id: Option<&str>, prompt: &str, model: Option<&str>) -> Vec<String> {
+fn base_exec_args(
+    session_id: Option<&str>,
+    prompt: &str,
+    model: Option<&str>,
+    readonly_mode: bool,
+) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
         args.push("-c".to_string());
@@ -821,13 +829,13 @@ fn base_exec_args(session_id: Option<&str>, prompt: &str, model: Option<&str>) -
         args.push("resume".to_string());
         args.push(existing_thread_id.to_string());
     }
-    args.extend([
-        "--skip-git-repo-check".to_string(),
-        "--json".to_string(),
-        "--dangerously-bypass-approvals-and-sandbox".to_string(),
-        "--".to_string(),
-        prompt.to_string(),
-    ]);
+    args.extend(["--skip-git-repo-check".to_string(), "--json".to_string()]);
+    if readonly_mode {
+        args.extend(["--sandbox".to_string(), "read-only".to_string()]);
+    } else {
+        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+    }
+    args.extend(["--".to_string(), prompt.to_string()]);
     args
 }
 
@@ -1118,7 +1126,7 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_includes_model_before_exec() {
-        let args = base_exec_args(None, "- starts like option", Some("gpt-5-codex"));
+        let args = base_exec_args(None, "- starts like option", Some("gpt-5-codex"), false);
         assert!(args.starts_with(&[
             "-c".to_string(),
             r#"model_reasoning_effort="high""#.to_string(),
@@ -1144,7 +1152,7 @@ mod tests {
 
     #[test]
     fn test_base_exec_args_includes_resume_before_flags() {
-        let args = base_exec_args(Some("thread-123"), "hello", None);
+        let args = base_exec_args(Some("thread-123"), "hello", None, false);
         assert_eq!(
             args,
             vec![
@@ -1157,6 +1165,20 @@ mod tests {
                 "--".to_string(),
                 "hello".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_base_exec_args_uses_readonly_sandbox_when_requested() {
+        let args = base_exec_args(None, "readonly", None, true);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox")
         );
     }
 

@@ -15,7 +15,7 @@ use crate::services::process::{
 };
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
-    fold_read_output_result, register_child_pid,
+    fold_read_output_result, is_readonly_tool_policy, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
@@ -146,13 +146,13 @@ pub fn execute_command(
     working_dir: &str,
     allowed_tools: Option<&[String]>,
 ) -> ClaudeResponse {
+    let readonly_mode = is_readonly_tool_policy(allowed_tools);
     let tools_str = match allowed_tools {
         Some(tools) => tools.join(","),
         None => DEFAULT_ALLOWED_TOOLS.join(","),
     };
     let mut args = vec![
         "-p".to_string(),
-        "--dangerously-skip-permissions".to_string(),
         "--tools".to_string(),
         tools_str,
         "--output-format".to_string(),
@@ -186,6 +186,12 @@ IMPORTANT: Format your responses using Markdown for better readability:
 - Use headers (## Title) to organize longer responses
 - Keep formatting minimal and terminal-friendly"#.to_string(),
     ];
+    if readonly_mode {
+        args.push("--permission-mode".to_string());
+        args.push("plan".to_string());
+    } else {
+        args.insert(1, "--dangerously-skip-permissions".to_string());
+    }
 
     // Resume session if available
     if let Some(sid) = session_id {
@@ -485,15 +491,21 @@ IMPORTANT: Format your responses using Markdown for better readability:
         Some(tools) => tools.join(","),
         None => DEFAULT_ALLOWED_TOOLS.join(","),
     };
+    let readonly_mode = is_readonly_tool_policy(allowed_tools);
     let mut args = vec![
         "-p".to_string(),
-        "--dangerously-skip-permissions".to_string(),
         "--tools".to_string(),
         tools_str,
         "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
     ];
+    if readonly_mode {
+        args.push("--permission-mode".to_string());
+        args.push("plan".to_string());
+    } else {
+        args.insert(1, "--dangerously-skip-permissions".to_string());
+    }
 
     // Apply model override if specified (e.g. "opus", "sonnet", "haiku")
     if let Some(model) = model_override {

@@ -669,7 +669,7 @@ fn build_exec_args(
         args.push("--sandbox".to_string());
         args.push("true".to_string());
         args.push("--approval-mode".to_string());
-        args.push("plan".to_string());
+        args.push("default".to_string());
         args.push("--admin-policy".to_string());
         args.push(
             ensure_gemini_meeting_readonly_policy_file()?
@@ -915,12 +915,12 @@ mod tests {
     }
 
     #[test]
-    fn build_exec_args_uses_plan_mode_for_readonly_sessions() {
+    fn build_exec_args_uses_default_mode_with_admin_policy_for_readonly_sessions() {
         let args = build_exec_args("hello", Some("gemini-2.5-flash"), None, true).expect("args");
         assert!(args.windows(2).any(|pair| pair == ["--sandbox", "true"]));
         assert!(
             args.windows(2)
-                .any(|pair| pair == ["--approval-mode", "plan"])
+                .any(|pair| pair == ["--approval-mode", "default"])
         );
         let policy_path = args
             .windows(2)

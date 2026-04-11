@@ -124,6 +124,13 @@ describe("pruneFixedParticipantRoleIdsForLoadedChannel", () => {
 
     expect(next).toEqual(["td", "pd"]);
   });
+
+  it("clears stale fixed participants when the selected channel has no available experts", () => {
+    const previous = ["td", "pd"];
+    const next = pruneFixedParticipantRoleIdsForLoadedChannel(previous, false, channel([]));
+
+    expect(next).toEqual([]);
+  });
 });
 
 describe("filterMeetingExpertsByQuery", () => {

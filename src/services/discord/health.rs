@@ -264,6 +264,13 @@ pub async fn clear_provider_channel_runtime(
 
 /// Build the health check snapshot for the API response.
 pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSnapshot {
+    build_health_snapshot_at(registry, Instant::now()).await
+}
+
+async fn build_health_snapshot_at(
+    registry: &HealthRegistry,
+    now: Instant,
+) -> DiscordHealthSnapshot {
     let uptime_secs = registry.started_at.elapsed().as_secs();
     let version = env!("CARGO_PKG_VERSION");
 
@@ -297,7 +304,7 @@ pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSn
             .values()
             .map(|snapshot| {
                 let mut queue = snapshot.intervention_queue.clone();
-                if super::has_soft_intervention(&mut queue) {
+                if super::has_soft_intervention_at(&mut queue, now) {
                     queue.len()
                 } else {
                     0
@@ -533,7 +540,7 @@ impl TestHealthHarness {
         .await;
     }
 
-    pub(crate) async fn set_queue_ages_secs(&self, ages_secs: &[u64]) {
+    pub(crate) async fn set_queue_ages_secs(&self, ages_secs: &[u64]) -> Instant {
         super::mailbox_replace_queue(
             &self.shared,
             &ProviderKind::Claude,
@@ -542,9 +549,10 @@ impl TestHealthHarness {
         )
         .await;
         if ages_secs.is_empty() {
-            return;
+            return Instant::now();
         }
-        let now = Instant::now();
+        let max_age_secs = ages_secs.iter().copied().max().unwrap_or(0);
+        let snapshot_now = Instant::now() + std::time::Duration::from_secs(max_age_secs);
         let queue = ages_secs
             .iter()
             .enumerate()
@@ -553,7 +561,9 @@ impl TestHealthHarness {
                 message_id: serenity::MessageId::new(idx as u64 + 1),
                 text: format!("queued-aged-{idx}"),
                 mode: super::InterventionMode::Soft,
-                created_at: now - std::time::Duration::from_secs(*age_secs),
+                created_at: snapshot_now
+                    .checked_sub(std::time::Duration::from_secs(*age_secs))
+                    .expect("snapshot instant should be offset far enough for the requested age"),
             })
             .collect::<Vec<_>>();
         super::mailbox_replace_queue(
@@ -563,6 +573,7 @@ impl TestHealthHarness {
             queue,
         )
         .await;
+        snapshot_now
     }
 }
 
@@ -1312,11 +1323,11 @@ mod tests {
     async fn health_snapshot_ignores_expired_queue_items() {
         let harness = TestHealthHarness::new().await;
         let expired_age = crate::services::discord::INTERVENTION_TTL.as_secs() + 5;
-        harness
+        let snapshot_now = harness
             .set_queue_ages_secs(&[expired_age, expired_age + 10])
             .await;
 
-        let snapshot = build_health_snapshot(&harness.registry()).await;
+        let snapshot = build_health_snapshot_at(&harness.registry(), snapshot_now).await;
         let json = serde_json::to_value(&snapshot).unwrap();
 
         assert_eq!(snapshot.status(), HealthStatus::Healthy);

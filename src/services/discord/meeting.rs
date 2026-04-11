@@ -507,6 +507,36 @@ fn merge_selected_participants(
     Ok(participants)
 }
 
+fn validate_fixed_participants(
+    config: &MeetingConfig,
+    fixed_role_ids: &[String],
+    max_participants: usize,
+) -> Result<(), String> {
+    let fixed_role_ids = normalize_role_ids(fixed_role_ids);
+    if fixed_role_ids.len() > max_participants {
+        return Err(format!(
+            "Too many fixed participants: {} (max {})",
+            fixed_role_ids.len(),
+            max_participants
+        ));
+    }
+
+    let known_role_ids: HashSet<&str> = config
+        .available_agents
+        .iter()
+        .map(|agent| agent.role_id.as_str())
+        .collect();
+    for role_id in fixed_role_ids {
+        if !known_role_ids.contains(role_id.as_str()) {
+            return Err(format!(
+                "Unknown fixed meeting participant role_id: {role_id}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn truncate_for_meeting(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max_chars {
@@ -753,7 +783,7 @@ pub(crate) async fn start_meeting_with_reviewer(
         .send_message(
             http,
             CreateMessage::new().content(format!(
-                "📋 **라운드 테이블 회의 시작**\n안건: {}\n회의 해시: {}{}\n진행 모델: {} / 교차검증: {}\n참여자 선정 중...",
+                "📋 **라운드 테이블 회의 시작**\n안건: {}\n회의 해시: {}{}\n진행 프로바이더: {} / 리뷰 프로바이더: {}\n참여자 선정 중...",
                 agenda,
                 meeting_hash,
                 thread_hash_line,
@@ -924,9 +954,9 @@ pub(crate) async fn spawn_direct_start(
         return Err("reviewer_provider must differ from primary_provider".to_string());
     }
 
-    if load_meeting_config().is_none() {
-        return Err("Meeting config not found in org.yaml or role_map.json".to_string());
-    }
+    let config = load_meeting_config()
+        .ok_or_else(|| "Meeting config not found in org.yaml or role_map.json".to_string())?;
+    validate_fixed_participants(&config, &fixed_participants, config.max_participants)?;
 
     {
         let core = shared.core.lock().await;
@@ -1044,7 +1074,7 @@ pub(super) async fn meeting_status(
                 .send_message(
                     http,
                     CreateMessage::new().content(format!(
-                        "📊 **회의 현황**\n안건: {}\n상태: {}\n진행 모델: {} / 교차검증: {}\n라운드: {}/{}\n참여자: {}명\n발언: {}개",
+                        "📊 **회의 현황**\n안건: {}\n상태: {}\n진행 프로바이더: {} / 리뷰 프로바이더: {}\n라운드: {}/{}\n참여자: {}명\n발언: {}개",
                         agenda,
                         status_str,
                         primary.display_name(),
@@ -2053,7 +2083,7 @@ fn build_meeting_markdown(m: &Meeting) -> String {
     };
 
     format!(
-        "---\ntags: [meeting, cookingheart]\ndate: {date}\nstatus: {status}\nparticipants: [{participants}]\nagenda: \"{agenda}\"\nmeeting_id: {id}\nmeeting_hash: \"{meeting_hash}\"\nthread_id: {thread_id}\nthread_hash: {thread_hash_frontmatter}\nprimary_provider: {primary_provider}\nreviewer_provider: {reviewer_provider}\nauto_memory_write: false\nauto_memory_capture: false\nmemory_postprocessing_policy: approval_required\n---\n\n# 회의록: {agenda}\n\n> **날짜**: {datetime}\n> **참여자**: {participants}\n> **라운드**: {rounds}/{max_rounds}\n> **상태**: {status}\n> **회의 해시**: {meeting_hash}\n> **스레드 해시**: {thread_hash_display}\n> **진행 모델**: {primary_provider}\n> **교차검증**: {reviewer_provider}\n> **메모리 후처리**: 자동 memory write/capture 비활성화, 승인 기반만 허용\n\n---\n\n## 요약\n\n{summary}\n\n---\n\n## 전체 발언 기록\n\n{transcript}\n",
+        "---\ntags: [meeting, cookingheart]\ndate: {date}\nstatus: {status}\nparticipants: [{participants}]\nagenda: \"{agenda}\"\nmeeting_id: {id}\nmeeting_hash: \"{meeting_hash}\"\nthread_id: {thread_id}\nthread_hash: {thread_hash_frontmatter}\nprimary_provider: {primary_provider}\nreviewer_provider: {reviewer_provider}\nauto_memory_write: false\nauto_memory_capture: false\nmemory_postprocessing_policy: approval_required\n---\n\n# 회의록: {agenda}\n\n> **날짜**: {datetime}\n> **참여자**: {participants}\n> **라운드**: {rounds}/{max_rounds}\n> **상태**: {status}\n> **회의 해시**: {meeting_hash}\n> **스레드 해시**: {thread_hash_display}\n> **진행 프로바이더**: {primary_provider}\n> **리뷰 프로바이더**: {reviewer_provider}\n> **메모리 후처리**: 자동 memory write/capture 비활성화, 승인 기반만 허용\n\n---\n\n## 요약\n\n{summary}\n\n---\n\n## 전체 발언 기록\n\n{transcript}\n",
         date = date_str,
         status = status_str,
         participants = participants_inline,

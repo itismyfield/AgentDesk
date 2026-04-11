@@ -607,7 +607,7 @@ pub(super) async fn restore_inflight_turns(
                             .entry(channel_id)
                             .or_insert_with(|| DiscordSession {
                                 session_id: state.session_id.clone(),
-                                memento_context_loaded: state.session_id.is_some(),
+                                memento_context_loaded: false,
                                 memento_reflected: false,
                                 current_path: None,
                                 history: Vec::new(),
@@ -1143,7 +1143,7 @@ pub(super) async fn restore_inflight_turns(
                     .entry(channel_id)
                     .or_insert_with(|| DiscordSession {
                         session_id: state.session_id.clone(),
-                        memento_context_loaded: state.session_id.is_some(),
+                        memento_context_loaded: false,
                         memento_reflected: false,
                         current_path: None,
                         history: Vec::new(),
@@ -1254,7 +1254,7 @@ pub(super) async fn restore_inflight_turns(
                 .entry(channel_id)
                 .or_insert_with(|| DiscordSession {
                     session_id: state.session_id.clone(),
-                    memento_context_loaded: state.session_id.is_some(),
+                    memento_context_loaded: false,
                     memento_reflected: false,
                     current_path: None,
                     history: Vec::new(),
