@@ -107,6 +107,32 @@ mod tests {
         }
     }
 
+    struct GeminiPathOverride {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl GeminiPathOverride {
+        fn new(path: &std::path::Path) -> Self {
+            let guard = crate::services::discord::runtime_store::lock_test_env();
+            let previous = std::env::var_os("AGENTDESK_GEMINI_PATH");
+            unsafe { std::env::set_var("AGENTDESK_GEMINI_PATH", path) };
+            Self {
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for GeminiPathOverride {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_GEMINI_PATH", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_GEMINI_PATH") },
+            }
+        }
+    }
+
     impl Drop for RuntimeRootOverride {
         fn drop(&mut self) {
             match self.previous.take() {
@@ -572,6 +598,14 @@ mod tests {
 
         script.push_str("echo '[]'\n");
         script
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &std::path::Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
     }
 
     #[cfg(windows)]
@@ -3549,5 +3583,89 @@ mod tests {
         };
         assert_eq!(entry_status, "dispatched");
         assert_eq!(entry_dispatch_id, latest_dispatch_id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gemini_streaming_cancel_integration_stops_after_partial_output() {
+        use std::sync::Arc;
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let gemini_path = dir.path().join("gemini");
+        write_executable_script(
+            &gemini_path,
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' '{"type":"init","session_id":"latest","model":"gemini-2.5-flash"}'
+printf '%s\n' '{"type":"message","role":"assistant","content":"partial"}'
+while true; do
+  printf '%s\n' 'heartbeat'
+  sleep 0.05
+done
+"#,
+        );
+        let _gemini_override = GeminiPathOverride::new(&gemini_path);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let token_for_thread = token.clone();
+        let working_dir = dir.path().display().to_string();
+        let started_at = Instant::now();
+        let handle = std::thread::spawn(move || {
+            crate::services::gemini::execute_command_streaming(
+                "say hello",
+                None,
+                &working_dir,
+                tx,
+                None,
+                None,
+                Some(token_for_thread),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        });
+
+        match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            crate::services::agent_protocol::StreamMessage::Init { session_id } => {
+                assert_eq!(session_id, "latest");
+            }
+            other => panic!("expected Init, got {:?}", other),
+        }
+        match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            crate::services::agent_protocol::StreamMessage::Text { content } => {
+                assert_eq!(content, "partial");
+            }
+            other => panic!("expected Text, got {:?}", other),
+        }
+
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let result = handle.join().unwrap();
+        assert!(result.is_ok());
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "cancellation should complete without waiting for provider shutdown"
+        );
+
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+                Ok(crate::services::agent_protocol::StreamMessage::Done { .. }) => {
+                    panic!("unexpected terminal Done after cancellation")
+                }
+                Ok(crate::services::agent_protocol::StreamMessage::Error { message, .. }) => {
+                    panic!("unexpected terminal Error after cancellation: {message}")
+                }
+                Ok(_) => {}
+            }
+        }
     }
 }
