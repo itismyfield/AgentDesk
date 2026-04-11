@@ -21,7 +21,7 @@ pub(crate) enum SharedAllowedToolKind {
     WebSearch,
     Skill,
     AskUserQuestion,
-    ExitPlanMode,
+    PlanMode,
 }
 
 pub(crate) fn spawn_line_stream_reader<R>(
@@ -67,7 +67,7 @@ pub(crate) fn resolve_shared_allowed_tool_compat(tool: &str) -> Option<SharedAll
         "WebSearch" => Some(SharedAllowedToolKind::WebSearch),
         "Skill" => Some(SharedAllowedToolKind::Skill),
         "AskUserQuestion" => Some(SharedAllowedToolKind::AskUserQuestion),
-        "EnterPlanMode" | "ExitPlanMode" => Some(SharedAllowedToolKind::ExitPlanMode),
+        "EnterPlanMode" | "ExitPlanMode" => Some(SharedAllowedToolKind::PlanMode),
         _ => None,
     }
 }
@@ -111,7 +111,7 @@ mod tests {
         );
         assert_eq!(
             resolve_shared_allowed_tool_compat("EnterPlanMode"),
-            Some(SharedAllowedToolKind::ExitPlanMode)
+            Some(SharedAllowedToolKind::PlanMode)
         );
         assert_eq!(
             resolve_shared_allowed_tool_compat("AskUserQuestion"),
