@@ -311,26 +311,74 @@ pub(super) fn find_discord_bot_by_token(token: &str) -> Option<ResolvedDiscordBo
 /// Only these bots should be launched as full agent bots via `run_bot()`.
 /// Utility bots (e.g. announce, notify) that aren't mapped to any agent channel
 /// are excluded, preventing them from processing agent messages.
+///
+/// Supported launchable shapes:
+/// - legacy provider-named bots (`claude`, `codex`, ...)
+/// - onboarding-managed alias bots (`command`, `command_2`, ...)
+/// - bots explicitly scoped to agent channel IDs
+/// - bots explicitly pinned to a concrete agent id
 pub(super) fn collect_agent_bot_names() -> HashSet<String> {
     let Some(config) = load_agentdesk_config() else {
         return HashSet::new();
     };
-    let mut names = HashSet::new();
+
+    let mut provider_keys = HashSet::new();
+    let mut agent_ids = HashSet::new();
+    let mut concrete_channel_ids = HashSet::new();
     for agent in &config.agents {
-        if agent.channels.claude.is_some() {
-            names.insert("claude".to_string());
-        }
-        if agent.channels.codex.is_some() {
-            names.insert("codex".to_string());
-        }
-        if agent.channels.gemini.is_some() {
-            names.insert("gemini".to_string());
-        }
-        if agent.channels.qwen.is_some() {
-            names.insert("qwen".to_string());
+        agent_ids.insert(agent.id.trim().to_ascii_lowercase());
+        for (provider_key, channel) in agent.channels.iter() {
+            let Some(channel) = channel else {
+                continue;
+            };
+            if channel.target().is_some() {
+                provider_keys.insert(provider_key.to_ascii_lowercase());
+            }
+            if let Some(channel_id) = channel
+                .channel_id()
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                concrete_channel_ids.insert(channel_id);
+            }
         }
     }
-    names
+
+    config
+        .discord
+        .bots
+        .iter()
+        .filter_map(|(name, bot)| {
+            let normalized_name = name.trim().to_ascii_lowercase();
+            let normalized_provider = bot
+                .provider
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase());
+            let normalized_agent = bot
+                .agent
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase());
+            let is_provider_named_bot = provider_keys.contains(&normalized_name);
+            let is_command_alias = matches!(
+                normalized_provider.as_deref(),
+                Some(provider) if provider_keys.contains(provider)
+            ) && (normalized_name == "command"
+                || normalized_name.starts_with("command_"));
+            let has_explicit_agent = normalized_agent
+                .as_deref()
+                .is_some_and(|agent_id| agent_ids.contains(agent_id));
+            let has_agent_channel_allowlist = bot
+                .auth
+                .allowed_channel_ids
+                .as_ref()
+                .is_some_and(|ids| ids.iter().any(|id| concrete_channel_ids.contains(id)));
+
+            (is_provider_named_bot
+                || is_command_alias
+                || has_explicit_agent
+                || has_agent_channel_allowlist)
+                .then(|| name.clone())
+        })
+        .collect()
 }
 
 pub(super) fn is_known_agent(role_id: &str) -> Option<bool> {

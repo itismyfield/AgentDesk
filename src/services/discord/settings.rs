@@ -2022,6 +2022,87 @@ agents:
     }
 
     #[test]
+    fn test_load_bot_launch_configs_includes_command_alias_bots_from_yaml() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home,
+                r#"
+server:
+  port: 8791
+discord:
+  owner_id: "343742347365974026"
+  bots:
+    command:
+      token: "claude-token"
+      provider: "claude"
+    command_2:
+      token: "codex-token"
+      provider: "codex"
+    notify:
+      token: "notify-token"
+      provider: "claude"
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      claude:
+        id: "1479671298497183835"
+        name: "adk-cc"
+      codex:
+        id: "1479671301387059200"
+        name: "adk-cdx"
+"#,
+            );
+
+            let mut tokens = load_discord_bot_launch_configs()
+                .into_iter()
+                .map(|cfg| cfg.token)
+                .collect::<Vec<_>>();
+            tokens.sort();
+            assert_eq!(tokens, vec!["claude-token", "codex-token"]);
+        });
+    }
+
+    #[test]
+    fn test_load_bot_launch_configs_includes_allowlisted_alias_bot_from_yaml() {
+        with_temp_home(|temp_home: &TempDir| {
+            write_agentdesk_yaml(
+                temp_home,
+                r#"
+server:
+  port: 8791
+discord:
+  owner_id: "343742347365974026"
+  bots:
+    workspace-bot:
+      token: "workspace-token"
+      provider: "claude"
+      auth:
+        allowed_channel_ids:
+          - "1479671298497183835"
+    notify:
+      token: "notify-token"
+      provider: "claude"
+agents:
+  - id: project-agentdesk
+    name: "AgentDesk"
+    provider: claude
+    channels:
+      claude:
+        id: "1479671298497183835"
+        name: "adk-cc"
+"#,
+            );
+
+            let configs = load_discord_bot_launch_configs();
+            assert_eq!(configs.len(), 1);
+            assert_eq!(configs[0].token, "workspace-token");
+            assert_eq!(configs[0].provider, ProviderKind::Claude);
+        });
+    }
+
+    #[test]
     fn test_load_bot_settings_accepts_string_encoded_ids() {
         with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".adk").join("config");
