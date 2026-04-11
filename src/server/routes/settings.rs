@@ -472,6 +472,14 @@ pub fn seed_config_defaults(conn: &rusqlite::Connection, config: &crate::config:
         }
     }
 
+    // Seed workspace_root from CARGO_MANIFEST_DIR (compile-time) for auto-merge.
+    // This is the source repo path, not a runtime override — always INSERT OR IGNORE.
+    conn.execute(
+        "INSERT OR IGNORE INTO kv_meta (key, value) VALUES ('workspace_root', ?1)",
+        [env!("CARGO_MANIFEST_DIR")],
+    )
+    .ok();
+
     crate::services::settings::seed_runtime_config_defaults(conn, config);
     crate::server::routes::escalation::seed_escalation_defaults(conn, config);
 
