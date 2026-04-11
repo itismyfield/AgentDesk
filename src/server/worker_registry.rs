@@ -278,7 +278,7 @@ impl SupervisedWorkerRegistry {
             );
             match step.id {
                 BootStepId::RefreshMemoryHealth => {
-                    super::refresh_memory_health_for_startup().await;
+                    super::tick::refresh_memory_health_for_startup().await;
                 }
                 BootStepId::DrainStartupHooks => {
                     self.engine.drain_startup_hooks();
@@ -349,7 +349,7 @@ impl SupervisedWorkerRegistry {
                 let sync_db = self.db.clone();
                 let sync_engine = self.engine.clone();
                 self.register_tokio(spec, async move {
-                    super::github_sync_loop(sync_db, sync_engine, sync_interval).await;
+                    super::background::github_sync_loop(sync_db, sync_engine, sync_interval).await;
                 });
                 Ok(None)
             }
@@ -364,14 +364,14 @@ impl SupervisedWorkerRegistry {
                             eprintln!("Fatal: failed to create policy-tick runtime: {e}");
                             std::process::exit(1);
                         });
-                    rt.block_on(super::policy_tick_loop(tick_engine, tick_db));
+                    rt.block_on(super::tick::policy_tick_loop(tick_engine, tick_db));
                 })?;
                 Ok(None)
             }
             ServerWorkerId::RateLimitSync => {
                 let rate_limit_db = self.db.clone();
                 self.register_tokio(spec, async move {
-                    super::rate_limit_sync_loop(rate_limit_db).await;
+                    super::background::rate_limit_sync_loop(rate_limit_db).await;
                 });
                 Ok(None)
             }
@@ -379,7 +379,7 @@ impl SupervisedWorkerRegistry {
                 let outbox_db = self.db.clone();
                 let outbox_port = self.config.server.port;
                 self.register_tokio(spec, async move {
-                    super::message_outbox_loop(outbox_db, outbox_port).await;
+                    super::background::message_outbox_loop(outbox_db, outbox_port).await;
                 });
                 Ok(None)
             }
@@ -393,7 +393,7 @@ impl SupervisedWorkerRegistry {
             ServerWorkerId::DmReplyRetry => {
                 let dm_retry_db = self.db.clone();
                 self.register_tokio(spec, async move {
-                    super::dm_reply_retry_loop(dm_retry_db).await;
+                    super::background::dm_reply_retry_loop(dm_retry_db).await;
                 });
                 Ok(None)
             }
