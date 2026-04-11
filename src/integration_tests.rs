@@ -756,7 +756,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn gh_log(env: &MockGhEnv) -> String {
         fs::read_to_string(&env.log_path).unwrap_or_default()
     }
@@ -2523,6 +2522,82 @@ mod tests {
         let (state, _, _) = get_review_state(&db, "card-review-disabled")
             .expect("terminal transition must sync canonical review state");
         assert_eq!(state, "idle");
+    }
+
+    #[test]
+    fn scenario_review_disabled_on_review_enter_closes_issue_and_completes_auto_queue_run() {
+        let gh = install_mock_gh(&[MockGhReply {
+            key: "issue:close",
+            contains: Some("--repo test/repo"),
+            stdout: "",
+        }]);
+
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_agent(&db);
+        seed_repo(&db, "test/repo");
+        seed_card_with_repo(
+            &db,
+            "card-review-disabled-gh",
+            "review",
+            "test/repo",
+            482,
+            None,
+        );
+        ensure_auto_queue_tables(&db);
+        set_config_key(&db, "review_enabled", json!(false));
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, repo, agent_id, status, created_at) \
+                 VALUES ('run-review-disabled-gh', 'test/repo', 'agent-1', 'active', datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank, dispatch_id, dispatched_at, created_at) \
+                 VALUES ('entry-review-disabled-gh', 'run-review-disabled-gh', 'card-review-disabled-gh', 'agent-1', 'dispatched', 1, 'review-disabled-gh-dispatch', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        kanban::fire_enter_hooks(&db, &engine, "card-review-disabled-gh", "review");
+
+        assert_eq!(get_card_status(&db, "card-review-disabled-gh"), "done");
+
+        let conn = db.lock().unwrap();
+        let run_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_runs WHERE id = 'run-review-disabled-gh'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let entry_status: String = conn
+            .query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-review-disabled-gh'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            entry_status, "done",
+            "terminal review-disabled transition must close the active auto-queue entry"
+        );
+        assert_eq!(
+            run_status, "completed",
+            "review-disabled JS terminal path must still fire OnCardTerminal auto-queue completion"
+        );
+
+        let log = gh_log(&gh);
+        assert!(
+            log.contains("issue close 482 --repo test/repo"),
+            "review-disabled JS terminal path must close the linked GitHub issue"
+        );
     }
 
     #[test]
