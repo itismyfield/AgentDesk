@@ -135,6 +135,13 @@ fn merged_settings(conn: &rusqlite::Connection, config: &Config) -> EscalationSe
     load_override(conn).unwrap_or_else(|| escalation_defaults(config))
 }
 
+pub(in crate::server::routes) fn effective_owner_user_id(
+    conn: &rusqlite::Connection,
+    config: &Config,
+) -> Option<u64> {
+    merged_settings(conn, config).owner_user_id
+}
+
 fn store_override(
     conn: &rusqlite::Connection,
     settings: &EscalationSettings,

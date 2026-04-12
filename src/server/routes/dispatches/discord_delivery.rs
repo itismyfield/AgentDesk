@@ -12,12 +12,35 @@ use crate::services::auto_queue::runtime::reset_slot_thread_bindings;
 const SLOT_THREAD_RESET_MESSAGE_LIMIT: u64 = 500;
 const SLOT_THREAD_RESET_MAX_AGE_DAYS: i64 = 7;
 const SLOT_THREAD_MAX_SLOTS: i64 = 32;
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 
 #[derive(Clone, Debug)]
 struct SlotThreadBinding {
     agent_id: String,
     slot_index: i64,
     thread_id: Option<String>,
+}
+
+fn discord_api_base_url() -> String {
+    std::env::var("AGENTDESK_DISCORD_API_BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DISCORD_API_BASE.to_string())
+}
+
+fn discord_api_url(base_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+fn resolve_dispatch_thread_owner_user_id(db: &crate::db::Db) -> Option<u64> {
+    let config = crate::config::load_graceful();
+    let conn = db.lock().ok()?;
+    crate::server::routes::escalation::effective_owner_user_id(&conn, &config)
 }
 
 fn dispatch_context_value(dispatch_context: Option<&str>) -> Option<serde_json::Value> {
@@ -460,6 +483,104 @@ pub(super) fn resolve_dispatch_delivery_channel_on_conn(
     )
 }
 
+async fn add_thread_member_to_dispatch_thread(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    thread_id: &str,
+    user_id: u64,
+) -> Result<(), String> {
+    let thread_info_url = discord_api_url(base_url, &format!("/channels/{thread_id}"));
+    let response = client
+        .get(&thread_info_url)
+        .header("Authorization", format!("Bot {}", token))
+        .send()
+        .await
+        .map_err(|err| format!("failed to inspect thread {thread_id}: {err}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "failed to inspect thread {thread_id}: {status} {body}"
+        ));
+    }
+
+    let thread_info = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|err| format!("failed to parse thread {thread_id}: {err}"))?;
+    let is_archived = thread_info
+        .get("thread_metadata")
+        .and_then(|metadata| metadata.get("archived"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    if is_archived {
+        let response = client
+            .patch(&thread_info_url)
+            .header("Authorization", format!("Bot {}", token))
+            .json(&serde_json::json!({"archived": false}))
+            .send()
+            .await
+            .map_err(|err| format!("failed to unarchive thread {thread_id}: {err}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "failed to unarchive thread {thread_id}: {status} {body}"
+            ));
+        }
+    }
+
+    let member_url = discord_api_url(
+        base_url,
+        &format!("/channels/{thread_id}/thread-members/{user_id}"),
+    );
+    let response = client
+        .put(&member_url)
+        .header("Authorization", format!("Bot {}", token))
+        .send()
+        .await
+        .map_err(|err| format!("failed to add user {user_id} to thread {thread_id}: {err}"))?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Err(format!(
+            "failed to add user {user_id} to thread {thread_id}: {status} {body}"
+        ))
+    }
+}
+
+async fn maybe_add_owner_to_dispatch_thread(
+    client: &reqwest::Client,
+    token: &str,
+    base_url: &str,
+    thread_id: &str,
+    dispatch_id: &str,
+    owner_user_id: Option<u64>,
+) {
+    let Some(owner_user_id) = owner_user_id else {
+        return;
+    };
+
+    if let Err(err) =
+        add_thread_member_to_dispatch_thread(client, token, base_url, thread_id, owner_user_id)
+            .await
+    {
+        tracing::warn!(
+            "[dispatch] Failed to add owner {} to thread {} for dispatch {}: {}",
+            owner_user_id,
+            thread_id,
+            dispatch_id,
+            err
+        );
+    }
+}
+
 /// Send a dispatch notification to the target agent's Discord channel.
 /// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
 /// The `DISPATCH:<uuid>` prefix is required for the dcserver to link the
@@ -537,6 +658,40 @@ async fn send_dispatch_to_discord_inner(
     title: &str,
     card_id: &str,
     dispatch_id: &str,
+) -> Result<(), String> {
+    let token = match crate::credential::read_bot_token("announce") {
+        Some(t) => t,
+        None => {
+            tracing::warn!(
+                "[dispatch] No announce bot token (missing credential/announce_bot_token)"
+            );
+            return Err("no announce bot token".into());
+        }
+    };
+    let discord_api_base = discord_api_base_url();
+    let thread_owner_user_id = resolve_dispatch_thread_owner_user_id(db);
+    send_dispatch_to_discord_inner_with_context(
+        db,
+        agent_id,
+        title,
+        card_id,
+        dispatch_id,
+        &token,
+        &discord_api_base,
+        thread_owner_user_id,
+    )
+    .await
+}
+
+async fn send_dispatch_to_discord_inner_with_context(
+    db: &crate::db::Db,
+    agent_id: &str,
+    title: &str,
+    card_id: &str,
+    dispatch_id: &str,
+    token: &str,
+    discord_api_base: &str,
+    thread_owner_user_id: Option<u64>,
 ) -> Result<(), String> {
     // Determine dispatch type + status before attempting Discord delivery.
     let (dispatch_type, dispatch_status, dispatch_context): (
@@ -673,17 +828,6 @@ async fn send_dispatch_to_discord_inner(
         dispatch_context.as_deref(),
     );
 
-    // Send via Discord HTTP API using the announce bot
-    let token = match crate::credential::read_bot_token("announce") {
-        Some(t) => t,
-        None => {
-            tracing::warn!(
-                "[dispatch] No announce bot token (missing credential/announce_bot_token)"
-            );
-            return Err("no announce bot token".into());
-        }
-    };
-
     // ── Thread reuse: every dispatch now resolves into a slot thread ──
     let client = reqwest::Client::new();
     let dispatch_type_label = dispatch_type.as_deref().unwrap_or("implementation");
@@ -745,6 +889,15 @@ async fn send_dispatch_to_discord_inner(
         .await
         {
             if reused {
+                maybe_add_owner_to_dispatch_thread(
+                    &client,
+                    &token,
+                    &discord_api_base,
+                    existing_tid,
+                    dispatch_id,
+                    thread_owner_user_id,
+                )
+                .await;
                 if let Some(binding) = slot_binding.as_ref() {
                     if let Ok(conn) = db.lock() {
                         upsert_slot_thread_id(
@@ -767,9 +920,9 @@ async fn send_dispatch_to_discord_inner(
         }
     }
 
-    let thread_url = format!(
-        "https://discord.com/api/v10/channels/{}/threads",
-        channel_id_num
+    let thread_url = discord_api_url(
+        &discord_api_base,
+        &format!("/channels/{channel_id_num}/threads"),
     );
     let thread_resp = client
         .post(&thread_url)
@@ -791,9 +944,9 @@ async fn send_dispatch_to_discord_inner(
                     // If the POST fails, we don't save thread_id so that
                     // [I-0] recovery sends to the channel and future dispatches won't
                     // reuse an empty thread.
-                    let thread_msg_url = format!(
-                        "https://discord.com/api/v10/channels/{}/messages",
-                        thread_id
+                    let thread_msg_url = discord_api_url(
+                        &discord_api_base,
+                        &format!("/channels/{thread_id}/messages"),
                     );
                     let thread_msg_ok = client
                         .post(&thread_msg_url)
@@ -822,6 +975,15 @@ async fn send_dispatch_to_discord_inner(
                                 );
                             }
                         }
+                        maybe_add_owner_to_dispatch_thread(
+                            &client,
+                            &token,
+                            &discord_api_base,
+                            thread_id,
+                            dispatch_id,
+                            thread_owner_user_id,
+                        )
+                        .await;
                         tracing::info!(
                             "[dispatch] Created thread {thread_id} and sent dispatch {dispatch_id} to {agent_id}"
                         );
@@ -845,9 +1007,9 @@ async fn send_dispatch_to_discord_inner(
             tracing::warn!(
                 "[dispatch] Thread creation failed ({status}), falling back to channel message"
             );
-            let url = format!(
-                "https://discord.com/api/v10/channels/{}/messages",
-                channel_id_num
+            let url = discord_api_url(
+                &discord_api_base,
+                &format!("/channels/{channel_id_num}/messages"),
             );
             match client
                 .post(&url)
@@ -1182,4 +1344,230 @@ pub(super) async fn send_review_result_to_primary(
     }
 
     unreachable!("explicit review verdicts should return earlier");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        extract::{Path, State},
+        response::IntoResponse,
+        routing::{get, post, put},
+    };
+    use std::sync::{Arc, Mutex};
+
+    fn test_db() -> crate::db::Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        crate::db::wrap_conn(conn)
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct MockDiscordState {
+        archived: bool,
+        calls: Vec<String>,
+    }
+
+    async fn spawn_mock_discord_server(
+        initial_archived: bool,
+    ) -> (
+        String,
+        Arc<Mutex<MockDiscordState>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        async fn get_channel(
+            State(state): State<Arc<Mutex<MockDiscordState>>>,
+            Path(thread_id): Path<String>,
+        ) -> impl IntoResponse {
+            let archived = {
+                let mut state = state.lock().unwrap();
+                state.calls.push(format!("GET /channels/{thread_id}"));
+                state.archived
+            };
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": thread_id,
+                    "thread_metadata": {
+                        "archived": archived,
+                    }
+                })),
+            )
+        }
+
+        async fn patch_channel(
+            State(state): State<Arc<Mutex<MockDiscordState>>>,
+            Path(thread_id): Path<String>,
+        ) -> impl IntoResponse {
+            let mut state = state.lock().unwrap();
+            state.calls.push(format!("PATCH /channels/{thread_id}"));
+            state.archived = false;
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({"id": thread_id, "ok": true})),
+            )
+        }
+
+        async fn create_thread(
+            State(state): State<Arc<Mutex<MockDiscordState>>>,
+            Path(channel_id): Path<String>,
+        ) -> impl IntoResponse {
+            let mut state = state.lock().unwrap();
+            state
+                .calls
+                .push(format!("POST /channels/{channel_id}/threads"));
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({"id": "thread-created"})),
+            )
+        }
+
+        async fn post_message(
+            State(state): State<Arc<Mutex<MockDiscordState>>>,
+            Path(channel_id): Path<String>,
+        ) -> impl IntoResponse {
+            let mut state = state.lock().unwrap();
+            state
+                .calls
+                .push(format!("POST /channels/{channel_id}/messages"));
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({"id": format!("message-{channel_id}")})),
+            )
+        }
+
+        async fn add_thread_member(
+            State(state): State<Arc<Mutex<MockDiscordState>>>,
+            Path((thread_id, user_id)): Path<(String, String)>,
+        ) -> impl IntoResponse {
+            let mut state = state.lock().unwrap();
+            state.calls.push(format!(
+                "PUT /channels/{thread_id}/thread-members/{user_id}"
+            ));
+            axum::http::StatusCode::NO_CONTENT
+        }
+
+        let state = Arc::new(Mutex::new(MockDiscordState {
+            archived: initial_archived,
+            calls: Vec::new(),
+        }));
+        let app = Router::new()
+            .route(
+                "/channels/{thread_id}",
+                get(get_channel).patch(patch_channel),
+            )
+            .route("/channels/{channel_id}/threads", post(create_thread))
+            .route("/channels/{channel_id}/messages", post(post_message))
+            .route(
+                "/channels/{thread_id}/thread-members/{user_id}",
+                put(add_thread_member),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), state, handle)
+    }
+
+    #[tokio::test]
+    async fn add_thread_member_unarchives_archived_thread_before_put() {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(true).await;
+        let client = reqwest::Client::new();
+
+        add_thread_member_to_dispatch_thread(&client, "announce-token", &base_url, "thread-1", 42)
+            .await
+            .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec![
+                "GET /channels/thread-1",
+                "PATCH /channels/thread-1",
+                "PUT /channels/thread-1/thread-members/42",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_dispatch_to_discord_adds_configured_owner_to_created_thread() {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id) VALUES ('agent-1', 'Agent 1', '123')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at
+                ) VALUES (
+                    'card-1', 'Test card', 'requested', 'agent-1', 'dispatch-1', datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+                ) VALUES (
+                    'dispatch-1', 'card-1', 'agent-1', 'implementation', 'pending', 'Test card', datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        send_dispatch_to_discord_inner_with_context(
+            &db,
+            "agent-1",
+            "Test card",
+            "card-1",
+            "dispatch-1",
+            "announce-token",
+            &base_url,
+            Some(343742347365974026),
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+
+        let state = state.lock().unwrap();
+        assert!(
+            state
+                .calls
+                .contains(&"POST /channels/123/threads".to_string())
+        );
+        assert!(
+            state
+                .calls
+                .contains(&"POST /channels/thread-created/messages".to_string())
+        );
+        assert!(
+            state
+                .calls
+                .contains(&"GET /channels/thread-created".to_string())
+        );
+        assert!(state.calls.contains(
+            &"PUT /channels/thread-created/thread-members/343742347365974026".to_string()
+        ));
+
+        let conn = db.lock().unwrap();
+        let thread_id: Option<String> = conn
+            .query_row(
+                "SELECT thread_id FROM task_dispatches WHERE id = 'dispatch-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(thread_id.as_deref(), Some("thread-created"));
+    }
 }
