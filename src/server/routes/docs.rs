@@ -278,6 +278,12 @@ fn all_endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "GET",
+            "/api/agents/{id}/transcripts",
+            "agents",
+            "List recent completed turn transcripts for agent",
+        ),
+        ep(
+            "GET",
             "/api/agents/{id}/timeline",
             "agents",
             "Agent activity timeline",
@@ -882,6 +888,12 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "/api/pipeline/cards/{cardId}/history",
             "pipeline",
             "Get card transition history",
+        ),
+        ep(
+            "GET",
+            "/api/pipeline/cards/{cardId}/transcripts",
+            "pipeline",
+            "List completed turn transcripts linked to card dispatches",
         ),
         ep(
             "GET",

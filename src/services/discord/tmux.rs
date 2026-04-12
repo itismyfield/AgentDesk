@@ -4,6 +4,7 @@ use std::sync::{Arc, LazyLock};
 use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
+use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::services::provider::{ProviderKind, parse_provider_and_channel_from_tmux_name};
 use crate::services::session_backend::StreamLineState;
 use crate::services::tmux_diagnostics::{
@@ -151,6 +152,40 @@ fn provider_overload_fingerprint(user_text: &str) -> String {
 fn provider_overload_retry_delay(attempt: u8) -> std::time::Duration {
     let shift = u32::from(attempt.saturating_sub(1));
     std::time::Duration::from_secs(120 * (1u64 << shift))
+}
+
+fn push_transcript_event(events: &mut Vec<SessionTranscriptEvent>, event: SessionTranscriptEvent) {
+    let has_payload = !event.content.trim().is_empty()
+        || event
+            .summary
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || event
+            .tool_name
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    if has_payload
+        || matches!(
+            event.kind,
+            SessionTranscriptEventKind::Thinking
+                | SessionTranscriptEventKind::Result
+                | SessionTranscriptEventKind::Error
+                | SessionTranscriptEventKind::Task
+                | SessionTranscriptEventKind::System
+        )
+    {
+        events.push(event);
+    }
+}
+
+fn inflight_duration_ms(started_at: Option<&str>) -> Option<i64> {
+    let started_at = started_at?.trim();
+    if started_at.is_empty() {
+        return None;
+    }
+    let parsed = chrono::NaiveDateTime::parse_from_str(started_at, "%Y-%m-%d %H:%M:%S").ok()?;
+    let elapsed = chrono::Local::now().naive_local() - parsed;
+    Some(elapsed.num_milliseconds().max(0))
 }
 
 fn clear_provider_overload_retry_state(channel_id: ChannelId) {
@@ -1423,6 +1458,8 @@ pub(super) async fn tmux_output_watcher(
                         dispatch_id: resolved_did.as_deref().or(state.dispatch_id.as_deref()),
                         user_message: &state.user_text,
                         assistant_message: &full_response,
+                        events: &tool_state.transcript_events,
+                        duration_ms: inflight_duration_ms(Some(state.started_at.as_str())),
                     },
                 ) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1769,6 +1806,8 @@ pub(super) struct WatcherToolState {
     pub any_tool_used: bool,
     /// Whether a text block was streamed after the last tool_use
     pub has_post_tool_text: bool,
+    /// Structured transcript events collected during watcher replay
+    pub transcript_events: Vec<SessionTranscriptEvent>,
 }
 
 impl WatcherToolState {
@@ -1780,6 +1819,7 @@ impl WatcherToolState {
             in_thinking: false,
             any_tool_used: false,
             has_post_tool_text: false,
+            transcript_events: Vec::new(),
         }
     }
 
@@ -1838,6 +1878,17 @@ pub(super) fn process_watcher_lines(
                                             block.get("text").and_then(|t| t.as_str())
                                         {
                                             full_response.push_str(text);
+                                            push_transcript_event(
+                                                &mut tool_state.transcript_events,
+                                                SessionTranscriptEvent {
+                                                    kind: SessionTranscriptEventKind::Assistant,
+                                                    tool_name: None,
+                                                    summary: None,
+                                                    content: text.to_string(),
+                                                    status: Some("success".to_string()),
+                                                    is_error: false,
+                                                },
+                                            );
                                             if tool_state.any_tool_used {
                                                 tool_state.has_post_tool_text = true;
                                             }
@@ -1863,6 +1914,17 @@ pub(super) fn process_watcher_lines(
                                             format!("⚙ {}: {}", name, truncated)
                                         };
                                         tool_state.set_current_tool_line(Some(display));
+                                        push_transcript_event(
+                                            &mut tool_state.transcript_events,
+                                            SessionTranscriptEvent {
+                                                kind: SessionTranscriptEventKind::ToolUse,
+                                                tool_name: Some(name.to_string()),
+                                                summary: (!summary.is_empty()).then_some(summary),
+                                                content: input_str,
+                                                status: Some("running".to_string()),
+                                                is_error: false,
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -1909,6 +1971,17 @@ pub(super) fn process_watcher_lines(
                         let display = tool_state.thinking_buffer.trim().to_string();
                         if !display.is_empty() {
                             tool_state.set_current_tool_line(Some(format!("💭 {display}")));
+                            push_transcript_event(
+                                &mut tool_state.transcript_events,
+                                SessionTranscriptEvent {
+                                    kind: SessionTranscriptEventKind::Thinking,
+                                    tool_name: None,
+                                    summary: Some(truncate_str(&display, 120).to_string()),
+                                    content: display,
+                                    status: Some("info".to_string()),
+                                    is_error: false,
+                                },
+                            );
                         }
                     } else if let Some(line) = tool_state.current_tool_line.clone() {
                         // Tool completed — mark with checkmark
@@ -1925,6 +1998,29 @@ pub(super) fn process_watcher_lines(
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let result_str = extract_result_error_text(&val);
+                    push_transcript_event(
+                        &mut tool_state.transcript_events,
+                        SessionTranscriptEvent {
+                            kind: if is_error {
+                                SessionTranscriptEventKind::Error
+                            } else {
+                                SessionTranscriptEventKind::Result
+                            },
+                            tool_name: None,
+                            summary: Some(if result_str.trim().is_empty() {
+                                if is_error {
+                                    "error".to_string()
+                                } else {
+                                    "completed".to_string()
+                                }
+                            } else {
+                                truncate_str(&result_str, 120).to_string()
+                            }),
+                            content: result_str.clone(),
+                            status: Some(if is_error { "error" } else { "success" }.to_string()),
+                            is_error,
+                        },
+                    );
 
                     if is_error {
                         if is_prompt_too_long_message(&result_str) {
@@ -2000,6 +2096,17 @@ pub(super) fn process_watcher_lines(
             outcome.found_result = true;
             outcome.is_provider_overloaded = true;
             outcome.provider_overload_message.get_or_insert(message);
+            push_transcript_event(
+                &mut tool_state.transcript_events,
+                SessionTranscriptEvent {
+                    kind: SessionTranscriptEventKind::Error,
+                    tool_name: None,
+                    summary: Some("provider overload".to_string()),
+                    content: trimmed.to_string(),
+                    status: Some("error".to_string()),
+                    is_error: true,
+                },
+            );
             state.final_result = Some(String::new());
         }
     }

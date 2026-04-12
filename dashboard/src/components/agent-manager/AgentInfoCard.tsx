@@ -15,6 +15,7 @@ import { localeName } from "../../i18n";
 import AgentAvatar from "../AgentAvatar";
 import { STATUS_DOT } from "./constants";
 import AgentLiveTurnPanel from "./AgentLiveTurnPanel";
+import TurnTranscriptPanel from "./TurnTranscriptPanel";
 import type { Translator } from "./types";
 import * as api from "../../api";
 import type {
@@ -638,6 +639,15 @@ export default function AgentInfoCard({
         </div>
 
         <AgentLiveTurnPanel agentId={agent.id} isKo={isKo} tr={tr} />
+        <TurnTranscriptPanel
+          source={{
+            type: "agent",
+            id: agent.id,
+            refreshSeed: `${agent.status}:${agent.session_info ?? ""}:${agent.current_task_id ?? ""}`,
+          }}
+          isKo={isKo}
+          tr={tr}
+        />
 
         <div
           className="px-5 py-3"

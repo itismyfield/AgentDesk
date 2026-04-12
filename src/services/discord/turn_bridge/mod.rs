@@ -14,6 +14,7 @@ use super::gateway::TurnGateway;
 use super::handoff::{HandoffRecord, save_handoff};
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::*;
+use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::services::memory::{
     CaptureRequest, TokenUsage, resolve_memory_role_id, resolve_memory_session_id,
 };
@@ -75,6 +76,34 @@ pub(super) struct TurnBridgeContext {
     pub(super) inflight_state: InflightTurnState,
 }
 
+fn push_transcript_event(events: &mut Vec<SessionTranscriptEvent>, event: SessionTranscriptEvent) {
+    let has_payload = !event.content.trim().is_empty()
+        || event
+            .summary
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || event
+            .tool_name
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    if has_payload
+        || matches!(
+            event.kind,
+            SessionTranscriptEventKind::Thinking
+                | SessionTranscriptEventKind::Result
+                | SessionTranscriptEventKind::Error
+                | SessionTranscriptEventKind::Task
+                | SessionTranscriptEventKind::System
+        )
+    {
+        events.push(event);
+    }
+}
+
+fn turn_duration_ms(started_at: std::time::Instant) -> i64 {
+    i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -123,6 +152,7 @@ pub(super) fn spawn_turn_bridge(
         let mut tmux_handed_off = false;
         let mut transport_error = false;
         let mut api_friction_reports = Vec::new();
+        let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
         let mut resume_failure_detected = false;
         let mut terminal_session_reset_required = false;
         let mut restart_recovery_handoff = false;
@@ -207,6 +237,7 @@ pub(super) fn spawn_turn_bridge(
                                     &mut inflight_state,
                                 )
                             {
+                                transcript_events.clear();
                                 state_dirty = true;
                             }
                         }
@@ -217,6 +248,17 @@ pub(super) fn spawn_turn_bridge(
                         }
                         StreamMessage::Text { content } => {
                             full_response.push_str(&content);
+                            push_transcript_event(
+                                &mut transcript_events,
+                                SessionTranscriptEvent {
+                                    kind: SessionTranscriptEventKind::Assistant,
+                                    tool_name: None,
+                                    summary: None,
+                                    content: content.clone(),
+                                    status: Some("success".to_string()),
+                                    is_error: false,
+                                },
+                            );
                             if any_tool_used {
                                 has_post_tool_text = true;
                                 inflight_state.has_post_tool_text = true;
@@ -246,6 +288,17 @@ pub(super) fn spawn_turn_bridge(
                             current_tool_line = Some(display);
                             last_tool_name = None;
                             last_tool_summary = None;
+                            push_transcript_event(
+                                &mut transcript_events,
+                                SessionTranscriptEvent {
+                                    kind: SessionTranscriptEventKind::Thinking,
+                                    tool_name: None,
+                                    summary: summary.clone(),
+                                    content: summary.unwrap_or_default(),
+                                    status: Some("info".to_string()),
+                                    is_error: false,
+                                },
+                            );
                         }
                         StreamMessage::ToolUse { name, input } => {
                             any_tool_used = true;
@@ -287,6 +340,17 @@ pub(super) fn spawn_turn_bridge(
                             current_tool_line = Some(display);
                             last_tool_name = Some(name.clone());
                             last_tool_summary = Some(display_summary);
+                            push_transcript_event(
+                                &mut transcript_events,
+                                SessionTranscriptEvent {
+                                    kind: SessionTranscriptEventKind::ToolUse,
+                                    tool_name: Some(name.clone()),
+                                    summary: last_tool_summary.clone(),
+                                    content: input.clone(),
+                                    status: Some("running".to_string()),
+                                    is_error: false,
+                                },
+                            );
                             if !restart_followup_pending && is_dcserver_restart_command(&input) {
                                 let mut report = RestartCompletionReport::new(
                                     provider.clone(),
@@ -354,7 +418,23 @@ pub(super) fn spawn_turn_bridge(
                                 );
                                 current_tool_line = Some(detail);
                             }
-                            let _ = content;
+                            push_transcript_event(
+                                &mut transcript_events,
+                                SessionTranscriptEvent {
+                                    kind: if is_error {
+                                        SessionTranscriptEventKind::Error
+                                    } else {
+                                        SessionTranscriptEventKind::ToolResult
+                                    },
+                                    tool_name: last_tool_name.clone(),
+                                    summary: last_tool_summary.clone(),
+                                    content,
+                                    status: Some(
+                                        if is_error { "error" } else { "success" }.to_string(),
+                                    ),
+                                    is_error,
+                                },
+                            );
                         }
                         StreamMessage::TaskNotification { summary, .. } => {
                             if !summary.is_empty() {
@@ -362,6 +442,17 @@ pub(super) fn spawn_turn_bridge(
                                 inflight_state.full_response = full_response.clone();
                                 state_dirty = true;
                             }
+                            push_transcript_event(
+                                &mut transcript_events,
+                                SessionTranscriptEvent {
+                                    kind: SessionTranscriptEventKind::Task,
+                                    tool_name: None,
+                                    summary: Some(summary.clone()),
+                                    content: summary,
+                                    status: Some("info".to_string()),
+                                    is_error: false,
+                                },
+                            );
                         }
                         StreamMessage::Done {
                             result,
@@ -389,6 +480,25 @@ pub(super) fn spawn_turn_bridge(
                             if let Some(s) = sid {
                                 new_session_id = Some(s.clone());
                                 inflight_state.session_id = Some(s);
+                            }
+                            if result != super::recovery::RESTART_SESSION_DIED_HANDOFF_SENTINEL
+                                && result != "__session_died_retry__"
+                            {
+                                push_transcript_event(
+                                    &mut transcript_events,
+                                    SessionTranscriptEvent {
+                                        kind: SessionTranscriptEventKind::Result,
+                                        tool_name: None,
+                                        summary: Some(if result.trim().is_empty() {
+                                            "Turn completed".to_string()
+                                        } else {
+                                            truncate_str(&result, 120).to_string()
+                                        }),
+                                        content: result,
+                                        status: Some("success".to_string()),
+                                        is_error: false,
+                                    },
+                                );
                             }
                             state_dirty = true;
                             done = true;
@@ -436,6 +546,21 @@ pub(super) fn spawn_turn_bridge(
                             } else {
                                 full_response = format!("Error: {}", message);
                             }
+                            push_transcript_event(
+                                &mut transcript_events,
+                                SessionTranscriptEvent {
+                                    kind: SessionTranscriptEventKind::Error,
+                                    tool_name: last_tool_name.clone(),
+                                    summary: Some(message.clone()),
+                                    content: if stderr.trim().is_empty() {
+                                        message.clone()
+                                    } else {
+                                        format!("{message}\n{stderr}")
+                                    },
+                                    status: Some("error".to_string()),
+                                    is_error: true,
+                                },
+                            );
                             if session_reset_required {
                                 terminal_session_reset_required = true;
                                 clear_local_session_state(&mut new_session_id, &mut inflight_state);
@@ -1252,6 +1377,8 @@ pub(super) fn spawn_turn_bridge(
                     dispatch_id: dispatch_id.as_deref(),
                     user_message: &user_text_owned,
                     assistant_message: &full_response,
+                    events: &transcript_events,
+                    duration_ms: Some(turn_duration_ms(turn_start)),
                 },
             ) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
