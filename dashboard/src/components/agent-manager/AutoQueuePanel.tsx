@@ -5,6 +5,7 @@ import type {
   AutoQueueStatus,
   DispatchQueueEntry as DispatchQueueEntryType,
   AutoQueueRun,
+  AutoQueueThreadLink,
 } from "../../api";
 
 import type { Agent, UiLanguage } from "../../types";
@@ -15,7 +16,6 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
-import { buildDiscordThreadLinks } from "./discord-routing";
 
 interface Props {
   tr: (ko: string, en: string) => string;
@@ -141,22 +141,6 @@ function batchPhaseLabel(phase: number): string {
   return `P${phase}`;
 }
 
-function labelForThreadLink(
-  label: string | undefined,
-  tr: (ko: string, en: string) => string,
-): string {
-  switch (label) {
-    case "work":
-      return tr("작업", "Work");
-    case "review":
-      return tr("리뷰", "Review");
-    case "active":
-      return tr("활성", "Active");
-    default:
-      return label ?? tr("스레드", "Thread");
-  }
-}
-
 function isCompletedEntry(entry: DispatchQueueEntryType): boolean {
   return entry.status === "done" || entry.status === "skipped";
 }
@@ -175,6 +159,17 @@ function sortEntriesForDisplay(entries: DispatchQueueEntryType[]): DispatchQueue
     if (sa !== sb) return sa - sb;
     return a.priority_rank - b.priority_rank;
   });
+}
+
+function formatThreadLinkLabel(
+  link: AutoQueueThreadLink,
+  tr: (ko: string, en: string) => string,
+): string {
+  const key = (link.label || link.role || "").trim().toLowerCase();
+  if (key === "work") return tr("작업", "Work");
+  if (key === "review") return tr("리뷰", "Review");
+  if (key === "active") return tr("활성", "Active");
+  return (link.label || link.role || tr("스레드", "Thread")).trim();
 }
 
 function EntryRow({
@@ -221,10 +216,13 @@ function EntryRow({
   const sty = ENTRY_STATUS_STYLE[effectiveDisplayStatus] ?? ENTRY_STATUS_STYLE.pending;
   const isPending = entry.status === "pending";
   const showReviewRound = (entry.card_status === "review" || entry.card_status === "rework") && (entry.review_round ?? 0) > 0;
+  const threadLinks = (entry.thread_links ?? []).filter(
+    (link) => Boolean(link.url || link.thread_id),
+  );
 
   return (
     <div
-      className="flex items-center gap-2 rounded-xl px-3 py-2 border transition-all"
+      className="flex flex-wrap items-start gap-2 rounded-xl border px-3 py-2 transition-all sm:flex-nowrap sm:items-center"
       style={{
         borderColor: isDropTarget
           ? "rgba(139,92,246,0.6)"
@@ -243,180 +241,205 @@ function EntryRow({
       }}
       {...(dragHandlers ?? {})}
     >
-      {/* Drag handle for pending items */}
-      {isPending && dragHandlers?.draggable && (
-        <span
-          className="text-xs shrink-0 select-none"
-          style={{ color: "var(--th-text-muted)", cursor: "grab" }}
-        >
-          ⠿
-        </span>
-      )}
-      <span
-        className="text-xs font-mono shrink-0 w-5 text-center"
-        style={{ color: "var(--th-text-muted)" }}
-      >
-        {idx + 1}
-      </span>
-      <div className="flex-1 min-w-0">
-        <div
-          className="text-xs truncate"
-          style={{ color: "var(--th-text-primary)" }}
-        >
-          {showBatchPhase && (
-            <span
-              className="mr-1 text-xs font-mono px-1 py-0.5 rounded"
-              style={{
-                backgroundColor: `${batchPhaseColor(entry.batch_phase ?? 0)}22`,
-                color: batchPhaseColor(entry.batch_phase ?? 0),
-              }}
-            >
-              {batchPhaseLabel(entry.batch_phase ?? 0)}
-            </span>
-          )}
-          {showThreadGroup && entry.thread_group != null && (
-            <span
-              className="mr-1 text-xs font-mono px-1 py-0.5 rounded"
-              style={{
-                backgroundColor: `${threadGroupColor(entry.thread_group)}22`,
-                color: threadGroupColor(entry.thread_group),
-              }}
-            >
-              G{entry.thread_group}
-            </span>
-          )}
-          {entry.github_issue_number && (
-            <span
-              className="mr-1 font-medium"
-              style={{ color: "var(--th-text-muted)" }}
-            >
-              #{entry.github_issue_number}
-            </span>
-          )}
-          {entry.card_title ?? entry.card_id.slice(0, 8)}
-        </div>
-        {entry.reason && (
-          <div
-            className="text-xs truncate"
-            style={{ color: "var(--th-text-muted)" }}
+      <div className="flex min-w-0 flex-1 items-start gap-2">
+        {isPending && dragHandlers?.draggable && (
+          <span
+            className="shrink-0 select-none text-xs"
+            style={{ color: "var(--th-text-muted)", cursor: "grab" }}
           >
-            {entry.reason}
-          </div>
+            ⠿
+          </span>
         )}
-        {entry.thread_links && entry.thread_links.length > 0 && (
-          <div className="mt-1 flex flex-wrap gap-1.5">
-            {entry.thread_links.map((threadLink) => {
-              const { webUrl, deepLink } = buildDiscordThreadLinks(threadLink);
-              if (!webUrl && !deepLink) return null;
-              const linkLabel = labelForThreadLink(threadLink.label, tr);
-              return (
-                <div
-                  key={`${threadLink.role}-${threadLink.thread_id}`}
-                  className="flex flex-wrap gap-1"
-                >
-                  {webUrl && (
+        <span
+          className="w-5 shrink-0 text-center font-mono text-xs"
+          style={{ color: "var(--th-text-muted)" }}
+        >
+          {idx + 1}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div
+            className="text-sm font-medium leading-snug sm:text-xs"
+            style={{
+              color: "var(--th-text-primary)",
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {showBatchPhase && (
+              <span
+                className="mr-1 rounded px-1 py-0.5 font-mono text-xs"
+                style={{
+                  backgroundColor: `${batchPhaseColor(entry.batch_phase ?? 0)}22`,
+                  color: batchPhaseColor(entry.batch_phase ?? 0),
+                }}
+              >
+                {batchPhaseLabel(entry.batch_phase ?? 0)}
+              </span>
+            )}
+            {showThreadGroup && entry.thread_group != null && (
+              <span
+                className="mr-1 rounded px-1 py-0.5 font-mono text-xs"
+                style={{
+                  backgroundColor: `${threadGroupColor(entry.thread_group)}22`,
+                  color: threadGroupColor(entry.thread_group),
+                }}
+              >
+                G{entry.thread_group}
+              </span>
+            )}
+            {entry.github_issue_number && (
+              <span
+                className="mr-1 font-medium"
+                style={{ color: "var(--th-text-muted)" }}
+              >
+                #{entry.github_issue_number}
+              </span>
+            )}
+            {entry.card_title ?? entry.card_id.slice(0, 8)}
+          </div>
+          {entry.reason && (
+            <div
+              className="mt-1 text-[11px] leading-snug sm:text-xs"
+              style={{
+                color: "var(--th-text-muted)",
+                display: "-webkit-box",
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical",
+                overflow: "hidden",
+              }}
+            >
+              {entry.reason}
+            </div>
+          )}
+          {threadLinks.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {threadLinks.map((link) => {
+                const label = formatThreadLinkLabel(link, tr);
+                const key = `${entry.id}:${link.role}:${link.thread_id}`;
+                const content = (
+                  <>
+                    <span>{label}</span>
+                    {link.url ? (
+                      <span aria-hidden="true">↗</span>
+                    ) : (
+                      <span className="font-mono opacity-70">
+                        #{link.thread_id.slice(-4)}
+                      </span>
+                    )}
+                  </>
+                );
+
+                if (link.url) {
+                  return (
                     <a
-                      href={webUrl}
+                      key={key}
+                      href={link.url}
                       target="_blank"
                       rel="noreferrer"
-                      className="rounded-full px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-80"
+                      onClick={(event) => event.stopPropagation()}
+                      className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium transition-colors hover:brightness-110"
                       style={{
                         backgroundColor: "rgba(59,130,246,0.14)",
                         color: "#93c5fd",
                       }}
                     >
-                      {linkLabel} Web
+                      {content}
                     </a>
-                  )}
-                  {deepLink && (
-                    <a
-                      href={deepLink}
-                      className="rounded-full px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-80"
-                      style={{
-                        backgroundColor: "rgba(34,197,94,0.14)",
-                        color: "#86efac",
-                      }}
-                    >
-                      {linkLabel} App
-                    </a>
-                  )}
-                </div>
-              );
-            })}
+                  );
+                }
+
+                return (
+                  <span
+                    key={key}
+                    className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium"
+                    style={{
+                      backgroundColor: "rgba(148,163,184,0.12)",
+                      color: "var(--th-text-muted)",
+                    }}
+                  >
+                    {content}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="ml-auto flex shrink-0 items-center gap-1.5 self-start sm:self-center">
+        <div
+          className="shrink-0 rounded px-1.5 py-0.5 text-xs"
+          style={{ backgroundColor: sty.bg, color: sty.text }}
+        >
+          {tr(sty.label, sty.labelEn)}
+          {showReviewRound && ` R${entry.review_round}`}
+        </div>
+        {isPending && moveControls && (
+          <div
+            className="inline-flex shrink-0 overflow-hidden rounded-md border"
+            style={{ borderColor: "rgba(148,163,184,0.2)" }}
+          >
+            <button
+              type="button"
+              onClick={moveControls.onMoveUp}
+              disabled={!moveControls.canMoveUp}
+              aria-label={tr("위로 이동", "Move up")}
+              title={tr("위로 이동", "Move up")}
+              className="px-1.5 py-0.5 text-xs"
+              style={{
+                color: moveControls.canMoveUp
+                  ? "var(--th-text-secondary)"
+                  : "var(--th-text-muted)",
+                backgroundColor: "var(--th-bg-surface)",
+                opacity: moveControls.canMoveUp ? 1 : 0.45,
+                touchAction: "manipulation",
+              }}
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              onClick={moveControls.onMoveDown}
+              disabled={!moveControls.canMoveDown}
+              aria-label={tr("아래로 이동", "Move down")}
+              title={tr("아래로 이동", "Move down")}
+              className="border-l px-1.5 py-0.5 text-xs"
+              style={{
+                borderColor: "rgba(148,163,184,0.2)",
+                color: moveControls.canMoveDown
+                  ? "var(--th-text-secondary)"
+                  : "var(--th-text-muted)",
+                backgroundColor: "var(--th-bg-surface)",
+                opacity: moveControls.canMoveDown ? 1 : 0.45,
+                touchAction: "manipulation",
+              }}
+            >
+              ↓
+            </button>
           </div>
         )}
-      </div>
-      <span
-        className="text-xs px-1.5 py-0.5 rounded shrink-0"
-        style={{ backgroundColor: sty.bg, color: sty.text }}
-      >
-        {tr(sty.label, sty.labelEn)}
-        {showReviewRound && ` R${entry.review_round}`}
-      </span>
-      {isPending && moveControls && (
-        <div
-          className="inline-flex rounded-md overflow-hidden border shrink-0"
-          style={{ borderColor: "rgba(148,163,184,0.2)" }}
-        >
+        {isPending && (
           <button
-            type="button"
-            onClick={moveControls.onMoveUp}
-            disabled={!moveControls.canMoveUp}
-            aria-label={tr("위로 이동", "Move up")}
-            title={tr("위로 이동", "Move up")}
-            className="px-1.5 py-0.5 text-xs"
-            style={{
-              color: moveControls.canMoveUp
-                ? "var(--th-text-secondary)"
-                : "var(--th-text-muted)",
-              backgroundColor: "var(--th-bg-surface)",
-              opacity: moveControls.canMoveUp ? 1 : 0.45,
-              touchAction: "manipulation",
-            }}
-          >
-            ↑
-          </button>
-          <button
-            type="button"
-            onClick={moveControls.onMoveDown}
-            disabled={!moveControls.canMoveDown}
-            aria-label={tr("아래로 이동", "Move down")}
-            title={tr("아래로 이동", "Move down")}
-            className="px-1.5 py-0.5 text-xs border-l"
+            onClick={() => onSkip(entry.id)}
+            className="shrink-0 rounded border px-1.5 py-0.5 text-xs"
             style={{
               borderColor: "rgba(148,163,184,0.2)",
-              color: moveControls.canMoveDown
-                ? "var(--th-text-secondary)"
-                : "var(--th-text-muted)",
-              backgroundColor: "var(--th-bg-surface)",
-              opacity: moveControls.canMoveDown ? 1 : 0.45,
-              touchAction: "manipulation",
+              color: "var(--th-text-muted)",
             }}
           >
-            ↓
+            {tr("건너뛰기", "Skip")}
           </button>
-        </div>
-      )}
-      {isPending && (
-        <button
-          onClick={() => onSkip(entry.id)}
-          className="text-xs px-1.5 py-0.5 rounded border shrink-0"
-          style={{
-            borderColor: "rgba(148,163,184,0.2)",
-            color: "var(--th-text-muted)",
-          }}
-        >
-          {tr("건너뛰기", "Skip")}
-        </button>
-      )}
-      {entry.dispatched_at && (
-        <span
-          className="text-xs shrink-0"
-          style={{ color: "var(--th-text-muted)" }}
-        >
-          {formatTs(entry.dispatched_at, locale)}
-        </span>
-      )}
+        )}
+        {entry.dispatched_at && (
+          <span
+            className="hidden shrink-0 text-xs sm:inline"
+            style={{ color: "var(--th-text-muted)" }}
+          >
+            {formatTs(entry.dispatched_at, locale)}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -544,7 +567,7 @@ export default function AutoQueuePanel({
   selectedAgentId,
 }: Props) {
   const [status, setStatus] = useState<AutoQueueStatus | null>(null);
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -842,6 +842,39 @@ export async function getAgentTranscripts(
   return data.transcripts;
 }
 
+export interface AgentTurnToolEvent {
+  kind: "thinking" | "tool";
+  status: "info" | "running" | "success" | "error";
+  tool_name?: string | null;
+  summary: string;
+  line: string;
+}
+
+export interface AgentTurnState {
+  agent_id: string;
+  status: string;
+  started_at: string | null;
+  updated_at: string | null;
+  recent_output: string | null;
+  recent_output_source: string;
+  session_key: string | null;
+  tmux_session: string | null;
+  provider: string | null;
+  thread_channel_id: string | null;
+  active_dispatch_id: string | null;
+  last_heartbeat: string | null;
+  current_tool_line: string | null;
+  prev_tool_status: string | null;
+  tool_events: AgentTurnToolEvent[];
+  tool_count: number;
+}
+
+export async function getAgentTurn(
+  agentId: string,
+): Promise<AgentTurnState> {
+  return request(`/api/agents/${agentId}/turn`);
+}
+
 // ── Agent Skills ──
 
 export interface AgentSkill {

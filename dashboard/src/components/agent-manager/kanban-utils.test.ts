@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { GitHubComment } from "../../api";
+import type { KanbanCard } from "../../types";
 import {
-  BOARD_COLUMN_DEFS,
   coalesceGitHubCommentTimeline,
-  getBoardColumnStatus,
-  isManualStatusTransitionAllowed,
+  getCardDwellBadge,
+  getCardStateEnteredAt,
   parseGitHubCommentTimeline,
-  STATUS_TRANSITIONS,
 } from "./kanban-utils";
 
 function makeComment(
@@ -18,6 +17,44 @@ function makeComment(
     author: { login: author },
     body,
     createdAt,
+  };
+}
+
+function makeCard(overrides: Partial<KanbanCard> = {}): KanbanCard {
+  return {
+    id: "card-1",
+    title: "Test card",
+    description: null,
+    status: "in_progress",
+    github_repo: "itismyfield/AgentDesk",
+    owner_agent_id: null,
+    requester_agent_id: null,
+    assignee_agent_id: "agent-1",
+    parent_card_id: null,
+    latest_dispatch_id: "dispatch-1",
+    sort_order: 10,
+    priority: "medium",
+    depth: 0,
+    blocked_reason: null,
+    review_notes: null,
+    github_issue_number: 540,
+    github_issue_url: null,
+    metadata_json: null,
+    pipeline_stage_id: null,
+    review_status: null,
+    created_at: 1_710_000_000_000,
+    updated_at: 1_710_000_000_000,
+    started_at: 1_710_000_000_000,
+    requested_at: 1_709_999_700_000,
+    review_entered_at: null,
+    completed_at: null,
+    latest_dispatch_status: "in_progress",
+    latest_dispatch_title: "dispatch",
+    latest_dispatch_type: "implementation",
+    latest_dispatch_result_summary: null,
+    latest_dispatch_chain_depth: 0,
+    child_count: 0,
+    ...overrides,
   };
 }
 
@@ -294,27 +331,6 @@ assign_issue 경로가 description을 metadata에만 저장합니다.
   });
 });
 
-describe("manual kanban transitions", () => {
-  it("only allows backlog to ready and any status back to backlog", () => {
-    expect(isManualStatusTransitionAllowed("backlog", "ready")).toBe(true);
-    expect(isManualStatusTransitionAllowed("ready", "backlog")).toBe(true);
-    expect(isManualStatusTransitionAllowed("in_progress", "backlog")).toBe(true);
-    expect(isManualStatusTransitionAllowed("review", "backlog")).toBe(true);
-
-    expect(isManualStatusTransitionAllowed("ready", "requested")).toBe(false);
-    expect(isManualStatusTransitionAllowed("review", "done")).toBe(false);
-    expect(isManualStatusTransitionAllowed("backlog", "in_progress")).toBe(false);
-  });
-
-  it("exposes only permitted quick-transition buttons", () => {
-    expect(STATUS_TRANSITIONS.backlog).toEqual(["ready"]);
-    expect(STATUS_TRANSITIONS.ready).toEqual(["backlog"]);
-    expect(STATUS_TRANSITIONS.in_progress).toEqual(["backlog"]);
-    expect(STATUS_TRANSITIONS.review).toEqual(["backlog"]);
-    expect(STATUS_TRANSITIONS.done).toEqual(["backlog"]);
-  });
-});
-
 describe("coalesceGitHubCommentTimeline", () => {
   it("같은 작성자의 연속 일반 변경 이벤트를 2분 윈도우로 합산한다", () => {
     const parsed = parseGitHubCommentTimeline([
@@ -359,19 +375,54 @@ describe("coalesceGitHubCommentTimeline", () => {
   });
 });
 
-describe("board column helpers", () => {
-  it("칸반 보드에서 판단 대기와 막힘 상태를 메인 칼럼으로 접어 넣는다", () => {
-    expect(getBoardColumnStatus("blocked")).toBe("in_progress");
-    expect(getBoardColumnStatus("pending_decision")).toBe("review");
-    expect(getBoardColumnStatus("done")).toBe("done");
+describe("getCardStateEnteredAt", () => {
+  it("review 상태에서는 review_entered_at 문자열을 우선 사용한다", () => {
+    const card = makeCard({
+      status: "review",
+      started_at: 1_710_000_000_000,
+      updated_at: 1_710_000_600_000,
+      review_entered_at: "2026-04-13T00:15:00Z",
+    });
+
+    expect(getCardStateEnteredAt(card)).toBe(new Date("2026-04-13T00:15:00Z").getTime());
+  });
+});
+
+describe("getCardDwellBadge", () => {
+  const tr = (ko: string, _en: string) => ko;
+
+  it("requested 카드는 15분 이후 warm 톤으로 바뀐다", () => {
+    const enteredAt = Date.UTC(2026, 3, 13, 0, 0, 0);
+    const card = makeCard({
+      status: "requested",
+      requested_at: enteredAt,
+      updated_at: enteredAt,
+      started_at: null,
+    });
+
+    const badge = getCardDwellBadge(card, enteredAt + 16 * 60_000, tr);
+
+    expect(badge).toMatchObject({
+      label: "체류",
+      tone: "warm",
+      detail: "16분",
+    });
   });
 
-  it("보드 전용 칼럼 정의에서 판단 대기와 막힘 칼럼을 제거하고 완료 일감 라벨을 사용한다", () => {
-    expect(BOARD_COLUMN_DEFS.map((column) => column.status)).not.toContain("blocked");
-    expect(BOARD_COLUMN_DEFS.map((column) => column.status)).not.toContain("pending_decision");
-    expect(BOARD_COLUMN_DEFS.find((column) => column.status === "done")).toMatchObject({
-      labelKo: "완료 일감",
-      labelEn: "Completed Work",
+  it("review 카드는 review_entered_at 기준으로 stale 판정한다", () => {
+    const enteredAt = Date.UTC(2026, 3, 13, 0, 0, 0);
+    const card = makeCard({
+      status: "review",
+      started_at: enteredAt - 3 * 60 * 60_000,
+      updated_at: enteredAt - 30 * 60_000,
+      review_entered_at: new Date(enteredAt).toISOString(),
+    });
+
+    const badge = getCardDwellBadge(card, enteredAt + 121 * 60_000, tr);
+
+    expect(badge).toMatchObject({
+      tone: "stale",
+      detail: "2시간",
     });
   });
 });
