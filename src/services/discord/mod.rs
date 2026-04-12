@@ -92,7 +92,7 @@ pub(crate) use runtime_bootstrap::run_bot;
 use crate::services::turn_orchestrator::{
     CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot, ClearChannelResult,
     FinishTurnResult, QueueExitEvent, QueueExitKind, QueuePersistenceContext,
-    RecoveryKickoffResult, TakeNextSoftResult, load_pending_queues,
+    RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult, load_pending_queues,
     warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
@@ -681,13 +681,14 @@ async fn mailbox_requeue_intervention_front(
     channel_id: ChannelId,
     intervention: Intervention,
 ) {
-    shared
+    let result: RequeueInterventionResult = shared
         .mailbox(channel_id)
         .requeue_front(
             intervention,
             queue_persistence_context(shared, provider, channel_id),
         )
         .await;
+    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
 }
 
 async fn mailbox_cancel_soft_intervention(
