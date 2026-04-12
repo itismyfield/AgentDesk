@@ -1,7 +1,10 @@
 use crate::db::Db;
 use std::{fs, path::PathBuf};
 
-use super::{register_globals, review_state_sync, review_state_sync_on_conn};
+use super::{
+    register_globals, register_globals_with_supervisor, review_state_sync,
+    review_state_sync_on_conn,
+};
 
 fn test_db() -> Db {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -824,4 +827,85 @@ fn test_review_state_sync_json_wrapper() {
     assert_eq!(state, "suggestion_pending");
     assert_eq!(verdict.as_deref(), Some("improve"));
     assert_eq!(pd.as_deref(), Some("d-99"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_auto_queue_activate_bridge_dispatches_without_server_port() {
+    crate::pipeline::ensure_loaded();
+
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id) \
+             VALUES ('aq-bridge-agent', 'AQ Bridge Agent', 'claude', 'idle', '123456789012345678')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, created_at, updated_at
+            ) VALUES (
+                'aq-bridge-card', 'AQ Bridge Card', 'ready', 'medium', 'aq-bridge-agent',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, agent_id, status) \
+             VALUES ('aq-bridge-run', 'aq-bridge-agent', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank
+            ) VALUES (
+                'aq-bridge-entry', 'aq-bridge-run', 'aq-bridge-card',
+                'aq-bridge-agent', 'pending', 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let engine =
+        crate::engine::PolicyEngine::new(&crate::config::Config::default(), db.clone()).unwrap();
+    let bridge = crate::supervisor::BridgeHandle::new();
+    bridge.attach_engine(&engine);
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals_with_supervisor(&ctx, db.clone(), bridge.clone()).unwrap();
+        let raw: String = ctx
+            .eval(
+                r#"
+                JSON.stringify(agentdesk.autoQueue.activate("aq-bridge-run"))
+                "#,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["count"], 1);
+        assert_eq!(parsed["dispatched"][0]["card_id"], "aq-bridge-card");
+    });
+
+    let conn = db.separate_conn().unwrap();
+    let entry_status: String = conn
+        .query_row(
+            "SELECT status FROM auto_queue_entries WHERE id = 'aq-bridge-entry'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'aq-bridge-card'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entry_status, "dispatched");
+    assert_eq!(dispatch_count, 1);
 }

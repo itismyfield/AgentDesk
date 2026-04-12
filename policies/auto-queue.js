@@ -711,27 +711,12 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
 
 function activateRun(runId, threadGroup) {
   if (!runId) return null;
-  var apiPort = agentdesk.config.get("server_port");
-  if (!apiPort) {
-    agentdesk.log.error("[auto-queue] server_port missing — cannot call /api/auto-queue/activate for run " + runId);
+  try {
+    return agentdesk.autoQueue.activate(runId, threadGroup);
+  } catch (e) {
+    agentdesk.log.warn("[auto-queue] activate bridge failed for run " + runId + ": " + e);
     return null;
   }
-
-  var body = {
-    run_id: runId,
-    active_only: true
-  };
-  if (threadGroup !== null && threadGroup !== undefined) {
-    body.thread_group = threadGroup;
-  }
-
-  var url = "http://127.0.0.1:" + apiPort + "/api/auto-queue/activate";
-  var resp = agentdesk.http.post(url, body);
-  if (!resp || resp.error) {
-    agentdesk.log.warn("[auto-queue] activate API failed for run " + runId + ": " + JSON.stringify(resp));
-    return null;
-  }
-  return resp;
 }
 
 // ── Shared dispatch helper (group-aware) (#140) ─────────────────
@@ -739,7 +724,7 @@ function dispatchNextEntryInGroup(agentId, runId, threadGroup) {
   var result = activateRun(runId, threadGroup);
   if (!result) return;
   if (result.count > 0) {
-    agentdesk.log.info("[auto-queue] activate API dispatched " + result.count + " entry(s) for run " + runId + " group " + threadGroup);
+    agentdesk.log.info("[auto-queue] activate bridge dispatched " + result.count + " entry(s) for run " + runId + " group " + threadGroup);
   }
 }
 
@@ -789,15 +774,15 @@ function _createConsultationDispatch(entry, agentId, preflightMeta) {
 
 // Legacy helper for backward compatibility
 function dispatchNextEntry(agentId) {
-  var apiPort = agentdesk.config.get("server_port");
-  if (!apiPort) return;
-  agentdesk.http.post(
-    "http://127.0.0.1:" + apiPort + "/api/auto-queue/activate",
-    {
+  if (!agentId) return;
+  try {
+    agentdesk.autoQueue.activate({
       agent_id: agentId,
       active_only: true
-    }
-  );
+    });
+  } catch (e) {
+    agentdesk.log.warn("[auto-queue] legacy activate bridge failed for agent " + agentId + ": " + e);
+  }
 }
 
 function collectRunMainChannels(runId, runInfo) {

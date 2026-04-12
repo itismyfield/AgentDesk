@@ -96,7 +96,7 @@ pub fn register_globals_with_supervisor(
     queue_ops::register_queue_ops(ctx, db.clone())?;
 
     // ── agentdesk.autoQueue ─────────────────────────────────────
-    auto_queue_ops::register_auto_queue_ops(ctx, db.clone())?;
+    auto_queue_ops::register_auto_queue_ops(ctx, db.clone(), supervisor_bridge.clone())?;
 
     // ── agentdesk.runtime ────────────────────────────────────────
     runtime_ops::register_runtime_ops(ctx, db.clone(), supervisor_bridge)?;

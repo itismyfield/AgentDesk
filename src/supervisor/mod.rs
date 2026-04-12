@@ -55,16 +55,20 @@ impl BridgeHandle {
         }
     }
 
-    fn runtime_supervisor(&self, db: Db) -> Result<RuntimeSupervisor, String> {
+    pub fn upgrade_engine(&self) -> Result<PolicyEngine, String> {
         let handle = self
             .engine
             .lock()
             .map_err(|e| format!("supervisor bridge lock poisoned: {e}"))?
             .clone()
             .ok_or_else(|| "runtime supervisor is not attached".to_string())?;
-        let engine = handle
+        handle
             .upgrade()
-            .ok_or_else(|| "policy engine is no longer available".to_string())?;
+            .ok_or_else(|| "policy engine is no longer available".to_string())
+    }
+
+    fn runtime_supervisor(&self, db: Db) -> Result<RuntimeSupervisor, String> {
+        let engine = self.upgrade_engine()?;
         Ok(RuntimeSupervisor::new(db, engine))
     }
 }

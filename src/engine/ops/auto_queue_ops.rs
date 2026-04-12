@@ -1,11 +1,16 @@
 use crate::db::Db;
+use crate::supervisor::BridgeHandle;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 
-pub(super) fn register_auto_queue_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+pub(super) fn register_auto_queue_ops<'js>(
+    ctx: &Ctx<'js>,
+    db: Db,
+    bridge: BridgeHandle,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let auto_queue_obj = Object::new(ctx.clone())?;
 
-    let db_update = db;
+    let db_update = db.clone();
     auto_queue_obj.set(
         "__updateEntryStatusRaw",
         Function::new(
@@ -16,12 +21,41 @@ pub(super) fn register_auto_queue_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<(
         )?,
     )?;
 
+    let db_activate = db;
+    let bridge_activate = bridge.clone();
+    auto_queue_obj.set(
+        "__activateRaw",
+        Function::new(ctx.clone(), move |body_json: String| -> String {
+            activate_raw(&db_activate, &bridge_activate, &body_json)
+        })?,
+    )?;
+
     ad.set("autoQueue", auto_queue_obj)?;
 
     ctx.eval::<(), _>(
         r#"
         (function() {
             var aq = agentdesk.autoQueue;
+            aq.activate = function(runIdOrBody, threadGroup) {
+                var body;
+                if (runIdOrBody && typeof runIdOrBody === "object" && !Array.isArray(runIdOrBody)) {
+                    body = Object.assign({}, runIdOrBody);
+                } else {
+                    body = {
+                        run_id: runIdOrBody || null,
+                        active_only: true
+                    };
+                    if (threadGroup !== null && threadGroup !== undefined) {
+                        body.thread_group = threadGroup;
+                    }
+                }
+                if (body.active_only === undefined) {
+                    body.active_only = true;
+                }
+                var result = JSON.parse(aq.__activateRaw(JSON.stringify(body)));
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
             aq.updateEntryStatus = function(entryId, status, source, opts) {
                 var result = JSON.parse(
                     aq.__updateEntryStatusRaw(
@@ -39,6 +73,34 @@ pub(super) fn register_auto_queue_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<(
     )?;
 
     Ok(())
+}
+
+fn activate_raw(db: &Db, bridge: &BridgeHandle, body_json: &str) -> String {
+    let body: crate::server::routes::auto_queue::ActivateBody =
+        match serde_json::from_str(body_json) {
+            Ok(body) => body,
+            Err(error) => {
+                return serde_json::json!({
+                    "error": format!("invalid activate body JSON: {error}")
+                })
+                .to_string();
+            }
+        };
+
+    let engine = match bridge.upgrade_engine() {
+        Ok(engine) => engine,
+        Err(error) => {
+            return serde_json::json!({
+                "error": error
+            })
+            .to_string();
+        }
+    };
+
+    let deps =
+        crate::server::routes::auto_queue::AutoQueueActivateDeps::for_bridge(db.clone(), engine);
+    let (_status, response) = crate::server::routes::auto_queue::activate_with_deps(&deps, body);
+    response.0.to_string()
 }
 
 fn update_entry_status_raw(

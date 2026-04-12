@@ -330,21 +330,69 @@ fn load_activate_card_state(
     })
 }
 
+#[derive(Clone)]
+pub(crate) struct AutoQueueActivateDeps {
+    db: crate::db::Db,
+    engine: crate::engine::PolicyEngine,
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    guild_id: Option<String>,
+}
+
+impl AutoQueueActivateDeps {
+    fn from_state(state: &AppState) -> Self {
+        Self {
+            db: state.db.clone(),
+            engine: state.engine.clone(),
+            health_registry: state.health_registry.clone(),
+            guild_id: state.config.discord.guild_id.clone(),
+        }
+    }
+
+    pub(crate) fn for_bridge(db: crate::db::Db, engine: crate::engine::PolicyEngine) -> Self {
+        Self {
+            db,
+            engine,
+            health_registry: None,
+            guild_id: None,
+        }
+    }
+
+    fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
+        crate::services::auto_queue::AutoQueueService::new(self.db.clone(), self.engine.clone())
+    }
+
+    fn entry_json(&self, entry_id: &str) -> serde_json::Value {
+        self.auto_queue_service()
+            .entry_json(entry_id, self.guild_id.as_deref())
+            .unwrap_or(serde_json::Value::Null)
+    }
+}
+
 enum ActivatePreflightOutcome {
     Continue,
     Dispatched(serde_json::Value),
     Skipped,
 }
 
+fn run_activate_blocking<T, F>(operation: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(operation)
+    } else {
+        operation()
+    }
+}
+
 fn handle_activate_preflight_metadata(
-    state: &AppState,
+    deps: &AutoQueueActivateDeps,
     entry_id: &str,
     card_id: &str,
     agent_id: &str,
     group: i64,
     title: &str,
     metadata: Option<&str>,
-    guild_id: Option<&str>,
 ) -> ActivatePreflightOutcome {
     let Some(metadata) = metadata else {
         return ActivatePreflightOutcome::Continue;
@@ -356,7 +404,7 @@ fn handle_activate_preflight_metadata(
     match parsed.get("preflight_status").and_then(|v| v.as_str()) {
         Some("consult_required") => {
             let consult_agent_id = {
-                let conn = state.db.separate_conn().unwrap();
+                let conn = deps.db.separate_conn().unwrap();
                 let provider = conn
                     .query_row(
                         "SELECT COALESCE(provider, 'claude') FROM agents WHERE id = ?1",
@@ -402,10 +450,10 @@ fn handle_activate_preflight_metadata(
                     .unwrap_or_else(|| agent_id.to_string())
             };
 
-            let dispatch_result = tokio::task::block_in_place(|| {
+            let dispatch_result = run_activate_blocking(|| {
                 crate::dispatch::create_dispatch(
-                    &state.db,
-                    &state.engine,
+                    &deps.db,
+                    &deps.engine,
                     card_id,
                     &consult_agent_id,
                     "consultation",
@@ -439,7 +487,7 @@ fn handle_activate_preflight_metadata(
                 );
             }
 
-            let conn = state.db.separate_conn().unwrap();
+            let conn = deps.db.separate_conn().unwrap();
             conn.execute(
                 "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
                 rusqlite::params![parsed.to_string(), card_id],
@@ -454,15 +502,10 @@ fn handle_activate_preflight_metadata(
                 rusqlite::params![dispatch_id, entry_id],
             )
             .ok();
-            ActivatePreflightOutcome::Dispatched(
-                state
-                    .auto_queue_service()
-                    .entry_json(entry_id, guild_id)
-                    .unwrap_or(serde_json::Value::Null),
-            )
+            ActivatePreflightOutcome::Dispatched(deps.entry_json(entry_id))
         }
         Some("invalid") | Some("already_applied") => {
-            let conn = state.db.separate_conn().unwrap();
+            let conn = deps.db.separate_conn().unwrap();
             conn.execute(
                 "UPDATE auto_queue_entries
                  SET status = 'skipped',
@@ -1663,9 +1706,15 @@ pub async fn activate(
     State(state): State<AppState>,
     Json(body): Json<ActivateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let guild_id = state.config.discord.guild_id.as_deref();
+    activate_with_deps(&AutoQueueActivateDeps::from_state(&state), body)
+}
+
+pub(crate) fn activate_with_deps(
+    deps: &AutoQueueActivateDeps,
+    body: ActivateBody,
+) -> (StatusCode, Json<serde_json::Value>) {
     let _ignored_unified_thread = body.unified_thread.is_some();
-    let conn = match state.db.separate_conn() {
+    let conn = match deps.db.separate_conn() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1785,7 +1834,7 @@ pub async fn activate(
     let mut cleared_slots: HashSet<(String, i64)> = HashSet::new();
     for (agent_id, slot_index) in &completed_slots {
         let cleared = crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
-            state.health_registry.clone(),
+            deps.health_registry.clone(),
             &conn,
             agent_id,
             *slot_index,
@@ -1962,7 +2011,7 @@ pub async fn activate(
     let preferred_group = body.thread_group;
 
     if let Some(group) = preferred_group {
-        let conn = state.db.separate_conn().unwrap();
+        let conn = deps.db.separate_conn().unwrap();
         let has_pending =
             crate::db::auto_queue::group_has_pending_entries(&conn, &run_id, group, current_phase);
         let has_dispatched: bool = conn
@@ -1982,7 +2031,7 @@ pub async fn activate(
     }
 
     {
-        let conn = state.db.separate_conn().unwrap();
+        let conn = deps.db.separate_conn().unwrap();
         for group in crate::db::auto_queue::assigned_groups_with_pending_entries(
             &conn,
             &run_id,
@@ -1997,7 +2046,7 @@ pub async fn activate(
     // Also dispatch next entry for active groups that have pending entries
     // (continuation within same group after prior entry completed)
     {
-        let conn = state.db.separate_conn().unwrap();
+        let conn = deps.db.separate_conn().unwrap();
         for &grp in &active_groups {
             let has_pending = crate::db::auto_queue::group_has_pending_entries(
                 &conn,
@@ -2035,7 +2084,7 @@ pub async fn activate(
 
     for group in &groups_to_dispatch {
         // Get first pending entry in this group
-        let conn = state.db.separate_conn().unwrap();
+        let conn = deps.db.separate_conn().unwrap();
         let entry = crate::db::auto_queue::first_pending_entry_for_group(
             &conn,
             &run_id,
@@ -2049,7 +2098,7 @@ pub async fn activate(
         };
 
         let initial_state = {
-            let conn = state.db.separate_conn().unwrap();
+            let conn = deps.db.separate_conn().unwrap();
             let card_state = load_activate_card_state(&conn, &card_id, &entry_id);
             drop(conn);
             match card_state {
@@ -2069,7 +2118,7 @@ pub async fn activate(
         // Exclude the card being dispatched (#162) and cards that belong to the
         // same auto-queue run — those work in isolated worktrees so parallel
         // execution is safe.
-        let conn = state.db.separate_conn().unwrap();
+        let conn = deps.db.separate_conn().unwrap();
         let busy: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM kanban_cards \
@@ -2093,7 +2142,7 @@ pub async fn activate(
         // walk it through free transitions using the same canonical transition
         // path as manual status changes so requested-state hooks/preflight fire.
         let walk_path = {
-            let conn = state.db.separate_conn().unwrap();
+            let conn = deps.db.separate_conn().unwrap();
             let (card_repo_id, card_assigned_agent_id): (Option<String>, Option<String>) = conn
                 .query_row(
                     "SELECT repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
@@ -2122,14 +2171,13 @@ pub async fn activate(
 
         if walk_path.is_none() {
             match handle_activate_preflight_metadata(
-                &state,
+                deps,
                 &entry_id,
                 &card_id,
                 &agent_id,
                 *group,
                 &initial_state.title,
                 initial_state.metadata.as_deref(),
-                guild_id,
             ) {
                 ActivatePreflightOutcome::Continue => {}
                 ActivatePreflightOutcome::Dispatched(entry_json) => {
@@ -2141,7 +2189,7 @@ pub async fn activate(
         }
 
         // Get card title
-        let conn = state.db.separate_conn().unwrap();
+        let conn = deps.db.separate_conn().unwrap();
         let title: String = conn
             .query_row(
                 "SELECT title FROM kanban_cards WHERE id = ?1",
@@ -2154,7 +2202,7 @@ pub async fn activate(
         // Preserve the legacy JS preflight contract when activate() became the
         // authoritative dispatch path.
         {
-            let conn = state.db.separate_conn().unwrap();
+            let conn = deps.db.separate_conn().unwrap();
             let metadata: Option<String> = conn
                 .query_row(
                     "SELECT metadata FROM kanban_cards WHERE id = ?1",
@@ -2169,7 +2217,7 @@ pub async fn activate(
                 if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&metadata) {
                     match parsed.get("preflight_status").and_then(|v| v.as_str()) {
                         Some("consult_required") => {
-                            let conn = state.db.separate_conn().unwrap();
+                            let conn = deps.db.separate_conn().unwrap();
                             if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
                                 &conn,
                                 &entry_id,
@@ -2188,7 +2236,7 @@ pub async fn activate(
                             drop(conn);
 
                             let consult_agent_id = {
-                                let conn = state.db.separate_conn().unwrap();
+                                let conn = deps.db.separate_conn().unwrap();
                                 let provider = conn
                                     .query_row(
                                         "SELECT COALESCE(provider, 'claude') FROM agents WHERE id = ?1",
@@ -2236,10 +2284,10 @@ pub async fn activate(
                                     .unwrap_or_else(|| agent_id.clone())
                             };
 
-                            let dispatch_result = tokio::task::block_in_place(|| {
+                            let dispatch_result = run_activate_blocking(|| {
                                 crate::dispatch::create_dispatch(
-                                    &state.db,
-                                    &state.engine,
+                                    &deps.db,
+                                    &deps.engine,
                                     &card_id,
                                     &consult_agent_id,
                                     "consultation",
@@ -2252,7 +2300,7 @@ pub async fn activate(
                                 )
                             });
                             if dispatch_result.is_err() {
-                                let conn = state.db.separate_conn().unwrap();
+                                let conn = deps.db.separate_conn().unwrap();
                                 if let Err(error) =
                                     crate::db::auto_queue::update_entry_status_on_conn(
                                         &conn,
@@ -2290,7 +2338,7 @@ pub async fn activate(
                                 );
                             }
 
-                            let conn = state.db.separate_conn().unwrap();
+                            let conn = deps.db.separate_conn().unwrap();
                             conn.execute(
                                 "UPDATE kanban_cards SET metadata = ?1 WHERE id = ?2",
                                 rusqlite::params![parsed.to_string(), card_id],
@@ -2312,17 +2360,12 @@ pub async fn activate(
                                     error
                                 );
                             }
-                            dispatched.push(
-                                state
-                                    .auto_queue_service()
-                                    .entry_json(&entry_id, guild_id)
-                                    .unwrap_or(serde_json::Value::Null),
-                            );
+                            dispatched.push(deps.entry_json(&entry_id));
                             drop(conn);
                             continue;
                         }
                         Some("invalid") | Some("already_applied") => {
-                            let conn = state.db.separate_conn().unwrap();
+                            let conn = deps.db.separate_conn().unwrap();
                             if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
                                 &conn,
                                 &entry_id,
@@ -2363,8 +2406,8 @@ pub async fn activate(
             let mut walk_failed = false;
             for step in &path {
                 if let Err(e) = crate::kanban::transition_status_with_opts(
-                    &state.db,
-                    &state.engine,
+                    &deps.db,
+                    &deps.engine,
                     &card_id,
                     step,
                     "auto-queue-walk",
@@ -2385,7 +2428,7 @@ pub async fn activate(
         }
 
         let post_walk = {
-            let conn = state.db.separate_conn().unwrap();
+            let conn = deps.db.separate_conn().unwrap();
             let state_after_walk = load_activate_card_state(&conn, &card_id, &entry_id);
             drop(conn);
             match state_after_walk {
@@ -2403,18 +2446,13 @@ pub async fn activate(
 
         if post_walk.entry_status != "pending" {
             if post_walk.entry_status == "dispatched" {
-                dispatched.push(
-                    state
-                        .auto_queue_service()
-                        .entry_json(&entry_id, guild_id)
-                        .unwrap_or(serde_json::Value::Null),
-                );
+                dispatched.push(deps.entry_json(&entry_id));
             }
             continue;
         }
 
         if post_walk.status == "done" {
-            let conn = state.db.separate_conn().unwrap();
+            let conn = deps.db.separate_conn().unwrap();
             conn.execute(
                 "UPDATE auto_queue_entries
                  SET status = 'skipped',
@@ -2432,7 +2470,7 @@ pub async fn activate(
                 .latest_dispatch_id
                 .as_ref()
                 .expect("active dispatch state requires dispatch id");
-            let conn = state.db.separate_conn().unwrap();
+            let conn = deps.db.separate_conn().unwrap();
             conn.execute(
                 "UPDATE auto_queue_entries
                  SET status = 'dispatched',
@@ -2443,24 +2481,18 @@ pub async fn activate(
             )
             .ok();
             drop(conn);
-            dispatched.push(
-                state
-                    .auto_queue_service()
-                    .entry_json(&entry_id, guild_id)
-                    .unwrap_or(serde_json::Value::Null),
-            );
+            dispatched.push(deps.entry_json(&entry_id));
             continue;
         }
 
         match handle_activate_preflight_metadata(
-            &state,
+            deps,
             &entry_id,
             &card_id,
             &agent_id,
             *group,
             &post_walk.title,
             post_walk.metadata.as_deref(),
-            guild_id,
         ) {
             ActivatePreflightOutcome::Continue => {}
             ActivatePreflightOutcome::Dispatched(entry_json) => {
@@ -2471,7 +2503,7 @@ pub async fn activate(
         }
 
         // Create dispatch
-        let conn = state.db.separate_conn().unwrap();
+        let conn = deps.db.separate_conn().unwrap();
         let slot_allocation =
             crate::db::auto_queue::allocate_slot_for_group_agent(&conn, &run_id, *group, &agent_id);
         let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
@@ -2485,7 +2517,7 @@ pub async fn activate(
             let slot_key = (agent_id.clone(), assigned_slot);
             if !cleared_slots.contains(&slot_key) {
                 let cleared = crate::services::auto_queue::runtime::clear_slot_threads_for_slot(
-                    state.health_registry.clone(),
+                    deps.health_registry.clone(),
                     &conn,
                     &agent_id,
                     assigned_slot,
@@ -2499,7 +2531,7 @@ pub async fn activate(
             }
         }
 
-        let conn = state.db.separate_conn().unwrap();
+        let conn = deps.db.separate_conn().unwrap();
         if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
             &conn,
             &entry_id,
@@ -2520,10 +2552,10 @@ pub async fn activate(
         }
         drop(conn);
 
-        let dispatch_result = tokio::task::block_in_place(|| {
+        let dispatch_result = run_activate_blocking(|| {
             crate::dispatch::create_dispatch(
-                &state.db,
-                &state.engine,
+                &deps.db,
+                &deps.engine,
                 &card_id,
                 &agent_id,
                 "implementation",
@@ -2538,7 +2570,7 @@ pub async fn activate(
         });
 
         if dispatch_result.is_err() {
-            let conn = state.db.separate_conn().unwrap();
+            let conn = deps.db.separate_conn().unwrap();
             if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
                 &conn,
                 &entry_id,
@@ -2564,7 +2596,7 @@ pub async fn activate(
             .as_str()
             .unwrap_or("")
             .to_string();
-        let conn = state.db.separate_conn().unwrap();
+        let conn = deps.db.separate_conn().unwrap();
         if let Err(error) = crate::db::auto_queue::update_entry_status_on_conn(
             &conn,
             &entry_id,
@@ -2583,18 +2615,11 @@ pub async fn activate(
         }
         drop(conn);
 
-        let conn = state.db.separate_conn().unwrap();
-        dispatched.push(
-            state
-                .auto_queue_service()
-                .entry_json(&entry_id, guild_id)
-                .unwrap_or(serde_json::Value::Null),
-        );
-        drop(conn);
+        dispatched.push(deps.entry_json(&entry_id));
     }
 
     // Check if all entries are done — include 'dispatched' to avoid premature run completion (#179)
-    let conn = state.db.separate_conn().unwrap();
+    let conn = deps.db.separate_conn().unwrap();
     let remaining: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1 AND status IN ('pending', 'dispatched')",
