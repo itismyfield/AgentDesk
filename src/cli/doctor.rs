@@ -675,6 +675,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
         check_tmux(),
         check_service_manager(),
         check_db_integrity(cfg),
+        check_github_repo_registry(cfg),
         check_disk_usage(),
     ]
 }
@@ -1668,6 +1669,114 @@ fn check_db_integrity(cfg: &config::Config) -> Check {
     }
 }
 
+fn check_github_repo_registry(cfg: &config::Config) -> Check {
+    let db_path = cfg.data.dir.join(&cfg.data.db_name);
+    if !db_path.exists() {
+        return Check::warn(
+            "github_repo_registry",
+            CheckGroup::Core,
+            "GitHub Repo Registry",
+            format!("{} — skipped (DB missing)", db_path.display()),
+            "DB 파일이 없어서 config.github.repos와 github_repos 비교를 건너뒀습니다.",
+        )
+        .with_path(db_path.display().to_string())
+        .with_expected_actual("github_repos matches config.github.repos", "db unavailable");
+    }
+
+    let (configured, invalid_config) = normalized_config_repo_ids(cfg);
+    let db_repos = match open_registered_github_repo_ids(&db_path) {
+        Ok(repos) => repos,
+        Err(error) => {
+            return Check::warn(
+                "github_repo_registry",
+                CheckGroup::Core,
+                "GitHub Repo Registry",
+                format!("{} — skipped ({error})", db_path.display()),
+                "DB repo registry를 읽지 못했습니다. DB 상태와 권한을 확인하세요.",
+            )
+            .with_path(db_path.display().to_string())
+            .with_expected_actual(
+                "github_repos matches config.github.repos",
+                format!("registry read failed: {error}"),
+            );
+        }
+    };
+
+    let missing_in_db: Vec<String> = configured.difference(&db_repos).cloned().collect();
+    let extra_in_db: Vec<String> = db_repos.difference(&configured).cloned().collect();
+
+    if missing_in_db.is_empty() && extra_in_db.is_empty() && invalid_config.is_empty() {
+        return Check::ok(
+            "github_repo_registry",
+            CheckGroup::Core,
+            "GitHub Repo Registry",
+            format!("config={} db={}", configured.len(), db_repos.len()),
+        )
+        .with_path(db_path.display().to_string())
+        .with_expected_actual(
+            "github_repos matches config.github.repos",
+            format!("config={} db={}", configured.len(), db_repos.len()),
+        );
+    }
+
+    let mut detail_parts = vec![format!("config={} db={}", configured.len(), db_repos.len())];
+    if !missing_in_db.is_empty() {
+        detail_parts.push(format!("missing_in_db={}", missing_in_db.join(",")));
+    }
+    if !extra_in_db.is_empty() {
+        detail_parts.push(format!("extra_in_db={}", extra_in_db.join(",")));
+    }
+    if !invalid_config.is_empty() {
+        detail_parts.push(format!("invalid_config={}", invalid_config.join(",")));
+    }
+    let detail = detail_parts.join(" ");
+
+    Check::warn(
+        "github_repo_registry",
+        CheckGroup::Core,
+        "GitHub Repo Registry",
+        detail.clone(),
+        "서버 시작 시 config.github.repos를 github_repos에 seed해야 합니다. 누락 repo는 서버 재기동으로 복구되고, extra row는 stale registry인지 점검하세요.",
+    )
+    .with_path(db_path.display().to_string())
+    .with_expected_actual("github_repos matches config.github.repos", detail)
+}
+
+fn normalized_config_repo_ids(cfg: &config::Config) -> (BTreeSet<String>, Vec<String>) {
+    let mut valid = BTreeSet::new();
+    let mut invalid = BTreeSet::new();
+
+    for raw_repo_id in &cfg.github.repos {
+        let repo_id = raw_repo_id.trim();
+        if repo_id.is_empty() {
+            continue;
+        }
+        if repo_id.contains('/') {
+            valid.insert(repo_id.to_string());
+        } else {
+            invalid.insert(repo_id.to_string());
+        }
+    }
+
+    (valid, invalid.into_iter().collect())
+}
+
+fn open_registered_github_repo_ids(db_path: &std::path::Path) -> Result<BTreeSet<String>, String> {
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| format!("cannot open: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM github_repos ORDER BY id")
+        .map_err(|e| format!("prepare: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query: {e}"))?;
+
+    let mut repos = BTreeSet::new();
+    for row in rows {
+        repos.insert(row.map_err(|e| format!("row: {e}"))?);
+    }
+    Ok(repos)
+}
+
 fn check_disk_usage() -> Check {
     match dcserver::agentdesk_runtime_root() {
         Some(path) if !path.exists() => Check::warn(
@@ -1787,11 +1896,12 @@ pub fn cmd_doctor(fix: bool, json: bool) -> Result<(), String> {
 mod tests {
     use super::{
         Check, CheckGroup, CheckStatus, FixAction, HealthSnapshot, build_json_report,
-        check_provider_cli, check_qwen_auth_hints, check_qwen_runtime_artifacts,
-        check_qwen_settings_files, check_server_running, configured_provider_names,
-        discord_bot_check_from_health, provider_capability_summary,
+        check_github_repo_registry, check_provider_cli, check_qwen_auth_hints,
+        check_qwen_runtime_artifacts, check_qwen_settings_files, check_server_running,
+        configured_provider_names, discord_bot_check_from_health, provider_capability_summary,
     };
     use crate::config::ServerConfig;
+    use crate::db::schema;
     use crate::services::provider::ProviderKind;
     use serde_json::json;
     use std::path::Path;
@@ -1845,6 +1955,18 @@ mod tests {
         let mut perms = std::fs::metadata(path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn write_github_repo_registry(db_path: &Path, repos: &[&str]) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        schema::migrate(&conn).unwrap();
+        for repo in repos {
+            conn.execute(
+                "INSERT INTO github_repos (id, display_name, sync_enabled) VALUES (?1, ?1, 1)",
+                [repo],
+            )
+            .unwrap();
+        }
     }
 
     fn test_base_url() -> String {
@@ -2091,6 +2213,48 @@ mod tests {
                 Some(format!("user settings={}", qwen_settings.display()).as_str())
             );
         });
+    }
+
+    #[test]
+    fn github_repo_registry_check_passes_when_config_matches_db() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("agentdesk.db");
+        write_github_repo_registry(&db_path, &["owner/repo-a", "owner/repo-b"]);
+
+        let mut cfg = crate::config::Config::default();
+        cfg.data.dir = temp.path().to_path_buf();
+        cfg.data.db_name = "agentdesk.db".to_string();
+        cfg.github.repos = vec![
+            " owner/repo-b ".to_string(),
+            "owner/repo-a".to_string(),
+            "owner/repo-a".to_string(),
+        ];
+
+        let check = check_github_repo_registry(&cfg);
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(check.detail.contains("config=2 db=2"));
+    }
+
+    #[test]
+    fn github_repo_registry_check_reports_missing_extra_and_invalid_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("agentdesk.db");
+        write_github_repo_registry(&db_path, &["owner/repo-a", "owner/repo-stale"]);
+
+        let mut cfg = crate::config::Config::default();
+        cfg.data.dir = temp.path().to_path_buf();
+        cfg.data.db_name = "agentdesk.db".to_string();
+        cfg.github.repos = vec![
+            "owner/repo-a".to_string(),
+            "owner/repo-missing".to_string(),
+            "noslash".to_string(),
+        ];
+
+        let check = check_github_repo_registry(&cfg);
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("missing_in_db=owner/repo-missing"));
+        assert!(check.detail.contains("extra_in_db=owner/repo-stale"));
+        assert!(check.detail.contains("invalid_config=noslash"));
     }
 
     #[test]

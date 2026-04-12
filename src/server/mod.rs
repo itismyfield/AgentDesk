@@ -36,6 +36,8 @@ pub async fn run(
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Result<()> {
+    seed_startup_runtime_state(&db, &config);
+
     let mut worker_registry = worker_registry::SupervisedWorkerRegistry::new(
         config.clone(),
         db.clone(),
@@ -83,17 +85,6 @@ pub async fn run(
     let broadcast_tx = ws::new_broadcast();
     let batch_buffer = worker_registry.start_after_websocket_broadcast(broadcast_tx.clone())?;
 
-    // Seed config defaults + store server port in kv_meta so policy JS can read them
-    if let Ok(conn) = db.lock() {
-        routes::settings::seed_config_defaults(&conn, &config);
-        // server_port is always overwritten (not INSERT OR IGNORE) to match current config
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_port', ?1)",
-            [config.server.port.to_string()],
-        )
-        .ok();
-    }
-
     let app = Router::new()
         .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
         .nest(
@@ -113,6 +104,50 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("HTTP server listening on {addr}");
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn seed_startup_runtime_state(db: &Db, config: &Config) {
+    if let Ok(conn) = db.lock() {
+        routes::settings::seed_config_defaults(&conn, config);
+        // server_port is always overwritten (not INSERT OR IGNORE) to match current config
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('server_port', ?1)",
+            [config.server.port.to_string()],
+        )
+        .ok();
+    } else {
+        tracing::warn!("[startup] failed to lock db for config default seeding");
+    }
+
+    if let Err(error) = seed_github_repos_from_config(db, config) {
+        tracing::warn!("[startup] failed to seed github repos from config: {error}");
+    }
+}
+
+fn seed_github_repos_from_config(db: &Db, config: &Config) -> std::result::Result<(), String> {
+    use std::collections::BTreeSet;
+
+    let mut repo_ids = BTreeSet::new();
+    for raw_repo_id in &config.github.repos {
+        let repo_id = raw_repo_id.trim();
+        if repo_id.is_empty() {
+            continue;
+        }
+        if !repo_id.contains('/') {
+            tracing::warn!(
+                "[startup] skipping invalid github.repos entry {:?}: expected owner/repo",
+                raw_repo_id
+            );
+            continue;
+        }
+        repo_ids.insert(repo_id.to_string());
+    }
+
+    for repo_id in repo_ids {
+        crate::github::register_repo(db, &repo_id)?;
+    }
+
     Ok(())
 }
 
@@ -319,6 +354,14 @@ mod tests {
         .ok()
     }
 
+    fn repo_ids(db: &Db) -> Vec<String> {
+        crate::github::list_repos(db)
+            .unwrap()
+            .into_iter()
+            .map(|repo| repo.id)
+            .collect()
+    }
+
     fn insert_pending_message(db: &Db, target: &str, content: &str) -> i64 {
         let conn = db.lock().unwrap();
         conn.execute(
@@ -365,6 +408,43 @@ mod tests {
         assert_eq!(
             crate::services::memory::last_refresh_reason_for_tests().as_deref(),
             Some(MEMORY_HEALTH_FIVE_MIN_REASON)
+        );
+    }
+
+    #[test]
+    fn seed_startup_runtime_state_records_server_port_and_registered_repos() {
+        let db = test_db();
+        let mut config = crate::config::Config::default();
+        config.server.port = 43121;
+        config.github.repos = vec!["owner/repo-a".to_string(), "owner/repo-b".to_string()];
+
+        seed_startup_runtime_state(&db, &config);
+
+        assert_eq!(kv_value(&db, "server_port").as_deref(), Some("43121"));
+        assert_eq!(
+            repo_ids(&db),
+            vec!["owner/repo-a".to_string(), "owner/repo-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn seed_startup_runtime_state_deduplicates_and_skips_invalid_repo_entries() {
+        let db = test_db();
+        let mut config = crate::config::Config::default();
+        config.github.repos = vec![
+            " owner/repo-a ".to_string(),
+            "owner/repo-a".to_string(),
+            "".to_string(),
+            "noslash".to_string(),
+            "owner/repo-b".to_string(),
+        ];
+
+        seed_startup_runtime_state(&db, &config);
+        seed_startup_runtime_state(&db, &config);
+
+        assert_eq!(
+            repo_ids(&db),
+            vec!["owner/repo-a".to_string(), "owner/repo-b".to_string()]
         );
     }
 
