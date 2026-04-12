@@ -73,6 +73,12 @@ pub(crate) trait OutboxNotifier: Send + Sync {
         db: crate::db::Db,
         dispatch_id: String,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+
+    fn sync_status_reaction(
+        &self,
+        db: crate::db::Db,
+        dispatch_id: String,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
 
 /// Production notifier that calls the real Discord functions.
@@ -99,6 +105,14 @@ impl OutboxNotifier for RealOutboxNotifier {
 
     async fn handle_followup(&self, db: crate::db::Db, dispatch_id: String) -> Result<(), String> {
         handle_completed_dispatch_followups(&db, &dispatch_id).await
+    }
+
+    async fn sync_status_reaction(
+        &self,
+        db: crate::db::Db,
+        dispatch_id: String,
+    ) -> Result<(), String> {
+        super::discord_delivery::sync_dispatch_status_reaction(&db, &dispatch_id).await
     }
 }
 
@@ -187,6 +201,11 @@ pub(crate) async fn process_outbox_batch<N: OutboxNotifier>(
             "followup" => {
                 notifier
                     .handle_followup(db.clone(), dispatch_id.clone())
+                    .await
+            }
+            "status_reaction" => {
+                notifier
+                    .sync_status_reaction(db.clone(), dispatch_id.clone())
                     .await
             }
             other => {
@@ -1038,5 +1057,96 @@ pub(crate) async fn dispatch_outbox_loop(db: crate::db::Db) {
         } else {
             poll_interval = Duration::from_millis(500);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn test_db() -> crate::db::Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        crate::db::wrap_conn(conn)
+    }
+
+    #[derive(Clone, Default)]
+    struct MockOutboxNotifier {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl OutboxNotifier for MockOutboxNotifier {
+        async fn notify_dispatch(
+            &self,
+            _db: crate::db::Db,
+            _agent_id: String,
+            _title: String,
+            _card_id: String,
+            dispatch_id: String,
+        ) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("notify:{dispatch_id}"));
+            Ok(())
+        }
+
+        async fn handle_followup(
+            &self,
+            _db: crate::db::Db,
+            dispatch_id: String,
+        ) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("followup:{dispatch_id}"));
+            Ok(())
+        }
+
+        async fn sync_status_reaction(
+            &self,
+            _db: crate::db::Db,
+            dispatch_id: String,
+        ) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("status_reaction:{dispatch_id}"));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn process_outbox_batch_handles_status_reaction_action() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO dispatch_outbox (dispatch_id, action) VALUES ('dispatch-status', 'status_reaction')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let notifier = MockOutboxNotifier::default();
+        let processed = process_outbox_batch(&db, &notifier).await;
+        assert_eq!(processed, 1);
+        assert_eq!(
+            notifier.calls.lock().unwrap().as_slice(),
+            ["status_reaction:dispatch-status"]
+        );
+
+        let conn = db.lock().unwrap();
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, processed_at FROM dispatch_outbox WHERE dispatch_id = 'dispatch-status'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "done");
+        assert!(row.1.is_some());
     }
 }
