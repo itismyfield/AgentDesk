@@ -119,17 +119,17 @@ pub async fn list_meeting_channels(
     let mut channels = Vec::new();
     for binding in bindings {
         let channel_id = ChannelId::new(binding.channel_id);
+        let fallback_name = binding
+            .fallback_name
+            .clone()
+            .unwrap_or_else(|| format!("channel-{}", binding.channel_id));
         let channel_name = match registry {
-            Some(registry) => {
+            Some(registry) if binding.fallback_name.is_none() => {
                 health::fetch_channel_name(registry, channel_id, &binding.owner_provider)
                     .await
-                    .or(binding.fallback_name.clone())
-                    .unwrap_or_else(|| format!("channel-{}", binding.channel_id))
+                    .unwrap_or(fallback_name)
             }
-            None => binding
-                .fallback_name
-                .clone()
-                .unwrap_or_else(|| format!("channel-{}", binding.channel_id)),
+            _ => fallback_name,
         };
 
         channels.push(json!({

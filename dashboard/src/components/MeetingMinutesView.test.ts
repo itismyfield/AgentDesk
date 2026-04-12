@@ -168,6 +168,15 @@ describe("MeetingMinutesView rendered form contract", () => {
     expect(markup).toContain("placeholder=\"회의 안건을 입력하세요\"");
     expect(markup).toContain("rows=\"3\"");
   });
+
+  it("renders configured expert chips for the selected meeting channel", () => {
+    const markup = renderMeetingStartFormMarkup();
+
+    expect(markup).toContain("QWEN");
+    expect(markup).toContain("GEMINI");
+    expect(markup).toContain("#qwen");
+    expect(markup).toContain("#gemini");
+  });
 });
 
 describe("submitMeetingStartRequest", () => {

@@ -291,6 +291,138 @@ async fn offices_reorder_rejects_wrapped_order_body() {
 }
 
 #[tokio::test]
+async fn round_table_meeting_channels_endpoint_does_not_fall_through_to_meeting_lookup() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let app = axum::Router::new().nest("/api", test_api_router(db, engine, None));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/round-table-meetings/channels")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(
+        json["channels"].is_array(),
+        "expected channels array, got {json}"
+    );
+    assert_ne!(json["error"], json!("meeting not found"));
+}
+
+#[tokio::test]
+async fn round_table_meeting_channels_endpoint_returns_configured_experts_and_fallback_name() {
+    let _lock = env_lock();
+    let runtime_root = tempfile::tempdir().unwrap();
+    let _root_env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+
+    let mut config = crate::config::Config::default();
+    config.agents = vec![
+        crate::config::AgentDef {
+            id: "meeting-host".to_string(),
+            name: "Meeting Host".to_string(),
+            name_ko: None,
+            provider: "codex".to_string(),
+            channels: crate::config::AgentChannels {
+                codex: Some(crate::config::AgentChannel::Detailed(
+                    crate::config::AgentChannelConfig {
+                        id: Some("123456789".to_string()),
+                        name: Some("meeting-room".to_string()),
+                        provider: Some("codex".to_string()),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+            keywords: vec!["facilitation".to_string()],
+            department: None,
+            avatar_emoji: None,
+        },
+        crate::config::AgentDef {
+            id: "qwen".to_string(),
+            name: "QWEN".to_string(),
+            name_ko: None,
+            provider: "qwen".to_string(),
+            channels: crate::config::AgentChannels::default(),
+            keywords: vec!["planning".to_string()],
+            department: None,
+            avatar_emoji: None,
+        },
+        crate::config::AgentDef {
+            id: "gemini".to_string(),
+            name: "GEMINI".to_string(),
+            name_ko: None,
+            provider: "gemini".to_string(),
+            channels: crate::config::AgentChannels::default(),
+            keywords: vec!["analysis".to_string()],
+            department: None,
+            avatar_emoji: None,
+        },
+    ];
+    config.meeting = Some(crate::config::MeetingSettings {
+        channel_name: "meeting-room".to_string(),
+        max_rounds: Some(3),
+        max_participants: Some(4),
+        summary_agent: Some(crate::config::MeetingSummaryAgentDef::Static(
+            "meeting-host".to_string(),
+        )),
+        available_agents: Some(vec![
+            crate::config::MeetingAgentEntry::RoleId("qwen".to_string()),
+            crate::config::MeetingAgentEntry::RoleId("gemini".to_string()),
+        ]),
+    });
+
+    let config_path = crate::runtime_layout::config_file_path(runtime_root.path());
+    crate::config::save_to_path(&config_path, &config).unwrap();
+
+    let db = test_db();
+    let engine = test_engine(&db);
+    let health_registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    let app = axum::Router::new().nest("/api", test_api_router(db, engine, Some(health_registry)));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/round-table-meetings/channels")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let channels = json["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 1, "expected one registered meeting channel");
+    assert_eq!(channels[0]["channel_id"], json!("123456789"));
+    assert_eq!(channels[0]["channel_name"], json!("meeting-room"));
+
+    let experts = channels[0]["available_experts"].as_array().unwrap();
+    assert_eq!(experts.len(), 2, "expected configured meeting experts");
+    assert!(experts.iter().any(|expert| {
+        expert["role_id"] == json!("qwen") && expert["provider_hint"] == json!("qwen")
+    }));
+    assert!(experts.iter().any(|expert| {
+        expert["role_id"] == json!("gemini") && expert["provider_hint"] == json!("gemini")
+    }));
+}
+
+#[tokio::test]
 async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
     let _env_lock = env_lock();
     let temp = tempfile::tempdir().unwrap();
