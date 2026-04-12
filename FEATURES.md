@@ -217,9 +217,32 @@ On `onTick`, scans `backlog` cards without `assigned_agent_id`:
 
 ---
 
+## Session Runtime and Recovery
+
+`src/runtime.rs`, `src/runtime_layout.rs`, `src/supervisor/mod.rs`, and `src/services/discord/runtime_bootstrap.rs` keep provider runtimes recoverable across restarts.
+
+### Runtime Abstraction
+
+- `SessionRuntime` hides backend-specific session operations behind a common interface.
+- `TmuxRuntime` is the current production backend and provides session naming, liveness checks, input readiness, termination, and death diagnostics.
+
+### Runtime Layout and Managed Assets
+
+- `ensure_runtime_layout()` migrates legacy runtime layout into the managed root, normalizes memory backend paths, and syncs shared prompt/config files.
+- `sync_managed_skills()` deploys provider/workspace skill links from the managed skills manifest.
+- Shared knowledge, shared memory, and long-term memory paths resolve centrally from `src/runtime_layout.rs`.
+
+### Supervision and Orphan Recovery
+
+- `src/supervisor/mod.rs` exposes a policy bridge for supervisor signals such as orphan, deadlock, or stale inflight candidates.
+- Orphan recovery fails the stale dispatch, returns the card to a dispatchable state, and records an auditable supervisor decision instead of falsely advancing work.
+- Startup recovery in `src/services/discord/runtime_bootstrap.rs` re-delivers truly orphaned pending dispatches after restart when the agent still needs the work.
+
+---
+
 ## Meeting System
 
-`src/services/discord/meeting.rs` — round-table meeting orchestration.
+`src/services/discord/meeting_orchestrator.rs` — round-table meeting orchestration, re-exported as `crate::services::discord::meeting`.
 
 ### Meeting Flow
 
@@ -283,6 +306,17 @@ export default {
 
 ---
 
+## Documentation Drift Guard
+
+`python3 scripts/generate_inventory_docs.py` keeps `ARCHITECTURE.md` and `docs/generated/` aligned with the current Rust tree.
+
+- Rewrites the generated `src/` tree snapshot in `ARCHITECTURE.md`.
+- Rewrites the generated top-level module map in `ARCHITECTURE.md`; adding a new top-level `src/` entry without a description makes `--check` fail.
+- Regenerates module, route, and worker inventories under `docs/generated/`.
+- CI runs `python3 scripts/generate_inventory_docs.py --check` to block architecture and inventory drift before merge.
+
+---
+
 ## Discord Bot Roles
 
 | Bot | Purpose |
@@ -295,14 +329,14 @@ export default {
 
 ```
 User message
-  → router.rs: intake_message()
+  → src/services/discord/router/message_handler.rs
     → dedup check (dispatch_id or hash-based)
     → bot message filtering (allowed_bot_ids check)
     → mention filtering (only process self-mentions)
     → provider routing (-cc → Claude, -cdx → Codex)
-  → turn_bridge.rs: dispatch_turn()
+  → src/services/discord/turn_bridge/mod.rs
     → cancel_token created
     → "..." placeholder message in Discord
-    → claude.rs: execute_streaming — provider CLI spawn
+    → src/services/claude.rs (or sibling provider module) — provider CLI spawn
     → placeholder replaced with final response
 ```
