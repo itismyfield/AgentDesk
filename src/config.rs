@@ -484,14 +484,12 @@ pub struct ReviewConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub counter_model_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rounds: Option<u32>,
 }
 
 impl ReviewConfig {
     pub fn is_empty(&self) -> bool {
-        self.enabled.is_none() && self.counter_model_enabled.is_none() && self.max_rounds.is_none()
+        self.enabled.is_none() && self.max_rounds.is_none()
     }
 }
 
@@ -987,12 +985,12 @@ pub fn load_graceful() -> Config {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
             Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
+                tracing::warn!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
                 Config::default()
             }
         },
         Err(_) => {
-            eprintln!("  ⚠ {path_display} not found — using defaults");
+            tracing::warn!("  ⚠ {path_display} not found — using defaults");
             Config::default()
         }
     };
@@ -1229,7 +1227,6 @@ mod tests {
         };
         config.review = ReviewConfig {
             enabled: Some(true),
-            counter_model_enabled: Some(false),
             max_rounds: Some(4),
         };
         config.runtime = RuntimeSettingsConfig {
@@ -1353,7 +1350,6 @@ mod tests {
         );
         assert_eq!(loaded.kanban.pm_decision_gate_enabled, Some(true));
         assert_eq!(loaded.review.enabled, Some(true));
-        assert_eq!(loaded.review.counter_model_enabled, Some(false));
         assert_eq!(loaded.review.max_rounds, Some(4));
         assert_eq!(loaded.runtime.requested_timeout_min, Some(55));
         assert_eq!(loaded.runtime.in_progress_stale_min, Some(180));

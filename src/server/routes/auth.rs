@@ -1,12 +1,13 @@
-use axum::Json;
+use axum::{Json, extract::State};
 use serde_json::json;
+
+use super::AppState;
 
 /// GET /api/auth/session
 /// Returns session status. If auth_token is configured, validates the request.
 /// The actual auth check is done by the middleware — if this handler runs, the request is authenticated.
-pub async fn get_session() -> Json<serde_json::Value> {
-    let config = crate::config::load_graceful();
-    let auth_enabled = config.server.auth_token.is_some();
+pub async fn get_session(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let auth_enabled = state.config.server.auth_token.is_some();
     Json(json!({
         "ok": true,
         "auth_enabled": auth_enabled,
@@ -17,11 +18,11 @@ pub async fn get_session() -> Json<serde_json::Value> {
 /// Auth middleware: checks Bearer token against config.server.auth_token.
 /// If auth_token is not set, all requests pass through (local-only mode).
 pub async fn auth_middleware(
+    State(state): State<AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let config = crate::config::load_graceful();
-    let Some(expected_token) = config.server.auth_token.as_deref() else {
+    let Some(expected_token) = state.config.server.auth_token.as_deref() else {
         // No auth configured — pass through
         return next.run(req).await;
     };

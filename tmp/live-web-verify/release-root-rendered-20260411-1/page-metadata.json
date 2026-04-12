@@ -1,0 +1,10 @@
+{
+  "requestedUrl": "http://127.0.0.1:8791",
+  "finalUrl": "http://127.0.0.1:8791/",
+  "status": 200,
+  "title": "AgentDesk",
+  "waitForSelector": null,
+  "elementLimit": 12,
+  "logNetwork": false,
+  "cookieFile": null
+}

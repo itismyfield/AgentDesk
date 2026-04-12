@@ -1,0 +1,12 @@
+[
+  {
+    "type": "warning",
+    "text": "[.WebGL-0x114001cf600]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+    "location": "http://127.0.0.1:8791/:0:0"
+  },
+  {
+    "type": "warning",
+    "text": "[.WebGL-0x114001cf000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)",
+    "location": "http://127.0.0.1:8791/:0:0"
+  }
+]

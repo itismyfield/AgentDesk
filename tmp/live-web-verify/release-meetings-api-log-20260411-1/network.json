@@ -1,0 +1,243 @@
+[
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/auth/session"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/offices"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/auth/session",
+    "body": "{\"auth_enabled\":false,\"csrf_token\":\"\",\"ok\":true}"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/agents"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/agents?officeId=ee2bbf5d-02ef-46ba-87fa-e27f3358c8ee"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/departments"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/departments?officeId=ee2bbf5d-02ef-46ba-87fa-e27f3358c8ee"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/dispatched-sessions?includeMerged=1"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/stats?officeId=ee2bbf5d-02ef-46ba-87fa-e27f3358c8ee"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/settings"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/round-table-meetings"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/audit-logs?limit=12"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/kanban-cards"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/dispatches?limit=200"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/offices",
+    "body": "{\"offices\":[{\"agent_count\":17,\"color\":\"#6366f1\",\"created_at\":null,\"department_count\":6,\"description\":\"Dashboard-managed core providers\",\"icon\":\"🧠\",\"id\":\"ee2bbf5d-02ef-46ba-87fa-e27f3358c8ee\",\"name\":\"Core Ops\",\"name_ko\":\"코어 운영\",\"sort_order\":0}]}"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/agents",
+    "body": "{\"agents\":[{\"alias\":null,\"avatar_emoji\":\"✳\",\"cli_provider\":\"claude\",\"created_at\":\"2026-03-26 13:52:57\",\"current_task_id\":null,\"current_thread_channel_id\":null,\"department\":\"providers\",\"department_color\":null,\"department_id\":\"providers\",\"department_name\":\"providers | 공용 모델\",\"department_name_ko\":\"providers | 공용 모델\",\"discord_channel_alt\":\"1486723324259340408\",\"discord_channel_cc\":null,\"discord_channe"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/stats?officeId=ee2bbf5d-02ef-46ba-87fa-e27f3358c8ee",
+    "body": "{\"agents\":{\"break\":0,\"idle\":17,\"offline\":0,\"total\":17,\"working\":0},\"departments\":[{\"color\":\"#1d4ed8\",\"icon\":\"🎛️\",\"id\":\"hq\",\"name\":\"hq | 중앙 통제실\",\"name_ko\":\"중앙 통제실\",\"sum_xp\":0,\"total_agents\":1,\"working_agents\":0},{\"color\":\"#7c3aed\",\"icon\":\"🧠\",\"id\":\"strategy\",\"name\":\"strategy | 전략 기획\",\"name_ko\":\"전략 기획 본부\",\"sum_xp\":0,\"total_agents\":2,\"working_agents\":0},{\"color\":\"#0f766e\",\"icon\":\"⚙️\",\"id\":\"engineeri"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/departments?officeId=ee2bbf5d-02ef-46ba-87fa-e27f3358c8ee",
+    "body": "{\"departments\":[{\"agent_count\":1,\"color\":\"#1d4ed8\",\"created_at\":\"2026-04-03 09:57:21\",\"description\":\"오케스트레이션, 우선순위 판단, 신뢰성 운영을 총괄하는 컨트롤 타워\",\"icon\":\"🎛️\",\"id\":\"hq\",\"name\":\"hq | 중앙 통제실\",\"name_ja\":null,\"name_ko\":\"중앙 통제실\",\"name_zh\":null,\"office_id\":\"ee2bbf5d-02ef-46ba-87fa-e27f3358c8ee\",\"prompt\":null,\"sort_order\":0},{\"agent_count\":2,\"color\":\"#7c3aed\",\"created_at\":\"2026-04-03 09:57:21\",\"description\":\"리"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/departments",
+    "body": "{\"departments\":[{\"agent_count\":1,\"color\":\"#1d4ed8\",\"created_at\":\"2026-04-03 09:57:21\",\"description\":\"오케스트레이션, 우선순위 판단, 신뢰성 운영을 총괄하는 컨트롤 타워\",\"icon\":\"🎛️\",\"id\":\"hq\",\"name\":\"hq | 중앙 통제실\",\"name_ja\":null,\"name_ko\":\"중앙 통제실\",\"name_zh\":null,\"office_id\":\"ee2bbf5d-02ef-46ba-87fa-e27f3358c8ee\",\"prompt\":null,\"sort_order\":0},{\"agent_count\":2,\"color\":\"#7c3aed\",\"created_at\":\"2026-04-03 09:57:21\",\"description\":\"리"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/agents?officeId=ee2bbf5d-02ef-46ba-87fa-e27f3358c8ee",
+    "body": "{\"agents\":[{\"alias\":null,\"avatar_emoji\":\"✳\",\"cli_provider\":\"claude\",\"created_at\":\"2026-03-26 13:52:57\",\"current_task_id\":null,\"current_thread_channel_id\":null,\"department\":\"providers\",\"department_color\":null,\"department_id\":\"providers\",\"department_name\":\"providers | 공용 모델\",\"department_name_ko\":\"providers | 공용 모델\",\"discord_channel_alt\":\"1486723324259340408\",\"discord_channel_cc\":null,\"discord_channe"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/settings",
+    "body": "{}"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/dispatched-sessions?includeMerged=1",
+    "body": "{\"sessions\":[{\"active_dispatch_id\":null,\"agent_id\":null,\"avatar_emoji\":\"🤖\",\"connected_at\":null,\"cwd\":\"/Users/kunkun/.adk/release/workspace/30uimnim\",\"department_color\":null,\"department_id\":null,\"department_name\":null,\"department_name_ko\":null,\"id\":\"1\",\"last_heartbeat\":\"2026-03-26 15:08:12\",\"last_seen_at\":\"2026-03-26 15:08:12\",\"linked_agent_id\":null,\"model\":\"codex\",\"name\":\"kunkun-ui-Macmini:AgentD"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/audit-logs?limit=12",
+    "body": "{\"logs\":[{\"action\":\"in_progress->review (OK)\",\"actor\":\"resume\",\"created_at\":1775806401000,\"entity_id\":\"04bca2ac-80fc-0866-558e-9134424eb01c\",\"entity_type\":\"kanban_card\",\"id\":\"51\",\"summary\":\"kanban_card:04bca2ac-80fc-0866-558e-9134424eb01c in_progress->review (OK)\"},{\"action\":\"in_progress->review (OK)\",\"actor\":\"resume\",\"created_at\":1775806401000,\"entity_id\":\"203d0379-eeb1-576e-cc60-b10dd1699341\",\"e"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/round-table-meetings",
+    "body": "{\"meetings\":[{\"agenda\":\"gemini, qwen cli 특징 논의\",\"channel_id\":\"1470643510179926080\",\"completed_at\":1775897741751,\"created_at\":1775897494596,\"effective_rounds\":1,\"entries\":[{\"content\":\"BLOCKED: QA 기준으로 Gemini는 응답 안정성·장문 요약 품질의 재현 검증이 먼저 필요합니다. Qwen CLI는 로컬·헤드리스 자동화 적합성이 강점입니다. 비교축은 정확도보다 재현성, 비대화식 실행 성공률, 로그 추적성으로 고정해야 합니다.\\n이견: Gemini 평가를 품질 중심으로 볼지 운영 적합성 중심으로 볼지 아직 정리되지 않았습니다.\",\"id\":48,\"is_summar"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/kanban-cards",
+    "body": "{\"cards\":[{\"assigned_agent_id\":\"openclaw-coder\",\"assignee_agent_id\":\"openclaw-coder\",\"blocked_reason\":null,\"child_count\":0,\"completed_at\":\"2026-04-10 02:04:37\",\"created_at\":\"2026-04-09 22:42:43\",\"depth\":0,\"description\":\"논제: model picker에서 선택한 model을 기준으로, provider resume 없이도 기존 채널 세션의 연속성을 어떻게 유지할지 검토한다. 검토 포인트: 1) live session hot swap 가능성 2) 새 프로세스 + 비-resume 문맥 이관 방식 3) provider별 제약(Claude/Code"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/dispatches?limit=200",
+    "body": "{\"dispatches\":[{\"chain_depth\":0,\"completed_at\":null,\"context\":null,\"context_file\":null,\"created_at\":\"2026-04-10 09:25:27\",\"dispatch_type\":\"implementation\",\"dispatched_at\":\"2026-04-10 09:25:27\",\"from_agent_id\":null,\"id\":\"7d8e08a4-7437-4b34-a371-c3ff2282f4b6\",\"kanban_card_id\":\"b4810466-80de-11a6-3263-5520d44440d1\",\"parent_dispatch_id\":null,\"result\":\"recovered\",\"result_file\":null,\"result_summary\":nul"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/rate-limits"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/rate-limits"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/stats"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/rate-limits"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/rate-limits"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/stats"
+  },
+  {
+    "type": "console",
+    "level": "warning",
+    "text": "[.WebGL-0x11c001d0200]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+  },
+  {
+    "type": "console",
+    "level": "warning",
+    "text": "[.WebGL-0x11c001cfc00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/rate-limits",
+    "body": "{\"providers\":[{\"buckets\":[{\"limit\":100,\"name\":\"5h\",\"remaining\":70,\"reset\":1775916000,\"used\":30},{\"limit\":100,\"name\":\"7d\",\"remaining\":74,\"reset\":1776463200,\"used\":26},{\"limit\":100,\"name\":\"7d Sonnet\",\"remaining\":100,\"reset\":0,\"used\":0}],\"fetched_at\":1775908616,\"provider\":\"claude\",\"stale\":false},{\"buckets\":[{\"limit\":100,\"name\":\"5h\",\"remaining\":81,\"reset\":1775915324,\"used\":19},{\"limit\":100,\"name\":\"7d\""
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/stats",
+    "body": "{\"agents\":{\"break\":0,\"idle\":17,\"offline\":0,\"total\":17,\"working\":0},\"departments\":[{\"color\":\"#1d4ed8\",\"icon\":\"🎛️\",\"id\":\"hq\",\"name\":\"hq | 중앙 통제실\",\"name_ko\":\"중앙 통제실\",\"sum_xp\":0,\"total_agents\":1,\"working_agents\":0},{\"color\":\"#7c3aed\",\"icon\":\"🧠\",\"id\":\"strategy\",\"name\":\"strategy | 전략 기획\",\"name_ko\":\"전략 기획 본부\",\"sum_xp\":0,\"total_agents\":2,\"working_agents\":0},{\"color\":\"#0f766e\",\"icon\":\"⚙️\",\"id\":\"engineeri"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/rate-limits",
+    "body": "{\"providers\":[{\"buckets\":[{\"limit\":100,\"name\":\"5h\",\"remaining\":70,\"reset\":1775916000,\"used\":30},{\"limit\":100,\"name\":\"7d\",\"remaining\":74,\"reset\":1776463200,\"used\":26},{\"limit\":100,\"name\":\"7d Sonnet\",\"remaining\":100,\"reset\":0,\"used\":0}],\"fetched_at\":1775908616,\"provider\":\"claude\",\"stale\":false},{\"buckets\":[{\"limit\":100,\"name\":\"5h\",\"remaining\":81,\"reset\":1775915324,\"used\":19},{\"limit\":100,\"name\":\"7d\""
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/stats",
+    "body": "{\"agents\":{\"break\":0,\"idle\":17,\"offline\":0,\"total\":17,\"working\":0},\"departments\":[{\"color\":\"#1d4ed8\",\"icon\":\"🎛️\",\"id\":\"hq\",\"name\":\"hq | 중앙 통제실\",\"name_ko\":\"중앙 통제실\",\"sum_xp\":0,\"total_agents\":1,\"working_agents\":0},{\"color\":\"#7c3aed\",\"icon\":\"🧠\",\"id\":\"strategy\",\"name\":\"strategy | 전략 기획\",\"name_ko\":\"전략 기획 본부\",\"sum_xp\":0,\"total_agents\":2,\"working_agents\":0},{\"color\":\"#0f766e\",\"icon\":\"⚙️\",\"id\":\"engineeri"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/rate-limits",
+    "body": "{\"providers\":[{\"buckets\":[{\"limit\":100,\"name\":\"5h\",\"remaining\":70,\"reset\":1775916000,\"used\":30},{\"limit\":100,\"name\":\"7d\",\"remaining\":74,\"reset\":1776463200,\"used\":26},{\"limit\":100,\"name\":\"7d Sonnet\",\"remaining\":100,\"reset\":0,\"used\":0}],\"fetched_at\":1775908616,\"provider\":\"claude\",\"stale\":false},{\"buckets\":[{\"limit\":100,\"name\":\"5h\",\"remaining\":81,\"reset\":1775915324,\"used\":19},{\"limit\":100,\"name\":\"7d\""
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/rate-limits",
+    "body": "{\"providers\":[{\"buckets\":[{\"limit\":100,\"name\":\"5h\",\"remaining\":70,\"reset\":1775916000,\"used\":30},{\"limit\":100,\"name\":\"7d\",\"remaining\":74,\"reset\":1776463200,\"used\":26},{\"limit\":100,\"name\":\"7d Sonnet\",\"remaining\":100,\"reset\":0,\"used\":0}],\"fetched_at\":1775908616,\"provider\":\"claude\",\"stale\":false},{\"buckets\":[{\"limit\":100,\"name\":\"5h\",\"remaining\":81,\"reset\":1775915324,\"used\":19},{\"limit\":100,\"name\":\"7d\""
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/round-table-meetings/channels"
+  },
+  {
+    "type": "request",
+    "method": "GET",
+    "url": "http://127.0.0.1:8791/api/github-repos"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/github-repos",
+    "body": "{\"repos\":[{\"isPrivate\":false,\"nameWithOwner\":\"kunkunGames/AgentDesk\",\"updatedAt\":\"2026-04-09T04:23:39Z\",\"viewerPermission\":true}],\"viewer_login\":\"kunkunGames\"}"
+  },
+  {
+    "type": "response",
+    "status": 200,
+    "url": "http://127.0.0.1:8791/api/round-table-meetings/channels",
+    "body": "{\"channels\":[{\"available_experts\":[{\"anti_signals\":[],\"display_name\":\"흐름이 | Macro\",\"domain_summary\":null,\"keywords\":[],\"provider_hint\":\"codex\",\"role_id\":\"openclaw-macro\",\"strengths\":[],\"task_types\":[]},{\"anti_signals\":[],\"display_name\":\"qwen\",\"domain_summary\":null,\"keywords\":[],\"provider_hint\":\"qwen\",\"role_id\":\"qwen\",\"strengths\":[],\"task_types\":[]},{\"anti_signals\":[],\"display_name\":\"코딩이 | Coder\",\""
+  }
+]

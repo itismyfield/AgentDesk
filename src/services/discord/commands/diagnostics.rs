@@ -647,7 +647,7 @@ pub(in crate::services::discord) async fn cmd_metrics(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /metrics");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /metrics");
 
     let data = match &date {
         Some(d) => metrics::load_date(d),
@@ -669,7 +669,7 @@ pub(in crate::services::discord) async fn cmd_health(ctx: Context<'_>) -> Result
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /health");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /health");
 
     let text =
         build_health_report(&ctx.data().shared, &ctx.data().provider, ctx.channel_id()).await;
@@ -687,7 +687,7 @@ pub(in crate::services::discord) async fn cmd_status(ctx: Context<'_>) -> Result
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /status");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /status");
 
     let text =
         build_status_report(&ctx.data().shared, &ctx.data().provider, ctx.channel_id()).await;
@@ -705,7 +705,7 @@ pub(in crate::services::discord) async fn cmd_inflight(ctx: Context<'_>) -> Resu
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /inflight");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /inflight");
 
     let text =
         build_inflight_report(&ctx.data().shared, &ctx.data().provider, ctx.channel_id()).await;
@@ -726,7 +726,7 @@ pub(in crate::services::discord) async fn cmd_queue(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /queue");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /queue");
 
     let show_all = all.unwrap_or(false);
     let text = build_queue_report(
@@ -750,12 +750,12 @@ pub(in crate::services::discord) async fn cmd_debug(ctx: Context<'_>) -> Result<
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /debug");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /debug");
 
     let new_state = claude::toggle_debug();
     let status = if new_state { "ON" } else { "OFF" };
     ctx.say(format!("Debug logging: **{}**", status)).await?;
-    println!("  [{ts}] ▶ Debug logging toggled to {status}");
+    tracing::info!("  [{ts}] ▶ Debug logging toggled to {status}");
     Ok(())
 }
 

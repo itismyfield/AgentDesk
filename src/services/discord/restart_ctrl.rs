@@ -106,7 +106,7 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
         let version = fs::read_to_string(&marker).unwrap_or_default();
         let version = version.trim();
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] 🔄 Deferred restart: all turns complete, restarting for v{version}...");
+        tracing::info!("  [{ts}] 🔄 Deferred restart: all turns complete, restarting for v{version}...");
         let _ = fs::remove_file(&marker);
         std::process::exit(0);
     }

@@ -16,18 +16,13 @@ describe("auto-queue-actions", () => {
       { resetAutoQueue, generateAutoQueue },
       "test-repo",
       "agent-selected",
-      "priority-sort",
     );
 
     expect(resetAutoQueue).toHaveBeenCalledWith({
       repo: "test-repo",
       agentId: "agent-selected",
     });
-    expect(generateAutoQueue).toHaveBeenCalledWith(
-      "test-repo",
-      "agent-selected",
-      "priority-sort",
-    );
+    expect(generateAutoQueue).toHaveBeenCalledWith("test-repo", "agent-selected");
   });
 
   it("passes the selected scope to reset-only actions", async () => {

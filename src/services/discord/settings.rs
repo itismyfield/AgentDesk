@@ -518,7 +518,7 @@ impl Default for ResolvedMemorySettings {
 fn clamp_timeout(name: &str, value: u64, min: u64, max: u64, default: u64) -> u64 {
     let clamped = value.clamp(min, max);
     if value != clamped {
-        eprintln!(
+        tracing::warn!(
             "  [memory] Warning: {name}={} is out of range; clamping to {clamped}",
             value
         );
@@ -535,7 +535,7 @@ fn normalize_memory_backend_name(raw: Option<&str>) -> Option<&'static str> {
         Some(value) if value.eq_ignore_ascii_case("mem0") => Some("mem0"),
         Some(value) if value.eq_ignore_ascii_case("memento") => Some("memento"),
         Some(value) => {
-            eprintln!(
+            tracing::warn!(
                 "  [memory] Warning: unknown memory.backend '{value}', falling back to auto-detect"
             );
             None
@@ -590,14 +590,14 @@ fn resolve_explicit_memory_backend(kind: MemoryBackendKind) -> MemoryBackendKind
     }
 
     if let Some(state) = crate::services::memory::backend_state(kind) {
-        eprintln!(
+        tracing::warn!(
             "  [memory] Warning: requested backend '{}' unavailable (configured={}, failures={}); falling back to file",
             kind.as_str(),
             state.configured,
             state.consecutive_failures
         );
     } else {
-        eprintln!(
+        tracing::warn!(
             "  [memory] Warning: requested backend '{}' unavailable; falling back to file",
             kind.as_str()
         );
@@ -617,7 +617,7 @@ fn resolve_mem0_profile(raw: Option<&str>) -> String {
             value.to_ascii_lowercase()
         }
         Some(value) => {
-            eprintln!(
+            tracing::warn!(
                 "  [memory] Warning: unknown memory.mem0.profile '{value}', falling back to {DEFAULT_MEM0_PROFILE}"
             );
             DEFAULT_MEM0_PROFILE.to_string()
@@ -629,7 +629,7 @@ fn resolve_confidence_threshold(raw: Option<f64>) -> Option<f64> {
     match raw {
         Some(value) if (0.0..=1.0).contains(&value) => Some(value),
         Some(value) => {
-            eprintln!(
+            tracing::warn!(
                 "  [memory] Warning: memory.mem0.ingestion.confidence_threshold={} is invalid; dropping override",
                 value
             );

@@ -7,8 +7,8 @@ use serde::Serialize;
 use serenity::ChannelId;
 
 use super::{
-    SharedData, clear_inflight_state, clear_watchdog_deadline_override, mailbox_cancel_active_turn,
-    mailbox_clear_channel, mailbox_clear_recovery_marker, mailbox_finish_turn,
+    SharedData, clear_inflight_state, mailbox_cancel_active_turn, mailbox_clear_channel,
+    mailbox_clear_recovery_marker, mailbox_finish_turn,
 };
 use crate::db::Db;
 use crate::services::provider::ProviderKind;
@@ -140,7 +140,9 @@ impl HealthRegistry {
                         } else {
                             "🔔"
                         };
-                        println!("  [{ts}] {emoji} {bot_name} bot loaded for /api/send routing");
+                        tracing::info!(
+                            "  [{ts}] {emoji} {bot_name} bot loaded for /api/send routing"
+                        );
                     }
                 }
             }
@@ -271,24 +273,23 @@ pub async fn stop_provider_channel_runtime(
     }
 
     let finish = mailbox_finish_turn(&shared, &provider, channel_id).await;
-    if let Some(token) = finish.removed_token {
-        super::turn_bridge::cancel_active_token(&token, true, reason);
-        decrement_counter(shared.global_active.as_ref());
+    if let Some(token) = finish.removed_token.as_ref() {
+        super::turn_bridge::cancel_active_token(token, true, reason);
     }
-    if !finish.has_pending {
-        shared.dispatch_role_overrides.remove(&channel_id);
-    }
+    apply_runtime_hard_stop_cleanup(
+        &shared,
+        &provider,
+        channel_id,
+        &finish,
+        "runtime_stop_fallback",
+    )
+    .await;
     let queue_depth = shared
         .mailbox(channel_id)
         .snapshot()
         .await
         .intervention_queue
         .len();
-
-    clear_watchdog_deadline_override(channel_id.get()).await;
-    shared
-        .dispatch_thread_parents
-        .retain(|_, thread| *thread != channel_id);
     mailbox_clear_recovery_marker(&shared, channel_id).await;
     clear_inflight_state(&provider, channel_id.get());
 
@@ -1257,7 +1258,7 @@ pub async fn send_message(
         Ok(_) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let emoji = if bot == "notify" { "🔔" } else { "📨" };
-            println!("  [{ts}] {emoji} ROUTE: [{source}] → channel {channel_id} (bot={bot})");
+            tracing::info!("  [{ts}] {emoji} ROUTE: [{source}] → channel {channel_id} (bot={bot})");
             let mut response = serde_json::json!({
                 "ok": true,
                 "target": format!("channel:{channel_id}"),
@@ -1271,7 +1272,7 @@ pub async fn send_message(
         }
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ ROUTE: failed to send to channel {channel_id}: {e}");
+            tracing::warn!("  [{ts}] ⚠ ROUTE: failed to send to channel {channel_id}: {e}");
             (
                 "500 Internal Server Error",
                 format!(r#"{{"ok":false,"error":"Discord send failed: {}"}}"#, e),
@@ -1420,7 +1421,7 @@ pub async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static s
             {
                 Ok(_) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] 📨 DM: → user {user_id_raw}");
+                    tracing::info!("  [{ts}] 📨 DM: → user {user_id_raw}");
                     (
                         "200 OK",
                         format!(r#"{{"ok":true,"user_id":"{}"}}"#, user_id_raw),
@@ -1500,7 +1501,7 @@ pub fn spawn_watchdog(port: u16) {
                 if ok {
                     if consecutive_failures > 0 {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!(
+                        tracing::warn!(
                             "  [{ts}] 🩺 watchdog: health recovered after {consecutive_failures} failure(s)"
                         );
                     }
@@ -1508,11 +1509,11 @@ pub fn spawn_watchdog(port: u16) {
                 } else {
                     consecutive_failures += 1;
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
+                    tracing::warn!(
                         "  [{ts}] 🩺 watchdog: health check failed ({consecutive_failures}/{MAX_FAILURES})"
                     );
                     if consecutive_failures >= MAX_FAILURES {
-                        eprintln!(
+                        tracing::warn!(
                             "  [{ts}] 🩺 watchdog: runtime unresponsive — capturing diagnostics before exit"
                         );
                         // Capture process dump for post-mortem analysis (platform-aware)
@@ -1529,10 +1530,10 @@ pub fn spawn_watchdog(port: u16) {
                             chrono::Local::now().format("%Y%m%d-%H%M%S")
                         );
                         match crate::services::platform::capture_process_dump(pid, &dump_path) {
-                            Ok(()) => eprintln!(
+                            Ok(()) => tracing::warn!(
                                 "  [{ts}] 🩺 watchdog: dump saved to {dump_path} — forcing exit"
                             ),
-                            Err(e) => eprintln!(
+                            Err(e) => tracing::warn!(
                                 "  [{ts}] 🩺 watchdog: dump capture failed ({e}) — forcing exit without diagnostics"
                             ),
                         }

@@ -168,6 +168,13 @@ pub fn get_process_list() -> Vec<ProcessInfo> {
 
 /// Get list of running processes with error handling
 pub fn get_process_list_result() -> ProcessListResult {
+    #[cfg(target_os = "windows")]
+    let output = Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH", "/V"])
+        .output()
+        .map_err(|e| format!("Failed to execute tasklist command: {}", e))?;
+
+    #[cfg(not(target_os = "windows"))]
     let output = Command::new("ps")
         .args(["aux"])
         .output()
@@ -175,21 +182,37 @@ pub fn get_process_list_result() -> ProcessListResult {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ps command failed: {}", stderr.trim()));
+        #[cfg(target_os = "windows")]
+        {
+            return Err(format!("tasklist command failed: {}", stderr.trim()));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            return Err(format!("ps command failed: {}", stderr.trim()));
+        }
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut processes: Vec<ProcessInfo> = stdout
+    #[cfg(target_os = "windows")]
+    let mut processes = stdout
+        .lines()
+        .filter_map(parse_tasklist_line)
+        .collect::<Vec<_>>();
+
+    #[cfg(not(target_os = "windows"))]
+    let mut processes = stdout
         .lines()
         .skip(1) // Skip header line (compatible with both Linux and macOS)
         .filter_map(parse_process_line)
-        .collect();
+        .collect::<Vec<_>>();
 
-    // Sort by CPU usage descending by default
+    // Sort by CPU usage descending by default, then RSS as a fallback for
+    // Windows tasklist rows where CPU percentages are unavailable.
     processes.sort_by(|a, b| {
         b.cpu
             .partial_cmp(&a.cpu)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.rss.cmp(&a.rss))
     });
 
     Ok(processes)
@@ -220,6 +243,86 @@ fn parse_process_line(line: &str) -> Option<ProcessInfo> {
         time: parts[9].to_string(),
         command: parts[10..].join(" "),
     })
+}
+
+fn parse_tasklist_line(line: &str) -> Option<ProcessInfo> {
+    let fields = parse_csv_record(line)?;
+    if fields.len() < 5 {
+        return None;
+    }
+
+    let pid = fields.get(1)?.parse::<i32>().ok()?;
+    let rss = fields
+        .get(4)
+        .map(|value| parse_tasklist_memory_kb(value))
+        .unwrap_or(0);
+    let image_name = fields.first()?.clone();
+    let session_name = fields.get(2).cloned().unwrap_or_default();
+    let status = fields.get(5).cloned().unwrap_or_default();
+    let user = fields.get(6).cloned().unwrap_or_default();
+    let cpu_time = fields.get(7).cloned().unwrap_or_default();
+    let window_title = fields.get(8).cloned().unwrap_or_default();
+
+    let command = if window_title.is_empty() || window_title.eq_ignore_ascii_case("N/A") {
+        image_name
+    } else {
+        format!("{image_name} [{window_title}]")
+    };
+
+    Some(ProcessInfo {
+        pid,
+        user,
+        cpu: 0.0,
+        mem: 0.0,
+        vsz: 0,
+        rss,
+        tty: session_name,
+        stat: status,
+        start: String::new(),
+        time: cpu_time,
+        command,
+    })
+}
+
+fn parse_csv_record(line: &str) -> Option<Vec<String>> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                if in_quotes && matches!(chars.peek(), Some('"')) {
+                    current.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = !in_quotes;
+                }
+            }
+            ',' if !in_quotes => {
+                fields.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if in_quotes {
+        return None;
+    }
+
+    fields.push(current.trim().to_string());
+    Some(fields)
+}
+
+fn parse_tasklist_memory_kb(value: &str) -> u64 {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse::<u64>()
+        .unwrap_or(0)
 }
 
 /// Get process start time from /proc/[pid]/stat for additional PID validation
@@ -359,18 +462,40 @@ pub fn force_kill_process_with_verification(
 
 /// Get process command by PID
 fn get_process_command(pid: i32) -> Option<String> {
-    // Use "command=" format to suppress header (POSIX compatible, works on Linux and macOS)
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .ok()?;
+    #[cfg(target_os = "windows")]
+    {
+        let filter = format!("PID eq {pid}");
+        let output = Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH", "/FI", &filter])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.lines().find_map(|line| {
+            let fields = parse_csv_record(line)?;
+            let image = fields.first()?.trim();
+            if image.is_empty() || image.starts_with("INFO:") {
+                None
+            } else {
+                Some(image.to_string())
+            }
+        })
+    }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let command = stdout.trim();
-    if command.is_empty() {
-        None
-    } else {
-        Some(command.to_string())
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Use "command=" format to suppress header (POSIX compatible, works on Linux and macOS)
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .ok()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let command = stdout.trim();
+        if command.is_empty() {
+            None
+        } else {
+            Some(command.to_string())
+        }
     }
 }
 
@@ -513,6 +638,35 @@ mod tests {
         let info = result.unwrap();
         assert_eq!(info.pid, 12345);
         assert_eq!(info.command, "/usr/bin/program --arg value");
+    }
+
+    #[test]
+    fn test_parse_csv_record_handles_embedded_comma() {
+        let line = "\"Code.exe\",\"1234\",\"Console\",\"1\",\"12,345 K\",\"Running\",\"DESKTOP\\user\",\"0:00:03\",\"AgentDesk, Main\"";
+        let fields = parse_csv_record(line).expect("valid csv");
+        assert_eq!(fields.len(), 9);
+        assert_eq!(fields[0], "Code.exe");
+        assert_eq!(fields[4], "12,345 K");
+        assert_eq!(fields[8], "AgentDesk, Main");
+    }
+
+    #[test]
+    fn test_parse_tasklist_line_valid() {
+        let line = "\"Code.exe\",\"1234\",\"Console\",\"1\",\"12,345 K\",\"Running\",\"DESKTOP\\user\",\"0:00:03\",\"N/A\"";
+        let result = parse_tasklist_line(line).expect("tasklist row");
+        assert_eq!(result.pid, 1234);
+        assert_eq!(result.user, "DESKTOP\\user");
+        assert_eq!(result.rss, 12345);
+        assert_eq!(result.command, "Code.exe");
+        assert_eq!(result.tty, "Console");
+        assert_eq!(result.time, "0:00:03");
+    }
+
+    #[test]
+    fn test_parse_tasklist_line_with_window_title() {
+        let line = "\"cmd.exe\",\"4321\",\"Console\",\"1\",\"1,024 K\",\"Running\",\"DESKTOP\\user\",\"0:00:01\",\"AgentDesk Shell\"";
+        let result = parse_tasklist_line(line).expect("tasklist row");
+        assert_eq!(result.command, "cmd.exe [AgentDesk Shell]");
     }
 
     // ========== SortField tests ==========

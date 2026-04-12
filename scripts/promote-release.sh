@@ -76,6 +76,16 @@ sign_binary_with_fallback() {
         fi
     fi
 
+    # Skip re-sign if already signed with the same identity (preserves TCC permissions)
+    if [ "$identity" != "-" ] && codesign -v "$target" 2>/dev/null; then
+        local current_authority
+        current_authority=$(codesign -dvv "$target" 2>&1 | grep "^Authority=" | head -1 || true)
+        if echo "$current_authority" | grep -qF "$identity" 2>/dev/null; then
+            echo "✓ Already signed with matching identity — skipping re-sign (TCC preserved)"
+            return 0
+        fi
+    fi
+
     if [ "$identity" = "-" ]; then
         codesign -f -s "$identity" --identifier "com.itismyfield.agentdesk" "$target"
     else
@@ -157,12 +167,6 @@ _review_gate_override_source() {
             return 0
         fi
 
-        raw=$(_read_kv_flag "$db_path" "counter_model_review_enabled")
-        normalized=$(_normalize_bool "$raw")
-        if [ "$normalized" = "false" ]; then
-            printf '%s\t%s\t%s\n' "$runtime_label" "counter_model_review_enabled" "$db_path"
-            return 0
-        fi
     done
     return 1
 }
@@ -256,7 +260,7 @@ if [ "$SKIP_REVIEW" != true ]; then
         REVIEW_MARKER_REL="$ADK_REL/runtime/review_passed/$LAST_COMMIT"
         if [ ! -f "$REVIEW_MARKER_DEV" ] && [ ! -f "$REVIEW_MARKER_REL" ]; then
             echo "✗ Review not passed for commit $LAST_COMMIT — aborting promotion"
-            echo "  Run counter-review first, or use --skip-review to override"
+            echo "  Run review first, or use --skip-review to override"
             exit 1
         fi
         echo "▸ Review passed for $LAST_COMMIT"
@@ -326,6 +330,15 @@ DIST_STAGED="$ADK_REL/dashboard/dist.new"
 rm -rf "$DIST_STAGED"
 cp -r "$DASHBOARD_SOURCE" "$DIST_STAGED"
 
+# Stage agent prompt files atomically (source-of-truth: workspace config/agents/)
+if [ -d "$REPO/config/agents" ]; then
+    echo "▸ Staging agent prompts..."
+    PROMPTS_STAGED="$ADK_REL/config/agents.new"
+    rm -rf "$PROMPTS_STAGED"
+    mkdir -p "$PROMPTS_STAGED"
+    rsync -a "$REPO/config/agents/" "$PROMPTS_STAGED/"
+fi
+
 # Stage managed skills before stopping release so skill sync never sees partial content.
 echo "▸ Staging managed skills..."
 SKILLS_STAGED="$ADK_REL/skills.new"
@@ -342,9 +355,9 @@ _health_busy_count() {
     local health_json
     health_json=$(curl -sf "http://127.0.0.1:${REL_PORT}/api/health" 2>/dev/null) || { echo "0"; return; }
     local active finalizing queue_depth
-    active=$(echo "$health_json" | grep -o '"global_active":[0-9]*' | cut -d: -f2 || echo "0")
-    finalizing=$(echo "$health_json" | grep -o '"global_finalizing":[0-9]*' | cut -d: -f2 || echo "0")
-    queue_depth=$(echo "$health_json" | grep -o '"queue_depth":[0-9]*' | cut -d: -f2 || echo "0")
+    active=$(echo "$health_json" | grep -o '"global_active":[0-9]*' | head -1 | cut -d: -f2)
+    finalizing=$(echo "$health_json" | grep -o '"global_finalizing":[0-9]*' | head -1 | cut -d: -f2)
+    queue_depth=$(echo "$health_json" | grep -o '"queue_depth":[0-9]*' | head -1 | cut -d: -f2)
     echo $(( ${active:-0} + ${finalizing:-0} + ${queue_depth:-0} ))
 }
 BUSY=$(_health_busy_count)
@@ -410,6 +423,15 @@ rm -rf "$ADK_REL/skills.old"
 [ -d "$ADK_REL/skills" ] && mv "$ADK_REL/skills" "$ADK_REL/skills.old"
 mv "$SKILLS_STAGED" "$ADK_REL/skills"
 rm -rf "$ADK_REL/skills.old"
+
+if [ -d "$PROMPTS_STAGED" ]; then
+    rm -rf "$ADK_REL/config/agents.old"
+    [ -d "$ADK_REL/config/agents" ] && mv "$ADK_REL/config/agents" "$ADK_REL/config/agents.old"
+    mv "$PROMPTS_STAGED" "$ADK_REL/config/agents"
+    rm -rf "$ADK_REL/config/agents.old"
+    # Restore symlink for legacy compatibility
+    [ ! -e "$ADK_REL/config/agents/_shared.md" ] && ln -s _shared.prompt.md "$ADK_REL/config/agents/_shared.md" 2>/dev/null || true
+fi
 
 # Keep the user-facing CLI wrapper discoverable via PATH.
 echo "▸ Ensuring global agentdesk CLI..."

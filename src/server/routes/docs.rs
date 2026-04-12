@@ -1407,17 +1407,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                 ),
             ),
             (
-                "mode",
-                body_param("string", false, "Grouping strategy")
-                    .with_enum(&[
-                        "priority-sort",
-                        "dependency-aware",
-                        "similarity-aware",
-                        "pm-assisted",
-                    ])
-                    .with_default("priority-sort"),
-            ),
-            (
                 "unified_thread",
                 body_param(
                     "boolean",
@@ -1425,11 +1414,6 @@ fn all_endpoints() -> Vec<EndpointDoc> {
                     "Accepted for compatibility but ignored; generate keeps slot pooling",
                 )
                 .with_default(false),
-            ),
-            (
-                "parallel",
-                body_param("boolean", false, "Allow multiple thread groups")
-                    .with_default(false),
             ),
             (
                 "max_concurrent_threads",
@@ -1446,7 +1430,7 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"body": {"repo": "test-repo", "issue_numbers": [423, 405, 407], "mode": "similarity-aware", "parallel": true, "unified_thread": true, "max_concurrent_threads": 2}}),
+            json!({"body": {"repo": "test-repo", "issue_numbers": [423, 405, 407], "unified_thread": true, "max_concurrent_threads": 2}}),
             json!({"run": {"id": "run-1", "status": "generated", "thread_group_count": 2, "max_concurrent_threads": 2, "unified_thread": false}, "entries": [{"id": "entry-1", "github_issue_number": 423, "thread_group": 0, "priority_rank": 0, "status": "pending"}]}),
         ),
         ep(
@@ -1800,6 +1784,25 @@ fn all_endpoints() -> Vec<EndpointDoc> {
             "Cached rate limits per provider",
         ),
         ep("GET", "/api/receipt", "analytics", "Latest usage receipt snapshot"),
+        ep(
+            "GET",
+            "/api/token-analytics",
+            "analytics",
+            "Token dashboard analytics with daily trend, heatmap, and usage breakdowns",
+        )
+        .with_params([(
+            "period",
+            ParamDoc {
+                location: "query",
+                kind: "string",
+                required: false,
+                description: "Analytics window",
+                enum_values: None,
+                default: None,
+            }
+            .with_enum(&["7d", "30d", "90d"])
+            .with_default("30d"),
+        )]),
         ep(
             "GET",
             "/api/skills-trend",

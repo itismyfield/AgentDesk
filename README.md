@@ -18,6 +18,17 @@ This will:
 3. Register a launchd service (auto-starts on boot)
 4. Open the web dashboard for guided onboarding
 
+### Windows and Linux Native Runtime
+
+Windows and Linux run natively today, but they use the manual/runtime-first path instead of the macOS `curl | bash` bootstrap.
+
+1. Download the matching release artifact (`agentdesk-linux-<arch>.tar.gz` or `agentdesk-windows-<arch>.zip`) or build from source with `cargo build --release`.
+2. Run `agentdesk --init` (`agentdesk.exe --init` on Windows) to create the runtime under `~/.adk/release` or `%USERPROFILE%\.adk\release`.
+3. Start `agentdesk dcserver` directly, or register the generated service path with `systemd --user` on Linux or `nssm` / `sc.exe` on Windows.
+4. Verify the host runtime with `agentdesk doctor` and use `agentdesk doctor --fix` for service/runtime repairs.
+
+When tmux is unavailable, provider turns automatically fall back to `ProcessBackend` instead of tmux sessions. That path still posts ADK session heartbeats every 30 seconds, but live child processes cannot be reattached after a `dcserver` restart. After restart, AgentDesk starts a fresh backend process on the next turn and only restores provider-native session IDs when the underlying CLI supports resume.
+
 ### Build from Source
 
 ```bash
@@ -467,10 +478,10 @@ Full API documentation is available at `/api/docs` when the server is running, w
 
 ## Limitations
 
-- **Installer is macOS-focused** — The `curl | bash` installer and launchd integration target macOS. Linux systemd and Windows service support exist in `--init` but are not yet covered by the one-click installer.
+- **Installer is macOS-focused** — The `curl | bash` installer and launchd integration target macOS. Linux systemd and Windows service support exist in `--init`, but native runtime setup is still a manual path.
 - **Local execution** — Agents run on the same machine as AgentDesk. Distributed agent execution is not supported.
 - **Discord-dependent** — Agent communication requires Discord. There is no built-in alternative messaging backend.
-- **tmux optional** — Agent sessions use tmux by default, but a backend process mode is available that does not require tmux.
+- **tmux optional** — Agent sessions use tmux by default, but a backend process mode is available that does not require tmux. That fallback keeps heartbeats, not tmux-style watcher reattachment after restart.
 - **Single SQLite database** — Not designed for multi-instance or clustered deployment.
 - **Provider CLI required** — AI providers (Claude Code, Codex) must be installed and authenticated on the host machine for agents to function.
 - **GitHub integration via CLI** — GitHub features require the `gh` CLI tool to be installed and authenticated.

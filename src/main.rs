@@ -10,6 +10,7 @@ mod error;
 mod github;
 pub(crate) mod kanban;
 mod launch;
+mod logging;
 pub(crate) mod pipeline;
 pub(crate) mod receipt;
 pub(crate) mod reconcile;

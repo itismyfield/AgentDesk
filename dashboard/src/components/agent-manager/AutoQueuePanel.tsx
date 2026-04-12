@@ -518,10 +518,6 @@ export default function AutoQueuePanel({
     return agent ? localeName(locale, agent) : agentId.slice(0, 8);
   };
 
-  const [generateMode, setGenerateMode] = useState<
-    "priority-sort" | "dependency-aware" | "similarity-aware" | "pm-assisted"
-  >("priority-sort");
-
   const handleGenerate = async () => {
     setGenerating(true);
     setError(null);
@@ -535,7 +531,6 @@ export default function AutoQueuePanel({
       const result = await api.generateAutoQueue(
         selectedRepo || null,
         selectedAgentId,
-        generateMode,
       ) as Record<string, unknown>;
       if (result.entries && Array.isArray(result.entries) && result.entries.length === 0) {
         const counts = result.counts as Record<string, number> | undefined;
@@ -934,36 +929,6 @@ export default function AutoQueuePanel({
           )}
           {primaryAction === "generate" && (
             <>
-              <select
-                value={generateMode}
-                onChange={(e) =>
-                  setGenerateMode(
-                    e.target.value as
-                      | "priority-sort"
-                      | "dependency-aware"
-                      | "similarity-aware"
-                      | "pm-assisted",
-                  )
-                }
-                className="text-[11px] px-2 py-1 rounded-lg border bg-transparent"
-                style={{
-                  borderColor: "rgba(148,163,184,0.22)",
-                  color: "var(--th-text-secondary)",
-                }}
-              >
-                <option value="priority-sort">
-                  {tr("우선순위 정렬", "Priority Sort")}
-                </option>
-                <option value="dependency-aware">
-                  {tr("의존관계 고려", "Dependency Aware")}
-                </option>
-                <option value="similarity-aware">
-                  {tr("유사도 자동 그룹", "Similarity Aware")}
-                </option>
-                <option value="pm-assisted">
-                  {tr("PM 분석 요청", "PM Assisted")}
-                </option>
-              </select>
               <button
                 onClick={() => void handleGenerate()}
                 disabled={generating || noReadyCards}

@@ -97,6 +97,8 @@ fn run_git(repo_dir: &std::path::Path, args: &[&str]) {
 struct RepoDirOverride {
     _lock: MutexGuard<'static, ()>,
     _env: EnvVarGuard,
+    _config_dir: tempfile::TempDir,
+    _config: EnvVarGuard,
 }
 
 fn setup_test_repo() -> (tempfile::TempDir, RepoDirOverride) {
@@ -107,11 +109,16 @@ fn setup_test_repo() -> (tempfile::TempDir, RepoDirOverride) {
     run_git(repo.path(), &["config", "user.name", "Test"]);
     run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
     let env = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
+    let config_dir = write_repo_mapping_config(&[("test-repo", repo.path())]);
+    let config_path = config_dir.path().join("agentdesk.yaml");
+    let config = EnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
     (
         repo,
         RepoDirOverride {
             _lock: lock,
             _env: env,
+            _config_dir: config_dir,
+            _config: config,
         },
     )
 }
@@ -147,6 +154,97 @@ fn git_commit(repo_dir: &std::path::Path, message: &str) -> String {
         .unwrap();
     assert!(output.status.success());
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn protected_domain_router_keeps_internal_and_hook_auth_exemptions() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let mut config = crate::config::Config::default();
+    config.server.auth_token = Some("secret-token".to_string());
+    let state = AppState::test_state_with_config(db, engine, config);
+    let app = protected_api_domain(
+        axum::Router::new()
+            .route(
+                "/internal/ping",
+                axum::routing::get(|| async { StatusCode::OK }),
+            )
+            .route(
+                "/hook/session",
+                axum::routing::post(|| async { StatusCode::CREATED }),
+            )
+            .route("/settings", axum::routing::get(|| async { StatusCode::OK })),
+        state.clone(),
+    )
+    .with_state(state);
+
+    let internal_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/internal/ping")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(internal_response.status(), StatusCode::OK);
+
+    let hook_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/hook/session")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hook_response.status(), StatusCode::CREATED);
+
+    let protected_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(protected_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn public_domain_router_wraps_plain_server_errors_in_app_error_json() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    let state = AppState::test_state(db, engine);
+    let app = public_api_domain(axum::Router::new().route(
+        "/boom",
+        axum::routing::get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+    ))
+    .with_state(state);
+
+    let response = app
+        .oneshot(Request::builder().uri("/boom").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "internal server error");
+    assert_eq!(json["code"], "internal");
 }
 
 #[tokio::test]
@@ -403,6 +501,7 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
             "last_offset": 0u64,
             "started_at": "2026-04-06 10:11:12",
             "updated_at": "2026-04-06 10:11:13",
+            "prev_tool_status": "✓ Read: src/config.rs",
             "current_tool_line": "⚙ Bash: rg -n turn src",
             "full_response": "partial output\nOPENAI_API_KEY=sk-secret",
             "response_sent_offset": 0,
@@ -448,12 +547,23 @@ async fn agent_turn_returns_recent_output_from_inflight_snapshot() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "working");
     assert_eq!(json["started_at"], "2026-04-06 10:11:12");
+    assert_eq!(json["updated_at"], "2026-04-06 10:11:13");
     assert_eq!(json["recent_output_source"], "inflight");
     assert_eq!(json["active_dispatch_id"], "dispatch-turn");
+    assert_eq!(json["prev_tool_status"], "✓ Read: src/config.rs");
+    assert_eq!(json["current_tool_line"], "⚙ Bash: rg -n turn src");
+    assert_eq!(json["tool_count"], 2);
     let recent_output = json["recent_output"].as_str().unwrap();
     assert!(recent_output.contains("⚙ Bash: rg -n turn src"));
+    assert!(recent_output.contains("✓ Read: src/config.rs"));
     assert!(recent_output.contains("OPENAI_API_KEY=[REDACTED]"));
     assert!(!recent_output.contains("sk-secret"));
+    let tool_events = json["tool_events"].as_array().unwrap();
+    assert_eq!(tool_events.len(), 2);
+    assert_eq!(tool_events[0]["tool_name"], "Read");
+    assert_eq!(tool_events[0]["status"], "success");
+    assert_eq!(tool_events[1]["tool_name"], "Bash");
+    assert_eq!(tool_events[1]["status"], "running");
 }
 
 #[tokio::test]
@@ -489,6 +599,12 @@ async fn agent_turn_reports_idle_when_agent_has_no_active_session() {
     assert_eq!(json["status"], "idle");
     assert!(json["recent_output"].is_null());
     assert!(json["started_at"].is_null());
+    assert!(json["updated_at"].is_null());
+    assert_eq!(json["recent_output_source"], "none");
+    assert!(json["current_tool_line"].is_null());
+    assert!(json["prev_tool_status"].is_null());
+    assert_eq!(json["tool_count"], 0);
+    assert!(json["tool_events"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -616,7 +732,7 @@ async fn stop_agent_turn_force_kills_matching_tmux_session() {
 }
 
 #[tokio::test]
-async fn stop_agent_turn_preserves_pending_queue_via_mailbox_canonical_cleanup() {
+async fn stop_agent_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     let db = test_db();
     let engine = test_engine(&db);
     let harness = crate::services::discord::health::TestHealthHarness::new_with_provider(
@@ -676,7 +792,7 @@ async fn stop_agent_turn_preserves_pending_queue_via_mailbox_canonical_cleanup()
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "stopped");
-    assert_eq!(json["lifecycle_path"], "canonical");
+    assert_eq!(json["lifecycle_path"], "runtime-fallback");
     assert_eq!(json["queue_preserved"], true);
 
     let (has_active_turn, queue_depth, session_id) = harness.mailbox_state(channel_num).await;
@@ -808,7 +924,7 @@ async fn cancel_turn_kills_tmux_and_cancels_active_dispatch() {
 }
 
 #[tokio::test]
-async fn cancel_turn_preserves_pending_queue_via_mailbox_canonical_cleanup() {
+async fn cancel_turn_preserves_pending_queue_via_mailbox_fallback_cleanup() {
     let db = test_db();
     let engine = test_engine(&db);
     let harness = crate::services::discord::health::TestHealthHarness::new().await;
@@ -864,7 +980,7 @@ async fn cancel_turn_preserves_pending_queue_via_mailbox_canonical_cleanup() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["session_key"], session_key);
-    assert_eq!(json["lifecycle_path"], "canonical");
+    assert_eq!(json["lifecycle_path"], "runtime-fallback");
     assert_eq!(json["queue_preserved"], true);
     assert!(json["dispatch_cancelled"].is_null());
 
@@ -1970,14 +2086,13 @@ async fn api_docs_category_exposes_auto_queue_params_and_examples() {
         .iter()
         .find(|ep| ep["method"] == "POST" && ep["path"] == "/api/auto-queue/generate")
         .expect("auto-queue generate endpoint must be present");
-    assert_eq!(generate["params"]["mode"]["type"], "string");
     assert!(
-        generate["params"]["mode"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "similarity-aware"),
-        "generate docs must expose supported mode enum"
+        generate["params"].get("mode").is_none(),
+        "generate docs should not expose legacy mode selection"
+    );
+    assert!(
+        generate["params"].get("parallel").is_none(),
+        "generate docs should not expose legacy parallel toggle"
     );
     assert_eq!(
         generate["example"]["response"]["run"]["unified_thread"],
@@ -4265,6 +4380,11 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
     run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
     let expected_commit = git_commit(repo.path(), "fix: review target (#269)");
     let _repo_dir = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
+    let _config_dir = write_repo_mapping_config(&[("test-repo", repo.path())]);
+    let _config = EnvVarGuard::set_path(
+        "AGENTDESK_CONFIG",
+        &_config_dir.path().join("agentdesk.yaml"),
+    );
 
     let completed_commit = "1111111111111111111111111111111111111269";
     {
@@ -4416,6 +4536,231 @@ async fn rereview_reactivates_done_card_with_fresh_review_dispatch() {
         .unwrap();
     assert_eq!(entry_status, "dispatched");
     assert_eq!(entry_dispatch_id, review_dispatch_id);
+}
+
+#[tokio::test]
+async fn dispute_repeat_does_not_reuse_poisoned_review_target() {
+    crate::pipeline::ensure_loaded();
+    let _env_lock = env_lock();
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-dispute-repeat");
+    seed_repo(&db, "test-repo");
+    ensure_auto_queue_tables(&db);
+
+    let repo = tempfile::tempdir().unwrap();
+    run_git(repo.path(), &["init", "-b", "main"]);
+    run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+    run_git(repo.path(), &["config", "user.name", "Test"]);
+    run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+    let safe_commit = git_commit(repo.path(), "fix: safe review target (#472)");
+    let worktree_dir = repo.path().join("wt-472");
+    run_git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            "wt/472-poison",
+        ],
+    );
+    let worktree_path = worktree_dir.to_string_lossy().to_string();
+    let poisoned_commit = git_commit(&worktree_dir, "chore: stale target (#482)");
+    let _repo_dir = EnvVarGuard::set_path("AGENTDESK_REPO_DIR", repo.path());
+    let _config_dir = write_repo_mapping_config(&[("test-repo", repo.path())]);
+    let _config = EnvVarGuard::set_path(
+        "AGENTDESK_CONFIG",
+        &_config_dir.path().join("agentdesk.yaml"),
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, latest_dispatch_id, review_status, created_at, updated_at
+            ) VALUES (
+                'card-dispute-repeat', 'Issue #472', 'review', 'medium', 'agent-dispute-repeat', 'test-repo',
+                472, 'rd-dispute-1', 'suggestion_pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, result,
+                created_at, updated_at, completed_at
+            ) VALUES (
+                'impl-dispute-repeat', 'card-dispute-repeat', 'agent-dispute-repeat', 'implementation',
+                'completed', 'impl', ?1, ?2, datetime('now', '-10 minutes'), datetime('now', '-10 minutes'),
+                datetime('now', '-10 minutes')
+            )",
+            rusqlite::params![
+                serde_json::json!({
+                    "worktree_path": worktree_path,
+                    "branch": "wt/472-poison"
+                })
+                .to_string(),
+                serde_json::json!({
+                    "completed_worktree_path": worktree_path,
+                    "completed_branch": "wt/472-poison",
+                    "completed_commit": poisoned_commit.clone(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                created_at, updated_at
+            ) VALUES (
+                'rd-dispute-1', 'card-dispute-repeat', 'agent-dispute-repeat', 'review-decision',
+                'pending', '[Review Decision]', datetime('now', '-1 minutes'), datetime('now', '-1 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (
+                card_id, state, pending_dispatch_id, review_round, updated_at
+            ) VALUES (
+                'card-dispute-repeat', 'suggestion_pending', 'rd-dispute-1', 1, datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let dispute_request = |dispatch_id: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/review-decision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "card_id": "card-dispute-repeat",
+                    "decision": "dispute",
+                    "dispatch_id": dispatch_id,
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let response1 = app
+        .clone()
+        .oneshot(dispute_request("rd-dispute-1"))
+        .await
+        .unwrap();
+    assert_eq!(response1.status(), StatusCode::OK);
+
+    let body1 = axum::body::to_bytes(response1.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json1: serde_json::Value = serde_json::from_slice(&body1).unwrap();
+    let first_review_dispatch_id = json1["review_dispatch_id"]
+        .as_str()
+        .expect("dispute response must include first review dispatch id")
+        .to_string();
+    let first_reviewed_commit = json1["reviewed_commit"]
+        .as_str()
+        .expect("dispute response must include first reviewed commit")
+        .to_string();
+    assert_eq!(first_reviewed_commit, safe_commit);
+    assert_ne!(first_reviewed_commit, poisoned_commit);
+
+    {
+        let conn = db.lock().unwrap();
+        let first_rd_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'rd-dispute-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first_rd_status, "completed");
+
+        conn.execute(
+            "UPDATE task_dispatches
+             SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ?1",
+            [&first_review_dispatch_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title,
+                created_at, updated_at
+            ) VALUES (
+                'rd-dispute-2', 'card-dispute-repeat', 'agent-dispute-repeat', 'review-decision',
+                'pending', '[Review Decision 2]', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE kanban_cards
+             SET latest_dispatch_id = 'rd-dispute-2', review_status = 'suggestion_pending', updated_at = datetime('now')
+             WHERE id = 'card-dispute-repeat'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE card_review_state
+             SET state = 'suggestion_pending', pending_dispatch_id = 'rd-dispute-2', updated_at = datetime('now')
+             WHERE card_id = 'card-dispute-repeat'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let response2 = app.oneshot(dispute_request("rd-dispute-2")).await.unwrap();
+    assert_eq!(response2.status(), StatusCode::OK);
+
+    let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+    let second_review_dispatch_id = json2["review_dispatch_id"]
+        .as_str()
+        .expect("dispute response must include second review dispatch id")
+        .to_string();
+    let second_reviewed_commit = json2["reviewed_commit"]
+        .as_str()
+        .expect("dispute response must include second reviewed commit")
+        .to_string();
+    assert_ne!(second_review_dispatch_id, first_review_dispatch_id);
+    assert_eq!(second_reviewed_commit, safe_commit);
+    assert_ne!(second_reviewed_commit, poisoned_commit);
+
+    let conn = db.lock().unwrap();
+    let second_context = conn
+        .query_row(
+            "SELECT context FROM task_dispatches WHERE id = ?1",
+            [&second_review_dispatch_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .expect("second review dispatch must persist context");
+    assert_eq!(second_context["reviewed_commit"], safe_commit);
+    let actual_worktree_path = std::fs::canonicalize(
+        second_context["worktree_path"]
+            .as_str()
+            .expect("review dispatch must persist worktree_path"),
+    )
+    .unwrap()
+    .to_string_lossy()
+    .to_string();
+    let expected_worktree_path = std::fs::canonicalize(repo.path())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(actual_worktree_path, expected_worktree_path);
+    assert_eq!(second_context["branch"], "main");
 }
 
 #[tokio::test]
@@ -5279,6 +5624,156 @@ async fn auto_queue_dispatch_prepares_backlog_cards_and_auto_assigns_agent() {
 }
 
 #[tokio::test]
+async fn auto_queue_dispatch_reuses_existing_active_run_and_enqueues_entries() {
+    crate::pipeline::ensure_loaded();
+    let db = test_db();
+    let engine = test_engine(&db);
+    ensure_auto_queue_tables(&db);
+    seed_repo(&db, "test-repo");
+    seed_agent(&db, "project-agentdesk");
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-existing",
+        4901,
+        "ready",
+        "project-agentdesk",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-backlog",
+        4902,
+        "backlog",
+        "project-agentdesk",
+    );
+    seed_auto_queue_card(
+        &db,
+        "card-dispatch-ready",
+        4903,
+        "ready",
+        "project-agentdesk",
+    );
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (
+                id, repo, agent_id, status, max_concurrent_threads, thread_group_count, created_at
+            ) VALUES (
+                'run-dispatch-active', 'test-repo', 'project-agentdesk', 'active', 1, 1, datetime('now', '-1 minute')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, priority_rank, thread_group
+            ) VALUES (
+                'entry-dispatch-existing', 'run-dispatch-active', 'card-dispatch-existing', 'project-agentdesk', 'pending', 0, 0
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auto-queue/dispatch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "repo": "test-repo",
+                        "agent_id": "project-agentdesk",
+                        "groups": [
+                            {"issues": [4903], "thread_group": 0, "batch_phase": 1},
+                            {"issues": [4902], "thread_group": 7, "batch_phase": 3}
+                        ],
+                        "activate": false
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["run"]["id"], "run-dispatch-active");
+    assert_eq!(json["run"]["status"], "active");
+    assert_eq!(json["activated"], false);
+
+    let conn = db.lock().unwrap();
+    let total_runs: i64 = conn
+        .query_row("SELECT COUNT(*) FROM auto_queue_runs", [], |row| row.get(0))
+        .unwrap();
+    let active_runs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_runs WHERE status = 'active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(total_runs, 1, "dispatch must reuse the existing active run");
+    assert_eq!(
+        active_runs, 1,
+        "dispatch must not create a second active run"
+    );
+
+    let backlog_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'card-dispatch-backlog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(backlog_status, "ready");
+
+    let entry_layout: Vec<(i64, i64, i64, i64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT kc.github_issue_number, e.thread_group, e.priority_rank, COALESCE(e.batch_phase, 0)
+                 FROM auto_queue_entries e
+                 JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+                 WHERE e.run_id = 'run-dispatch-active'
+                 ORDER BY kc.github_issue_number ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+    };
+    assert_eq!(
+        entry_layout,
+        vec![(4901, 0, 0, 0), (4902, 7, 0, 3), (4903, 0, 1, 1)]
+    );
+
+    let run_meta: (i64, i64) = conn
+        .query_row(
+            "SELECT max_concurrent_threads, thread_group_count
+             FROM auto_queue_runs
+             WHERE id = 'run-dispatch-active'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(run_meta, (2, 2));
+}
+
+#[tokio::test]
 async fn auto_queue_update_entry_moves_pending_entry_and_syncs_run_groups() {
     let db = test_db();
     let engine = test_engine(&db);
@@ -5362,6 +5857,7 @@ async fn auto_queue_update_entry_moves_pending_entry_and_syncs_run_groups() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-active-only");
@@ -5462,6 +5958,7 @@ async fn auto_queue_activate_active_only_does_not_promote_generated_runs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_requested_card_not_blocked_by_own_status() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-req-self");
@@ -5530,6 +6027,7 @@ async fn auto_queue_activate_requested_card_not_blocked_by_own_status() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-walk");
@@ -5609,6 +6107,7 @@ async fn auto_queue_activate_walks_backlog_card_to_dispatchable_state() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_legacy_unified_thread_run_dispatches_via_slot_pool() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-unified");
@@ -5721,6 +6220,7 @@ async fn auto_queue_activate_legacy_unified_thread_run_dispatches_via_slot_pool(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-consult");
@@ -5817,6 +6317,7 @@ async fn auto_queue_activate_consult_required_creates_consultation_dispatch() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_consult_required_prefers_registry_counterpart_provider() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-qwen");
@@ -5985,6 +6486,7 @@ async fn auto_queue_activate_already_applied_skips_entry_and_completes_run() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_reuses_released_slot_for_next_group() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-slot");
@@ -6295,6 +6797,7 @@ async fn auto_queue_activate_reuses_released_slot_for_next_group() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-same-group");
@@ -6457,6 +6960,7 @@ async fn auto_queue_activate_reuses_same_group_slot_with_fresh_session_each_time
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_is_active() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-same-group-guard");
@@ -6616,6 +7120,7 @@ async fn auto_queue_activate_does_not_dispatch_same_group_follow_up_while_prior_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_expands_slot_pool_to_run_max_concurrency() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-slot-expand");
@@ -7008,7 +7513,7 @@ fn seed_similarity_group_cards(db: &Db) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn parallel_generate_creates_correct_thread_groups() {
+async fn smart_generate_creates_correct_thread_groups_and_batch_phases() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_parallel_test_cards(&db);
@@ -7023,7 +7528,6 @@ async fn parallel_generate_creates_correct_thread_groups() {
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
-                        "parallel": true,
                         "max_concurrent_threads": 3,
                         "max_concurrent_per_agent": 3,
                     }))
@@ -7043,22 +7547,25 @@ async fn parallel_generate_creates_correct_thread_groups() {
     let entries = json["entries"].as_array().expect("entries must be array");
     assert_eq!(entries.len(), 7, "all 7 cards should be queued");
 
-    // Verify run has correct parallel config
+    // Verify run keeps the requested concurrency cap while ignoring the
+    // legacy max_concurrent_per_agent input.
     let run = &json["run"];
     assert_eq!(run["max_concurrent_threads"], 3);
     assert!(run.get("max_concurrent_per_agent").is_none());
+    assert_eq!(run["ai_model"], "smart-planner");
 
-    // Collect thread_group assignments per issue number
-    let mut groups: std::collections::HashMap<i64, Vec<(i64, i64)>> =
+    // Collect thread_group assignments per issue number.
+    let mut groups: std::collections::HashMap<i64, Vec<(i64, i64, i64)>> =
         std::collections::HashMap::new();
     for entry in entries {
         let issue_num = entry["github_issue_number"].as_i64().unwrap();
         let thread_group = entry["thread_group"].as_i64().unwrap();
         let priority_rank = entry["priority_rank"].as_i64().unwrap();
+        let batch_phase = entry["batch_phase"].as_i64().unwrap();
         groups
             .entry(thread_group)
             .or_default()
-            .push((issue_num, priority_rank));
+            .push((issue_num, priority_rank, batch_phase));
     }
 
     let group_count = run["thread_group_count"].as_i64().unwrap();
@@ -7078,6 +7585,10 @@ async fn parallel_generate_creates_correct_thread_groups() {
                 [1, 2, 3].contains(&issue),
                 "single-member group should be an independent card, got issue #{issue}"
             );
+            assert_eq!(
+                members[0].2, 0,
+                "independent cards should start in batch phase 0"
+            );
             independent_groups += 1;
         } else {
             // This must be the dependency chain group
@@ -7093,8 +7604,9 @@ async fn parallel_generate_creates_correct_thread_groups() {
     // Verify the chain group: issues 4,5,6,7 in topological order
     let chain = chain_group.expect("dependency chain group must exist");
     let mut chain_members = groups[&chain].clone();
-    chain_members.sort_by_key(|(_, rank)| *rank);
-    let chain_issues: Vec<i64> = chain_members.iter().map(|(num, _)| *num).collect();
+    chain_members.sort_by_key(|(_, rank, _)| *rank);
+    let chain_issues: Vec<i64> = chain_members.iter().map(|(num, _, _)| *num).collect();
+    let chain_phases: Vec<i64> = chain_members.iter().map(|(_, _, phase)| *phase).collect();
     // Issue #4 must come first (rank 0), #5 second, then #6 and #7 (order between 6,7 may vary
     // since #7 depends on both #5 and #6, making #6 and #7 at different levels)
     assert_eq!(chain_issues[0], 4, "chain start (#4) must have lowest rank");
@@ -7102,6 +7614,11 @@ async fn parallel_generate_creates_correct_thread_groups() {
     // #6 depends on #5, #7 depends on #5 and #6 — so #6 before #7
     assert_eq!(chain_issues[2], 6, "#6 depends on #5, must be third");
     assert_eq!(chain_issues[3], 7, "#7 depends on #5 and #6, must be last");
+    assert_eq!(
+        chain_phases,
+        vec![0, 1, 2, 3],
+        "dependency chain should advance one batch phase at a time"
+    );
 }
 
 #[tokio::test]
@@ -7651,7 +8168,7 @@ async fn auto_queue_generate_entries_payload_persists_batch_phases() {
 }
 
 #[tokio::test]
-async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads() {
+async fn generate_smart_planner_groups_by_file_paths_and_recommends_threads() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_similarity_group_cards(&db);
@@ -7667,8 +8184,6 @@ async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads()
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
-                        "mode": "similarity-aware",
-                        "parallel": true,
                     }))
                     .unwrap(),
                 ))
@@ -7700,10 +8215,7 @@ async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads()
         3,
         "recommended concurrency should match the number of distinct runnable groups"
     );
-    assert_eq!(
-        run["ai_model"].as_str().unwrap(),
-        "similarity-aware-thread-group"
-    );
+    assert_eq!(run["ai_model"].as_str().unwrap(), "smart-planner");
 
     let similarity_reason_count = entries
         .iter()
@@ -7748,7 +8260,7 @@ async fn generate_similarity_aware_groups_by_file_paths_and_recommends_threads()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn generate_similarity_aware_without_file_paths_falls_back_to_dependency_only_groups() {
+async fn generate_smart_planner_without_file_paths_uses_dependency_only_groups() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_parallel_test_cards(&db);
@@ -7763,8 +8275,6 @@ async fn generate_similarity_aware_without_file_paths_falls_back_to_dependency_o
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
-                        "mode": "similarity-aware",
-                        "parallel": true,
                     }))
                     .unwrap(),
                 ))
@@ -7789,16 +8299,13 @@ async fn generate_similarity_aware_without_file_paths_falls_back_to_dependency_o
     assert_eq!(
         run["thread_group_count"].as_i64().unwrap(),
         4,
-        "without file paths, similarity-aware must fall back to dependency-only grouping"
+        "without file paths, smart planner must fall back to dependency-only grouping"
     );
-    assert_eq!(
-        run["ai_model"].as_str().unwrap(),
-        "similarity-aware-thread-group"
-    );
+    assert_eq!(run["ai_model"].as_str().unwrap(), "smart-planner");
     assert!(
         run["ai_rationale"]
             .as_str()
-            .map(|text| text.contains("fallback"))
+            .map(|text| text.contains("파일 경로 신호 없이"))
             .unwrap_or(false),
         "rationale should explain the dependency-only fallback"
     );
@@ -7814,7 +8321,7 @@ async fn generate_similarity_aware_without_file_paths_falls_back_to_dependency_o
 }
 
 #[tokio::test]
-async fn priority_sort_default_keeps_similarity_candidates_in_single_group() {
+async fn generate_ignores_legacy_mode_and_still_uses_smart_planner() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_similarity_group_cards(&db);
@@ -7829,6 +8336,7 @@ async fn priority_sort_default_keeps_similarity_candidates_in_single_group() {
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
+                        "mode": "pm-assisted",
                     }))
                     .unwrap(),
                 ))
@@ -7845,20 +8353,25 @@ async fn priority_sort_default_keeps_similarity_candidates_in_single_group() {
 
     let run = &json["run"];
     let entries = json["entries"].as_array().expect("entries must be array");
-    assert_eq!(run["thread_group_count"], 1);
-    assert_eq!(run["max_concurrent_threads"], 1);
-    assert_eq!(run["ai_model"], "priority-sort");
+    assert_eq!(run["thread_group_count"], 3);
+    assert_eq!(run["max_concurrent_threads"], 3);
+    assert_eq!(run["ai_model"], "smart-planner");
     assert!(
-        entries
-            .iter()
-            .all(|entry| entry["thread_group"].as_i64().unwrap() == 0),
-        "default priority-sort should keep a single sequential group"
+        !entries.is_empty(),
+        "legacy mode input should be ignored rather than triggering PM-assisted flow"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn parallel_activate_dispatches_multiple_groups() {
+async fn smart_activate_dispatches_multiple_groups() {
     crate::pipeline::ensure_loaded();
+
+    let (repo, _repo_guard) = setup_test_repo();
+    let config_dir = write_repo_mapping_config(&[("test-repo", repo.path())]);
+    let _config_guard = EnvVarGuard::set_path(
+        "AGENTDESK_CONFIG",
+        &config_dir.path().join("agentdesk.yaml"),
+    );
 
     let db = test_db();
     let engine = test_engine(&db);
@@ -7866,7 +8379,7 @@ async fn parallel_activate_dispatches_multiple_groups() {
 
     let app = test_api_router(db.clone(), engine.clone(), None);
 
-    // Step 1: Generate with parallel mode (no agent_id filter — cards have mixed agents)
+    // Step 1: Generate with the smart planner (no agent_id filter — cards have mixed agents)
     let resp = app
         .clone()
         .oneshot(
@@ -7877,7 +8390,6 @@ async fn parallel_activate_dispatches_multiple_groups() {
                 .body(Body::from(
                     serde_json::to_string(&serde_json::json!({
                         "repo": "test-repo",
-                        "parallel": true,
                         "max_concurrent_threads": 3,
                         "max_concurrent_per_agent": 3,
                     }))
@@ -7965,14 +8477,13 @@ async fn parallel_activate_dispatches_multiple_groups() {
 }
 
 #[tokio::test]
-async fn parallel_false_keeps_single_group_sequential() {
+async fn generate_ignores_legacy_parallel_toggle_and_keeps_smart_groups() {
     let db = test_db();
     let engine = test_engine(&db);
     let _card_ids = seed_parallel_test_cards(&db);
 
     let app = test_api_router(db, engine, None);
 
-    // Generate WITHOUT parallel — should put all entries in group 0
     let resp = app
         .oneshot(
             Request::builder()
@@ -7999,16 +8510,18 @@ async fn parallel_false_keeps_single_group_sequential() {
     let entries = json["entries"].as_array().unwrap();
     let run = &json["run"];
 
-    // All entries should be in thread_group 0
-    for entry in entries {
-        assert_eq!(
-            entry["thread_group"].as_i64().unwrap(),
-            0,
-            "non-parallel mode: all entries must be in group 0"
-        );
-    }
-    assert_eq!(run["thread_group_count"], 1);
-    assert_eq!(run["max_concurrent_threads"], 1);
+    let distinct_groups = entries
+        .iter()
+        .map(|entry| entry["thread_group"].as_i64().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(run["thread_group_count"], 4);
+    assert_eq!(run["max_concurrent_threads"], 4);
+    assert_eq!(run["ai_model"], "smart-planner");
+    assert_eq!(
+        distinct_groups.len(),
+        4,
+        "legacy parallel=false should be ignored in favor of smart grouping"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8420,6 +8933,7 @@ async fn resume_run_skips_phase_gate_blocked_runs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_queue_activate_ignores_legacy_max_concurrent_per_agent() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
 
     let db = test_db();
     let engine = test_engine(&db);
@@ -9226,6 +9740,7 @@ async fn rereview_clears_stale_review_fields() {
 #[tokio::test]
 async fn rereview_resets_repeated_finding_round_markers() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-acr-reset");
@@ -9386,6 +9901,7 @@ async fn idle_sync_preserves_repeated_finding_round_markers() {
 #[tokio::test]
 async fn rereview_backlog_card_transitions_to_review_with_dispatch() {
     crate::pipeline::ensure_loaded();
+    let (_repo, _repo_guard) = setup_test_repo();
     let db = test_db();
     let engine = test_engine(&db);
     seed_agent(&db, "agent-backlog-rr");

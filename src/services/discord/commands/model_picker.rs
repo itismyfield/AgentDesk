@@ -128,13 +128,13 @@ async fn run_model_command(ctx: Context<'_>) -> Result<(), Error> {
     let channel_id = ctx.channel_id();
 
     if !provider_supports_model_override(&ctx.data().provider) {
-        println!("  [{ts}] ◀ [{user_name}] /model (unsupported provider)");
+        tracing::info!("  [{ts}] ◀ [{user_name}] /model (unsupported provider)");
         ctx.say("Model override is only supported for Claude, Codex, Gemini, and Qwen channels.")
             .await?;
         return Ok(());
     }
 
-    println!("  [{ts}] ◀ [{user_name}] /model");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /model");
     match resolve_channel_kind(ctx.serenity_context(), channel_id).await {
         Some(serenity::ChannelType::Forum) => {
             let posted = create_model_picker_forum_post(

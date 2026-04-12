@@ -232,7 +232,7 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
                 if let Ok(age) = modified.elapsed() {
                     if age.as_secs() > INFLIGHT_MAX_AGE_SECS {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
+                        tracing::info!(
                             "  [{ts}] ⚠ removing stale inflight state file ({:.0}s old): {}",
                             age.as_secs_f64(),
                             path.display()
@@ -245,7 +245,7 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
         }
         let Ok(content) = fs::read_to_string(&path) else {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ failed to read inflight state file: {}",
                 path.display()
             );
@@ -253,7 +253,7 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
         };
         let Ok(state) = serde_json::from_str::<InflightTurnState>(&content) else {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ removing malformed inflight state file: {}",
                 path.display()
             );
@@ -262,7 +262,7 @@ fn load_inflight_states_from_root(root: &Path, provider: &ProviderKind) -> Vec<I
         };
         if state.provider_kind().as_ref() != Some(provider) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ removing inflight state with provider mismatch: {}",
                 path.display()
             );

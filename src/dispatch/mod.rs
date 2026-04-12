@@ -85,23 +85,6 @@ fn is_card_scoped_worktree_path(path: &str, branch: Option<&str>) -> bool {
     !is_repo_root || is_non_main_branch
 }
 
-fn refresh_worktree_execution_target(
-    target: &DispatchExecutionTarget,
-) -> Option<DispatchExecutionTarget> {
-    let path = target.worktree_path.as_deref()?;
-    if !is_card_scoped_worktree_path(path, target.branch.as_deref()) {
-        return None;
-    }
-    let mut refreshed = execution_target_from_dir(path)?;
-    if refreshed.branch.is_none() {
-        refreshed.branch = target.branch.clone();
-    }
-    if refreshed.worktree_path.is_none() {
-        refreshed.worktree_path = target.worktree_path.clone();
-    }
-    Some(refreshed)
-}
-
 fn load_card_issue_repo(db: &Db, card_id: &str) -> Option<(Option<i64>, Option<String>)> {
     db.separate_conn().ok().and_then(|conn| {
         conn.query_row(
@@ -129,7 +112,7 @@ fn resolve_card_repo_dir(db: &Db, card_id: &str, purpose: &str) -> Result<Option
 /// design ensures the fallback chain always reaches `resolve_card_worktree()` or
 /// `resolve_card_issue_commit_target()` when the dispatch-history commit can't
 /// be confirmed as belonging to this issue.
-fn commit_belongs_to_card_issue(db: &Db, card_id: &str, commit_sha: &str) -> bool {
+pub(crate) fn commit_belongs_to_card_issue(db: &Db, card_id: &str, commit_sha: &str) -> bool {
     let issue_number = load_card_issue_repo(db, card_id).and_then(|(issue_number, _)| issue_number);
     let Some(issue_number) = issue_number else {
         // No issue number on card — can't validate, assume OK
@@ -474,9 +457,11 @@ fn build_review_context(
             // for this card. This keeps review aligned even when the card had no
             // dedicated worktree and the agent worked directly in the repo root.
             //
-            // #269: Cross-validate the commit against the card's issue number.
-            // A poisoned reviewed_commit (from an unrelated issue) can propagate
-            // through review→rework cycles if we blindly trust dispatch history.
+            // #269/#491: Cross-validate the commit against the card's issue
+            // number. A poisoned reviewed_commit (from an unrelated issue) can
+            // propagate through review→rework/dispute cycles if we blindly
+            // trust dispatch history or revive the same worktree HEAD after
+            // validation already failed.
             let latest_work_target = latest_completed_work_dispatch_target(db, kanban_card_id);
             let validated_work_target = latest_work_target.as_ref().filter(|t| {
                 let valid =
@@ -499,54 +484,51 @@ fn build_review_context(
                     target.branch.as_deref(),
                     target.worktree_path.as_deref()
                 );
-            } else if let Some(target) = latest_work_target
-                .as_ref()
-                .and_then(refresh_worktree_execution_target)
-            {
-                apply_review_target_context(&target, obj);
-                tracing::info!(
-                    "[dispatch] Review dispatch for card {}: latest work commit didn't validate, but keeping non-main worktree target (commit {}, branch: {:?}, path: {:?})",
-                    kanban_card_id,
-                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())],
-                    target.branch.as_deref(),
-                    target.worktree_path.as_deref()
-                );
-            } else if let Some((ref wt_path, ref wt_branch, ref wt_commit)) =
-                resolve_card_worktree(db, kanban_card_id)?
-            {
-                apply_review_target_context(
-                    &DispatchExecutionTarget {
-                        reviewed_commit: wt_commit.clone(),
-                        branch: Some(wt_branch.clone()),
-                        worktree_path: Some(wt_path.clone()),
-                    },
-                    obj,
-                );
-                tracing::info!(
-                    "[dispatch] Review dispatch for card {}: using canonical worktree branch '{}' (commit {}, path: {})",
-                    kanban_card_id,
-                    wt_branch,
-                    &wt_commit[..8.min(wt_commit.len())],
-                    wt_path
-                );
-            } else if let Some(target) = resolve_card_issue_commit_target(db, kanban_card_id)? {
-                apply_review_target_context(&target, obj);
-                tracing::info!(
-                    "[dispatch] Review dispatch for card {}: recovered issue commit target ({})",
-                    kanban_card_id,
-                    &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
-                );
             } else {
-                // Last fallback: review the current repo HEAD. This path is used
-                // only when we have neither an execution target nor a canonical
-                // issue worktree.
-                if let Some(target) = resolve_repo_head_fallback_target(db, kanban_card_id)? {
-                    apply_review_target_context(&target, obj);
-                    tracing::info!(
-                        "[dispatch] Review dispatch for card {}: no worktree, using repo HEAD ({})",
+                if let Some(target) = latest_work_target.as_ref() {
+                    tracing::warn!(
+                        "[dispatch] Review dispatch for card {}: rejecting latest work target commit {} and skipping worktree refresh fallback",
                         kanban_card_id,
                         &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
                     );
+                }
+                if let Some((ref wt_path, ref wt_branch, ref wt_commit)) =
+                    resolve_card_worktree(db, kanban_card_id)?
+                {
+                    apply_review_target_context(
+                        &DispatchExecutionTarget {
+                            reviewed_commit: wt_commit.clone(),
+                            branch: Some(wt_branch.clone()),
+                            worktree_path: Some(wt_path.clone()),
+                        },
+                        obj,
+                    );
+                    tracing::info!(
+                        "[dispatch] Review dispatch for card {}: using canonical worktree branch '{}' (commit {}, path: {})",
+                        kanban_card_id,
+                        wt_branch,
+                        &wt_commit[..8.min(wt_commit.len())],
+                        wt_path
+                    );
+                } else if let Some(target) = resolve_card_issue_commit_target(db, kanban_card_id)? {
+                    apply_review_target_context(&target, obj);
+                    tracing::info!(
+                        "[dispatch] Review dispatch for card {}: recovered issue commit target ({})",
+                        kanban_card_id,
+                        &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                    );
+                } else {
+                    // Last fallback: review the current repo HEAD. This path is used
+                    // only when we have neither an execution target nor a canonical
+                    // issue worktree.
+                    if let Some(target) = resolve_repo_head_fallback_target(db, kanban_card_id)? {
+                        apply_review_target_context(&target, obj);
+                        tracing::info!(
+                            "[dispatch] Review dispatch for card {}: no worktree, using repo HEAD ({})",
+                            kanban_card_id,
+                            &target.reviewed_commit[..8.min(target.reviewed_commit.len())]
+                        );
+                    }
                 }
             }
         }
@@ -559,48 +541,26 @@ fn build_review_context(
                         .provider
                         .as_deref()
                         .and_then(ProviderKind::from_str);
-                    let implementation_provider = resolve_agent_dispatch_channel_on_conn(
-                        &conn,
-                        to_agent_id,
-                        Some("implementation"),
-                    )
-                    .ok()
-                    .flatten()
-                    .as_deref()
-                    .and_then(provider_from_bound_channel)
-                    .or_else(|| {
-                        bindings
+                    if !obj.contains_key("from_provider") {
+                        if let Some(fp) = primary_provider.as_ref().map(ProviderKind::as_str) {
+                            obj.insert("from_provider".to_string(), json!(fp));
+                        } else if let Some(fp) = bindings
                             .primary_channel()
                             .as_deref()
-                            .and_then(provider_from_bound_channel)
-                    })
-                    .or_else(|| primary_provider.clone());
-                    let review_provider =
-                        resolve_agent_dispatch_channel_on_conn(&conn, to_agent_id, Some("review"))
-                            .ok()
-                            .flatten()
-                            .as_deref()
-                            .and_then(provider_from_bound_channel)
-                            .or_else(|| {
-                                bindings
-                                    .counter_model_channel()
-                                    .as_deref()
-                                    .and_then(provider_from_bound_channel)
-                            })
-                            .or_else(|| {
-                                primary_provider
-                                    .as_ref()
-                                    .map(|provider| provider.counterpart())
-                            });
-                    if !obj.contains_key("from_provider") {
-                        if let Some(fp) = implementation_provider.as_ref().map(ProviderKind::as_str)
+                            .and_then(provider_from_channel_suffix)
                         {
                             obj.insert("from_provider".to_string(), json!(fp));
                         }
                     }
                     if !obj.contains_key("target_provider") {
-                        if let Some(tp) = review_provider {
+                        if let Some(tp) = primary_provider.as_ref().map(|p| p.counterpart()) {
                             obj.insert("target_provider".to_string(), json!(tp.as_str()));
+                        } else if let Some(tp) = bindings
+                            .counter_model_channel()
+                            .as_deref()
+                            .and_then(provider_from_channel_suffix)
+                        {
+                            obj.insert("target_provider".to_string(), json!(tp));
                         }
                     }
                 }
@@ -1543,6 +1503,9 @@ fn complete_dispatch_inner(
     dispatch_id: &str,
     result: &serde_json::Value,
 ) -> Result<serde_json::Value> {
+    let dispatch_span =
+        crate::logging::dispatch_span("complete_dispatch", Some(dispatch_id), None, None);
+    let _guard = dispatch_span.enter();
     let conn = db
         .separate_conn()
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
@@ -1572,10 +1535,7 @@ fn complete_dispatch_inner(
             )
             .unwrap_or(false);
         if exists {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
-                "  [{ts}] ⏭ complete_dispatch: {dispatch_id} already completed/cancelled, skipping hooks"
-            );
+            tracing::info!("skipping completion hooks because dispatch is already finalized");
             let dispatch = query_dispatch_row(&conn, dispatch_id)?;
             drop(conn);
             return Ok(dispatch);
@@ -1713,123 +1673,9 @@ pub fn query_dispatch_row(
     .map_err(|e| anyhow::anyhow!("Dispatch query error: {e}"))
 }
 
-pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
-    let root = match crate::cli::agentdesk_runtime_root() {
-        Some(r) => r,
-        None => return false,
-    };
-    let db_path = root.join("data/agentdesk.sqlite");
-    let conn = match rusqlite::Connection::open(&db_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let result: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 \
-             FROM auto_queue_entries e \
-             JOIN auto_queue_runs r ON e.run_id = r.id \
-             WHERE e.run_id = ( \
-                 SELECT e2.run_id FROM auto_queue_entries e2 \
-                 WHERE e2.dispatch_id = ?1 \
-                 ORDER BY CASE e2.status WHEN 'dispatched' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END \
-                 LIMIT 1 \
-             ) \
-             AND r.status IN ('active', 'paused') \
-             AND e.status IN ('pending', 'dispatched') \
-             AND r.unified_thread_id IS NOT NULL",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    let has_slot_table: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'auto_queue_slots'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_slot_table {
-        return result;
-    }
-    let slot_result: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 \
-             FROM auto_queue_entries e \
-             JOIN auto_queue_slots s
-               ON s.agent_id = e.agent_id
-              AND s.slot_index = e.slot_index \
-             WHERE e.dispatch_id = ?1 \
-               AND e.slot_index IS NOT NULL \
-               AND COALESCE(s.thread_id_map, '') != ''",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    result || slot_result
-}
-
 pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
-    let root = match crate::cli::agentdesk_runtime_root() {
-        Some(r) => r,
-        None => return false,
-    };
-    let db_path = root.join("data/agentdesk.sqlite");
-    let conn = match rusqlite::Connection::open(&db_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let channel_str = channel_id.to_string();
-    let quoted = format!("\"{}\"", channel_str);
-    let has_slot_table: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'auto_queue_slots'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if has_slot_table {
-        let slot_match: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0
-                 FROM auto_queue_slots
-                 WHERE COALESCE(thread_id_map, '') != ''
-                   AND INSTR(thread_id_map, ?1) > 0",
-                [&quoted],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if slot_match {
-            return true;
-        }
-    }
-    let scalar_match: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 \
-             FROM auto_queue_entries e \
-             JOIN auto_queue_runs r ON e.run_id = r.id \
-             WHERE r.unified_thread_channel_id = ?1 \
-             AND r.status IN ('active', 'paused') \
-             AND e.status IN ('pending', 'dispatched') \
-             AND r.unified_thread_id IS NOT NULL",
-            [&channel_str],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if scalar_match {
-        return true;
-    }
-    conn.query_row(
-        "SELECT COUNT(*) > 0 \
-         FROM auto_queue_entries e \
-         JOIN auto_queue_runs r ON e.run_id = r.id \
-         WHERE r.status IN ('active', 'paused') \
-         AND e.status IN ('pending', 'dispatched') \
-         AND r.unified_thread_id IS NOT NULL \
-         AND INSTR(r.unified_thread_id, ?1) > 0",
-        [&quoted],
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
+    let _ = channel_id;
+    false
 }
 
 /// Extract thread channel ID from a channel name's `-t{15+digit}` suffix.
@@ -1850,43 +1696,12 @@ pub fn extract_thread_channel_id(channel_name: &str) -> Option<u64> {
 /// unified-thread auto-queue run. Extracts the thread channel ID from the
 /// `-t{15+digit}` suffix in the channel name.
 pub fn is_unified_thread_channel_name_active(channel_name: &str) -> bool {
-    let Some(thread_channel_id) = extract_thread_channel_id(channel_name) else {
-        return false;
-    };
-    is_unified_thread_channel_active(thread_channel_id)
+    let _ = channel_name;
+    false
 }
 
 pub fn drain_unified_thread_kill_signals() -> Vec<String> {
-    let root = match crate::cli::agentdesk_runtime_root() {
-        Some(r) => r,
-        None => return vec![],
-    };
-    let db_path = root.join("data/agentdesk.sqlite");
-    let conn = match rusqlite::Connection::open(&db_path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-    let mut stmt = match conn
-        .prepare("SELECT key, value FROM kv_meta WHERE key LIKE 'kill_unified_thread:%'")
-    {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
-    let entries: Vec<(String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default();
-
-    let mut channels = Vec::new();
-    for (key, _run_id) in &entries {
-        if let Some(ch) = key.strip_prefix("kill_unified_thread:") {
-            channels.push(ch.to_string());
-        }
-        conn.execute("DELETE FROM kv_meta WHERE key = ?1", [key])
-            .ok();
-    }
-    channels
+    Vec::new()
 }
 
 /// Determine provider from a Discord channel name suffix.
@@ -1898,17 +1713,6 @@ fn provider_from_channel_suffix(channel: &str) -> Option<&'static str> {
         ProviderKind::Qwen => Some("qwen"),
         ProviderKind::Unsupported(_) => None,
     })
-}
-
-fn provider_from_bound_channel(channel: &str) -> Option<ProviderKind> {
-    crate::server::routes::dispatches::parse_channel_id(channel)
-        .and_then(|channel_id| {
-            crate::services::discord::settings::list_registered_channel_bindings()
-                .into_iter()
-                .find(|binding| binding.channel_id == channel_id)
-                .map(|binding| binding.owner_provider)
-        })
-        .or_else(|| provider_from_channel_suffix(channel).and_then(ProviderKind::from_str))
 }
 
 #[cfg(test)]
@@ -2437,38 +2241,6 @@ mod tests {
         assert_eq!(provider_from_channel_suffix("agent-gm"), Some("gemini"));
         assert_eq!(provider_from_channel_suffix("agent-qw"), Some("qwen"));
         assert_eq!(provider_from_channel_suffix("agent"), None);
-    }
-
-    #[test]
-    fn review_context_uses_actual_review_channel_provider() {
-        let db = test_db();
-        seed_card(&db, "card-review-provider", "review");
-
-        let conn = db.separate_conn().unwrap();
-        conn.execute(
-            "UPDATE agents
-             SET provider = 'claude',
-                 discord_channel_id = 'agent-cc',
-                 discord_channel_alt = 'agent-qw',
-                 discord_channel_cc = 'agent-cc',
-                 discord_channel_cdx = 'agent-qw'
-             WHERE id = 'agent-1'",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let context = build_review_context(
-            &db,
-            "card-review-provider",
-            "agent-1",
-            &json!({ "reviewed_commit": "test-commit" }),
-        )
-        .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
-
-        assert_eq!(parsed["from_provider"], "claude");
-        assert_eq!(parsed["target_provider"], "qwen");
     }
 
     #[test]
@@ -3493,13 +3265,14 @@ mod tests {
     }
 
     #[test]
-    fn review_context_keeps_non_main_worktree_when_latest_commit_does_not_match_issue() {
+    fn review_context_skips_poisoned_non_main_worktree_when_latest_commit_does_not_match_issue() {
         let db = test_db();
         seed_card(&db, "card-review-worktree-fallback", "review");
         set_card_issue_number(&db, "card-review-worktree-fallback", 320);
 
         let (repo, _repo_override) = setup_test_repo();
         let repo_dir = repo.path().to_str().unwrap();
+        let expected_commit = git_commit(repo_dir, "fix: target commit (#320)");
         let wt_dir = repo.path().join("wt-320");
         let wt_path = wt_dir.to_str().unwrap();
 
@@ -3507,17 +3280,10 @@ mod tests {
             repo_dir,
             &["worktree", "add", wt_path, "-b", "wt/320-phase6"],
         );
-        std::fs::write(
-            wt_dir.join("phase6.txt"),
-            "local-only dashboard v2 changes\n",
-        )
-        .unwrap();
-
-        let worktree_head = crate::services::platform::git_head_commit(wt_path).unwrap();
-        let main_head = git_commit(repo_dir, "chore: unrelated main advance (#999)");
+        let poisoned_commit = git_commit(wt_path, "chore: unrelated worktree drift (#999)");
         assert_ne!(
-            worktree_head, main_head,
-            "main must move past worktree HEAD"
+            expected_commit, poisoned_commit,
+            "poisoned worktree head must differ from the issue commit fallback"
         );
 
         let conn = db.separate_conn().unwrap();
@@ -3533,7 +3299,7 @@ mod tests {
                 serde_json::json!({
                     "completed_worktree_path": wt_path,
                     "completed_branch": "wt/320-phase6",
-                    "completed_commit": worktree_head.clone(),
+                    "completed_commit": poisoned_commit.clone(),
                 })
                 .to_string(),
             ],
@@ -3546,10 +3312,10 @@ mod tests {
                 .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
 
-        assert_eq!(parsed["worktree_path"], wt_path);
-        assert_eq!(parsed["branch"], "wt/320-phase6");
-        assert_eq!(parsed["reviewed_commit"], worktree_head);
-        assert_ne!(parsed["reviewed_commit"], main_head);
+        assert_eq!(parsed["worktree_path"], repo_dir);
+        assert_eq!(parsed["branch"], "main");
+        assert_eq!(parsed["reviewed_commit"], expected_commit);
+        assert_ne!(parsed["reviewed_commit"], poisoned_commit);
     }
 
     #[test]

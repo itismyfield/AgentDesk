@@ -14,6 +14,8 @@ use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
 
 const STALE_FIXED_WORKING_SESSION_MAX_AGE_SQL: &str = "-6 hours";
+const STALE_THREAD_SESSION_MAX_AGE_SQL: &str = "-1 hour";
+const STALE_THREAD_SESSION_ACTIVE_DISPATCH_MAX_AGE_SQL: &str = "-3 hours";
 
 /// Extract parent channel name from a thread channel name.
 /// Thread names follow the convention `{parent}-t{thread_id}` where thread_id
@@ -61,6 +63,24 @@ fn load_dispatch_thread_id(conn: &rusqlite::Connection, dispatch_id: &str) -> Op
     normalize_thread_channel_id(thread_id.as_deref())
 }
 
+fn normalize_agent_id(agent_id: Option<String>) -> Option<String> {
+    agent_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_known_agent_id(conn: &rusqlite::Connection, agent_id: Option<String>) -> Option<String> {
+    let agent_id = normalize_agent_id(agent_id)?;
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM agents WHERE id = ?1 LIMIT 1",
+            [agent_id.as_str()],
+            |_| Ok(()),
+        )
+        .is_ok();
+    exists.then_some(agent_id)
+}
+
 fn resolve_agent_id_from_channel_name(
     conn: &rusqlite::Connection,
     channel_name: &str,
@@ -104,6 +124,83 @@ fn resolve_agent_id_from_channel_name(
         }
         None
     })
+}
+
+fn resolve_agent_id_from_dispatch_id(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+) -> Option<String> {
+    let agent_id: Option<String> = conn
+        .query_row(
+            "SELECT to_agent_id FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    resolve_known_agent_id(conn, agent_id)
+}
+
+fn resolve_agent_id_from_thread_channel_id(
+    conn: &rusqlite::Connection,
+    thread_channel_id: &str,
+) -> Option<String> {
+    let thread_channel_id = normalize_thread_channel_id(Some(thread_channel_id))?;
+    resolve_agent_id_from_channel_name(conn, &thread_channel_id)
+        .or_else(|| {
+            let agent_id: Option<String> = conn
+                .query_row(
+                    "SELECT to_agent_id
+                     FROM task_dispatches
+                     WHERE thread_id = ?1
+                       AND NULLIF(TRIM(to_agent_id), '') IS NOT NULL
+                     ORDER BY datetime(created_at) DESC
+                     LIMIT 1",
+                    [thread_channel_id.as_str()],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+            resolve_known_agent_id(conn, agent_id)
+        })
+        .or_else(|| {
+            let agent_id: Option<String> = conn
+                .query_row(
+                    "SELECT assigned_agent_id
+                     FROM kanban_cards
+                     WHERE active_thread_id = ?1
+                       AND NULLIF(TRIM(assigned_agent_id), '') IS NOT NULL
+                     ORDER BY datetime(updated_at) DESC
+                     LIMIT 1",
+                    [thread_channel_id.as_str()],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+            resolve_known_agent_id(conn, agent_id)
+        })
+}
+
+fn resolve_agent_id_for_session(
+    conn: &rusqlite::Connection,
+    body_name: Option<&str>,
+    session_key_channel_name: Option<&str>,
+    thread_channel_id: Option<&str>,
+    dispatch_id: Option<&str>,
+) -> Option<String> {
+    [body_name, session_key_channel_name]
+        .into_iter()
+        .flatten()
+        .map(|name| {
+            parse_thread_channel_name(name)
+                .map(|(parent, _)| parent)
+                .unwrap_or(name)
+        })
+        .find_map(|channel_name| resolve_agent_id_from_channel_name(conn, channel_name))
+        .or_else(|| dispatch_id.and_then(|value| resolve_agent_id_from_dispatch_id(conn, value)))
+        .or_else(|| {
+            thread_channel_id.and_then(|value| resolve_agent_id_from_thread_channel_id(conn, value))
+        })
 }
 
 fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
@@ -353,15 +450,13 @@ pub async fn hook_session(
                 .and_then(|dispatch_id| load_dispatch_thread_id(&conn, dispatch_id))
         });
 
-    let agent_id = [body.name.as_deref(), session_key_channel_name.as_deref()]
-        .into_iter()
-        .flatten()
-        .map(|name| {
-            parse_thread_channel_name(name)
-                .map(|(parent, _)| parent)
-                .unwrap_or(name)
-        })
-        .find_map(|channel_name| resolve_agent_id_from_channel_name(&conn, channel_name));
+    let agent_id = resolve_agent_id_for_session(
+        &conn,
+        body.name.as_deref(),
+        session_key_channel_name.as_deref(),
+        thread_channel_id.as_deref(),
+        body.dispatch_id.as_deref(),
+    );
 
     let status = body.status.as_deref().unwrap_or("working");
     let provider = body.provider.as_deref().unwrap_or("claude");
@@ -393,7 +488,7 @@ pub async fn hook_session(
              WHEN excluded.active_dispatch_id IS NOT NULL THEN excluded.active_dispatch_id
              ELSE sessions.active_dispatch_id
            END,
-           agent_id = COALESCE(excluded.agent_id, sessions.agent_id),
+           agent_id = COALESCE(NULLIF(TRIM(excluded.agent_id), ''), NULLIF(TRIM(sessions.agent_id), '')),
            thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
            claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
            last_heartbeat = datetime('now')",
@@ -866,17 +961,29 @@ fn backfill_legacy_thread_channel_ids(conn: &rusqlite::Connection) -> usize {
         .sum()
 }
 
-/// GC stale thread sessions from DB: idle/disconnected + older than 1 hour.
+/// GC stale thread sessions from DB.
 /// Legacy rows may only encode the Discord thread ID inside session_key, so
-/// backfill thread_channel_id before applying the normal thread-session GC.
+/// backfill thread_channel_id before applying thread-session GC.
+///
+/// Idle/disconnected thread sessions without an active dispatch are dropped
+/// after 1 hour. Rows that still carry an active_dispatch_id are preserved
+/// until the 3-hour safety TTL so warm-resume sessions cannot lose their DB
+/// ownership before idle-kill has a chance to reap them.
 pub fn gc_stale_thread_sessions_db(conn: &rusqlite::Connection) -> usize {
     let _ = backfill_legacy_thread_channel_ids(conn);
     conn.execute(
         "DELETE FROM sessions
          WHERE thread_channel_id IS NOT NULL
            AND status IN ('idle', 'disconnected')
-           AND COALESCE(last_heartbeat, created_at) < datetime('now', '-1 hour')",
-        [],
+           AND (
+             (active_dispatch_id IS NULL
+               AND COALESCE(last_heartbeat, created_at) < datetime('now', ?1))
+             OR COALESCE(last_heartbeat, created_at) < datetime('now', ?2)
+           )",
+        rusqlite::params![
+            STALE_THREAD_SESSION_MAX_AGE_SQL,
+            STALE_THREAD_SESSION_ACTIVE_DISPATCH_MAX_AGE_SQL,
+        ],
     )
     .unwrap_or(0)
 }
@@ -1041,6 +1148,15 @@ pub(crate) async fn force_kill_session_impl(
     session_key: &str,
     retry: bool,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    force_kill_session_impl_with_reason(state, session_key, retry, "force-kill API invoked").await
+}
+
+pub(crate) async fn force_kill_session_impl_with_reason(
+    state: &AppState,
+    session_key: &str,
+    retry: bool,
+    reason: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
     let session_key = session_key;
 
     // Parse tmux session name from session_key (format: "hostname:tmux_name")
@@ -1134,7 +1250,7 @@ pub(crate) async fn force_kill_session_impl(
                 .map(poise::serenity_prelude::ChannelId::new),
             tmux_name: tmux_name.clone(),
         },
-        "force-kill API invoked",
+        reason,
     )
     .await;
 
@@ -1270,9 +1386,13 @@ pub(crate) async fn force_kill_session_impl(
     };
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    eprintln!(
+    tracing::warn!(
         "  [{ts}] ⚡ force-kill: session={}, tmux_killed={}, inflight_cleared={}, dispatch_failed={:?}, lifecycle={}",
-        session_key, tmux_killed, inflight_cleared, active_dispatch_id, lifecycle.lifecycle_path
+        session_key,
+        tmux_killed,
+        inflight_cleared,
+        active_dispatch_id,
+        lifecycle.lifecycle_path
     );
 
     // Notify bot message for force-kill visibility
@@ -1300,7 +1420,7 @@ pub(crate) async fn force_kill_session_impl(
                 "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
                 rusqlite::params![
                     format!("channel:{channel_id_str}"),
-                    format!("⚡ 세션 강제 종료: {agent_label}\n사유: {exit_reason}"),
+                    format!("🔴 세션 종료: {agent_label}\n사유: {exit_reason}"),
                 ],
             );
         }
@@ -1334,9 +1454,10 @@ pub async fn force_kill_session(
     force_kill_session_impl(&state, &session_key, body.retry).await
 }
 
-/// POST /api/sessions/force-kill
+/// Legacy body-based wrapper retained for compatibility tests and direct callers.
 ///
-/// Legacy body-based wrapper retained for compatibility with older policy scripts.
+/// This helper is no longer exposed as an HTTP route; use
+/// `POST /api/sessions/{session_key}/force-kill` instead.
 pub async fn force_kill_session_legacy(
     State(state): State<AppState>,
     Json(body): Json<ForceKillBody>,
@@ -2087,13 +2208,20 @@ mod tests {
         session_key: &str,
         status: &str,
         thread_channel_id: Option<&str>,
+        active_dispatch_id: Option<&str>,
         heartbeat_age_sql: &str,
     ) {
         conn.execute(
             "INSERT INTO sessions
-             (session_key, provider, status, thread_channel_id, last_heartbeat, created_at)
-             VALUES (?1, 'codex', ?2, ?3, datetime('now', ?4), datetime('now', ?4))",
-            rusqlite::params![session_key, status, thread_channel_id, heartbeat_age_sql],
+             (session_key, provider, status, thread_channel_id, active_dispatch_id, last_heartbeat, created_at)
+             VALUES (?1, 'codex', ?2, ?3, ?4, datetime('now', ?5), datetime('now', ?5))",
+            rusqlite::params![
+                session_key,
+                status,
+                thread_channel_id,
+                active_dispatch_id,
+                heartbeat_age_sql
+            ],
         )
         .unwrap();
     }
@@ -2106,15 +2234,23 @@ mod tests {
         let fixed_channel_session = "mac-mini:AgentDesk-claude-adk-cc-token-test";
         let recent_thread_session = "mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796";
 
-        insert_gc_candidate_session(&conn, legacy_thread_session, "idle", None, "-2 hours");
+        insert_gc_candidate_session(&conn, legacy_thread_session, "idle", None, None, "-2 hours");
         insert_gc_candidate_session(
             &conn,
             fixed_channel_session,
             "disconnected",
             None,
+            None,
             "-2 hours",
         );
-        insert_gc_candidate_session(&conn, recent_thread_session, "idle", None, "-10 minutes");
+        insert_gc_candidate_session(
+            &conn,
+            recent_thread_session,
+            "idle",
+            None,
+            None,
+            "-10 minutes",
+        );
 
         let deleted = gc_stale_thread_sessions_db(&conn);
         assert_eq!(deleted, 1);
@@ -2169,6 +2305,52 @@ mod tests {
     }
 
     #[test]
+    fn gc_stale_thread_sessions_db_keeps_active_dispatch_rows_until_safety_ttl() {
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        let protected_session = "mac-mini:AgentDesk-codex-adk-cdx-t1495400795435372796";
+        let expired_session = "mac-mini:AgentDesk-codex-adk-cdx-t1495400795435372797";
+
+        insert_gc_candidate_session(
+            &conn,
+            protected_session,
+            "idle",
+            None,
+            Some("dispatch-492-protected"),
+            "-2 hours",
+        );
+        insert_gc_candidate_session(
+            &conn,
+            expired_session,
+            "idle",
+            None,
+            Some("dispatch-492-expired"),
+            "-4 hours",
+        );
+
+        let deleted = gc_stale_thread_sessions_db(&conn);
+        assert_eq!(deleted, 1);
+
+        let protected_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [protected_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(protected_count, 1);
+
+        let expired_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                [expired_session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(expired_count, 0);
+    }
+
+    #[test]
     fn backfill_legacy_thread_channel_ids_uses_active_dispatch_thread_id() {
         let db = test_db();
         let conn = db.lock().unwrap();
@@ -2218,6 +2400,7 @@ mod tests {
                 &conn,
                 "mac-mini:AgentDesk-codex-adk-cdx-t1490653467734446120",
                 "idle",
+                None,
                 None,
                 "-2 hours",
             );
@@ -2330,6 +2513,192 @@ mod tests {
             .unwrap();
         assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
         assert_eq!(thread_channel_id.as_deref(), Some("1485506232256168011"));
+    }
+
+    #[tokio::test]
+    async fn direct_session_resolves_agent_from_dispatch_when_tmux_channel_is_truncated() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+        let long_channel = "project-skillmanager-extremely-verbose-channel-cdx";
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name(long_channel);
+        let session_key = format!("mac-mini:{tmux_name}");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_alt)
+                 VALUES ('project-skillmanager', 'SkillManager', ?1)",
+                [long_channel],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+                 VALUES ('card-dispatch-fallback', 'Dispatch Fallback', 'in_progress', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches
+                 (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+                 VALUES ('dispatch-dispatch-fallback', 'card-dispatch-fallback', 'project-skillmanager', 'implementation', 'dispatched', 'Dispatch fallback', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: session_key.clone(),
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("dispatch fallback".to_string()),
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: Some("dispatch-dispatch-fallback".to_string()),
+                claude_session_id: None,
+                thread_channel_id: None,
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let agent_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("project-skillmanager"));
+    }
+
+    #[tokio::test]
+    async fn direct_session_ignores_missing_agent_from_dispatch_fallback() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+        let long_channel = "project-skillmanager-extremely-verbose-channel-cdx";
+        let tmux_name = ProviderKind::Codex.build_tmux_session_name(long_channel);
+        let session_key = format!("mac-mini:{tmux_name}");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+                 VALUES ('card-missing-dispatch-agent', 'Missing Dispatch Agent', 'in_progress', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches
+                 (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+                 VALUES ('dispatch-missing-dispatch-agent', 'card-missing-dispatch-agent', 'project-missing-agent', 'implementation', 'dispatched', 'Dispatch fallback', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (status, body) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: session_key.clone(),
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("dispatch fallback".to_string()),
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: Some("dispatch-missing-dispatch-agent".to_string()),
+                claude_session_id: None,
+                thread_channel_id: None,
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+
+        let conn = db.lock().unwrap();
+        let agent_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent_id, None);
+    }
+
+    #[tokio::test]
+    async fn thread_session_resolves_agent_from_thread_id_when_parent_channel_is_truncated() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState::test_state(db.clone(), engine);
+        let thread_id = "1487044675541012490";
+        let long_parent_channel = "project-skillmanager-extremely-verbose-channel-cdx";
+        let tmux_name = ProviderKind::Codex
+            .build_tmux_session_name(&format!("{long_parent_channel}-t{thread_id}"));
+        let session_key = format!("mac-mini:{tmux_name}");
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_alt)
+                 VALUES ('project-skillmanager', 'SkillManager', ?1)",
+                [long_parent_channel],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+                 VALUES ('card-thread-fallback', 'Thread Fallback', 'in_progress', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches
+                 (id, kanban_card_id, to_agent_id, dispatch_type, status, title, thread_id, created_at, updated_at)
+                 VALUES ('dispatch-thread-fallback', 'card-thread-fallback', 'project-skillmanager', 'implementation', 'dispatched', 'Thread fallback', ?1, datetime('now'), datetime('now'))",
+                [thread_id],
+            )
+            .unwrap();
+        }
+
+        let (status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: session_key.clone(),
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("thread fallback".to_string()),
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: None,
+                claude_session_id: None,
+                thread_channel_id: None,
+                session_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let (agent_id, stored_thread_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("project-skillmanager"));
+        assert_eq!(stored_thread_id.as_deref(), Some(thread_id));
     }
 
     #[tokio::test]

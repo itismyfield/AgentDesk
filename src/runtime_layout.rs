@@ -801,7 +801,7 @@ fn load_memory_backend_from_yaml(root: &Path) -> Option<MemoryBackendConfig> {
                 }
             }
             Err(error) => {
-                eprintln!(
+                tracing::warn!(
                     "  [memory] Warning: failed to parse '{}' for memory config: {error}",
                     path.display()
                 );

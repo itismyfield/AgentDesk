@@ -20,7 +20,7 @@ pub(in crate::services::discord) async fn cmd_receipt(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] \u{25c0} [{user_name}] /receipt");
+    tracing::info!("  [{ts}] \u{25c0} [{user_name}] /receipt");
 
     ctx.defer().await?;
 
@@ -117,7 +117,7 @@ pub(in crate::services::discord) async fn cmd_receipt(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("  [{ts}] \u{2716} Playwright error for {label}: {stderr}");
+            tracing::warn!("  [{ts}] \u{2716} Playwright error for {label}: {stderr}");
             continue;
         }
 
@@ -144,7 +144,7 @@ pub(in crate::services::discord) async fn cmd_receipt(
         let _ = std::fs::remove_file(f);
     }
 
-    println!(
+    tracing::info!(
         "  [{ts}] \u{25b6} [{user_name}] Receipt sent ({} providers, total: {})",
         to_render.len(),
         receipt_fmt_cost(data.total)

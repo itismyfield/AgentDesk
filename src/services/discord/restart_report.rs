@@ -100,9 +100,10 @@ pub(crate) fn save_restart_report(report: &RestartCompletionReport) -> Result<()
     };
     save_restart_report_in_root(&root, report)?;
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts}] 📝 Saved restart follow-up report for provider {} channel {}",
-        report.provider, report.channel_id
+        report.provider,
+        report.channel_id
     );
     Ok(())
 }
@@ -158,7 +159,7 @@ fn load_restart_reports_in_root(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(err) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ restart report dir unreadable for provider {}: {} ({})",
                 provider.as_str(),
                 dir.display(),
@@ -176,7 +177,7 @@ fn load_restart_reports_in_root(
         }
         let Ok(content) = fs::read_to_string(&path) else {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ failed to read restart report file: {}",
                 path.display()
             );
@@ -184,7 +185,7 @@ fn load_restart_reports_in_root(
         };
         let Ok(report) = serde_json::from_str::<RestartCompletionReport>(&content) else {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ failed to parse restart report file: {}",
                 path.display()
             );
@@ -192,7 +193,7 @@ fn load_restart_reports_in_root(
         };
         if report.provider_kind().as_ref() != Some(provider) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ restart report provider mismatch in {}: expected {}, found {}",
                 path.display(),
                 provider.as_str(),
@@ -247,17 +248,15 @@ pub(super) async fn flush_restart_reports(
             is_dm,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            if should_clear_restart_report_on_routing_failure(reason) {
-                println!(
-                    "  [{ts}] ⏭ restart report skip for channel {} — {reason}",
-                    report.channel_id,
-                );
-                clear_restart_report(provider, report.channel_id);
-                println!(
-                    "  [{ts}] 🧹 dropped restart report for channel {} after routing failure",
-                    report.channel_id,
-                );
-            }
+            tracing::info!(
+                "  [{ts}] ⏭ restart report skip for channel {} — {reason}",
+                report.channel_id,
+            );
+            clear_restart_report(provider, report.channel_id);
+            tracing::info!(
+                "  [{ts}] 🧹 dropped restart report for channel {} after routing failure",
+                report.channel_id,
+            );
             continue;
         }
 
@@ -281,7 +280,7 @@ pub(super) async fn flush_restart_reports(
             // active — otherwise the report is stuck forever.
             if (has_active_turn || has_finalizing) && age < Duration::from_secs(30) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ⏳ pending restart report for channel {} deferred (age={:.0}s, active={}, finalizing={})",
                     report.channel_id,
                     age.as_secs_f64(),
@@ -348,9 +347,10 @@ pub(super) async fn flush_restart_reports(
         // Log internal details (summary, status) for debugging
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 📝 restart report detail: status={}, summary={}",
-                report.status, report.summary
+                report.status,
+                report.summary
             );
         }
 
@@ -358,9 +358,10 @@ pub(super) async fn flush_restart_reports(
             match send_long_message_raw(http, channel_id, &text, shared).await {
                 Ok(()) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] ✓ Flushed restart follow-up report for channel {} on attempt {}",
-                        report.channel_id, attempt
+                        report.channel_id,
+                        attempt
                     );
                     // Mark user message as completed: ⏳ → ✅
                     if let Some(umid) = report.user_msg_id {
@@ -376,19 +377,23 @@ pub(super) async fn flush_restart_reports(
                 Err(e) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     if attempt < 5 {
-                        println!(
+                        tracing::info!(
                             "  [{ts}] ⚠ failed to flush restart report for channel {} on attempt {}: {}",
-                            report.channel_id, attempt, e
+                            report.channel_id,
+                            attempt,
+                            e
                         );
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     } else {
-                        println!(
+                        tracing::info!(
                             "  [{ts}] ❌ keeping restart report for channel {} after {} failed attempts: {}",
-                            report.channel_id, attempt, e
+                            report.channel_id,
+                            attempt,
+                            e
                         );
                         if is_unrecoverable_flush_error(&e.to_string()) {
                             clear_restart_report(provider, report.channel_id);
-                            println!(
+                            tracing::info!(
                                 "  [{ts}] 🧹 dropped unrecoverable restart report for channel {}",
                                 report.channel_id
                             );

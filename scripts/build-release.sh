@@ -7,8 +7,8 @@
 #   ./scripts/build-release.sh --skip-dashboard
 #
 # Output:
-#   dist/agentdesk-{os}-{arch}.tar.gz  +  dist/checksums.txt
-#   Contents: agentdesk (binary), dashboard/dist/, policies/, skills/
+#   dist/agentdesk-{os}-{arch}.tar.gz|zip  +  dist/checksums.txt
+#   Contents: agentdesk / agentdesk.exe, dashboard/dist/, policies/, skills/
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -22,7 +22,29 @@ for arg in "$@"; do
   esac
 done
 
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+RAW_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$RAW_OS" in
+  darwin)
+    OS="darwin"
+    PACKAGE_EXT="tar.gz"
+    BINARY_NAME="agentdesk"
+    ;;
+  linux)
+    OS="linux"
+    PACKAGE_EXT="tar.gz"
+    BINARY_NAME="agentdesk"
+    ;;
+  msys*|mingw*|cygwin*)
+    OS="windows"
+    PACKAGE_EXT="zip"
+    BINARY_NAME="agentdesk.exe"
+    ;;
+  *)
+    echo "Error: Unsupported operating system: $RAW_OS"
+    exit 1
+    ;;
+esac
+
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)        ARCH="x86_64" ;;
@@ -32,6 +54,39 @@ esac
 
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 ARTIFACT_NAME="agentdesk-${OS}-${ARCH}"
+
+create_archive() {
+  local staging_name="$1"
+  local artifact_name="$2"
+
+  if [ "$OS" = "windows" ]; then
+    if command -v zip &>/dev/null; then
+      zip -rq "$artifact_name" "$staging_name"
+    else
+      echo "Error: zip is required to package Windows release artifacts"
+      exit 1
+    fi
+  else
+    tar czf "$artifact_name" "$staging_name"
+  fi
+}
+
+write_checksum() {
+  local artifact_name="$1"
+
+  if command -v shasum &>/dev/null; then
+    shasum -a 256 "$artifact_name" > checksums.txt
+  elif command -v sha256sum &>/dev/null; then
+    sha256sum "$artifact_name" > checksums.txt
+  elif command -v certutil &>/dev/null; then
+    local digest
+    digest=$(certutil -hashfile "$artifact_name" SHA256 | sed -n '2p' | tr -d '\r')
+    printf '%s  %s\n' "$digest" "$artifact_name" > checksums.txt
+  else
+    echo "Error: no SHA-256 checksum tool available"
+    exit 1
+  fi
+}
 
 echo "═══ Building AgentDesk v${VERSION} for ${OS}/${ARCH} ═══"
 echo ""
@@ -45,7 +100,7 @@ fi
 echo "[1/3] Building Rust binary (release)..."
 cargo build --release 2>&1 | tail -1
 
-BINARY="target/release/agentdesk"
+BINARY="target/release/${BINARY_NAME}"
 if [ ! -f "$BINARY" ]; then
   echo "Error: Binary not found at $BINARY"
   exit 1
@@ -75,7 +130,7 @@ mkdir -p "$STAGING"
 
 # Binary
 cp "$BINARY" "$STAGING/"
-chmod +x "$STAGING/agentdesk"
+chmod +x "$STAGING/$BINARY_NAME"
 
 # Dashboard
 if [ -d "dashboard/dist" ]; then
@@ -92,7 +147,11 @@ fi
 # Managed skills
 if [ -d "skills" ]; then
   mkdir -p "$STAGING/skills"
-  rsync -a --delete "skills/" "$STAGING/skills/"
+  if command -v rsync &>/dev/null; then
+    rsync -a --delete "skills/" "$STAGING/skills/"
+  else
+    cp -R "skills/." "$STAGING/skills/"
+  fi
 fi
 
 # Version marker
@@ -100,14 +159,15 @@ echo "$VERSION" > "$STAGING/VERSION"
 
 # Create tarball
 cd "$DIST_DIR"
-tar czf "${ARTIFACT_NAME}.tar.gz" "$ARTIFACT_NAME"
+ARTIFACT_FILE="${ARTIFACT_NAME}.${PACKAGE_EXT}"
+create_archive "$ARTIFACT_NAME" "$ARTIFACT_FILE"
 rm -rf "$ARTIFACT_NAME"
 
 # Checksum
-shasum -a 256 "${ARTIFACT_NAME}.tar.gz" > checksums.txt
+write_checksum "$ARTIFACT_FILE"
 
 echo ""
 echo "═══ Build Complete ═══"
-echo "  Artifact: $DIST_DIR/${ARTIFACT_NAME}.tar.gz"
+echo "  Artifact: $DIST_DIR/${ARTIFACT_FILE}"
 echo "  Checksum: $(cat checksums.txt)"
-ls -lh "$DIST_DIR/${ARTIFACT_NAME}.tar.gz"
+ls -lh "$DIST_DIR/${ARTIFACT_FILE}"

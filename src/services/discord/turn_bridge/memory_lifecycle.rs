@@ -18,7 +18,7 @@ pub(super) fn spawn_memory_capture_task(
         let result = backend.capture(capture_request).await;
         for warning in &result.warnings {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
+            tracing::warn!(
                 "  [{ts}] [memory] capture warning for channel {}: {}",
                 channel_id.get(),
                 warning
@@ -39,7 +39,7 @@ pub(super) fn spawn_memory_reflect_task(
         let result = backend.reflect(reflect_request).await;
         for warning in &result.warnings {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
+            tracing::warn!(
                 "  [{ts}] [memory] reflect warning for channel {} ({}): {}",
                 channel_id.get(),
                 reason,

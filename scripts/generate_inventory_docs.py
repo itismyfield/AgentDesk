@@ -13,6 +13,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
 GENERATED_DOCS_DIR = REPO_ROOT / "docs" / "generated"
+ARCHITECTURE_DOC = REPO_ROOT / "ARCHITECTURE.md"
+ARCHITECTURE_SRC_TREE_START = "<!-- BEGIN GENERATED: SRC TREE -->"
+ARCHITECTURE_SRC_TREE_END = "<!-- END GENERATED: SRC TREE -->"
 GIANT_FILE_THRESHOLD = 1000
 HTTP_METHODS = ("delete", "get", "head", "options", "patch", "post", "put")
 TEST_FILE_NAMES = {"integration_tests.rs", "tests.rs"}
@@ -623,6 +626,58 @@ def collect_workers() -> list[WorkerEntry]:
     return workers
 
 
+def render_ascii_tree(root: Path) -> list[str]:
+    lines: list[str] = [f"{root.name}/"]
+
+    def walk(directory: Path, prefix: str) -> None:
+        children = sorted(
+            directory.iterdir(),
+            key=lambda child: (child.is_file(), child.name),
+        )
+        for index, child in enumerate(children):
+            is_last = index == len(children) - 1
+            branch = "└── " if is_last else "├── "
+            label = child.name + ("/" if child.is_dir() else "")
+            lines.append(f"{prefix}{branch}{label}")
+            if child.is_dir():
+                walk(child, prefix + ("    " if is_last else "│   "))
+
+    walk(root, "")
+    return lines
+
+
+def replace_generated_block(
+    text: str,
+    start_marker: str,
+    end_marker: str,
+    replacement: str,
+) -> str:
+    start_index = text.find(start_marker)
+    end_index = text.find(end_marker)
+    if start_index == -1 or end_index == -1 or end_index < start_index:
+        raise ParseError(f"could not locate generated block {start_marker!r} … {end_marker!r}")
+
+    block_start = start_index + len(start_marker)
+    return (
+        text[:block_start]
+        + "\n"
+        + replacement.rstrip()
+        + "\n"
+        + text[end_index:]
+    )
+
+
+def render_architecture_doc() -> str:
+    current = read_text(ARCHITECTURE_DOC)
+    src_tree = "\n".join(["```text", *render_ascii_tree(SRC_ROOT), "```"])
+    return replace_generated_block(
+        current,
+        ARCHITECTURE_SRC_TREE_START,
+        ARCHITECTURE_SRC_TREE_END,
+        src_tree,
+    )
+
+
 def render_module_inventory(entries: list[ModuleEntry]) -> str:
     namespace_counts = Counter(entry.module_path.split("::", 1)[0] for entry in entries)
     giant_count = sum(1 for entry in entries if "giant-file" in entry.flags)
@@ -722,6 +777,7 @@ def generated_documents() -> dict[Path, str]:
     route_entries.sort(key=lambda entry: (entry.path, entry.method, entry.handler))
     worker_entries = collect_workers()
     return {
+        ARCHITECTURE_DOC: render_architecture_doc(),
         GENERATED_DOCS_DIR / "module-inventory.md": render_module_inventory(module_entries),
         GENERATED_DOCS_DIR / "route-inventory.md": render_route_inventory(route_entries),
         GENERATED_DOCS_DIR / "worker-inventory.md": render_worker_inventory(worker_entries),
@@ -766,7 +822,9 @@ def write_documents(documents: dict[Path, str], check: bool) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate deterministic code inventories under docs/generated/.")
+    parser = argparse.ArgumentParser(
+        description="Generate deterministic code inventories and ARCHITECTURE.md source snapshots."
+    )
     parser.add_argument(
         "--check",
         action="store_true",

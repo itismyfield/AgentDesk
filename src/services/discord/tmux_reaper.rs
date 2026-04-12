@@ -64,7 +64,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
                 // A tmux pane with a running process is proof the session is in use.
                 if tmux_session_has_live_pane(session_name) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}]   skipped orphan (live pane): {}", session_name);
+                    tracing::info!("  [{ts}]   skipped orphan (live pane): {}", session_name);
                     continue;
                 }
 
@@ -80,7 +80,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts}] 🧹 Cleaning {} orphan tmux session(s)...",
         orphans.len()
     );
@@ -99,7 +99,7 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
         .unwrap_or(false);
 
         if killed {
-            println!("  [{ts}]   killed orphan: {}", name);
+            tracing::info!("  [{ts}]   killed orphan: {}", name);
             // Also clean associated temp files
             let _ = std::fs::remove_file(crate::services::tmux_common::session_temp_path(
                 name, "jsonl",
@@ -201,7 +201,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
             is_thread && crate::dispatch::is_unified_thread_channel_active(channel_id.get());
 
         if is_thread && !is_unified_active {
-            // Thread sessions: delete from DB entirely (they are one-shot)
+            // Dead/orphan thread sessions: remove the DB row entirely.
             super::adk_session::delete_adk_session(&session_key, api_port).await;
         } else {
             // Fixed-channel sessions or active unified-thread: just mark idle
@@ -226,7 +226,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         if is_unified_active {
             // Don't kill unified-thread sessions — they'll be reused
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ♻ reaper: skipping kill for unified-thread session {session_name} — run still active"
             );
             continue;
@@ -242,14 +242,16 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         match &kill_result {
             Ok(Ok(o)) if !o.status.success() => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ⚠ reaper: tmux kill-session failed for {session_name}: {}",
                     String::from_utf8_lossy(&o.stderr)
                 );
             }
             Ok(Err(e)) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ reaper: tmux kill-session error for {session_name}: {e}");
+                tracing::warn!(
+                    "  [{ts}] ⚠ reaper: tmux kill-session error for {session_name}: {e}"
+                );
             }
             _ => {}
         }
@@ -259,7 +261,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
 
     if reaped > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] 🪦 Reaped {reaped} dead tmux session(s)");
+        tracing::info!("  [{ts}] 🪦 Reaped {reaped} dead tmux session(s)");
     }
 
     // #145: Process kill_unified_thread signals from auto-queue.js
@@ -299,7 +301,7 @@ async fn process_unified_thread_kill_signals(_shared: &Arc<SharedData>) {
 
         let ts = chrono::Local::now().format("%H:%M:%S");
         if let Some(name) = killed {
-            println!(
+            tracing::info!(
                 "  [{ts}] ♻ Killed unified-thread tmux session: {name} (thread: {thread_channel_id})"
             );
         }

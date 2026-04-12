@@ -174,7 +174,11 @@ pub(super) fn build_system_prompt(
          - Avoid long horizontal lines or decorative separators.\n\n\
          IMPORTANT: The user is on Discord and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
          All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
-         Never use tools that expect user interaction. If you need clarification, just ask in plain text.{}{}",
+         Never use tools that expect user interaction. If you need clarification, just ask in plain text.\n\n\
+         Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \
+         not necessarily your most recent message. Prioritize the reply target over the latest message when interpreting user intent. \
+         If ambiguous, ask which message the user is responding to. \
+         Avoid mixing status reports and action questions in a single message — it makes the reply target unclear.{}{}",
         discord_context,
         current_path,
         channel_id.get(),
@@ -227,7 +231,7 @@ pub(super) fn build_system_prompt(
             // Full profile: inject complete shared agent prompt (AGENTS.md)
             system_prompt_owned.push_str("\n\n[Shared Agent Rules]\n");
             system_prompt_owned.push_str(&shared_prompt);
-            eprintln!(
+            tracing::warn!(
                 "  [role-map] Injected shared prompt ({} chars) for channel {}",
                 shared_prompt.len(),
                 channel_id.get()
@@ -244,14 +248,14 @@ pub(super) fn build_system_prompt(
                      unless the user explicitly asks you to audit or compare role definitions.\n\n",
                 );
                 system_prompt_owned.push_str(&role_prompt);
-                eprintln!(
+                tracing::warn!(
                     "  [role-map] Applied role '{}' for channel {}",
                     binding.role_id,
                     channel_id.get()
                 );
             }
             None => {
-                eprintln!(
+                tracing::warn!(
                     "  [role-map] Failed to load prompt file '{}' for role '{}' (channel {})",
                     binding.prompt_file,
                     binding.role_id,
@@ -315,7 +319,7 @@ pub(super) fn build_system_prompt(
 
     if profile == DispatchProfile::ReviewLite {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 📉 ReviewLite prompt: {} chars (channel {})",
             system_prompt_owned.len(),
             channel_id.get()

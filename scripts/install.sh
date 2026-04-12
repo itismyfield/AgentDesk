@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-# install.sh — AgentDesk one-click installer (macOS)
+# install.sh — AgentDesk installer bootstrap
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/itismyfield/AgentDesk/main/scripts/install.sh | bash
 #
-# What it does:
+# What it does on macOS:
 #   1. Downloads the latest release from GitHub
 #   2. Installs to ~/.adk/release/
 #   3. Registers launchd service (auto-start on boot)
 #   4. Starts the AgentDesk server
 #   5. Opens the web dashboard for onboarding
+#
+# On Linux/Windows, this script prints the native runtime path and exits.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -47,6 +49,51 @@ info()  { echo -e "${CYAN}▸${NC} $1"; }
 ok()    { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1"; exit 1; }
+
+print_native_runtime_help() {
+  local os="$1"
+  local docs_url="https://github.com/$REPO#windows-and-linux-native-runtime"
+
+  echo ""
+  case "$os" in
+    linux)
+      warn "Linux uses the native runtime path instead of the one-click bootstrap."
+      cat <<EOF
+Recommended path:
+  1. Download the release tarball or build from source
+     cargo build --release
+  2. Initialize the runtime
+     ./target/release/agentdesk --init
+  3. Start the server and run diagnostics
+     ./target/release/agentdesk dcserver
+     ./target/release/agentdesk doctor
+
+Use the service path printed by \`agentdesk --init\` when registering a systemd --user service.
+Docs: $docs_url
+EOF
+      ;;
+    windows)
+      warn "Windows uses the native runtime path instead of the macOS launchd bootstrap."
+      cat <<EOF
+Recommended path:
+  1. Download the release zip or build from source
+     cargo build --release
+  2. Initialize the runtime
+     .\\target\\release\\agentdesk.exe --init
+  3. Start the server and run diagnostics
+     .\\target\\release\\agentdesk.exe dcserver
+     .\\target\\release\\agentdesk.exe doctor
+
+Use the NSSM / sc.exe service path printed by \`agentdesk.exe --init\`.
+Docs: $docs_url
+EOF
+      ;;
+    *)
+      warn "This operating system is not supported by the one-click installer."
+      echo "Docs: $docs_url"
+      ;;
+  esac
+}
 
 trim_whitespace() {
   local value="$1"
@@ -150,7 +197,14 @@ sign_binary_with_fallback() {
 }
 
 # ── Detect OS and arch ────────────────────────────────────────────────────────
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+RAW_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$RAW_OS" in
+  darwin) OS="darwin" ;;
+  linux) OS="linux" ;;
+  msys*|mingw*|cygwin*) OS="windows" ;;
+  *) fail "Unsupported operating system: $RAW_OS" ;;
+esac
+
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)        ARCH="x86_64" ;;
@@ -159,7 +213,8 @@ case "$ARCH" in
 esac
 
 if [ "$OS" != "darwin" ]; then
-  fail "This installer currently supports macOS only. Linux support coming soon."
+  print_native_runtime_help "$OS"
+  fail "One-click installer is only available on macOS."
 fi
 
 echo ""

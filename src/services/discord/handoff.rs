@@ -100,7 +100,7 @@ pub(super) fn save_handoff(record: &HandoffRecord) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)?;
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts}] 📎 Saved handoff for channel {} (intent: {})",
         record.channel_id,
         truncate(&record.intent, 60)
@@ -129,7 +129,7 @@ pub(super) fn load_handoffs(provider: &ProviderKind) -> Vec<HandoffRecord> {
                 if let Ok(age) = modified.elapsed() {
                     if age > Duration::from_secs(HANDOFF_MAX_AGE_SECS) {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
+                        tracing::info!(
                             "  [{ts}] 🗑 Removing stale handoff file: {} (age={:.0}s)",
                             path.display(),
                             age.as_secs_f64()
@@ -145,7 +145,7 @@ pub(super) fn load_handoffs(provider: &ProviderKind) -> Vec<HandoffRecord> {
         };
         let Ok(record) = serde_json::from_str::<HandoffRecord>(&content) else {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ Removing malformed handoff file: {}",
                 path.display()
             );

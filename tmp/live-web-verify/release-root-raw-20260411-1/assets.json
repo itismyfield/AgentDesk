@@ -1,0 +1,34 @@
+[
+  {
+    "tag": "script",
+    "url": "http://127.0.0.1:8791/assets/index-DRfGFecQ.js"
+  },
+  {
+    "tag": "link",
+    "url": "http://127.0.0.1:8791/assets/react-Bbft6den.js"
+  },
+  {
+    "tag": "link",
+    "url": "http://127.0.0.1:8791/assets/pixi-utils-DY2WuAjf.js"
+  },
+  {
+    "tag": "link",
+    "url": "http://127.0.0.1:8791/assets/pixi-svg-CH9GjiOA.js"
+  },
+  {
+    "tag": "link",
+    "url": "http://127.0.0.1:8791/assets/pixi-geom-B3NWpltw.js"
+  },
+  {
+    "tag": "link",
+    "url": "http://127.0.0.1:8791/assets/pixi-B7y-gAci.js"
+  },
+  {
+    "tag": "link",
+    "url": "http://127.0.0.1:8791/assets/icons-DHxNnaOW.js"
+  },
+  {
+    "tag": "link",
+    "url": "http://127.0.0.1:8791/assets/index-ChDJMX-j.css"
+  }
+]

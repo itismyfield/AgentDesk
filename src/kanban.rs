@@ -692,18 +692,10 @@ fn github_sync_on_transition(
     let Some(num) = issue_number else { return };
 
     if is_terminal {
-        let _ = crate::github::run_gh(&["issue", "close", &num.to_string(), "--repo", &repo]);
+        let _ = crate::github::close_issue(&repo, num);
     } else if is_review_enter {
         let comment = "🔍 칸반 상태: **review** (카운터모델 리뷰 진행 중)";
-        let _ = crate::github::run_gh(&[
-            "issue",
-            "comment",
-            &num.to_string(),
-            "--repo",
-            &repo,
-            "--body",
-            comment,
-        ]);
+        let _ = crate::github::comment_issue(&repo, num, comment);
     }
 }
 
@@ -1838,7 +1830,7 @@ mod tests {
         );
 
         let tmux_invocations = fs::read_to_string(&tmux_log).unwrap();
-        println!("[test] deploy tmux invocations:\n{tmux_invocations}");
+        tracing::info!("[test] deploy tmux invocations:\n{tmux_invocations}");
         assert!(
             tmux_invocations.contains(&correct_worktree.display().to_string()),
             "deploy command must use card-scoped worktree path from dispatch context"

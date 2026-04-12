@@ -1,0 +1,10 @@
+{
+  "picked": null,
+  "hasExpertSearchPlaceholder": false,
+  "hasNoConfiguredExperts": false,
+  "hasPinExpertCopy": true,
+  "placeholders": [
+    "등록된 회의 채널 검색",
+    "회의 안건을 입력하세요"
+  ]
+}

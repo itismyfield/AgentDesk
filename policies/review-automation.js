@@ -49,12 +49,15 @@ var reviewAutomation = {
       return;
     }
 
-    // Counter-model review disabled — treat as implicit approval and complete immediately
-    var counterModelEnabled = agentdesk.config.get("counter_model_review_enabled");
-    if (counterModelEnabled === false || counterModelEnabled === "false") {
+    if (!card.assigned_agent_id) return;
+
+    // Single-provider agents auto-approve after entering review because
+    // there is no alternate provider/channel to dispatch a review to.
+    var counterChannelId = agentdesk.agents.resolveCounterModelChannel(card.assigned_agent_id);
+    if (!counterChannelId) {
       agentdesk.kanban.setStatus(card.id, terminalState, true);
       agentdesk.kanban.setReviewStatus(card.id, null, {blocked_reason: null});
-      agentdesk.log.info("[review] Counter-model disabled, card " + card.id + " → " + terminalState);
+      agentdesk.log.info("[review] No alternate review channel for " + card.id + " → " + terminalState);
       return;
     }
 
@@ -93,23 +96,6 @@ var reviewAutomation = {
       notifyPmdPendingDecision(card.id, "리뷰 라운드 상한(" + maxRounds + "회) 초과");
       return;
     }
-
-    if (!card.assigned_agent_id) return;
-
-    // Get agent's counter-model channel via centralized resolver (#304)
-    var counterChannelId = agentdesk.agents.resolveCounterModelChannel(card.assigned_agent_id);
-    if (!counterChannelId) {
-      // No counter-model channel → PM decision (not silent done skip)
-      agentdesk.kanban.setStatus(card.id, pendingState);
-      agentdesk.kanban.setReviewStatus(card.id, null, {
-        suggestion_pending_at: null,
-        blocked_reason: "No counter-model channel for review — PM decision needed"
-      });
-      agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + " → " + pendingState);
-      notifyPmdPendingDecision(card.id, "카운터모델 채널 없음 — PM 판단 필요");
-      return;
-    }
-
     // Create review dispatch (targets same agent — counter channel picks it up)
     // #245: Log agent_id for diagnostics — "project-agentdesk-cdx" phantom agent was traced here
     agentdesk.log.info("[review] Creating review dispatch: card=" + card.id + " agent=" + card.assigned_agent_id + " round=" + newRound);

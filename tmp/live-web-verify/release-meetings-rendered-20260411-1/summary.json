@@ -1,0 +1,595 @@
+{
+  "currentUrl": "http://127.0.0.1:8791/",
+  "beforeNewMeetingContains": {
+    "meetingsTab": true,
+    "meetingHashes": [
+      "#4016f278d152",
+      "#5025065f271a",
+      "#c095760f41a1",
+      "#91c57ad982f3",
+      "#16d2f8da29c4",
+      "#dcf1c8f41dac",
+      "#6aff388c6cbf",
+      "#2de5e44be1c8",
+      "#11aef04d96b9",
+      "#56e2c6e0823d",
+      "#d1784cadb646",
+      "#421d386423d2",
+      "#6e75319b9fee",
+      "#23568112b89c"
+    ]
+  },
+  "afterNewMeetingContains": {
+    "hasPrimaryProvider": true,
+    "hasReviewerProvider": true,
+    "hasExpertSearchPlaceholder": false
+  },
+  "textarea": [
+    {
+      "rows": "3",
+      "placeholder": "회의 안건을 입력하세요"
+    }
+  ],
+  "providerLabels": [
+    "채널",
+    "안건",
+    "진행 프로바이더",
+    "리뷰 프로바이더",
+    "고정 전문 에이전트"
+  ],
+  "sampleInputs": [
+    {
+      "tag": "button",
+      "text": "오피스",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "펄스",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "칸반",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "컨트롤",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "에이전트17에이전트 프로필과 파견 세션을 관리합니다.",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "부서6부서 구조, 순서, 테마를 조정합니다.",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "오피스1오피스와 멤버 구성을 한 화면에서 관리합니다.",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "설정일반, 런타임, 시스템 설정을 조정합니다.",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "회의 기록12회의 상세와 후속 일감 상태를 확인합니다.",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "새 회의",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": "등록된 회의 채널 검색",
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "textarea",
+      "text": "",
+      "placeholder": "회의 안건을 입력하세요",
+      "value": null,
+      "rows": "3"
+    },
+    {
+      "tag": "select",
+      "text": "ClaudeCodexGeminiQwen",
+      "placeholder": null,
+      "value": "claude",
+      "rows": null
+    },
+    {
+      "tag": "select",
+      "text": "CodexGeminiQwen",
+      "placeholder": null,
+      "value": "codex",
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "취소",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "회의 시작",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "input",
+      "text": "",
+      "placeholder": null,
+      "value": "on",
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "상세 보기",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "오피스",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "펄스",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "칸반",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    },
+    {
+      "tag": "button",
+      "text": "컨트롤",
+      "placeholder": null,
+      "value": null,
+      "rows": null
+    }
+  ]
+}

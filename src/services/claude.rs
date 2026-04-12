@@ -3,19 +3,15 @@ use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage, is_valid_session_id};
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{
-    configure_child_process_group, kill_child_tree, kill_pid_tree, shell_escape,
-    wait_with_output_timeout,
-};
+use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
-    fold_read_output_result, is_readonly_tool_policy, register_child_pid,
+    fold_read_output_result, register_child_pid,
 };
 use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
@@ -36,19 +32,6 @@ pub fn resolve_claude_path() -> Option<String> {
 
 fn resolve_claude_binary() -> crate::services::platform::BinaryResolution {
     crate::services::platform::resolve_provider_binary("claude")
-}
-
-fn get_claude_path() -> Option<String> {
-    resolve_claude_path()
-}
-
-fn apply_permission_mode(args: &mut Vec<String>, readonly_mode: bool) {
-    if readonly_mode {
-        args.push("--permission-mode".to_string());
-        args.push("dontAsk".to_string());
-    } else {
-        args.insert(1, "--dangerously-skip-permissions".to_string());
-    }
 }
 
 fn build_tmux_launch_env_lines(
@@ -155,13 +138,13 @@ pub fn execute_command(
     working_dir: &str,
     allowed_tools: Option<&[String]>,
 ) -> ClaudeResponse {
-    let readonly_mode = is_readonly_tool_policy(allowed_tools);
     let tools_str = match allowed_tools {
         Some(tools) => tools.join(","),
         None => DEFAULT_ALLOWED_TOOLS.join(","),
     };
     let mut args = vec![
         "-p".to_string(),
+        "--dangerously-skip-permissions".to_string(),
         "--tools".to_string(),
         tools_str,
         "--output-format".to_string(),
@@ -195,7 +178,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
 - Use headers (## Title) to organize longer responses
 - Keep formatting minimal and terminal-friendly"#.to_string(),
     ];
-    apply_permission_mode(&mut args, readonly_mode);
 
     // Resume session if available
     if let Some(sid) = session_id {
@@ -326,24 +308,10 @@ fn parse_claude_output(output: &str) -> ClaudeResponse {
     }
 }
 
-/// Check if Claude CLI is available
-#[allow(dead_code)]
-pub fn is_claude_available() -> bool {
-    #[cfg(not(unix))]
-    {
-        false
-    }
-
-    #[cfg(unix)]
-    {
-        get_claude_path().is_some()
-    }
-}
-
-/// Check if platform supports AI features
+/// Check if platform supports local AI CLI execution.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn is_ai_supported() -> bool {
-    cfg!(unix)
+    cfg!(any(unix, windows))
 }
 
 /// Execute a simple Claude CLI call with `--print` flag (no tools, text-only response).
@@ -353,27 +321,11 @@ pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
     execute_command_simple_with_model(prompt, None)
 }
 
-pub fn execute_command_simple_with_timeout(
-    prompt: &str,
-    timeout: Duration,
-    label: &str,
-) -> Result<String, String> {
-    execute_command_simple_with_model_and_timeout(prompt, None, Some((timeout, label)))
-}
-
 /// Execute a simple Claude CLI call with optional model override (no tools, text-only response).
 /// This is a blocking function — call from tokio::task::spawn_blocking.
 pub fn execute_command_simple_with_model(
     prompt: &str,
     model_override: Option<&str>,
-) -> Result<String, String> {
-    execute_command_simple_with_model_and_timeout(prompt, model_override, None)
-}
-
-fn execute_command_simple_with_model_and_timeout(
-    prompt: &str,
-    model_override: Option<&str>,
-    timeout: Option<(Duration, &str)>,
 ) -> Result<String, String> {
     let resolution = resolve_claude_binary();
     let claude_bin = resolution
@@ -393,9 +345,6 @@ fn execute_command_simple_with_model_and_timeout(
 
     let mut command = Command::new(&claude_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    if timeout.is_some() {
-        configure_child_process_group(&mut command);
-    }
     let mut child = command
         .args(&args)
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "4096")
@@ -410,13 +359,9 @@ fn execute_command_simple_with_model_and_timeout(
         let _ = stdin.write_all(prompt.as_bytes());
     }
 
-    let output = if let Some((timeout, label)) = timeout {
-        wait_with_output_timeout(child, timeout, label)?
-    } else {
-        child
-            .wait_with_output()
-            .map_err(|e| format!("Failed to read output: {}", e))?
-    };
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to read output: {}", e))?;
 
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -432,6 +377,24 @@ fn execute_command_simple_with_model_and_timeout(
         } else {
             stderr
         })
+    }
+}
+
+/// Execute a simple Claude CLI call with an optional timeout.
+/// This is a blocking function — call from tokio::task::spawn_blocking.
+pub fn execute_command_simple_with_timeout(
+    prompt: &str,
+    timeout: std::time::Duration,
+    label: &str,
+) -> Result<String, String> {
+    let prompt = prompt.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(execute_command_simple(&prompt));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err(format!("{label} timeout after {}s", timeout.as_secs())),
     }
 }
 
@@ -495,16 +458,15 @@ IMPORTANT: Format your responses using Markdown for better readability:
         Some(tools) => tools.join(","),
         None => DEFAULT_ALLOWED_TOOLS.join(","),
     };
-    let readonly_mode = is_readonly_tool_policy(allowed_tools);
     let mut args = vec![
         "-p".to_string(),
+        "--dangerously-skip-permissions".to_string(),
         "--tools".to_string(),
         tools_str,
         "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
     ];
-    apply_permission_mode(&mut args, readonly_mode);
 
     // Apply model override if specified (e.g. "opus", "sonnet", "haiku")
     if let Some(model) = model_override {
@@ -654,7 +616,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
     if let Some(pct) = compact_percent.filter(|&p| p > 0) {
         command.env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", pct.to_string());
     }
-    configure_child_process_group(&mut command);
 
     let mut child = command.spawn().map_err(|e| {
         debug_log(&format!(
@@ -672,11 +633,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     // Store child PID in cancel token so the caller can kill it externally
     register_child_pid(cancel_token.as_deref(), child.id());
-    if cancel_requested(cancel_token.as_deref()) {
-        debug_log("Cancel detected immediately after spawn — killing child process tree");
-        kill_child_tree(&mut child);
-        return Ok(());
-    }
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -1833,42 +1789,6 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_permission_mode_uses_dont_ask_for_readonly() {
-        let mut args = vec!["-p".to_string(), "--tools".to_string(), "Read".to_string()];
-        apply_permission_mode(&mut args, true);
-
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--permission-mode", "dontAsk"])
-        );
-        assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "--dangerously-skip-permissions")
-        );
-    }
-
-    #[test]
-    fn test_apply_permission_mode_keeps_bypass_for_non_readonly() {
-        let mut args = vec![
-            "-p".to_string(),
-            "--tools".to_string(),
-            "Read,Edit".to_string(),
-        ];
-        apply_permission_mode(&mut args, false);
-
-        assert_eq!(
-            args.get(1).map(String::as_str),
-            Some("--dangerously-skip-permissions")
-        );
-        assert!(
-            !args
-                .windows(2)
-                .any(|pair| pair == ["--permission-mode", "dontAsk"])
-        );
-    }
-
-    #[test]
     fn test_session_id_valid() {
         assert!(is_valid_session_id("abc123"));
         assert!(is_valid_session_id("session-1"));
@@ -2002,10 +1922,10 @@ mod tests {
 
     #[test]
     fn test_is_ai_supported() {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         assert!(is_ai_supported());
 
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         assert!(!is_ai_supported());
     }
 

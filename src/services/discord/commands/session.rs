@@ -52,9 +52,10 @@ pub(in crate::services::discord) async fn cmd_start(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts}] ◀ [{user_name}] /start path={:?} remote={:?}",
-        path, remote
+        path,
+        remote
     );
 
     let path_str = path.as_deref().unwrap_or("").trim();
@@ -176,9 +177,10 @@ pub(in crate::services::discord) async fn cmd_start(
             match create_git_worktree(&canonical_path, ch, &provider_str) {
                 Ok((wt_path, branch)) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] 🌿 Worktree conflict: {} already uses {}. Created worktree.",
-                        conflicting_channel, canonical_path
+                        conflicting_channel,
+                        canonical_path
                     );
                     Some(WorktreeInfo {
                         original_path: canonical_path.clone(),
@@ -188,7 +190,7 @@ pub(in crate::services::discord) async fn cmd_start(
                 }
                 Err(e) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] 🌿 Worktree creation skipped: {e}");
+                    tracing::info!("  [{ts}] 🌿 Worktree creation skipped: {e}");
                     None
                 }
             }
@@ -259,7 +261,7 @@ pub(in crate::services::discord) async fn cmd_start(
                 .as_ref()
                 .map(|n| format!(" (remote: {})", n))
                 .unwrap_or_default();
-            println!("  [{ts}] ▶ Session restored: {effective_path}{remote_info}");
+            tracing::info!("  [{ts}] ▶ Session restored: {effective_path}{remote_info}");
             response_lines.push(format!(
                 "Session restored at `{}`{}.",
                 effective_path, remote_info
@@ -273,7 +275,7 @@ pub(in crate::services::discord) async fn cmd_start(
                 .as_ref()
                 .map(|n| format!(" (remote: {})", n))
                 .unwrap_or_default();
-            println!("  [{ts}] ▶ Session started: {effective_path}{remote_info}");
+            tracing::info!("  [{ts}] ▶ Session started: {effective_path}{remote_info}");
             response_lines.push(format!(
                 "Session started at `{}`{}.",
                 effective_path, remote_info
@@ -336,7 +338,7 @@ pub(in crate::services::discord) async fn cmd_pwd(ctx: Context<'_>) -> Result<()
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /pwd");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /pwd");
 
     // Auto-restore session
     auto_restore_session(&ctx.data().shared, ctx.channel_id(), ctx.serenity_context()).await;

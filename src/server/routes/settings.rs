@@ -18,6 +18,7 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
     "max_chain_depth",
     "context_clear_percent",
     "context_clear_idle_minutes",
+    "counter_model_review_enabled",
 ];
 
 /// GET /api/settings
@@ -113,13 +114,6 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         None,
     ),
     (
-        "counter_model_review_enabled",
-        "review",
-        "카운터모델 리뷰 활성화",
-        "Counter-Model Review",
-        None,
-    ),
-    (
         "max_review_rounds",
         "review",
         "최대 리뷰 라운드",
@@ -212,7 +206,6 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
         "kanban_manager_channel_id" => config.kanban.manager_channel_id.clone(),
         "deadlock_manager_channel_id" => config.kanban.deadlock_manager_channel_id.clone(),
         "review_enabled" => stringified_bool(config.review.enabled),
-        "counter_model_review_enabled" => stringified_bool(config.review.counter_model_enabled),
         "max_review_rounds" => stringified_number(config.review.max_rounds),
         "pm_decision_gate_enabled" => stringified_bool(config.kanban.pm_decision_gate_enabled),
         "merge_automation_enabled" => stringified_bool(config.automation.enabled),
@@ -472,6 +465,14 @@ pub fn seed_config_defaults(conn: &rusqlite::Connection, config: &crate::config:
         }
     }
 
+    // Seed workspace_root from CARGO_MANIFEST_DIR (compile-time) for auto-merge.
+    // This is the source repo path, not a runtime override — always INSERT OR IGNORE.
+    conn.execute(
+        "INSERT OR IGNORE INTO kv_meta (key, value) VALUES ('workspace_root', ?1)",
+        [env!("CARGO_MANIFEST_DIR")],
+    )
+    .ok();
+
     crate::services::settings::seed_runtime_config_defaults(conn, config);
     crate::server::routes::escalation::seed_escalation_defaults(conn, config);
 
@@ -726,12 +727,17 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('counter_model_review_enabled', 'false')",
+            [],
+        )
+        .unwrap();
 
         seed_config_defaults(&conn, &crate::config::Config::default());
 
         let retired_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM kv_meta WHERE key IN ('max_chain_depth', 'context_clear_percent')",
+                "SELECT COUNT(*) FROM kv_meta WHERE key IN ('max_chain_depth', 'context_clear_percent', 'counter_model_review_enabled')",
                 [],
                 |row| row.get(0),
             )

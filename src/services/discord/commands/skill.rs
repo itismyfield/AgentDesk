@@ -133,7 +133,7 @@ pub(in crate::services::discord) async fn cmd_cc(
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     let args_str = args.as_deref().unwrap_or("");
-    println!("  [{ts}] ◀ [{user_name}] /cc {skill} {args_str}");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /cc {skill} {args_str}");
 
     // Handle built-in commands directly instead of sending to AI
     match skill.as_str() {
@@ -152,7 +152,7 @@ pub(in crate::services::discord) async fn cmd_cc(
                     }
                     ctx.say("Stopping...").await?;
                     cancel_active_token(&token, true, "/cc stop");
-                    println!("  [{ts}] ■ Cancel signal sent");
+                    tracing::info!("  [{ts}] ■ Cancel signal sent");
                 }
                 None => {
                     ctx.say("No active request to stop.").await?;

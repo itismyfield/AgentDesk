@@ -224,7 +224,7 @@ fn schedule_provider_overload_retry(
         }
 
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!(
+        tracing::warn!(
             "  [{ts}] ↻ watcher overload auto-retry: channel {} attempt {}/{} after {}s",
             channel_id.get(),
             attempt,
@@ -311,7 +311,7 @@ pub(super) fn claim_or_replace_watcher(
                 .cancel
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ♻ watcher replaced for channel {} — cancelled stale watcher",
                 channel_id
             );
@@ -451,7 +451,7 @@ pub(super) async fn start_restart_handoff_from_state(
         Ok(msg) => msg.id,
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ failed to send watcher-handoff placeholder for channel {}: {}",
                 channel_id.get(),
                 e
@@ -484,7 +484,7 @@ pub(super) async fn start_restart_handoff_from_state(
         {
             Ok(()) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ↻ watcher death recovery: started immediate handoff turn for channel {}",
                     channel_id.get()
                 );
@@ -492,7 +492,7 @@ pub(super) async fn start_restart_handoff_from_state(
             }
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ⚠ watcher death recovery: immediate handoff start failed for channel {}: {}",
                     channel_id.get(),
                     e
@@ -516,7 +516,7 @@ pub(super) async fn start_restart_handoff_from_state(
         )
         .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] ↻ watcher death recovery: queued fallback handoff for channel {}",
             channel_id.get()
         );
@@ -536,7 +536,7 @@ async fn resume_aborted_restart_turn(
     let Some((provider_kind, _)) = parse_provider_and_channel_from_tmux_name(tmux_session_name)
     else {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] ⚠ watcher death recovery: failed to parse provider/channel from tmux session {}",
             tmux_session_name
         );
@@ -544,7 +544,7 @@ async fn resume_aborted_restart_turn(
     };
     let Some(state) = super::inflight::load_inflight_state(&provider_kind, channel_id.get()) else {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] ⚠ watcher death recovery: no inflight state for channel {} (provider {})",
             channel_id.get(),
             provider_kind.as_str()
@@ -555,7 +555,7 @@ async fn resume_aborted_restart_turn(
     let scope = resolve_restart_handoff_scope(&state, tmux_session_name, output_path);
     if matches!(scope, RestartHandoffScope::ProviderChannelScopedFallback) {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] ↻ watcher death recovery: inflight metadata mismatch for channel {} (state tmux: {:?}, watcher tmux: {}, state output: {:?}, watcher output: {}) — proceeding with provider/channel scoped handoff",
             channel_id.get(),
             state.tmux_session_name.as_deref(),
@@ -602,7 +602,9 @@ pub(super) async fn tmux_output_watcher(
     use std::io::{Read, Seek, SeekFrom};
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset}");
+    tracing::info!(
+        "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset}"
+    );
 
     let watcher_provider = parse_provider_and_channel_from_tmux_name(&tmux_session_name)
         .map(|(provider, _)| provider)
@@ -660,7 +662,7 @@ pub(super) async fn tmux_output_watcher(
             // between the top-of-loop check and here
             if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] 👁 tmux session {tmux_session_name} ended during shutdown, exiting quietly"
                 );
                 break;
@@ -669,7 +671,7 @@ pub(super) async fn tmux_output_watcher(
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             if cancel.load(Ordering::Relaxed) || shared.shutting_down.load(Ordering::Relaxed) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] 👁 tmux session {tmux_session_name} ended during shutdown, exiting quietly"
                 );
                 break;
@@ -677,11 +679,13 @@ pub(super) async fn tmux_output_watcher(
             let ts = chrono::Local::now().format("%H:%M:%S");
             if let Some(diag) = build_tmux_death_diagnostic(&tmux_session_name, Some(&output_path))
             {
-                println!(
+                tracing::info!(
                     "  [{ts}] 👁 tmux session {tmux_session_name} ended, watcher stopping ({diag})"
                 );
             } else {
-                println!("  [{ts}] 👁 tmux session {tmux_session_name} ended, watcher stopping");
+                tracing::info!(
+                    "  [{ts}] 👁 tmux session {tmux_session_name} ended, watcher stopping"
+                );
             }
             // Notify: tmux session termination with reason
             {
@@ -954,7 +958,7 @@ pub(super) async fn tmux_output_watcher(
         if is_prompt_too_long {
             clear_provider_overload_retry_state(channel_id);
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 👁 Prompt too long detected in watcher for {tmux_session_name}, killing session"
             );
             prompt_too_long_killed = true;
@@ -997,7 +1001,7 @@ pub(super) async fn tmux_output_watcher(
         if is_auth_error {
             clear_provider_overload_retry_state(channel_id);
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 👁 Auth error detected in watcher for {tmux_session_name}, killing session"
             );
             prompt_too_long_killed = true; // reuse flag to suppress duplicate "session ended" message
@@ -1082,9 +1086,10 @@ pub(super) async fn tmux_output_watcher(
             };
 
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 👁 Provider overload detected in watcher for {}: {}",
-                tmux_session_name, overload_message
+                tmux_session_name,
+                overload_message
             );
             prompt_too_long_killed = true;
 
@@ -1199,7 +1204,7 @@ pub(super) async fn tmux_output_watcher(
                 let _ = channel_id.delete_message(&http, msg_id).await;
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
+            tracing::warn!(
                 "  [{ts}] 👁 Late epoch/delivered guard: suppressed duplicate relay for {}",
                 tmux_session_name
             );
@@ -1210,9 +1215,11 @@ pub(super) async fn tmux_output_watcher(
         if let Some(prev_offset) = last_relayed_offset {
             if data_start_offset <= prev_offset {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] 👁 Duplicate relay guard: suppressed re-relay for {} (data_start={}, last_relayed={})",
-                    tmux_session_name, data_start_offset, prev_offset
+                    tmux_session_name,
+                    data_start_offset,
+                    prev_offset
                 );
                 if let Some(msg_id) = placeholder_msg_id {
                     let _ = channel_id.delete_message(&http, msg_id).await;
@@ -1226,7 +1233,7 @@ pub(super) async fn tmux_output_watcher(
         if is_stale_resume {
             clear_provider_overload_retry_state(channel_id);
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
+            tracing::warn!(
                 "  [{ts}] ⚠ Watcher detected stale session resume failure (channel {}), clearing session_id",
                 channel_id
             );
@@ -1290,13 +1297,13 @@ pub(super) async fn tmux_output_watcher(
                 )
                 .await;
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ↻ Watcher auto-retry queued for channel {}",
                     channel_id
                 );
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ⚠ Watcher auto-retry skipped: inflight state missing for channel {}",
                     channel_id
                 );
@@ -1316,7 +1323,7 @@ pub(super) async fn tmux_output_watcher(
             );
             let prefixed = formatted.to_string();
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 👁 Relaying terminal response to Discord ({} chars, offset {})",
                 prefixed.len(),
                 data_start_offset
@@ -1342,7 +1349,7 @@ pub(super) async fn tmux_output_watcher(
                             send_long_message_raw(&http, channel_id, &prefixed, &shared).await
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!("  [{ts}] 👁 Failed to relay: {e}");
+                            tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
                             relay_ok = false;
                         }
                     }
@@ -1352,7 +1359,7 @@ pub(super) async fn tmux_output_watcher(
                         send_long_message_raw(&http, channel_id, &prefixed, &shared).await
                     {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] 👁 Failed to relay: {e}");
+                        tracing::info!("  [{ts}] 👁 Failed to relay: {e}");
                         relay_ok = false;
                     }
                 }
@@ -1375,7 +1382,7 @@ pub(super) async fn tmux_output_watcher(
         let inflight_state = super::inflight::load_inflight_state(&provider_kind, channel_id.get());
         if inflight_state.is_none() {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
+            tracing::warn!(
                 "  [{ts}] ⚠ watcher: inflight state missing for channel {} — using DB dispatch fallback",
                 channel_id.get()
             );
@@ -1419,7 +1426,7 @@ pub(super) async fn tmux_output_watcher(
                     },
                 ) {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!("  [{ts}] ⚠ watcher: failed to persist session transcript: {e}");
+                    tracing::warn!("  [{ts}] ⚠ watcher: failed to persist session transcript: {e}");
                 }
             }
         }
@@ -1443,7 +1450,7 @@ pub(super) async fn tmux_output_watcher(
 
         if resolved_did.is_none() && has_assistant_response {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
+            tracing::warn!(
                 "  [{ts}] ⚠ watcher: no dispatch id resolved for channel {} after terminal success",
                 channel_id.get()
             );
@@ -1468,7 +1475,7 @@ pub(super) async fn tmux_output_watcher(
                 Some("implementation") | Some("rework") => {
                     if !has_assistant_response {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!(
+                        tracing::warn!(
                             "  [{ts}] ⚠ watcher: refusing to complete work dispatch {did} without assistant response"
                         );
                         false
@@ -1482,7 +1489,7 @@ pub(super) async fn tmux_output_watcher(
                         ) {
                             Ok(_) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!(
+                                tracing::info!(
                                     "  [{ts}] ✓ watcher: completed dispatch {did} via finalize_dispatch"
                                 );
                                 crate::server::routes::dispatches::queue_dispatch_followup(db, did);
@@ -1490,7 +1497,7 @@ pub(super) async fn tmux_output_watcher(
                             }
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!(
+                                tracing::warn!(
                                     "  [{ts}] ⚠ watcher: finalize_dispatch failed for {did}: {e}"
                                 );
                                 super::turn_bridge::runtime_db_fallback_complete_with_result(
@@ -1520,7 +1527,7 @@ pub(super) async fn tmux_output_watcher(
                 }
                 None => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
+                    tracing::warn!(
                         "  [{ts}] ⚠ watcher: cannot determine dispatch type for {did} — preserving state"
                     );
                     false
@@ -1577,7 +1584,7 @@ pub(super) async fn tmux_output_watcher(
             }
         } else {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
+            tracing::warn!("  [{ts}] ⚠ watcher: relay failed — preserving inflight for retry");
         }
 
         // Update session tokens from result event and auto-compact if threshold exceeded
@@ -1635,7 +1642,7 @@ pub(super) async fn tmux_output_watcher(
             // DISABLED — token counting still unreliable
             if false && pct >= ctx_cfg.compact_pct && !is_prompt_too_long && compact_cooldown_ok {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ⚡ [watcher] Auto-compact: {} at {pct}% ({tokens} tokens)",
                     tmux_session_name
                 );
@@ -1745,7 +1752,7 @@ pub(super) async fn tmux_output_watcher(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] 👁 tmux watcher stopped for #{tmux_session_name}");
+    tracing::info!("  [{ts}] 👁 tmux watcher stopped for #{tmux_session_name}");
 }
 
 /// Tracks tool/thinking status during watcher output processing.
@@ -2122,7 +2129,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
     for session_name in &agent_sessions {
         let Some((channel_id, channel_name)) = name_to_channel.get(*session_name) else {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ watcher skip for {} — channel mapping not found",
                 session_name
             );
@@ -2152,9 +2159,10 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             is_dm,
         ) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ watcher skip for {} — {reason} for channel {}",
-                session_name, channel_id
+                session_name,
+                channel_id
             );
             continue;
         }
@@ -2165,7 +2173,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         {
             if started.elapsed() < std::time::Duration::from_secs(60) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ⏳ watcher skip for {} — recovery in progress ({:.0}s ago)",
                     session_name,
                     started.elapsed().as_secs_f64()
@@ -2174,7 +2182,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             }
             // Stale recovery — remove marker and proceed with watcher
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ clearing stale recovery marker for {} ({:.0}s elapsed)",
                 session_name,
                 started.elapsed().as_secs_f64()
@@ -2189,7 +2197,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         let output_path = crate::services::tmux_common::session_temp_path(session_name, "jsonl");
         if std::fs::metadata(&output_path).is_err() {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ watcher skip for {} — no output file",
                 session_name
             );
@@ -2212,16 +2220,18 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             let current_owner_marker = current_tmux_owner_marker();
             if !session_belongs_to_current_runtime(session_name, &current_owner_marker) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ⏭ watcher skip for {} — owned by other runtime",
                     session_name
                 );
                 continue;
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ↻ Adopting old-gen session {} (gen {} → {})",
-                session_name, session_gen, current_gen
+                session_name,
+                session_gen,
+                current_gen
             );
             // Update generation marker to current gen
             let _ = std::fs::write(&gen_marker_path, current_gen.to_string());
@@ -2230,12 +2240,12 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         if !tmux_session_has_live_pane(session_name) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             if let Some(diag) = build_tmux_death_diagnostic(session_name, Some(&output_path)) {
-                println!(
+                tracing::info!(
                     "  [{ts}] ⏭ watcher skip for {} — tmux pane dead ({diag})",
                     session_name
                 );
             } else {
-                println!(
+                tracing::info!(
                     "  [{ts}] ⏭ watcher skip for {} — tmux pane dead",
                     session_name
                 );
@@ -2327,9 +2337,11 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                 {
                     if configured != restored {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
+                        tracing::info!(
                             "  [{ts}] ⚠ Ignoring restored DB cwd for channel {}: {} (configured workspace: {})",
-                            channel_id, restored, configured
+                            channel_id,
+                            restored,
+                            configured
                         );
                     }
                 }
@@ -2370,7 +2382,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             .unwrap_or(false);
         if recovery_handled {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ watcher skip for {} — recovery already handled this channel",
                 pw.session_name
             );
@@ -2392,7 +2404,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         };
         if !try_claim_watcher(&shared.tmux_watchers, pw.channel_id, handle) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⏭ watcher skip for {} — already watching (created during scan)",
                 pw.session_name
             );
@@ -2400,9 +2412,10 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         }
 
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] ↻ Restoring tmux watcher for {} (offset {})",
-            pw.session_name, pw.initial_offset
+            pw.session_name,
+            pw.initial_offset
         );
 
         tokio::spawn(tmux_output_watcher(
@@ -2468,7 +2481,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         }
 
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 🧹 Cleaned {} dead tmux session(s) on startup",
             dead_cleanups.len()
         );

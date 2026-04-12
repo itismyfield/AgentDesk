@@ -40,7 +40,6 @@ pub struct GenerateCandidate {
     pub description: Option<String>,
     pub metadata: Option<String>,
     pub github_issue_number: Option<i64>,
-    pub batch_phase: i64,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -394,7 +393,6 @@ impl From<GenerateCandidateRecord> for GenerateCandidate {
             description: record.description,
             metadata: record.metadata,
             github_issue_number: record.github_issue_number,
-            batch_phase: 0,
         }
     }
 }

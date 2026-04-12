@@ -243,7 +243,6 @@ const CATEGORIES: Array<{
 
 const BOOLEAN_CONFIG_KEYS = new Set([
   "review_enabled",
-  "counter_model_review_enabled",
   "pm_decision_gate_enabled",
   "merge_automation_enabled",
   "narrate_progress",
@@ -273,10 +272,6 @@ const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string }> = {
   review_enabled: {
     ko: "리뷰 단계를 전체 파이프라인에 적용할지 결정합니다.",
     en: "Controls whether the review step is enforced across the pipeline.",
-  },
-  counter_model_review_enabled: {
-    ko: "다른 모델을 이용한 교차 리뷰를 자동으로 붙입니다.",
-    en: "Automatically adds cross-review using a different model provider.",
   },
   max_review_rounds: {
     ko: "한 작업이 반복 리뷰를 수행할 수 있는 최대 횟수입니다.",

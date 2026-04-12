@@ -8,13 +8,14 @@ import type {
   Office,
   DispatchedSession,
   DashboardStats,
+  TokenAnalyticsResponse,
   RoundTableMeeting,
   RoundTableMeetingChannelOption,
   SkillCatalogEntry,
   TaskDispatch,
 } from "../types";
 
-export type { AuditLogEntry, KanbanCard, KanbanRepoSource } from "../types";
+export type { AuditLogEntry, KanbanCard, KanbanRepoSource, TokenAnalyticsResponse } from "../types";
 
 const BASE = "";
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -76,7 +77,8 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
         return await res.json();
       } catch (error) {
         clearTimeout(timer);
-        const resolvedError = error instanceof Error ? error : new Error(String(error));
+        const resolvedError =
+          error instanceof Error ? error : new Error(String(error));
         if (resolvedError.name === "AbortError") {
           lastError = new Error(`Request timeout: ${url}`);
           if (isGet && attempt < MAX_RETRIES) continue;
@@ -101,7 +103,8 @@ async function request<T>(url: string, opts?: RequestInit): Promise<T> {
   if (isGet) inflightGets.set(url, promise);
 
   return promise.catch((error) => {
-    const resolvedError = error instanceof Error ? error : new Error(String(error));
+    const resolvedError =
+      error instanceof Error ? error : new Error(String(error));
     apiErrorListener?.(url, resolvedError);
     throw resolvedError;
   });
@@ -417,6 +420,10 @@ export async function createDispatch(body: {
 export async function getStats(officeId?: string): Promise<DashboardStats> {
   const q = officeId ? `?officeId=${officeId}` : "";
   return request(`/api/stats${q}`);
+}
+
+export async function getTokenAnalytics(period: "7d" | "30d" | "90d" = "30d"): Promise<TokenAnalyticsResponse> {
+  return request(`/api/token-analytics?period=${period}`);
 }
 
 // ── Kanban & Dispatches ──
@@ -778,6 +785,52 @@ export async function getAgentDispatchedSessions(
     `/api/agents/${agentId}/dispatched-sessions`,
   );
   return data.sessions;
+}
+
+export interface AgentTurnToolEvent {
+  kind: "tool" | "thinking";
+  status: "running" | "success" | "error" | "info";
+  tool_name: string | null;
+  summary: string;
+  line: string;
+}
+
+export interface AgentTurnStatus {
+  agent_id: string;
+  status: "working" | "idle";
+  started_at: string | null;
+  updated_at: string | null;
+  recent_output: string | null;
+  recent_output_source: "tmux" | "inflight" | "none";
+  session_key: string | null;
+  tmux_session: string | null;
+  provider: string | null;
+  thread_channel_id: string | null;
+  active_dispatch_id: string | null;
+  last_heartbeat: string | null;
+  current_tool_line: string | null;
+  prev_tool_status: string | null;
+  tool_events: AgentTurnToolEvent[];
+  tool_count: number;
+}
+
+export interface StopAgentTurnResponse {
+  status: string;
+  agent_id: string;
+  session_key: string;
+  tmux_killed?: boolean;
+}
+
+export async function getAgentTurn(agentId: string): Promise<AgentTurnStatus> {
+  return request(`/api/agents/${agentId}/turn`);
+}
+
+export async function stopAgentTurn(
+  agentId: string,
+): Promise<StopAgentTurnResponse> {
+  return request(`/api/agents/${agentId}/turn/stop`, {
+    method: "POST",
+  });
 }
 
 // ── Agent Skills ──
@@ -1258,16 +1311,9 @@ export interface AutoQueueStatus {
   thread_groups?: Record<string, ThreadGroupStatus>;
 }
 
-export type AutoQueueGenerateMode =
-  | "priority-sort"
-  | "dependency-aware"
-  | "similarity-aware"
-  | "pm-assisted";
-
 export async function generateAutoQueue(
   repo?: string | null,
   agentId?: string | null,
-  mode?: AutoQueueGenerateMode | null,
 ): Promise<{
   run: AutoQueueRun;
   entries: DispatchQueueEntry[];
@@ -1275,8 +1321,6 @@ export async function generateAutoQueue(
   const body: Record<string, unknown> = {
     repo: repo ?? null,
     agent_id: agentId ?? null,
-    mode: mode ?? "priority-sort",
-    parallel: mode === "similarity-aware" || undefined,
   };
   return request("/api/auto-queue/generate", {
     method: "POST",

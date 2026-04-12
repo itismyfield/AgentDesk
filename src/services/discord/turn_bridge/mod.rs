@@ -19,7 +19,6 @@ use crate::services::memory::{
 };
 use crate::services::provider::cancel_requested;
 #[cfg(unix)]
-use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 use crate::utils::format::tail_with_ellipsis;
 
 // Re-exports for pub(super) items used by sibling modules in the discord package
@@ -96,6 +95,13 @@ pub(super) fn spawn_turn_bridge(
         let adk_session_info = bridge.adk_session_info.clone();
         let adk_cwd = bridge.adk_cwd.clone();
         let dispatch_id = bridge.dispatch_id.clone();
+        let bridge_span = tracing::info_span!(
+            "discord_turn_bridge",
+            channel_id = channel_id.get(),
+            provider = provider.as_str(),
+            dispatch_id = tracing::field::debug(dispatch_id.as_deref()),
+        );
+        let _bridge_guard = bridge_span.enter();
 
         let mut full_response = bridge.full_response.clone();
         let mut last_edit_text = String::new();
@@ -258,9 +264,10 @@ pub(super) fn spawn_turn_bridge(
                                     Ok(None) => {}
                                     Err(e) => {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
-                                        eprintln!(
+                                        tracing::warn!(
                                             "  [{ts}] ⚠ Failed to record skill usage for tool {}: {}",
-                                            name, e
+                                            name,
+                                            e
                                         );
                                     }
                                 }
@@ -311,7 +318,7 @@ pub(super) fn spawn_turn_bridge(
                                     );
                                     if let Err(e) = save_handoff(&handoff) {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
-                                        println!("  [{ts}] ⚠ failed to save handoff: {e}");
+                                        tracing::info!("  [{ts}] ⚠ failed to save handoff: {e}");
                                     }
 
                                     let handoff_text = "♻️ dcserver 재시작 중...\n\n새 dcserver가 이 메시지를 이어받는 중입니다.";
@@ -433,7 +440,7 @@ pub(super) fn spawn_turn_bridge(
                                 terminal_session_reset_required = true;
                                 clear_local_session_state(&mut new_session_id, &mut inflight_state);
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!(
+                                tracing::warn!(
                                     "  [{ts}] ⚠ Clearing stored provider session after terminal {} session failure (channel {})",
                                     provider.as_str(),
                                     channel_id,
@@ -524,7 +531,7 @@ pub(super) fn spawn_turn_bridge(
                                         ));
                                     } else {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
-                                        eprintln!(
+                                        tracing::warn!(
                                             "  [{ts}] ⚠ cached serenity context missing; tmux watcher not started for channel {}",
                                             channel_id
                                         );
@@ -643,7 +650,7 @@ pub(super) fn spawn_turn_bridge(
         }
         for error in extracted_api_friction.parse_errors {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
+            tracing::warn!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
         }
 
         let is_prompt_too_long = full_response.contains("__prompt too long__");
@@ -741,7 +748,7 @@ pub(super) fn spawn_turn_bridge(
         // Recovery auto-retry: session died during restart recovery
         if recovery_retry {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
+            tracing::warn!(
                 "  [{ts}] ↻ Recovery session died — triggering auto-retry with history (channel {})",
                 channel_id
             );
@@ -796,7 +803,7 @@ pub(super) fn spawn_turn_bridge(
                     .await
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
+                    tracing::warn!(
                         "  [{ts}] ⚠ cached serenity context missing; restart handoff unavailable (channel {})",
                         channel_id
                     );
@@ -805,13 +812,13 @@ pub(super) fn spawn_turn_bridge(
                 if handed_off {
                     full_response = String::new();
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
+                    tracing::warn!(
                         "  [{ts}] ↻ Recovery session died — queued internal handoff instead of Discord auto-retry (channel {})",
                         channel_id
                     );
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
+                    tracing::warn!(
                         "  [{ts}] ⚠ Recovery session died — internal handoff failed, falling back to auto-retry (channel {})",
                         channel_id
                     );
@@ -862,7 +869,7 @@ pub(super) fn spawn_turn_bridge(
             gateway.add_reaction(channel_id, user_msg_id, '🛑').await;
 
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ■ Stopped");
+            tracing::info!("  [{ts}] ■ Stopped");
         } else if is_prompt_too_long {
             let mention = gateway.requester_mention().unwrap_or_default();
             full_response = format!(
@@ -878,7 +885,7 @@ pub(super) fn spawn_turn_bridge(
             gateway.add_reaction(channel_id, user_msg_id, '⚠').await;
 
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ⚠ Prompt too long (channel {})", channel_id);
+            tracing::info!("  [{ts}] ⚠ Prompt too long (channel {})", channel_id);
         } else if rx_disconnected && tmux_handed_off && full_response.is_empty() {
             // Tmux watcher is handling response delivery — this is normal.
             // Don't delete placeholder — update it so the user sees the turn is still active.
@@ -887,7 +894,7 @@ pub(super) fn spawn_turn_bridge(
                 .edit_message(channel_id, current_msg_id, "⏳ 처리 중...")
                 .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!(
+            tracing::warn!(
                 "  [{ts}] ✓ tmux handoff complete, placeholder cleaned up, watcher handles response (channel {})",
                 channel_id
             );
@@ -896,7 +903,7 @@ pub(super) fn spawn_turn_bridge(
             // This path is driven by explicit error/result events, not assistant text.
             if resume_failure_detected {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ⚠ Resume failed (error in response), clearing session_id (channel {})",
                     channel_id
                 );
@@ -928,7 +935,7 @@ pub(super) fn spawn_turn_bridge(
                     );
                     if !recovered.trim().is_empty() {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!(
+                        tracing::warn!(
                             "  [{ts}] ↻ Recovered {} chars from output file for channel {}",
                             recovered.len(),
                             channel_id
@@ -951,7 +958,7 @@ pub(super) fn spawn_turn_bridge(
                 if stale_resume_in_output {
                     resume_failure_detected = true;
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
+                    tracing::warn!(
                         "  [{ts}] ⚠ Resume failed (stale session_id in recovered output), auto-retrying (channel {})",
                         channel_id
                     );
@@ -987,7 +994,7 @@ pub(super) fn spawn_turn_bridge(
                         resume_failed = true;
                         resume_failure_detected = true;
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!(
+                        tracing::warn!(
                             "  [{ts}] ⚠ Resume failed (stale session_id in output file), auto-retrying (channel {})",
                             channel_id
                         );
@@ -1023,7 +1030,7 @@ pub(super) fn spawn_turn_bridge(
                             resume_failed = true;
                             resume_failure_detected = true;
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!(
+                            tracing::warn!(
                                 "  [{ts}] ⚠ Quick exit with empty response — auto-retrying with fresh session (channel {})",
                                 channel_id
                             );
@@ -1056,15 +1063,17 @@ pub(super) fn spawn_turn_bridge(
                             full_response =
                                 "(No response — 프로세스가 응답 없이 종료됨)".to_string();
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!(
+                            tracing::warn!(
                                 "  [{ts}] ⚠ Empty response: rx disconnected before any text \
                                  (channel {}, output_path={:?}, last_offset={})",
-                                channel_id, inflight_state.output_path, inflight_state.last_offset
+                                channel_id,
+                                inflight_state.output_path,
+                                inflight_state.last_offset
                             );
                         } else {
                             full_response = "(No response)".to_string();
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!(
+                            tracing::warn!(
                                 "  [{ts}] ⚠ Empty response: done without text (channel {})",
                                 channel_id
                             );
@@ -1082,7 +1091,7 @@ pub(super) fn spawn_turn_bridge(
             }
             for error in late_api_friction.parse_errors {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
+                tracing::warn!("  [{ts}] ⚠ invalid API_FRICTION marker: {error}");
             }
 
             let mut delivery_response = full_response.clone();
@@ -1127,7 +1136,7 @@ pub(super) fn spawn_turn_bridge(
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ▶ Response sent");
+            tracing::info!("  [{ts}] ▶ Response sent");
             if let Ok(mut last) = shared_owned.last_turn_at.lock() {
                 *last = Some(chrono::Local::now().to_rfc3339());
             }
@@ -1242,7 +1251,7 @@ pub(super) fn spawn_turn_bridge(
                 },
             ) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!("  [{ts}] ⚠ failed to persist session transcript: {e}");
+                tracing::warn!("  [{ts}] ⚠ failed to persist session transcript: {e}");
             }
 
             if !api_friction_reports.is_empty() {
@@ -1266,12 +1275,14 @@ pub(super) fn spawn_turn_bridge(
                             .saturating_add(summary.token_usage.output_tokens);
                         for error in summary.memory_errors {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!("  [{ts}] ⚠ failed to store API friction memory: {error}");
+                            tracing::warn!(
+                                "  [{ts}] ⚠ failed to store API friction memory: {error}"
+                            );
                         }
                     }
                     Err(error) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!("  [{ts}] ⚠ failed to record API friction: {error}");
+                        tracing::warn!("  [{ts}] ⚠ failed to record API friction: {error}");
                     }
                 }
             }
@@ -1315,7 +1326,7 @@ pub(super) fn spawn_turn_bridge(
                 }
                 Err(err) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    eprintln!(
+                    tracing::warn!(
                         "  [{ts}] [memory] background task join failed for channel {}: {}",
                         channel_id.get(),
                         err
@@ -1367,7 +1378,7 @@ pub(super) fn spawn_turn_bridge(
         if restart_followup_pending {
             clear_restart_report(&provider, channel_id.get());
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ✓ Cleared restart report for channel {} (turn completed normally)",
                 channel_id
             );
@@ -1378,82 +1389,9 @@ pub(super) fn spawn_turn_bridge(
         inflight_guard.provider.take();
         super::mailbox_clear_recovery_marker(&shared_owned, channel_id).await;
 
-        // For dispatch-based turns (threads), kill the tmux session after
-        // finalization. Thread sessions are one-shot — keeping claude alive
-        // in "Ready for input" blocks idle detection and the auto-complete pipeline.
-        //
-        // Exception (#145): unified-thread auto-queue runs reuse the same thread
-        // session across multiple entries. Skip kill if the run is still active.
-        #[cfg(unix)]
-        if dispatch_id.is_some() {
-            let should_kill = if let Some(ref did) = dispatch_id {
-                !crate::dispatch::is_unified_thread_active(did)
-            } else {
-                true
-            };
-            if should_kill {
-                if let Some(ref name) = cancel_token
-                    .tmux_session
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.clone())
-                {
-                    record_tmux_exit_reason(
-                        name,
-                        "dispatch turn completed — killing thread session",
-                    );
-                    let name_c = name.to_string();
-                    let kill_result = tokio::task::spawn_blocking(move || {
-                        crate::services::platform::tmux::kill_session_output(&name_c)
-                    })
-                    .await;
-                    let kill_ok = matches!(&kill_result, Ok(Ok(o)) if o.status.success());
-                    if !kill_ok {
-                        match &kill_result {
-                            Ok(Ok(o)) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!(
-                                    "  [{ts}] ⚠ tmux kill-session failed for {}: {}",
-                                    name,
-                                    String::from_utf8_lossy(&o.stderr)
-                                );
-                            }
-                            Ok(Err(e)) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!("  [{ts}] ⚠ tmux kill-session error for {name}: {e}");
-                            }
-                            Err(e) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                eprintln!(
-                                    "  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}"
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // Only delete the DB session row if tmux kill succeeded.
-                    // If kill failed, leave the row so the periodic reaper can retry.
-                    if kill_ok
-                        && let Some(session_key) = super::adk_session::build_adk_session_key(
-                            &shared_owned,
-                            channel_id,
-                            &provider,
-                        )
-                        .await
-                    {
-                        super::adk_session::delete_adk_session(&session_key, shared_owned.api_port)
-                            .await;
-                    }
-                }
-            } else {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
-                    "  [{ts}] ♻ Skipping tmux kill for unified-thread dispatch {:?} — run still active",
-                    dispatch_id
-                );
-            }
-        }
+        // Dispatch thread sessions now stay alive after finalization so the next
+        // implementation/review/rework turn can warm-resume from the same tmux.
+        // New dispatch arrivals validate the managed tmux session before reuse.
 
         // Finalization complete — decrement counters
         shared_owned
@@ -1474,16 +1412,17 @@ pub(super) fn spawn_turn_bridge(
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] ⏸ DRAIN: skipping queued turn dequeue for channel {} (restart pending)",
                     channel_id
                 );
             } else if let Some(bot_owner_provider) = gateway.bot_owner_provider() {
                 if let Err(reason) = gateway.validate_live_routing(channel_id).await {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] ⚠ QUEUE-GUARD: preserving queued command(s) for channel {} (reason={})",
-                        channel_id, reason
+                        channel_id,
+                        reason
                     );
                 } else {
                     let next_intervention = super::mailbox_take_next_soft_intervention(
@@ -1495,7 +1434,7 @@ pub(super) fn spawn_turn_bridge(
 
                     if let Some((intervention, has_more_queued_turns)) = next_intervention {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] 📋 Processing next queued command");
+                        tracing::info!("  [{ts}] 📋 Processing next queued command");
                         if let Err(e) = gateway
                             .dispatch_queued_turn(
                                 channel_id,
@@ -1507,7 +1446,7 @@ pub(super) fn spawn_turn_bridge(
                             .await
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!("  [{ts}]   ⚠ queued command failed: {e}");
+                            tracing::info!("  [{ts}]   ⚠ queued command failed: {e}");
                             super::mailbox_requeue_intervention_front(
                                 &shared_owned,
                                 &bot_owner_provider,
@@ -1520,7 +1459,7 @@ pub(super) fn spawn_turn_bridge(
                 }
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                println!(
+                tracing::info!(
                     "  [{ts}] 📦 preserving queued command(s): missing live Discord context — scheduling deferred drain"
                 );
                 if let Some(offset) = tmux_last_offset

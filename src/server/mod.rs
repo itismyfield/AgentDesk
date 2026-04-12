@@ -297,6 +297,48 @@ async fn rate_limit_sync_loop(db: Db) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    fn test_db() -> Db {
+        crate::db::test_db()
+    }
+
+    fn test_engine_with_dir(db: &Db, dir: &std::path::Path) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = dir.to_path_buf();
+        config.policies.hot_reload = false;
+        PolicyEngine::new(&config, db.clone()).unwrap()
+    }
+
+    fn kv_value(db: &Db, key: &str) -> Option<String> {
+        let conn = db.lock().unwrap();
+        conn.query_row("SELECT value FROM kv_meta WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .ok()
+    }
+
+    fn insert_pending_message(db: &Db, target: &str, content: &str) -> i64 {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
+            rusqlite::params![target, content],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn message_row_status(db: &Db, id: i64) -> (String, Option<String>, Option<String>) {
+        db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT status, error, sent_at FROM message_outbox WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn startup_memory_health_refresh_uses_startup_reason() {
@@ -324,6 +366,145 @@ mod tests {
             crate::services::memory::last_refresh_reason_for_tests().as_deref(),
             Some(MEMORY_HEALTH_FIVE_MIN_REASON)
         );
+    }
+
+    #[test]
+    fn tiered_tick_hooks_record_expected_markers_per_label() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("tick-tier-probe.js"),
+            r#"
+            agentdesk.registerPolicy({
+                name: "tick-tier-probe",
+                priority: 1,
+                onTick30s: function() {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('probe_30s', 'hit')"
+                    );
+                },
+                onTick1min: function() {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('probe_1min', 'hit')"
+                    );
+                },
+                onTick5min: function() {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('probe_5min', 'hit')"
+                    );
+                },
+                onTick: function() {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('probe_legacy', 'hit')"
+                    );
+                }
+            });
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let engine = test_engine_with_dir(&db, dir.path());
+
+        fire_tick_hook_by_name(&engine, &db, "OnTick30s", "30s");
+        assert_eq!(kv_value(&db, "probe_30s").as_deref(), Some("hit"));
+        assert_eq!(kv_value(&db, "last_tick_30s_status").as_deref(), Some("ok"));
+        assert!(kv_value(&db, "last_tick_30s_ms").is_some());
+        assert_eq!(kv_value(&db, "probe_1min"), None);
+        assert_eq!(kv_value(&db, "probe_5min"), None);
+        assert_eq!(kv_value(&db, "probe_legacy"), None);
+
+        fire_tick_hook_by_name(&engine, &db, "OnTick1min", "1min");
+        assert_eq!(kv_value(&db, "probe_1min").as_deref(), Some("hit"));
+        assert_eq!(
+            kv_value(&db, "last_tick_1min_status").as_deref(),
+            Some("ok")
+        );
+        assert!(kv_value(&db, "last_tick_1min_ms").is_some());
+
+        fire_tick_hook_by_name(&engine, &db, "OnTick5min", "5min");
+        assert_eq!(kv_value(&db, "probe_5min").as_deref(), Some("hit"));
+        assert_eq!(
+            kv_value(&db, "last_tick_5min_status").as_deref(),
+            Some("ok")
+        );
+        assert!(kv_value(&db, "last_tick_5min_ms").is_some());
+
+        fire_tick_hook_by_name(&engine, &db, "OnTick", "legacy");
+        assert_eq!(kv_value(&db, "probe_legacy").as_deref(), Some("hit"));
+        assert_eq!(
+            kv_value(&db, "last_tick_legacy_status").as_deref(),
+            Some("ok")
+        );
+        assert!(kv_value(&db, "last_tick_legacy_ms").is_some());
+        assert!(kv_value(&db, "last_tick_ms").is_some());
+        assert_eq!(
+            crate::services::memory::last_refresh_reason_for_tests(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_message_outbox_batch_marks_successful_rows_sent() {
+        let db = test_db();
+        let message_id = insert_pending_message(&db, "channel:1492506767085801535", "hello");
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+
+        let processed = drain_message_outbox_batch_once(&db, {
+            let delivered = delivered.clone();
+            move |target, content, source, bot| {
+                let delivered = delivered.clone();
+                async move {
+                    delivered.lock().unwrap().push(json!({
+                        "target": target,
+                        "content": content,
+                        "source": source,
+                        "bot": bot,
+                    }));
+                    ("200 OK".to_string(), json!({"ok": true}).to_string())
+                }
+            }
+        })
+        .await;
+
+        let captured = delivered.lock().unwrap().clone();
+        let (status, error, sent_at) = message_row_status(&db, message_id);
+
+        assert_eq!(processed, 1, "one pending outbox row should be drained");
+        assert_eq!(status, "sent");
+        assert_eq!(error, None);
+        assert!(sent_at.is_some(), "successful delivery must stamp sent_at");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0]["target"], "channel:1492506767085801535");
+        assert_eq!(captured[0]["content"], "hello");
+        assert_eq!(captured[0]["source"], "system");
+        assert_eq!(captured[0]["bot"], "notify");
+    }
+
+    #[tokio::test]
+    async fn drain_message_outbox_batch_marks_http_failures_failed() {
+        let db = test_db();
+        let message_id = insert_pending_message(&db, "channel:1492506767085801535", "boom");
+
+        let processed =
+            drain_message_outbox_batch_once(&db, |_target, _content, _source, _bot| async {
+                (
+                    "500 Internal Server Error".to_string(),
+                    json!({"error": "mock failure"}).to_string(),
+                )
+            })
+            .await;
+
+        let (status, error, sent_at) = message_row_status(&db, message_id);
+
+        assert_eq!(
+            processed, 1,
+            "failed deliveries still consume the pending outbox row"
+        );
+        assert_eq!(status, "failed");
+        assert_eq!(sent_at, None);
+        let error = error.expect("failed rows must persist error details");
+        assert!(error.contains("500 Internal Server Error"));
+        assert!(error.contains("mock failure"));
     }
 }
 
@@ -705,6 +886,70 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 
 /// Async worker that drains the message_outbox table via the in-process Discord delivery path (#120).
 /// Runs every 2 seconds, processes up to 10 messages per tick.
+fn load_pending_message_outbox_batch(db: &Db) -> Vec<(i64, String, String, String, String)> {
+    let conn = match db.lock() {
+        Ok(conn) => conn,
+        Err(_) => return Vec::new(),
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT id, target, content, bot, source FROM message_outbox \
+         WHERE status = 'pending' ORDER BY id ASC LIMIT 10",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        ))
+    })
+    .ok()
+    .map(|rows| rows.filter_map(|row| row.ok()).collect())
+    .unwrap_or_default()
+}
+
+async fn drain_message_outbox_batch_once<F, Fut>(db: &Db, mut deliver: F) -> usize
+where
+    F: FnMut(String, String, String, String) -> Fut,
+    Fut: std::future::Future<Output = (String, String)>,
+{
+    let pending = load_pending_message_outbox_batch(db);
+    if pending.is_empty() {
+        return 0;
+    }
+
+    for (id, target, content, bot, source) in &pending {
+        let (status, err_text) =
+            deliver(target.clone(), content.clone(), source.clone(), bot.clone()).await;
+        if status == "200 OK" {
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "UPDATE message_outbox SET status = 'sent', sent_at = datetime('now') WHERE id = ?1",
+                    [id],
+                )
+                .ok();
+            }
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
+        } else {
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
+                    rusqlite::params![format!("{status}: {err_text}"), id],
+                )
+                .ok();
+            }
+            tracing::warn!("[outbox] ❌ msg {id} → {target} failed: {status}");
+        }
+    }
+
+    pending.len()
+}
+
 async fn message_outbox_loop(db: Db, health_registry: Option<Arc<HealthRegistry>>) {
     use std::time::Duration;
 
@@ -722,73 +967,35 @@ async fn message_outbox_loop(db: Db, health_registry: Option<Arc<HealthRegistry>
 
     loop {
         tokio::time::sleep(poll_interval).await;
-
-        // Fetch pending messages
-        let pending: Vec<(i64, String, String, String, String)> = {
-            let conn = match db.lock() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let mut stmt = match conn.prepare(
-                "SELECT id, target, content, bot, source FROM message_outbox \
-                 WHERE status = 'pending' ORDER BY id ASC LIMIT 10",
-            ) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            stmt.query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })
-            .ok()
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default()
-        };
-
-        if pending.is_empty() {
+        if drain_message_outbox_batch_once(&db, {
+            let health_registry = health_registry.clone();
+            let db = db.clone();
+            move |target, content, source, bot| {
+                let health_registry = health_registry.clone();
+                let db = db.clone();
+                async move {
+                    let (status, err_text) = crate::services::discord::health::send_message(
+                        &health_registry,
+                        &db,
+                        &target,
+                        &content,
+                        &source,
+                        &bot,
+                    )
+                    .await;
+                    (status.to_string(), err_text)
+                }
+            }
+        })
+        .await
+            == 0
+        {
             // No work: increase interval (up to max)
             poll_interval = (poll_interval.mul_f64(1.5)).min(max_interval);
             continue;
         }
         // Work found: reset to fast polling
         poll_interval = Duration::from_millis(500);
-
-        for (id, target, content, bot, source) in pending {
-            let (status, err_text) = crate::services::discord::health::send_message(
-                &health_registry,
-                &db,
-                &target,
-                &content,
-                &source,
-                &bot,
-            )
-            .await;
-            if status == "200 OK" {
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                            "UPDATE message_outbox SET status = 'sent', sent_at = datetime('now') WHERE id = ?1",
-                            [id],
-                        )
-                        .ok();
-                }
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
-            } else {
-                if let Ok(conn) = db.lock() {
-                    conn.execute(
-                        "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
-                        rusqlite::params![format!("{status}: {err_text}"), id],
-                    )
-                    .ok();
-                }
-                tracing::warn!("[outbox] ❌ msg {id} → {target} failed: {status}");
-            }
-        }
     }
 }
 

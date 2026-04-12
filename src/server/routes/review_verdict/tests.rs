@@ -973,7 +973,8 @@ async fn accept_on_done_card_fails_closed_without_stranding() {
 }
 
 #[tokio::test]
-async fn accept_skip_rework_falls_back_to_rework_when_direct_review_creates_no_dispatch() {
+async fn accept_skip_rework_auto_approves_when_direct_review_has_no_alternate_reviewer() {
+    let _env_lock = crate::services::discord::runtime_store::lock_test_env();
     let _worktree_override = WorktreeCommitOverrideGuard::set("bbb2222");
     let db = test_db();
     let engine = test_engine(&db);
@@ -1026,16 +1027,25 @@ async fn accept_skip_rework_falls_back_to_rework_when_direct_review_creates_no_d
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK, "accept should fall back to rework");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "single-provider skip_rework accept should auto-approve: {body:?}"
+    );
     assert_eq!(
         body.0["direct_review_created"],
         serde_json::Value::Bool(false),
-        "skip_rework fallback should not report a direct review dispatch"
+        "single-provider auto-approve should not report a direct review dispatch"
     );
     assert_eq!(
         body.0["rework_dispatch_created"],
+        serde_json::Value::Bool(false),
+        "single-provider auto-approve must not create a rework dispatch"
+    );
+    assert_eq!(
+        body.0["review_auto_approved"],
         serde_json::Value::Bool(true),
-        "skip_rework fallback must create a rework dispatch"
+        "single-provider auto-approve must be reported explicitly"
     );
 
     let conn = db.lock().unwrap();
@@ -1053,21 +1063,35 @@ async fn accept_skip_rework_falls_back_to_rework_when_direct_review_creates_no_d
             |row| row.get(0),
         )
         .unwrap();
+    let rd_result: Option<String> = conn
+        .query_row(
+            "SELECT result FROM task_dispatches WHERE id = 'rd-skip-fallback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     drop(conn);
 
-    assert_eq!(card_status, "in_progress");
-    assert_eq!(rd_status, "completed");
+    assert_eq!(card_status, "done");
+    assert_eq!(rd_status, "cancelled");
+    assert_eq!(
+        rd_result.as_deref(),
+        Some("{\"reason\":\"auto_cancelled_on_terminal_card\"}")
+    );
     assert_eq!(
         count_active_dispatches(&db, "card-skip-fallback", "review"),
-        0
+        0,
+        "single-provider auto-approve must not leave an active review dispatch behind"
     );
     assert_eq!(
         count_active_dispatches(&db, "card-skip-fallback", "rework"),
-        1
+        0,
+        "single-provider auto-approve must not create a rework dispatch"
     );
     assert_eq!(
         count_active_dispatches(&db, "card-skip-fallback", "review-decision"),
-        0
+        0,
+        "single-provider auto-approve must consume the pending review-decision"
     );
 }
 
@@ -1727,9 +1751,9 @@ async fn accept_direct_review_preserves_reviewing_status() {
         ).unwrap();
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, \
-             review_status, suggestion_pending_at, github_issue_number, created_at, updated_at) \
+             review_status, review_round, suggestion_pending_at, github_issue_number, created_at, updated_at) \
              VALUES ('card-266dr', 'Direct Review Path', 'review', 'agent-1', 'rd-266dr', \
-             'suggestion_pending', datetime('now', '-10 minutes'), 266, datetime('now'), datetime('now'))",
+             'suggestion_pending', 1, datetime('now', '-10 minutes'), 266, datetime('now'), datetime('now'))",
             [],
         ).unwrap();
         // Completed review dispatch with reviewed_commit (needed for skip_rework detection)
@@ -1786,5 +1810,30 @@ async fn accept_direct_review_preserves_reviewing_status() {
         review_status,
         Some("reviewing".to_string()),
         "#266: direct-review accept must preserve review_status='reviewing' set by OnReviewEnter"
+    );
+    let review_round: i64 = conn
+        .query_row(
+            "SELECT review_round FROM kanban_cards WHERE id = 'card-266dr'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        review_round, 2,
+        "#487: direct-review accept must advance review_round for the new review cycle"
+    );
+    let review_title: String = conn
+        .query_row(
+            "SELECT title FROM task_dispatches \
+             WHERE kanban_card_id = 'card-266dr' AND dispatch_type = 'review' \
+             AND status IN ('pending', 'dispatched') \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        review_title, "[Review R2] card-266dr",
+        "#487: direct-review accept must create an R2 review dispatch title"
     );
 }

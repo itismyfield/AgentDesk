@@ -370,7 +370,7 @@ impl SupervisedWorkerRegistry {
                         .enable_all()
                         .build()
                         .unwrap_or_else(|e| {
-                            eprintln!("Fatal: failed to create policy-tick runtime: {e}");
+                            tracing::warn!("Fatal: failed to create policy-tick runtime: {e}");
                             std::process::exit(1);
                         });
                     rt.block_on(super::policy_tick_loop(tick_engine, tick_db));

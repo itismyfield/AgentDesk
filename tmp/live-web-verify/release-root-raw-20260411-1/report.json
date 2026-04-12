@@ -1,0 +1,80 @@
+{
+  "requested_url": "http://127.0.0.1:8791",
+  "final_url": "http://127.0.0.1:8791",
+  "status": 200,
+  "output_dir": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1",
+  "html_path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/page.html",
+  "headers_path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/response_headers.json",
+  "assets_path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/assets.json",
+  "page_meta_path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/page-meta.json",
+  "asset_count": 8,
+  "response_time_ms": 2,
+  "redirect_count": 0,
+  "redirect_chain": [],
+  "downloaded_assets": [
+    {
+      "requested_url": "http://127.0.0.1:8791/assets/index-DRfGFecQ.js",
+      "final_url": "http://127.0.0.1:8791/assets/index-DRfGFecQ.js",
+      "status": 200,
+      "path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/assets/001.js",
+      "content_type": "text/javascript",
+      "size_bytes": 41624
+    },
+    {
+      "requested_url": "http://127.0.0.1:8791/assets/react-Bbft6den.js",
+      "final_url": "http://127.0.0.1:8791/assets/react-Bbft6den.js",
+      "status": 200,
+      "path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/assets/002.js",
+      "content_type": "text/javascript",
+      "size_bytes": 193838
+    },
+    {
+      "requested_url": "http://127.0.0.1:8791/assets/pixi-utils-DY2WuAjf.js",
+      "final_url": "http://127.0.0.1:8791/assets/pixi-utils-DY2WuAjf.js",
+      "status": 200,
+      "path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/assets/003.js",
+      "content_type": "text/javascript",
+      "size_bytes": 7102
+    },
+    {
+      "requested_url": "http://127.0.0.1:8791/assets/pixi-svg-CH9GjiOA.js",
+      "final_url": "http://127.0.0.1:8791/assets/pixi-svg-CH9GjiOA.js",
+      "status": 200,
+      "path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/assets/004.js",
+      "content_type": "text/javascript",
+      "size_bytes": 634
+    },
+    {
+      "requested_url": "http://127.0.0.1:8791/assets/pixi-geom-B3NWpltw.js",
+      "final_url": "http://127.0.0.1:8791/assets/pixi-geom-B3NWpltw.js",
+      "status": 200,
+      "path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/assets/005.js",
+      "content_type": "text/javascript",
+      "size_bytes": 6112
+    },
+    {
+      "requested_url": "http://127.0.0.1:8791/assets/pixi-B7y-gAci.js",
+      "final_url": "http://127.0.0.1:8791/assets/pixi-B7y-gAci.js",
+      "status": 200,
+      "path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/assets/006.js",
+      "content_type": "text/javascript",
+      "size_bytes": 537978
+    },
+    {
+      "requested_url": "http://127.0.0.1:8791/assets/icons-DHxNnaOW.js",
+      "final_url": "http://127.0.0.1:8791/assets/icons-DHxNnaOW.js",
+      "status": 200,
+      "path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/assets/007.js",
+      "content_type": "text/javascript",
+      "size_bytes": 11771
+    },
+    {
+      "requested_url": "http://127.0.0.1:8791/assets/index-ChDJMX-j.css",
+      "final_url": "http://127.0.0.1:8791/assets/index-ChDJMX-j.css",
+      "status": 200,
+      "path": "/private/tmp/agentdesk-meeting-provider-fix/tmp/live-web-verify/release-root-raw-20260411-1/assets/008.css",
+      "content_type": "text/css",
+      "size_bytes": 77948
+    }
+  ]
+}

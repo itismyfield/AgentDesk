@@ -51,8 +51,13 @@ fn message_queue_raw(db: &Db, target: &str, content: &str, bot: &str, source: &s
     ) {
         Ok(_) => {
             let id = conn.last_insert_rowid();
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] 📨 message.queue → {target} (bot={bot}, id={id})");
+            tracing::info!(
+                target,
+                bot,
+                source,
+                message_id = id,
+                "queued message from JS bridge"
+            );
             format!(r#"{{"ok":true,"id":{id}}}"#)
         }
         Err(e) => format!(r#"{{"error":"insert failed: {e}"}}"#),

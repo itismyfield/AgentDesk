@@ -267,7 +267,9 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
         let version = fs::read_to_string(&marker).unwrap_or_default();
         let version = version.trim();
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] 🔄 Deferred restart: all turns complete, restarting for v{version}...");
+        tracing::info!(
+            "  [{ts}] 🔄 Deferred restart: all turns complete, restarting for v{version}..."
+        );
         let _ = fs::remove_file(&marker);
         std::process::exit(0);
     }
@@ -772,7 +774,7 @@ async fn catch_up_missed_messages(
     }
     if pruned > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!("  [{ts}] 🧹 catch-up: pruned {pruned} stale checkpoint(s) (>10min old)");
+        tracing::warn!("  [{ts}] 🧹 catch-up: pruned {pruned} stale checkpoint(s) (>10min old)");
     }
 
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -811,7 +813,7 @@ async fn catch_up_missed_messages(
             RuntimeChannelBindingStatus::Owned => {}
             RuntimeChannelBindingStatus::Unowned => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ⏭ catch-up: dropping stale checkpoint for unowned channel {} ({})",
                     channel_id,
                     path.display()
@@ -836,7 +838,7 @@ async fn catch_up_missed_messages(
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 let msg = e.to_string();
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ⚠ catch-up: failed to fetch messages for channel {channel_id}: {e}"
                 );
                 // #429: permanent errors — remove checkpoint to avoid retrying every restart
@@ -920,9 +922,10 @@ async fn catch_up_missed_messages(
         if channel_recovered > 0 {
             total_recovered += channel_recovered;
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 🔍 CATCH-UP: recovered {} message(s) for channel {}",
-                channel_recovered, channel_id
+                channel_recovered,
+                channel_id
             );
         }
 
@@ -934,7 +937,7 @@ async fn catch_up_missed_messages(
 
     if total_recovered > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 🔍 CATCH-UP: total {total_recovered} message(s) recovered across channels"
         );
     }
@@ -985,7 +988,7 @@ async fn catch_up_missed_messages(
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 let msg = e.to_string();
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ⚠ catch-up phase2: failed to fetch recent messages for channel {channel_id}: {e}"
                 );
                 if msg.contains("Missing Access") || msg.contains("Unknown Channel") {
@@ -1069,16 +1072,17 @@ async fn catch_up_missed_messages(
         if channel_recovered > 0 {
             phase2_recovered += channel_recovered;
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 🔍 CATCH-UP phase2: recovered {} unanswered message(s) for channel {}",
-                channel_recovered, channel_id
+                channel_recovered,
+                channel_id
             );
         }
     }
 
     if phase2_recovered > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 🔍 CATCH-UP phase2: total {phase2_recovered} unanswered message(s) recovered"
         );
     }
@@ -1113,7 +1117,7 @@ pub(super) async fn kickoff_idle_queues(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts}] 🚀 KICKOFF: starting turns for {} idle channel(s) with queued messages",
         channels_to_kick.len()
     );
@@ -1124,9 +1128,10 @@ pub(super) async fn kickoff_idle_queues(
             validate_live_channel_routing(ctx, provider, &settings_snapshot, channel_id).await
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ⚠ KICKOFF-GUARD: preserving queued item(s) for channel {} (reason={})",
-                channel_id, reason
+                channel_id,
+                reason
             );
             continue;
         }
@@ -1153,7 +1158,7 @@ pub(super) async fn kickoff_idle_queues(
         };
 
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 🚀 KICKOFF: starting queued turn for channel {}",
             channel_id
         );
@@ -1175,7 +1180,7 @@ pub(super) async fn kickoff_idle_queues(
         .await
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
                 channel_id
             );
@@ -1536,7 +1541,7 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             None,
         );
     }
-    println!("  [cleanup] Removed {} idle session(s)", expired.len());
+    tracing::info!("  [cleanup] Removed {} idle session(s)", expired.len());
 }
 
 // ─── Slash commands (extracted to commands/ module) ──────────────────────────

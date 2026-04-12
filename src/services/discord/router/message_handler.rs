@@ -160,7 +160,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     workspace = settings::resolve_workspace(parent_id, parent_ch_name.as_deref());
                     if workspace.is_some() {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
+                        tracing::info!(
                             "  [{ts}] 🧵 Thread auto-start: resolved workspace from parent channel {}",
                             parent_id
                         );
@@ -214,7 +214,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                             match create_git_worktree(&canonical, ch, provider.as_str()) {
                                 Ok((wt_path, branch)) => {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!(
+                                    tracing::info!(
                                         "  [{ts}] 🌿 Auto-start worktree ({reason}): {ch} → {}",
                                         wt_path
                                     );
@@ -264,7 +264,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                         session.worktree = wt_info;
                     }
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ▶ Auto-started session from workspace: {eff_path}");
+                    tracing::info!("  [{ts}] ▶ Auto-started session from workspace: {eff_path}");
                     let session_state = {
                         let data = shared.core.lock().await;
                         data.sessions
@@ -322,7 +322,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     let dispatch_force_new_session = dispatch_context_hints.force_new_session;
     if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
+        tracing::info!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
     }
     let dispatch_default_path = crate::services::platform::resolve_repo_dir()
         .filter(|p| std::path::Path::new(p).is_dir())
@@ -332,7 +332,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         .unwrap_or_else(|| dispatch_default_path.clone());
     if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 🌱 Dispatch fallback CWD: using repo root instead of inherited session path: {}",
             dispatch_effective_path
         );
@@ -355,13 +355,13 @@ pub(in crate::services::discord) async fn handle_text_message(
             // Ensure thread is accessible (unarchive if needed) before proceeding
             if !super::verify_thread_accessible(ctx, channel_id).await {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                eprintln!(
+                tracing::warn!(
                     "  [{ts}] ⚠ Dispatch {did} thread {channel_id} is not accessible (archived/locked), skipping"
                 );
                 return Ok(());
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] 🧵 Dispatch {did} arrived in existing thread, skipping thread creation"
             );
             // For review dispatches in reused threads, set role override
@@ -369,7 +369,7 @@ pub(in crate::services::discord) async fn handle_text_message(
             if is_counter_model_dispatch {
                 if let Some(alt_ch) = alt_channel_id {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] 🔄 Review dispatch in reused thread: overriding role to alt channel {}",
                         alt_ch
                     );
@@ -394,9 +394,10 @@ pub(in crate::services::discord) async fn handle_text_message(
             let reused = if let Some(tid) = reuse_tid {
                 if super::verify_thread_accessible(ctx, tid).await {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] 🧵 Reusing existing thread {} for dispatch {}",
-                        tid, did
+                        tid,
+                        did
                     );
                     super::super::bootstrap_thread_session(
                         shared,
@@ -411,7 +412,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     if is_counter_model_dispatch {
                         if let Some(alt_ch) = alt_channel_id {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!(
+                            tracing::info!(
                                 "  [{ts}] 🔄 Review dispatch reusing thread: overriding role to alt channel {}",
                                 alt_ch
                             );
@@ -421,9 +422,10 @@ pub(in crate::services::discord) async fn handle_text_message(
                     Some(tid)
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] 🧵 Thread {} is locked/inaccessible, creating new for {}",
-                        tid, did
+                        tid,
+                        did
                     );
                     None
                 }
@@ -456,9 +458,10 @@ pub(in crate::services::discord) async fn handle_text_message(
                 {
                     Ok(thread) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!(
+                        tracing::info!(
                             "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
-                            thread.id, did
+                            thread.id,
+                            did
                         );
                         super::super::bootstrap_thread_session(
                             shared,
@@ -479,7 +482,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     }
                     Err(e) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!("  [{ts}] ⚠ Failed to create dispatch thread: {e}");
+                        tracing::warn!("  [{ts}] ⚠ Failed to create dispatch thread: {e}");
                         channel_id // fallback to main channel
                     }
                 }
@@ -511,7 +514,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         memento_context_loaded = false;
         if let Some(ref did) = dispatch_id_for_thread {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ♻️ Dispatch {did}: force_new_session=true, skipping provider session reuse"
             );
         }
@@ -569,9 +572,68 @@ pub(in crate::services::discord) async fn handle_text_message(
             .and_then(|_| dispatch_type_str.as_deref()),
     );
 
-    // Claim the turn before consuming one-shot state such as model reset flags.
-    // If another message already won the channel, this message must be queued
-    // without stealing the next admitted turn's reset.
+    super::super::commands::reset_provider_session_if_pending(
+        &ctx.http, shared, &provider, channel_id,
+    )
+    .await;
+    let prompt_prep_started = std::time::Instant::now();
+
+    // Resolve channel/tmux session name from current session state. We need the
+    // persisted provider session_id before recall so Mem0 can scope search by run_id.
+    let (channel_name, tmux_session_name) = {
+        let data = shared.core.lock().await;
+        let channel_name = data
+            .sessions
+            .get(&channel_id)
+            .and_then(|s| s.channel_name.clone());
+        let tmux_session_name = channel_name
+            .as_ref()
+            .map(|name| provider.build_tmux_session_name(name));
+        (channel_name, tmux_session_name)
+    };
+    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
+    if session_id.is_none() {
+        if dispatch_force_new_session {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ Skipping DB provider session restore for forced fresh dispatch turn"
+            );
+        } else if let Some(ref key) = adk_session_key {
+            let restored = super::super::adk_session::fetch_provider_session_id(
+                key,
+                &provider,
+                shared.api_port,
+            )
+            .await;
+            if restored.is_some() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
+                    key
+                );
+                let mut data = shared.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.restore_provider_session(restored.clone());
+                }
+                memento_context_loaded = true;
+                // Notify: session restored — send immediately (before agent response)
+                let sid_full = restored.as_deref().unwrap_or("?");
+                let sid_short: String = sid_full.chars().take(8).collect();
+                let restore_msg = format!(
+                    "📋 세션 복원: {} (session: {})",
+                    provider.as_str(),
+                    sid_short
+                );
+                let _ = channel_id.say(&ctx.http, &restore_msg).await;
+            }
+            session_id = restored;
+        }
+    }
+
+    // Create cancel token — with second check to close the TOCTOU race window.
+    // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
+    // because the async gap between check and insert allows interleaving.
+    // If another message won the race, queue ourselves and clean up.
     let cancel_token = Arc::new(CancelToken::new());
     let started = super::super::mailbox_try_start_turn(
         shared,
@@ -602,7 +664,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         super::super::formatting::remove_reaction_raw(&ctx.http, channel_id, user_msg_id, '⏳')
             .await;
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 🔀 RACE: message queued (another turn won), channel {}",
             channel_id
         );
@@ -688,7 +750,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     }
     for warning in &memory_recall.warnings {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        eprintln!(
+        tracing::warn!(
             "  [{ts}] [memory] recall warning for channel {}: {}",
             channel_id.get(),
             warning
@@ -808,7 +870,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     );
     if sak_for_system.is_some() {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!(
+        tracing::info!(
             "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
             sak_for_system.unwrap().len(),
             channel_id.get()
@@ -828,7 +890,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         DispatchProfile::ReviewLite => "review_lite",
     };
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!(
+    tracing::info!(
         "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} memory_profile={} reused_session={} duration_ms={}",
         channel_id.get(),
         provider_label,
@@ -889,7 +951,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     let remaining_min =
                         (clamped - chrono::Utc::now().timestamp_millis()) / 1000 / 60;
-                    println!(
+                    tracing::info!(
                         "  [{ts}] ⏰ WATCHDOG: deadline extended for channel {} — {remaining_min}m remaining",
                         channel_id
                     );
@@ -929,7 +991,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                                             .store(new_dl, std::sync::atomic::Ordering::Relaxed);
                                         let ts = chrono::Local::now().format("%H:%M:%S");
                                         let remaining_min = (new_dl - now_ms_check) / 1000 / 60;
-                                        println!(
+                                        tracing::info!(
                                             "  [{ts}] ⏰ WATCHDOG: auto-extended for channel {} (inflight active) — {remaining_min}m remaining",
                                             channel_id
                                         );
@@ -959,7 +1021,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     let elapsed_mins =
                         (now - (current_deadline - timeout.as_millis() as i64)) / 1000 / 60;
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] ⏰ WATCHDOG: turn timeout (~{elapsed_mins}m) for channel {}, cancelling",
                         channel_id
                     );
@@ -1101,7 +1163,7 @@ pub(in crate::services::discord) async fn handle_text_message(
     inflight_state.dispatch_id = dispatch_id.clone();
     if let Err(e) = save_inflight_state(&inflight_state) {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}]   ⚠ inflight state save failed: {e}");
+        tracing::info!("  [{ts}]   ⚠ inflight state save failed: {e}");
     }
 
     // Create channel for streaming
@@ -1145,12 +1207,14 @@ pub(in crate::services::discord) async fn handle_text_message(
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let msg = stdout.trim();
                     match out.status.code() {
-                        Some(0) => println!("  [{ts}] 🔄 worktree-autosync [{ws}]: {msg}"),
-                        Some(1) => println!("  [{ts}] ⏭ worktree-autosync [{ws}]: skipped — {msg}"),
-                        _ => eprintln!("  [{ts}] ⚠ worktree-autosync [{ws}]: error — {msg}"),
+                        Some(0) => tracing::info!("  [{ts}] 🔄 worktree-autosync [{ws}]: {msg}"),
+                        Some(1) => {
+                            tracing::info!("  [{ts}] ⏭ worktree-autosync [{ws}]: skipped — {msg}")
+                        }
+                        _ => tracing::warn!("  [{ts}] ⚠ worktree-autosync [{ws}]: error — {msg}"),
                     }
                 }
-                Err(e) => eprintln!("  [{ts}] ⚠ worktree-autosync: failed to run — {e}"),
+                Err(e) => tracing::warn!("  [{ts}] ⚠ worktree-autosync: failed to run — {e}"),
             }
         }
     }
@@ -1255,7 +1319,7 @@ pub(in crate::services::discord) async fn handle_text_message(
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                eprintln!("  [streaming] Error: {}", e);
+                tracing::warn!("  [streaming] Error: {}", e);
                 let _ = tx.send(StreamMessage::Error {
                     message: e,
                     stdout: String::new(),
@@ -1271,7 +1335,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                 } else {
                     "unknown panic".to_string()
                 };
-                eprintln!("  [streaming] PANIC: {}", msg);
+                tracing::warn!("  [streaming] PANIC: {}", msg);
                 let _ = tx.send(StreamMessage::Error {
                     message: format!("Internal error (panic): {}", msg),
                     stdout: String::new(),
@@ -1646,9 +1710,10 @@ pub(super) async fn handle_text_command(
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ◀ [{}] !start path={}",
-                msg.author.name, effective_path
+                msg.author.name,
+                effective_path
             );
 
             // Create session
@@ -1682,7 +1747,7 @@ pub(super) async fn handle_text_command(
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ▶ Session started: {}", effective_path);
+            tracing::info!("  [{ts}] ▶ Session started: {}", effective_path);
             let _ = msg
                 .reply(
                     &ctx.http,
@@ -1711,9 +1776,10 @@ pub(super) async fn handle_text_command(
                     };
 
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
+                    tracing::info!(
                         "  [{ts}] ◀ [{}] !meeting start {}",
-                        msg.author.name, agenda_text
+                        msg.author.name,
+                        agenda_text
                     );
 
                     let http = ctx.http.clone();
@@ -1746,12 +1812,12 @@ pub(super) async fn handle_text_command(
                         {
                             Ok(Some(id)) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}] ✅ Meeting completed: {id}");
+                                tracing::info!("  [{ts}] ✅ Meeting completed: {id}");
                             }
                             Ok(None) => {}
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}] ❌ Meeting error: {e}");
+                                tracing::info!("  [{ts}] ❌ Meeting error: {e}");
                             }
                         }
                     });
@@ -1773,7 +1839,7 @@ pub(super) async fn handle_text_command(
                         return Ok(true);
                     }
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}] ◀ [{}] !meeting {}", msg.author.name, full_agenda);
+                    tracing::info!("  [{ts}] ◀ [{}] !meeting {}", msg.author.name, full_agenda);
 
                     let http = ctx.http.clone();
                     let shared = data.shared.clone();
@@ -1805,12 +1871,12 @@ pub(super) async fn handle_text_command(
                         {
                             Ok(Some(id)) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}] ✅ Meeting completed: {id}");
+                                tracing::info!("  [{ts}] ✅ Meeting completed: {id}");
                             }
                             Ok(None) => {}
                             Err(e) => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}] ❌ Meeting error: {e}");
+                                tracing::info!("  [{ts}] ❌ Meeting error: {e}");
                             }
                         }
                     });
@@ -1855,7 +1921,7 @@ pub(super) async fn handle_text_command(
         // ── Simple diagnostic / info commands ──
         "!pwd" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !pwd", msg.author.name);
+            tracing::info!("  [{ts}] ◀ [{}] !pwd", msg.author.name);
 
             auto_restore_session(&data.shared, channel_id, ctx).await;
 
@@ -1882,7 +1948,7 @@ pub(super) async fn handle_text_command(
 
         "!health" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !health", msg.author.name);
+            tracing::info!("  [{ts}] ◀ [{}] !health", msg.author.name);
 
             let text =
                 commands::build_health_report(&data.shared, &data.provider, channel_id).await;
@@ -1892,7 +1958,7 @@ pub(super) async fn handle_text_command(
 
         "!status" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !status", msg.author.name);
+            tracing::info!("  [{ts}] ◀ [{}] !status", msg.author.name);
 
             let text =
                 commands::build_status_report(&data.shared, &data.provider, channel_id).await;
@@ -1902,7 +1968,7 @@ pub(super) async fn handle_text_command(
 
         "!inflight" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !inflight", msg.author.name);
+            tracing::info!("  [{ts}] ◀ [{}] !inflight", msg.author.name);
 
             let text =
                 commands::build_inflight_report(&data.shared, &data.provider, channel_id).await;
@@ -1912,7 +1978,7 @@ pub(super) async fn handle_text_command(
 
         "!queue" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !queue", msg.author.name);
+            tracing::info!("  [{ts}] ◀ [{}] !queue", msg.author.name);
 
             let show_all = *arg1 == "all";
             let text =
@@ -1924,7 +1990,7 @@ pub(super) async fn handle_text_command(
 
         "!metrics" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !metrics", msg.author.name);
+            tracing::info!("  [{ts}] ◀ [{}] !metrics", msg.author.name);
 
             let metrics_data = if arg1.is_empty() {
                 metrics::load_today()
@@ -1939,21 +2005,21 @@ pub(super) async fn handle_text_command(
 
         "!debug" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !debug", msg.author.name);
+            tracing::info!("  [{ts}] ◀ [{}] !debug", msg.author.name);
 
             let new_state = claude::toggle_debug();
             let status = if new_state { "ON" } else { "OFF" };
             let _ = msg
                 .reply(&ctx.http, format!("Debug logging: **{}**", status))
                 .await;
-            println!("  [{ts}] ▶ Debug logging toggled to {status}");
+            tracing::info!("  [{ts}] ▶ Debug logging toggled to {status}");
             return Ok(true);
         }
 
         "!escalation" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let rest = text.strip_prefix("!escalation").unwrap_or("").trim();
-            println!("  [{ts}] ◀ [{}] !escalation {}", msg.author.name, rest);
+            tracing::info!("  [{ts}] ◀ [{}] !escalation {}", msg.author.name, rest);
 
             if !check_owner(msg.author.id, &data.shared).await {
                 let _ = msg
@@ -2080,7 +2146,7 @@ pub(super) async fn handle_text_command(
 
         "!help" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !help", msg.author.name);
+            tracing::info!("  [{ts}] ◀ [{}] !help", msg.author.name);
 
             let provider_name = data.provider.display_name();
             let help = format!(
@@ -2141,7 +2207,7 @@ Any other message is sent to {p}.
 
         "!allowedtools" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !allowedtools", msg.author.name);
+            tracing::info!("  [{ts}] ◀ [{}] !allowedtools", msg.author.name);
 
             let tools = {
                 let settings = data.shared.settings.read().await;
@@ -2170,7 +2236,7 @@ Any other message is sent to {p}.
         // ── Commands with arguments ──
         "!model" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !model {} {}", msg.author.name, arg1, arg2);
+            tracing::info!("  [{ts}] ◀ [{}] !model {} {}", msg.author.name, arg1, arg2);
             let _ = msg
                 .reply(
                     &ctx.http,
@@ -2182,7 +2248,7 @@ Any other message is sent to {p}.
 
         "!allowed" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !allowed {}", msg.author.name, arg1);
+            tracing::info!("  [{ts}] ◀ [{}] !allowed {}", msg.author.name, arg1);
 
             let arg = arg1.trim();
             let (op, raw_name) = if let Some(name) = arg.strip_prefix('+') {
@@ -2245,7 +2311,7 @@ Any other message is sent to {p}.
 
         "!adduser" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !adduser {}", msg.author.name, arg1);
+            tracing::info!("  [{ts}] ◀ [{}] !adduser {}", msg.author.name, arg1);
 
             if !check_owner(msg.author.id, &data.shared).await {
                 let _ = msg.reply(&ctx.http, "Only the owner can add users.").await;
@@ -2285,13 +2351,13 @@ Any other message is sent to {p}.
                     format!("Added `{}` as authorized user.", target_id),
                 )
                 .await;
-            println!("  [{ts}] ▶ Added user: {target_id}");
+            tracing::info!("  [{ts}] ▶ Added user: {target_id}");
             return Ok(true);
         }
 
         "!allowall" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !allowall {}", msg.author.name, arg1);
+            tracing::info!("  [{ts}] ◀ [{}] !allowall {}", msg.author.name, arg1);
 
             if !check_owner(msg.author.id, &data.shared).await {
                 let _ = msg
@@ -2341,13 +2407,13 @@ Any other message is sent to {p}.
             };
 
             let _ = msg.reply(&ctx.http, response).await;
-            println!("  [{ts}] ▶ {response}");
+            tracing::info!("  [{ts}] ▶ {response}");
             return Ok(true);
         }
 
         "!removeuser" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ◀ [{}] !removeuser {}", msg.author.name, arg1);
+            tracing::info!("  [{ts}] ◀ [{}] !removeuser {}", msg.author.name, arg1);
 
             if !check_owner(msg.author.id, &data.shared).await {
                 let _ = msg
@@ -2396,14 +2462,14 @@ Any other message is sent to {p}.
                     format!("Removed `{}` from authorized users.", target_id),
                 )
                 .await;
-            println!("  [{ts}] ▶ Removed user: {target_id}");
+            tracing::info!("  [{ts}] ▶ Removed user: {target_id}");
             return Ok(true);
         }
 
         "!down" => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let file_arg = text.strip_prefix("!down").unwrap_or("").trim();
-            println!("  [{ts}] ◀ [{}] !down {}", msg.author.name, file_arg);
+            tracing::info!("  [{ts}] ◀ [{}] !down {}", msg.author.name, file_arg);
 
             if file_arg.is_empty() {
                 let _ = msg
@@ -2465,7 +2531,7 @@ Any other message is sent to {p}.
             let cmd_str = text.strip_prefix("!shell").unwrap_or("").trim();
             let ts = chrono::Local::now().format("%H:%M:%S");
             let preview = truncate_str(cmd_str, 60);
-            println!("  [{ts}] ◀ [{}] !shell {}", msg.author.name, preview);
+            tracing::info!("  [{ts}] ◀ [{}] !shell {}", msg.author.name, preview);
 
             if cmd_str.is_empty() {
                 let _ = msg
@@ -2543,9 +2609,11 @@ Any other message is sent to {p}.
                 .unwrap_or("")
                 .trim();
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!(
+            tracing::info!(
                 "  [{ts}] ◀ [{}] !cc {} {}",
-                msg.author.name, skill, args_str
+                msg.author.name,
+                skill,
+                args_str
             );
 
             if skill.is_empty() {

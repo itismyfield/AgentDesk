@@ -52,7 +52,7 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
     let memory_override = obj.get("memory").and_then(|raw| {
         serde_json::from_value::<MemoryConfigOverride>(raw.clone())
             .map_err(|err| {
-                eprintln!("  [memory] Warning: invalid role_map memory block: {err}");
+                tracing::warn!("  [memory] Warning: invalid role_map memory block: {err}");
                 err
             })
             .ok()

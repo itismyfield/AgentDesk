@@ -1,0 +1,413 @@
+{
+  "button": [
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "relative",
+        "flex",
+        "w-14",
+        "flex-col",
+        "items-center",
+        "justify-center",
+        "gap-0.5",
+        "rounded-lg",
+        "py-1.5",
+        "transition-colors",
+        "bg-indigo-600",
+        "text-white"
+      ],
+      "text": "오피스",
+      "rect": {
+        "x": 7.5,
+        "y": 68,
+        "width": 56,
+        "height": 49
+      },
+      "computed": {
+        "display": "flex",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "rgb(255, 255, 255)",
+        "backgroundColor": "oklch(0.511 0.262 276.966)",
+        "border": "0px solid rgb(255, 255, 255)",
+        "borderRadius": "8px",
+        "boxShadow": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "relative",
+        "flex",
+        "w-14",
+        "flex-col",
+        "items-center",
+        "justify-center",
+        "gap-0.5",
+        "rounded-lg",
+        "py-1.5",
+        "transition-colors",
+        "text-gray-500",
+        "hover:bg-gray-800",
+        "hover:text-gray-300"
+      ],
+      "text": "펄스",
+      "rect": {
+        "x": 7.5,
+        "y": 121,
+        "width": 56,
+        "height": 49
+      },
+      "computed": {
+        "display": "flex",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "oklch(0.551 0.027 264.364)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid oklch(0.551 0.027 264.364)",
+        "borderRadius": "8px",
+        "boxShadow": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "relative",
+        "flex",
+        "w-14",
+        "flex-col",
+        "items-center",
+        "justify-center",
+        "gap-0.5",
+        "rounded-lg",
+        "py-1.5",
+        "transition-colors",
+        "text-gray-500",
+        "hover:bg-gray-800",
+        "hover:text-gray-300"
+      ],
+      "text": "칸반",
+      "rect": {
+        "x": 7.5,
+        "y": 174,
+        "width": 56,
+        "height": 49
+      },
+      "computed": {
+        "display": "flex",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "oklch(0.551 0.027 264.364)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid oklch(0.551 0.027 264.364)",
+        "borderRadius": "8px",
+        "boxShadow": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "relative",
+        "flex",
+        "w-14",
+        "flex-col",
+        "items-center",
+        "justify-center",
+        "gap-0.5",
+        "rounded-lg",
+        "py-1.5",
+        "transition-colors",
+        "text-gray-500",
+        "hover:bg-gray-800",
+        "hover:text-gray-300"
+      ],
+      "text": "컨트롤",
+      "rect": {
+        "x": 7.5,
+        "y": 227,
+        "width": 56,
+        "height": 49
+      },
+      "computed": {
+        "display": "flex",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "oklch(0.551 0.027 264.364)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid oklch(0.551 0.027 264.364)",
+        "borderRadius": "8px",
+        "boxShadow": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "px-2.5",
+        "py-1",
+        "rounded-md",
+        "text-xs",
+        "font-medium",
+        "whitespace-nowrap",
+        "transition-all",
+        "hover:bg-surface-hover"
+      ],
+      "text": "전체",
+      "rect": {
+        "x": 84,
+        "y": 9,
+        "width": 40.765625,
+        "height": 24
+      },
+      "computed": {
+        "display": "block",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "rgb(148, 163, 184)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(148, 163, 184)",
+        "borderRadius": "6px",
+        "boxShadow": "none",
+        "fontSize": "12px",
+        "fontWeight": "500",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "px-2.5",
+        "py-1",
+        "rounded-md",
+        "text-xs",
+        "font-medium",
+        "whitespace-nowrap",
+        "transition-all",
+        "flex",
+        "items-center",
+        "gap-1",
+        "text-white"
+      ],
+      "text": "🧠코어 운영17",
+      "rect": {
+        "x": 130.765625,
+        "y": 9,
+        "width": 102.546875,
+        "height": 24
+      },
+      "computed": {
+        "display": "flex",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "rgb(255, 255, 255)",
+        "backgroundColor": "rgb(99, 102, 241)",
+        "border": "0px solid rgb(255, 255, 255)",
+        "borderRadius": "6px",
+        "boxShadow": "none",
+        "fontSize": "12px",
+        "fontWeight": "500",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "ml-auto",
+        "p-1.5",
+        "rounded-md",
+        "hover:bg-surface-hover",
+        "transition-colors",
+        "shrink-0"
+      ],
+      "text": "",
+      "rect": {
+        "x": 1242,
+        "y": 8,
+        "width": 26,
+        "height": 26
+      },
+      "computed": {
+        "display": "block",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "rgb(100, 116, 139)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "border": "0px solid rgb(100, 116, 139)",
+        "borderRadius": "6px",
+        "boxShadow": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "rounded-full",
+        "px-2",
+        "py-1",
+        "text-xs",
+        "font-medium"
+      ],
+      "text": "더보기",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0
+      },
+      "computed": {
+        "display": "block",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "rgb(226, 232, 240)",
+        "backgroundColor": "rgb(20, 25, 37)",
+        "border": "1px solid rgb(31, 41, 55)",
+        "borderRadius": "3.35544e+07px",
+        "boxShadow": "none",
+        "fontSize": "12px",
+        "fontWeight": "500",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "rounded-xl",
+        "px-2",
+        "py-2",
+        "text-left"
+      ],
+      "text": "검토필요2",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0
+      },
+      "computed": {
+        "display": "block",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "rgb(226, 232, 240)",
+        "backgroundColor": "rgb(20, 25, 37)",
+        "border": "1px solid rgb(31, 41, 55)",
+        "borderRadius": "12px",
+        "boxShadow": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "rounded-xl",
+        "px-2",
+        "py-2",
+        "text-left"
+      ],
+      "text": "오늘 완료0",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0
+      },
+      "computed": {
+        "display": "block",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "rgb(226, 232, 240)",
+        "backgroundColor": "rgb(20, 25, 37)",
+        "border": "1px solid rgb(31, 41, 55)",
+        "borderRadius": "12px",
+        "boxShadow": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "rounded-xl",
+        "px-2",
+        "py-2",
+        "text-left"
+      ],
+      "text": "열린이슈3",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0
+      },
+      "computed": {
+        "display": "block",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "rgb(226, 232, 240)",
+        "backgroundColor": "rgb(20, 25, 37)",
+        "border": "1px solid rgb(31, 41, 55)",
+        "borderRadius": "12px",
+        "boxShadow": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "pointerEvents": "auto"
+      }
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "classes": [
+        "rounded-xl",
+        "px-2",
+        "py-2",
+        "text-left"
+      ],
+      "text": "검토필요2",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0
+      },
+      "computed": {
+        "display": "block",
+        "visibility": "visible",
+        "opacity": "1",
+        "color": "rgb(226, 232, 240)",
+        "backgroundColor": "rgb(20, 25, 37)",
+        "border": "1px solid rgb(31, 41, 55)",
+        "borderRadius": "12px",
+        "boxShadow": "none",
+        "fontSize": "16px",
+        "fontWeight": "400",
+        "pointerEvents": "auto"
+      }
+    }
+  ]
+}
