@@ -8,6 +8,7 @@ pub enum SqlGuardTarget {
     KanbanLatestDispatchId,
     TaskDispatches,
     CardReviewState,
+    AutoQueueEntries,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +39,9 @@ impl SqlGuardViolation {
             SqlGuardTarget::CardReviewState => {
                 "Direct card_review_state mutation is blocked. Use agentdesk.reviewState.sync(cardId, state, opts) instead."
             }
+            SqlGuardTarget::AutoQueueEntries => {
+                "Direct auto_queue_entries mutation is blocked. Use agentdesk.autoQueue.updateEntryStatus(entryId, status, source, opts) instead."
+            }
         }
     }
 
@@ -58,6 +62,7 @@ impl SqlGuardViolation {
             SqlGuardTarget::KanbanLatestDispatchId => "kanban_cards.latest_dispatch_id",
             SqlGuardTarget::TaskDispatches => "task_dispatches",
             SqlGuardTarget::CardReviewState => "card_review_state",
+            SqlGuardTarget::AutoQueueEntries => "auto_queue_entries",
         }
     }
 
@@ -77,6 +82,9 @@ impl SqlGuardViolation {
             }
             SqlGuardTarget::CardReviewState => {
                 "agentdesk.reviewState.sync(cardId, state, opts) instead."
+            }
+            SqlGuardTarget::AutoQueueEntries => {
+                "agentdesk.autoQueue.updateEntryStatus(entryId, status, source, opts) instead."
             }
         }
     }
@@ -114,6 +122,12 @@ pub fn detect_core_table_write(sql: &str) -> Option<SqlGuardViolation> {
     if card_review_state_mutation_re().is_match(sql) {
         return Some(SqlGuardViolation {
             target: SqlGuardTarget::CardReviewState,
+        });
+    }
+
+    if auto_queue_entries_mutation_re().is_match(sql) {
+        return Some(SqlGuardViolation {
+            target: SqlGuardTarget::AutoQueueEntries,
         });
     }
 
@@ -169,6 +183,16 @@ fn card_review_state_mutation_re() -> &'static Regex {
     })
 }
 
+fn auto_queue_entries_mutation_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?:INSERT(?:\s+OR\s+REPLACE)?\s+INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+auto_queue_entries\b",
+        )
+        .unwrap()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SqlGuardTarget, detect_core_table_write};
@@ -193,5 +217,14 @@ mod tests {
             detect_core_table_write("UPDATE kanban_cards SET blocked_reason = 'x' WHERE id = ?")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn detects_auto_queue_entry_update() {
+        let violation =
+            detect_core_table_write("UPDATE auto_queue_entries SET status = 'done' WHERE id = ?")
+                .expect("auto_queue_entries UPDATE must be guarded");
+        assert_eq!(violation.target(), SqlGuardTarget::AutoQueueEntries);
+        assert!(violation.error_message().contains("auto_queue_entries"));
     }
 }

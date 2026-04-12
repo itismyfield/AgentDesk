@@ -420,6 +420,77 @@ fn test_review_entry_context_and_record_entry_facade() {
 }
 
 #[test]
+fn test_review_entry_hint_advances_round_once_and_clears_metadata() {
+    let db = test_db();
+    {
+        let conn = db.separate_conn().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, provider, status, discord_channel_id, discord_channel_cc, discord_channel_cdx) \
+             VALUES ('ag-review-hint', 'Review Hint Bot', 'codex', 'idle', '111', '222', '333')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, review_round, metadata, created_at, updated_at) \
+             VALUES ('card-review-hint', 'Review Hint Card', 'review', 'ag-review-hint', 1, ?1, datetime('now'), datetime('now'))",
+            [serde_json::json!({
+                crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY: true,
+                "keep": "value"
+            })
+            .to_string()],
+        )
+        .unwrap();
+    }
+
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        register_globals(&ctx, db.clone()).unwrap();
+        let result: String = ctx
+            .eval(
+                r#"
+                (function() {
+                    var entry = agentdesk.review.entryContext("card-review-hint");
+                    agentdesk.review.recordEntry("card-review-hint", {
+                        review_round: entry.next_round,
+                        exclude_status: "done"
+                    });
+                    var updated = agentdesk.cards.get("card-review-hint");
+                    return JSON.stringify({
+                        should_advance_round: entry.should_advance_round,
+                        next_round: entry.next_round,
+                        stored_round: updated.review_round
+                    });
+                })()
+                "#,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            r#"{"should_advance_round":true,"next_round":2,"stored_round":2}"#
+        );
+    });
+
+    let conn = db.separate_conn().unwrap();
+    let metadata_raw: Option<String> = conn
+        .query_row(
+            "SELECT metadata FROM kanban_cards WHERE id = 'card-review-hint'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(metadata_raw.as_deref().unwrap_or("{}")).unwrap();
+    assert_eq!(metadata["keep"], "value");
+    assert!(
+        metadata
+            .get(crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY)
+            .is_none(),
+        "review entry hint must be consumed after recordEntry"
+    );
+}
+
+#[test]
 fn test_queue_status_facade() {
     let db = test_db();
     {
