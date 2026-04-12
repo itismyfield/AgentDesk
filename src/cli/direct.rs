@@ -4,7 +4,6 @@ use axum::{
     http::StatusCode,
 };
 use regex::Regex;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -525,29 +524,8 @@ pub(crate) async fn cmd_discord_read(
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-struct GithubIssueView {
-    number: i64,
-    state: String,
-    title: String,
-    body: Option<String>,
-    url: String,
-    #[serde(default)]
-    labels: Vec<crate::github::sync::GhLabel>,
-}
-
-fn fetch_github_issue(repo: &str, issue_number: i64) -> Result<GithubIssueView, String> {
-    let number = issue_number.to_string();
-    let output = crate::github::run_gh(&[
-        "issue",
-        "view",
-        &number,
-        "--repo",
-        repo,
-        "--json",
-        "number,state,title,body,labels,url",
-    ])?;
-    serde_json::from_str(&output).map_err(|e| format!("parse gh issue view output: {e}"))
+fn fetch_github_issue(repo: &str, issue_number: i64) -> Result<crate::github::IssueView, String> {
+    crate::github::fetch_issue(repo, issue_number)
 }
 
 fn infer_issue_priority(labels: &[crate::github::sync::GhLabel]) -> &'static str {
@@ -569,7 +547,7 @@ fn infer_issue_priority(labels: &[crate::github::sync::GhLabel]) -> &'static str
 fn upsert_backlog_card_from_issue(
     db: &crate::db::Db,
     repo: &str,
-    issue: &GithubIssueView,
+    issue: &crate::github::IssueView,
 ) -> Result<String, String> {
     let conn = db.lock().map_err(|e| format!("db lock: {e}"))?;
     let metadata = {
@@ -1281,8 +1259,10 @@ pub(crate) fn cmd_cherry_merge(branch: &str, close_issue: bool) -> Result<(), St
         if issues.len() == 1 {
             let repo_id = maybe_infer_repo_from_git()
                 .ok_or_else(|| "could not infer repo for gh issue close".to_string())?;
-            let issue_number = issues[0].clone();
-            crate::github::run_gh(&["issue", "close", &issue_number, "--repo", &repo_id])?;
+            let issue_number = issues[0]
+                .parse::<i64>()
+                .map_err(|e| format!("invalid issue number '{}': {e}", issues[0]))?;
+            crate::github::close_issue(&repo_id, issue_number)?;
             Some(json!({
                 "repo": repo_id,
                 "issue_number": issue_number,

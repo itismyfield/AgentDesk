@@ -22,7 +22,14 @@ pub struct GhLabel {
 /// Fetch open issues for a repo via `gh` CLI.
 /// Returns parsed issues or an error if `gh` is unavailable / fails.
 pub fn fetch_issues(repo: &str) -> Result<Vec<GhIssue>, String> {
-    let output = super::run_gh(&[
+    fetch_issues_with(super::adapter(), repo)
+}
+
+pub(crate) fn fetch_issues_with(
+    adapter: &dyn super::GitHubAdapter,
+    repo: &str,
+) -> Result<Vec<GhIssue>, String> {
+    let output = adapter.run(&[
         "issue",
         "list",
         "--repo",
@@ -180,6 +187,7 @@ pub struct SyncResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::test_utils::RecordingAdapter;
 
     fn test_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -208,6 +216,34 @@ mod tests {
         assert_eq!(issues[0].state, "OPEN");
         assert_eq!(issues[0].labels[0].name, "bug");
         assert_eq!(issues[1].state, "CLOSED");
+    }
+
+    #[test]
+    fn fetch_issues_routes_through_adapter_interface() {
+        let adapter = RecordingAdapter::with_sync_responses(vec![Ok(
+            r#"[{"number":5,"state":"OPEN","title":"Adapter flow","labels":[{"name":"bug"}],"body":"Body"}]"#
+                .to_string(),
+        )]);
+
+        let issues = fetch_issues_with(&adapter, "owner/repo").unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 5);
+        assert_eq!(
+            adapter.calls(),
+            vec![vec![
+                "issue".to_string(),
+                "list".to_string(),
+                "--repo".to_string(),
+                "owner/repo".to_string(),
+                "--json".to_string(),
+                "number,state,title,labels,body".to_string(),
+                "--limit".to_string(),
+                "100".to_string(),
+                "--state".to_string(),
+                "all".to_string(),
+            ]]
+        );
     }
 
     #[test]
@@ -305,5 +341,56 @@ mod tests {
             sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
         assert_eq!(result.closed_count, 0);
         assert_eq!(result.inconsistency_count, 0);
+    }
+
+    #[test]
+    fn sync_and_triage_flow_can_run_with_mock_adapter() {
+        let db = test_db();
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute("INSERT INTO github_repos (id) VALUES ('owner/repo')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, repo_id, title, status, priority, github_issue_number, created_at, updated_at)
+                 VALUES ('closed-card', 'owner/repo', 'Already linked', 'in_progress', 'medium', 7, datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let adapter = RecordingAdapter::with_sync_responses(vec![Ok(
+            r#"[
+                {"number":7,"state":"CLOSED","title":"Already linked","labels":[],"body":"Closed body"},
+                {"number":9,"state":"OPEN","title":"New issue","labels":[{"name":"high"}],"body":"Open body"}
+            ]"#
+            .to_string(),
+        )]);
+
+        let issues = fetch_issues_with(&adapter, "owner/repo").unwrap();
+        let triaged = crate::github::triage::triage_new_issues(&db, "owner/repo", &issues).unwrap();
+        let synced =
+            sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
+
+        assert_eq!(triaged, 1);
+        assert_eq!(synced.closed_count, 1);
+
+        let conn = db.lock().unwrap();
+        let new_card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE github_issue_number = 9",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let closed_card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'closed-card'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_card_status, "backlog");
+        assert_eq!(closed_card_status, "done");
     }
 }

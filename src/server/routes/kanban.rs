@@ -1629,49 +1629,32 @@ pub async fn card_github_comments(
         None => return (StatusCode::OK, Json(json!({"comments": []}))),
     };
 
-    // Fetch comments AND body via gh CLI in a blocking task
+    // Fetch comments AND body via the GitHub adapter in a blocking task
     let card_id = id.clone();
     let db = state.db.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        crate::github::run_gh(&[
-            "issue",
-            "view",
-            &number.to_string(),
-            "--repo",
-            &repo,
-            "--json",
-            "comments,body",
-        ])
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || crate::github::fetch_issue_comments(&repo, number))
+            .await;
 
     match result {
-        Ok(Ok(output)) => {
-            match serde_json::from_str::<serde_json::Value>(&output) {
-                Ok(parsed) => {
-                    let comments = parsed.get("comments").cloned().unwrap_or(json!([]));
-                    let body = parsed.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        Ok(Ok(issue)) => {
+            let comments = serde_json::to_value(issue.comments).unwrap_or_else(|_| json!([]));
+            let body = issue.body.unwrap_or_default();
 
-                    // On-demand sync: update card description from latest issue body
-                    // Only UPDATE when the value actually changed to avoid polluting updated_at
-                    if let Ok(conn) = db.lock() {
-                        let _ = conn.execute(
-                            "UPDATE kanban_cards SET description = ?1, updated_at = datetime('now') \
-                             WHERE id = ?2 AND (description IS NOT ?1 OR description IS NULL)",
-                            rusqlite::params![body, card_id],
-                        );
-                    }
-
-                    (
-                        StatusCode::OK,
-                        Json(json!({"comments": comments, "body": body})),
-                    )
-                }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("parse: {e}")})),
-                ),
+            // On-demand sync: update card description from latest issue body
+            // Only UPDATE when the value actually changed to avoid polluting updated_at
+            if let Ok(conn) = db.lock() {
+                let _ = conn.execute(
+                    "UPDATE kanban_cards SET description = ?1, updated_at = datetime('now') \
+                     WHERE id = ?2 AND (description IS NOT ?1 OR description IS NULL)",
+                    rusqlite::params![body, card_id],
+                );
             }
+
+            (
+                StatusCode::OK,
+                Json(json!({"comments": comments, "body": body})),
+            )
         }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
         Err(e) => (
