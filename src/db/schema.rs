@@ -1047,6 +1047,16 @@ fn backfill_auto_queue_dispatch_history(conn: &Connection) -> Result<()> {
             continue;
         };
 
+        let entry_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM auto_queue_entries WHERE id = ?1)",
+                [entry_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !entry_exists {
+            continue;
+        }
         conn.execute(
             "INSERT OR IGNORE INTO auto_queue_entry_dispatch_history (
                 entry_id, dispatch_id, trigger_source, created_at
