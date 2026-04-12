@@ -11,11 +11,13 @@ use crate::db::{
         StatusFilter,
     },
 };
+use crate::engine::PolicyEngine;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 
 #[derive(Clone)]
 pub struct AutoQueueService {
     db: Db,
+    engine: PolicyEngine,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -131,8 +133,8 @@ struct ThreadLinkCandidate {
 }
 
 impl AutoQueueService {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, engine: PolicyEngine) -> Self {
+        Self { db, engine }
     }
 
     pub fn prepare_generate_cards(
@@ -190,11 +192,13 @@ impl AutoQueueService {
 
             for (card_id, path) in transition_plan {
                 for step in &path {
-                    crate::kanban::transition_status_no_hooks(
+                    crate::kanban::transition_status_with_opts(
                         &self.db,
+                        &self.engine,
                         &card_id,
                         step,
                         "auto-queue-generate",
+                        false,
                     )
                     .map_err(|error| {
                         ServiceError::bad_request(format!(

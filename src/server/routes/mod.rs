@@ -59,7 +59,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn auto_queue_service(&self) -> crate::services::auto_queue::AutoQueueService {
-        crate::services::auto_queue::AutoQueueService::new(self.db.clone())
+        crate::services::auto_queue::AutoQueueService::new(self.db.clone(), self.engine.clone())
     }
 
     pub fn dispatch_service(&self) -> crate::services::dispatches::DispatchService {
