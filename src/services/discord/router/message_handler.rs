@@ -606,20 +606,6 @@ pub(in crate::services::discord) async fn handle_text_message(
         }
     }
 
-    // Send placeholder message
-    rate_limit_wait(shared, channel_id).await;
-    let placeholder = channel_id
-        .send_message(&ctx.http, {
-            let builder = CreateMessage::new().content("...");
-            if reply_to_user_message && dispatch_id_for_thread.is_none() {
-                builder.reference_message((channel_id, user_msg_id))
-            } else {
-                builder
-            }
-        })
-        .await?;
-    let placeholder_msg_id = placeholder.id;
-
     // Sanitize input
     let sanitized_input = ai_screen::sanitize_user_input(user_text);
 
@@ -702,7 +688,7 @@ pub(in crate::services::discord) async fn handle_text_message(
                     session.restore_provider_session(restored.clone());
                 }
                 memento_context_loaded = true;
-                // Notify: session restored — send immediately (before agent response)
+                // Notify: session restored — send before placeholder so it appears first
                 send_restore_notification(
                     shared,
                     &ctx.http,
@@ -715,6 +701,20 @@ pub(in crate::services::discord) async fn handle_text_message(
             session_id = restored;
         }
     }
+
+    // Send placeholder message (after restore notification so restore appears first)
+    rate_limit_wait(shared, channel_id).await;
+    let placeholder = channel_id
+        .send_message(&ctx.http, {
+            let builder = CreateMessage::new().content("...");
+            if reply_to_user_message && dispatch_id_for_thread.is_none() {
+                builder.reference_message((channel_id, user_msg_id))
+            } else {
+                builder
+            }
+        })
+        .await?;
+    let placeholder_msg_id = placeholder.id;
 
     // Create cancel token — with second check to close the TOCTOU race window.
     // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
