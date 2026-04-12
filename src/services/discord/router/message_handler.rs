@@ -91,6 +91,33 @@ fn parse_dispatch_context_hints(dispatch_context: Option<&str>) -> DispatchConte
     }
 }
 
+fn load_session_runtime_state(
+    sessions: &mut std::collections::HashMap<ChannelId, DiscordSession>,
+    channel_id: ChannelId,
+) -> Option<(Option<String>, bool, String)> {
+    sessions.get_mut(&channel_id).and_then(|session| {
+        let current_path = session.validated_path(channel_id)?;
+        Some((
+            session.session_id.clone(),
+            session.memento_context_loaded,
+            current_path,
+        ))
+    })
+}
+
+fn session_runtime_state_after_redirect(
+    sessions: &mut std::collections::HashMap<ChannelId, DiscordSession>,
+    original_channel_id: ChannelId,
+    effective_channel_id: ChannelId,
+    original_state: (Option<String>, bool, String),
+) -> (Option<String>, bool, String) {
+    if effective_channel_id == original_channel_id {
+        return original_state;
+    }
+
+    load_session_runtime_state(sessions, effective_channel_id).unwrap_or(original_state)
+}
+
 pub(in crate::services::discord) async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -105,17 +132,11 @@ pub(in crate::services::discord) async fn handle_text_message(
     wait_for_completion: bool,
     reply_context: Option<String>,
 ) -> Result<(), Error> {
+    let original_channel_id = channel_id;
     // Get session info, allowed tools, and pending uploads
     let (session_info, provider, allowed_tools, pending_uploads) = {
         let mut data = shared.core.lock().await;
-        let info = data.sessions.get_mut(&channel_id).and_then(|session| {
-            let current_path = session.validated_path(channel_id)?;
-            Some((
-                session.session_id.clone(),
-                session.memento_context_loaded,
-                current_path,
-            ))
-        });
+        let info = load_session_runtime_state(&mut data.sessions, channel_id);
         let uploads = data
             .sessions
             .get_mut(&channel_id)
@@ -492,6 +513,16 @@ pub(in crate::services::discord) async fn handle_text_message(
         channel_id
     };
 
+    let (mut session_id, mut memento_context_loaded, current_path) = {
+        let mut data = shared.core.lock().await;
+        session_runtime_state_after_redirect(
+            &mut data.sessions,
+            original_channel_id,
+            channel_id,
+            (session_id, memento_context_loaded, current_path),
+        )
+    };
+
     // #259: Override current_path with the pre-computed dispatch worktree path.
     // Also update the in-memory session so the worktree sticks for subsequent turns.
     let current_path = if dispatch_worktree_path.is_some() {
@@ -503,7 +534,6 @@ pub(in crate::services::discord) async fn handle_text_message(
     } else {
         current_path
     };
-    let (mut session_id, mut memento_context_loaded) = (session_id, memento_context_loaded);
     if dispatch_force_new_session {
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -2715,6 +2745,7 @@ mod tests {
     use super::super::super::DiscordSession;
     use super::*;
     use crate::services::memory::RecallResponse;
+    use poise::serenity_prelude::ChannelId;
 
     fn sample_recall() -> RecallResponse {
         RecallResponse {
@@ -2912,5 +2943,56 @@ mod tests {
 
         assert!(hints.worktree_path.is_none());
         assert!(hints.force_new_session);
+    }
+
+    #[test]
+    fn session_runtime_state_after_redirect_prefers_reused_thread_state() {
+        let parent_dir = tempfile::tempdir().unwrap();
+        let thread_dir = tempfile::tempdir().unwrap();
+        let parent_channel_id = ChannelId::new(100);
+        let thread_channel_id = ChannelId::new(200);
+
+        let mut sessions = std::collections::HashMap::new();
+        let mut parent = make_session(Some(parent_dir.path().to_str().unwrap().to_string()), None);
+        parent.restore_provider_session(Some("parent-session".to_string()));
+        sessions.insert(parent_channel_id, parent);
+
+        let thread = make_session(Some(thread_dir.path().to_str().unwrap().to_string()), None);
+        sessions.insert(thread_channel_id, thread);
+
+        let resolved = session_runtime_state_after_redirect(
+            &mut sessions,
+            parent_channel_id,
+            thread_channel_id,
+            (
+                Some("parent-session".to_string()),
+                true,
+                parent_dir.path().to_str().unwrap().to_string(),
+            ),
+        );
+
+        assert_eq!(resolved.0, None);
+        assert!(!resolved.1);
+        assert_eq!(resolved.2, thread_dir.path().to_str().unwrap());
+    }
+
+    #[test]
+    fn session_runtime_state_after_redirect_keeps_original_state_when_channel_unchanged() {
+        let channel_id = ChannelId::new(100);
+        let dir = tempfile::tempdir().unwrap();
+        let original = (
+            Some("session-1".to_string()),
+            true,
+            dir.path().to_str().unwrap().to_string(),
+        );
+
+        let resolved = session_runtime_state_after_redirect(
+            &mut std::collections::HashMap::new(),
+            channel_id,
+            channel_id,
+            original.clone(),
+        );
+
+        assert_eq!(resolved, original);
     }
 }
