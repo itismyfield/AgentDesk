@@ -5,6 +5,7 @@ use super::thread_reuse::{
 };
 use crate::db::agents::{
     resolve_agent_channel_for_provider_on_conn, resolve_agent_dispatch_channel_on_conn,
+    resolve_agent_primary_channel_on_conn,
 };
 use crate::db::auto_queue::{ensure_agent_slot_pool_rows, slot_has_active_dispatch};
 use crate::services::auto_queue::runtime::reset_slot_thread_bindings;
@@ -603,6 +604,35 @@ fn latest_completed_review_provider_on_conn(
     review_source_provider_from_context(review_context.as_deref())
 }
 
+fn latest_work_dispatch_thread_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> Option<String> {
+    conn.query_row(
+        "SELECT COALESCE(td.thread_id, json_extract(td.context, '$.thread_id'))
+         FROM task_dispatches td
+         WHERE td.kanban_card_id = ?1
+           AND td.dispatch_type IN ('implementation', 'rework')
+           AND TRIM(COALESCE(td.thread_id, json_extract(td.context, '$.thread_id'), '')) != ''
+         ORDER BY
+           CASE td.status
+             WHEN 'dispatched' THEN 0
+             WHEN 'pending' THEN 1
+             WHEN 'completed' THEN 2
+             ELSE 3
+           END,
+           datetime(COALESCE(td.completed_at, td.updated_at, td.created_at)) DESC,
+           td.rowid DESC
+         LIMIT 1",
+        [card_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
 fn resolve_agent_channel_with_provider_override_on_conn(
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -638,6 +668,13 @@ pub(super) fn resolve_dispatch_delivery_channel_on_conn(
         dispatch_type,
         provider_override.as_deref(),
     )
+}
+
+fn resolve_review_followup_channel_on_conn(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    resolve_agent_primary_channel_on_conn(conn, agent_id)
 }
 
 async fn add_thread_member_to_dispatch_thread(
@@ -1249,6 +1286,7 @@ async fn resolve_review_followup_target_channel(
             Err(_) => return Err("db lock failed for thread lookup".into()),
         };
         get_thread_for_channel(&conn, card_id, channel_id_num)
+            .or_else(|| latest_work_dispatch_thread_on_conn(&conn, card_id))
     };
     let channel_id = channel_id_num.to_string();
 
@@ -1500,16 +1538,12 @@ async fn send_review_result_to_primary_with_context(
             Ok(c) => c,
             Err(_) => return Err("db lock failed for primary channel lookup".into()),
         };
-        resolve_dispatch_delivery_channel_on_conn(
-            &conn,
-            &agent_id,
-            card_id,
-            Some("review-decision"),
-            review_dispatch_context.as_deref(),
-        )
-        .ok()
-        .flatten()
-        .ok_or_else(|| format!("agent {agent_id} missing review followup discord channel"))?
+        resolve_review_followup_channel_on_conn(&conn, &agent_id)
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                format!("agent {agent_id} missing primary discord channel for review followup")
+            })?
     };
 
     let channel_id_num: u64 = match channel_id.parse() {
@@ -2074,6 +2108,210 @@ mod tests {
                 "PATCH /channels/thread-primary",
                 "POST /channels/thread-primary/messages",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn review_pass_notification_uses_primary_thread_even_when_review_context_points_to_alt_channel()
+     {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (
+                    id, name, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+                 ) VALUES ('agent-1', 'Agent 1', 'claude', '123', '456', '123', '456')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, channel_thread_map,
+                    created_at, updated_at
+                ) VALUES (
+                    'card-review-alt', 'Review Card', 'review', 'agent-1', 'dispatch-review-alt',
+                    '{\"123\":\"thread-impl\"}', datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-review-alt', 'card-review-alt', 'agent-1', 'review', 'completed',
+                    '[Review R1] card-review-alt', '{\"from_provider\":\"codex\",\"target_provider\":\"claude\"}',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        send_review_result_to_primary_with_context(
+            &db,
+            "card-review-alt",
+            "dispatch-review-alt",
+            "pass",
+            Some("announce-token"),
+            &base_url,
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec![
+                "GET /channels/thread-impl",
+                "POST /channels/thread-impl/messages",
+            ]
+        );
+        assert!(
+            !state
+                .calls
+                .contains(&"POST /channels/456/messages".to_string()),
+            "review followup must not fall back to the review channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_pass_notification_falls_back_to_primary_channel_when_no_implementation_thread_exists()
+     {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (
+                    id, name, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+                 ) VALUES ('agent-1', 'Agent 1', 'claude', '123', '456', '123', '456')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at
+                ) VALUES (
+                    'card-review-fallback', 'Review Card', 'review', 'agent-1', 'dispatch-review-fallback',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-review-fallback', 'card-review-fallback', 'agent-1', 'review', 'completed',
+                    '[Review R1] card-review-fallback', '{\"from_provider\":\"codex\",\"target_provider\":\"claude\"}',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        send_review_result_to_primary_with_context(
+            &db,
+            "card-review-fallback",
+            "dispatch-review-fallback",
+            "pass",
+            Some("announce-token"),
+            &base_url,
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        assert_eq!(state.calls, vec!["POST /channels/123/messages"]);
+        assert!(
+            !state
+                .calls
+                .contains(&"POST /channels/456/messages".to_string()),
+            "review followup fallback must use the implementation channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_pass_notification_reuses_latest_work_dispatch_thread_when_channel_map_is_missing()
+     {
+        let (base_url, state, server_handle) = spawn_mock_discord_server(false).await;
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (
+                    id, name, provider, discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx
+                 ) VALUES ('agent-1', 'Agent 1', 'claude', '123', '456', '123', '456')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (
+                    id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at
+                ) VALUES (
+                    'card-review-history', 'Review Card', 'review', 'agent-1', 'dispatch-review-history',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, thread_id,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-impl-history', 'card-review-history', 'agent-1', 'implementation', 'completed',
+                    'Implementation', 'thread-history', datetime('now', '-1 minute'), datetime('now', '-1 minute')
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (
+                    id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
+                    created_at, updated_at
+                ) VALUES (
+                    'dispatch-review-history', 'card-review-history', 'agent-1', 'review', 'completed',
+                    '[Review R1] card-review-history', '{\"from_provider\":\"codex\",\"target_provider\":\"claude\"}',
+                    datetime('now'), datetime('now')
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        send_review_result_to_primary_with_context(
+            &db,
+            "card-review-history",
+            "dispatch-review-history",
+            "pass",
+            Some("announce-token"),
+            &base_url,
+        )
+        .await
+        .unwrap();
+
+        server_handle.abort();
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls,
+            vec![
+                "GET /channels/thread-history",
+                "POST /channels/thread-history/messages",
+            ]
+        );
+        assert!(
+            !state
+                .calls
+                .contains(&"POST /channels/456/messages".to_string()),
+            "latest work thread must win over the review channel"
         );
     }
 
