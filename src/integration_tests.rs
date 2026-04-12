@@ -202,6 +202,29 @@ mod tests {
         (repo, override_guard)
     }
 
+    fn setup_test_repo_with_mock_gh(
+        replies: &[MockGhReply],
+    ) -> (tempfile::TempDir, RepoAndMockGhEnv) {
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "test@test.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "initial"]);
+
+        let lock = repo_dir_env_lock().lock().unwrap();
+        let previous_repo_dir = std::env::var_os("AGENTDESK_REPO_DIR");
+        unsafe { std::env::set_var("AGENTDESK_REPO_DIR", repo.path()) };
+
+        let gh = install_mock_gh_with_lock(lock, replies);
+        (
+            repo,
+            RepoAndMockGhEnv {
+                _gh: gh,
+                previous_repo_dir,
+            },
+        )
+    }
+
     fn setup_test_repo_with_runtime_root()
     -> (tempfile::TempDir, tempfile::TempDir, RepoAndRuntimeOverride) {
         let repo = tempfile::tempdir().unwrap();
@@ -607,11 +630,26 @@ mod tests {
         log_path: PathBuf,
     }
 
+    struct RepoAndMockGhEnv {
+        _gh: MockGhEnv,
+        previous_repo_dir: Option<OsString>,
+    }
+
     struct MockGhReply {
         key: &'static str,
         contains: Option<&'static str>,
         stdout: &'static str,
     }
+
+    impl Drop for RepoAndMockGhEnv {
+        fn drop(&mut self) {
+            match self.previous_repo_dir.take() {
+                Some(value) => unsafe { std::env::set_var("AGENTDESK_REPO_DIR", value) },
+                None => unsafe { std::env::remove_var("AGENTDESK_REPO_DIR") },
+            }
+        }
+    }
+
     impl Drop for MockGhEnv {
         fn drop(&mut self) {
             if let Some(old_path) = &self.old_path {
@@ -695,8 +733,10 @@ mod tests {
         (wrapper, script)
     }
 
-    fn install_mock_gh(replies: &[MockGhReply]) -> MockGhEnv {
-        let lock = crate::services::discord::runtime_store::lock_test_env();
+    fn install_mock_gh_with_lock(
+        lock: std::sync::MutexGuard<'static, ()>,
+        replies: &[MockGhReply],
+    ) -> MockGhEnv {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("gh.log");
         #[cfg(unix)]
@@ -762,6 +802,11 @@ mod tests {
                 log_path,
             };
         }
+    }
+
+    fn install_mock_gh(replies: &[MockGhReply]) -> MockGhEnv {
+        let lock = crate::services::discord::runtime_store::lock_test_env();
+        install_mock_gh_with_lock(lock, replies)
     }
 
     fn gh_log(env: &MockGhEnv) -> String {
@@ -3620,7 +3665,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn scenario_208_on_tick_creates_codex_rework_and_dedups_review() {
-        let _gh = install_mock_gh(&[
+        let (repo, _env) = setup_test_repo_with_mock_gh(&[
             MockGhReply {
                 key: "pr:list",
                 contains: Some("--state merged"),
@@ -3642,6 +3687,10 @@ mod tests {
                 stdout: "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"thread-1\",\"isResolved\":false,\"isOutdated\":false,\"comments\":{\"nodes\":[{\"id\":\"comment-1\",\"body\":\"P1 force-transition leaves dispatch alive\",\"path\":\"src/server/routes/github.rs\",\"line\":77,\"url\":\"https://example.com/comment-1\",\"author\":{\"login\":\"chatgpt-codex-connector\"},\"pullRequestReview\":{\"id\":\"PRR_9001\",\"state\":\"COMMENTED\",\"author\":{\"login\":\"chatgpt-codex-connector\"}}}]}}]}}}}}",
             },
         ]);
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", "git@github.com:test/repo.git"],
+        );
 
         let db = test_db();
         let engine = test_engine(&db);

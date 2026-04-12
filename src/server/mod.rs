@@ -370,6 +370,7 @@ mod tests {
 
     #[test]
     fn tiered_tick_hooks_record_expected_markers_per_label() {
+        crate::services::memory::reset_backend_health_for_tests();
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("tick-tier-probe.js"),

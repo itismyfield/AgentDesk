@@ -1,4 +1,5 @@
 use axum::{Json, extract::State, http::StatusCode};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -115,6 +116,47 @@ fn current_card_status(db: &crate::db::Db, card_id: &str) -> Option<String> {
         )
         .ok()
     })
+}
+
+fn mark_next_review_round_advance_on_conn(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+) -> rusqlite::Result<bool> {
+    let metadata_raw: Option<String> = conn
+        .query_row(
+            "SELECT metadata FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+
+    let mut metadata = metadata_raw
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| json!({}));
+    let object = metadata
+        .as_object_mut()
+        .expect("review round advance metadata must be an object");
+    if object
+        .get(crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY)
+        .and_then(|value| value.as_bool())
+        == Some(true)
+    {
+        return Ok(false);
+    }
+
+    object.insert(
+        crate::engine::ops::ADVANCE_REVIEW_ROUND_HINT_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    conn.execute(
+        "UPDATE kanban_cards SET metadata = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![metadata.to_string(), card_id],
+    )?;
+    Ok(true)
 }
 
 fn dispatch_status_and_result(
@@ -429,6 +471,19 @@ pub async fn submit_review_decision(
                     .map(|t| t.to.clone());
 
                 if let Some(ref review_st) = review_state {
+                    if let Ok(conn) = state.db.lock()
+                        && let Err(error) =
+                            mark_next_review_round_advance_on_conn(&conn, &body.card_id)
+                    {
+                        accept_failures.push(format!(
+                            "failed to mark review round advance before direct review: {error}"
+                        ));
+                        tracing::warn!(
+                            "[review-decision] failed to mark direct-review round advance for card {}: {}",
+                            body.card_id,
+                            error
+                        );
+                    }
                     // Step 1: Transition to rework_target (e.g., in_progress)
                     match crate::kanban::transition_status_with_opts(
                         &state.db,

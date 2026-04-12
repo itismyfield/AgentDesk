@@ -432,12 +432,7 @@ fn sync_terminal_card_state(db: &Db, card_id: &str) {
         return;
     };
 
-    conn.execute(
-        "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') \
-         WHERE kanban_card_id = ?1 AND status = 'dispatched'",
-        [card_id],
-    )
-    .ok();
+    crate::engine::ops::sync_auto_queue_terminal_on_conn(&conn, card_id);
 
     let pending_followups: Vec<String> = conn
         .prepare(
