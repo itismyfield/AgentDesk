@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
@@ -557,6 +557,16 @@ fn write_credential_token(
     }
 }
 
+fn onboarding_config_path(runtime_root: &Path) -> PathBuf {
+    let canonical = crate::runtime_layout::config_file_path(runtime_root);
+    let legacy = crate::runtime_layout::legacy_config_file_path(runtime_root);
+    if canonical.is_file() || !legacy.is_file() {
+        canonical
+    } else {
+        legacy
+    }
+}
+
 fn default_secondary_command_provider(primary_provider: &str) -> &'static str {
     match primary_provider {
         "codex" => "claude",
@@ -598,13 +608,7 @@ fn write_agentdesk_discord_config(
     secondary_provider: Option<&str>,
     owner_id: Option<&str>,
 ) -> Result<(), String> {
-    let canonical = crate::runtime_layout::config_file_path(runtime_root);
-    let legacy = crate::runtime_layout::legacy_config_file_path(runtime_root);
-    let config_path = if canonical.is_file() || !legacy.is_file() {
-        canonical
-    } else {
-        legacy
-    };
+    let config_path = onboarding_config_path(runtime_root);
     let mut config = if config_path.is_file() {
         crate::config::load_from_path(&config_path)
             .map_err(|e| format!("Failed to load config {}: {e}", config_path.display()))?
@@ -698,7 +702,7 @@ fn write_agentdesk_channel_bindings(
     provider: &str,
     resolved_channels: &[ResolvedChannelMapping],
 ) -> Result<(), String> {
-    let config_path = crate::runtime_layout::config_file_path(runtime_root);
+    let config_path = onboarding_config_path(runtime_root);
     let mut config = if config_path.is_file() {
         crate::config::load_from_path(&config_path)
             .map_err(|e| format!("Failed to load config {}: {e}", config_path.display()))?
@@ -756,6 +760,255 @@ fn write_agentdesk_channel_bindings(
         .map_err(|e| format!("Failed to write config {}: {e}", config_path.display()))
 }
 
+fn agent_channel_slot_ref<'a>(
+    channels: &'a crate::config::AgentChannels,
+    provider: &str,
+) -> Option<&'a Option<crate::config::AgentChannel>> {
+    match provider {
+        "claude" => Some(&channels.claude),
+        "codex" => Some(&channels.codex),
+        "gemini" => Some(&channels.gemini),
+        "qwen" => Some(&channels.qwen),
+        _ => None,
+    }
+}
+
+fn verify_onboarding_settings_artifacts(
+    runtime_root: &Path,
+    primary_token: &str,
+    primary_provider: &str,
+    secondary_token: Option<&str>,
+    secondary_provider: Option<&str>,
+    guild_id: &str,
+    owner_id: Option<&str>,
+    announce_token: Option<&str>,
+    notify_token: Option<&str>,
+    resolved_channels: &[ResolvedChannelMapping],
+) -> Result<serde_json::Value, String> {
+    let config_path = onboarding_config_path(runtime_root);
+    if !config_path.is_file() {
+        return Err(format!(
+            "onboarding config was not written at {}",
+            config_path.display()
+        ));
+    }
+    let config = crate::config::load_from_path(&config_path).map_err(|e| {
+        format!(
+            "failed to reload onboarding config {}: {e}",
+            config_path.display()
+        )
+    })?;
+
+    if config.discord.guild_id.as_deref() != Some(guild_id.trim()) {
+        return Err(format!(
+            "discord guild mismatch after onboarding: expected '{}' got {:?}",
+            guild_id.trim(),
+            config.discord.guild_id
+        ));
+    }
+    if config.discord.owner_id != parse_owner_id(owner_id) {
+        return Err(format!(
+            "discord owner mismatch after onboarding: expected {:?} got {:?}",
+            parse_owner_id(owner_id),
+            config.discord.owner_id
+        ));
+    }
+
+    let command_bot = config
+        .discord
+        .bots
+        .get("command")
+        .ok_or_else(|| "missing command bot config after onboarding".to_string())?;
+    if command_bot.token.as_deref() != Some(primary_token.trim()) {
+        return Err("primary command token was not persisted".to_string());
+    }
+    if command_bot.provider.as_deref() != Some(primary_provider.trim()) {
+        return Err("primary command provider was not persisted".to_string());
+    }
+
+    match secondary_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(expected_token) => {
+            let command2 = config
+                .discord
+                .bots
+                .get("command_2")
+                .ok_or_else(|| "missing command_2 bot config after onboarding".to_string())?;
+            let expected_provider = secondary_provider
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(default_secondary_command_provider(primary_provider));
+            if command2.token.as_deref() != Some(expected_token) {
+                return Err("secondary command token was not persisted".to_string());
+            }
+            if command2.provider.as_deref() != Some(expected_provider) {
+                return Err("secondary command provider was not persisted".to_string());
+            }
+        }
+        None => {
+            if config.discord.bots.contains_key("command_2") {
+                return Err("unexpected command_2 bot config remained after onboarding".to_string());
+            }
+        }
+    }
+
+    for mapping in resolved_channels {
+        let agent = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == mapping.role_id)
+            .ok_or_else(|| format!("agent '{}' missing from onboarding config", mapping.role_id))?;
+        if agent.provider != primary_provider {
+            return Err(format!(
+                "agent '{}' provider mismatch after onboarding: expected '{}' got '{}'",
+                mapping.role_id, primary_provider, agent.provider
+            ));
+        }
+        let slot = agent_channel_slot_ref(&agent.channels, primary_provider).ok_or_else(|| {
+            format!(
+                "unsupported provider '{}' in onboarding verification",
+                primary_provider
+            )
+        })?;
+        let channel = channel_config_from_existing(slot.clone());
+        if channel.id.as_deref() != Some(mapping.channel_id.as_str()) {
+            return Err(format!(
+                "agent '{}' channel id mismatch after onboarding",
+                mapping.role_id
+            ));
+        }
+        if channel.name.as_deref() != Some(mapping.channel_name.as_str()) {
+            return Err(format!(
+                "agent '{}' channel name mismatch after onboarding",
+                mapping.role_id
+            ));
+        }
+    }
+
+    let role_map_path = crate::runtime_layout::role_map_path(runtime_root);
+    if !role_map_path.is_file() {
+        return Err(format!(
+            "role map was not written at {}",
+            role_map_path.display()
+        ));
+    }
+
+    let workspace_root = runtime_root.join("workspaces");
+    for mapping in resolved_channels {
+        let workspace = workspace_root.join(&mapping.role_id);
+        if !workspace.is_dir() {
+            return Err(format!(
+                "workspace for agent '{}' missing at {}",
+                mapping.role_id,
+                workspace.display()
+            ));
+        }
+    }
+
+    let announce_path = runtime_root.join("credential").join("announce_bot_token");
+    match announce_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(_) if !announce_path.is_file() => {
+            return Err(format!(
+                "announce credential missing at {}",
+                announce_path.display()
+            ));
+        }
+        None if announce_path.exists() => {
+            return Err(format!(
+                "announce credential should have been removed at {}",
+                announce_path.display()
+            ));
+        }
+        _ => {}
+    }
+
+    let notify_path = runtime_root.join("credential").join("notify_bot_token");
+    match notify_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(_) if !notify_path.is_file() => {
+            return Err(format!(
+                "notify credential missing at {}",
+                notify_path.display()
+            ));
+        }
+        None if notify_path.exists() => {
+            return Err(format!(
+                "notify credential should have been removed at {}",
+                notify_path.display()
+            ));
+        }
+        _ => {}
+    }
+
+    Ok(json!({
+        "config_path": config_path.display().to_string(),
+        "role_map_path": role_map_path.display().to_string(),
+        "workspace_root": workspace_root.display().to_string(),
+        "workspace_count": resolved_channels.len(),
+        "announce_credential_path": announce_path.display().to_string(),
+        "notify_credential_path": notify_path.display().to_string(),
+    }))
+}
+
+fn verify_onboarding_pipeline_artifact(runtime_root: &Path) -> Result<serde_json::Value, String> {
+    let config_path = onboarding_config_path(runtime_root);
+    let config = if config_path.is_file() {
+        crate::config::load_from_path(&config_path).map_err(|e| {
+            format!(
+                "failed to reload onboarding config {}: {e}",
+                config_path.display()
+            )
+        })?
+    } else {
+        crate::config::Config::default()
+    };
+
+    let mut candidates = Vec::new();
+    candidates.push(config.policies.dir.join("default-pipeline.yaml"));
+    if !config.policies.dir.is_absolute() {
+        candidates.push(
+            runtime_root
+                .join(&config.policies.dir)
+                .join("default-pipeline.yaml"),
+        );
+    }
+
+    let pipeline_path = candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            format!(
+                "default pipeline not found for onboarding under '{}' or runtime root '{}'",
+                config.policies.dir.display(),
+                runtime_root.display()
+            )
+        })?;
+
+    let content = std::fs::read_to_string(&pipeline_path)
+        .map_err(|e| format!("failed to read pipeline {}: {e}", pipeline_path.display()))?;
+    let pipeline: crate::pipeline::PipelineConfig = serde_yaml::from_str(&content)
+        .map_err(|e| format!("failed to parse pipeline {}: {e}", pipeline_path.display()))?;
+    if pipeline.states.is_empty() || pipeline.transitions.is_empty() {
+        return Err(format!(
+            "pipeline {} is missing states or transitions",
+            pipeline_path.display()
+        ));
+    }
+
+    Ok(json!({
+        "path": pipeline_path.display().to_string(),
+        "states": pipeline.states.len(),
+        "transitions": pipeline.transitions.len(),
+    }))
+}
+
 /// POST /api/onboarding/complete
 /// Saves onboarding configuration and sets up agents.
 pub async fn complete(
@@ -803,137 +1056,6 @@ pub async fn complete(
         .filter(|mapping| mapping.created)
         .count();
 
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
-    // Save onboarding metadata
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_bot_token', ?1)",
-        [&body.token],
-    )
-    .ok();
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_guild_id', ?1)",
-        [&body.guild_id],
-    )
-    .ok();
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_provider', ?1)",
-        [provider],
-    )
-    .ok();
-    if let Some(ref owner) = body.owner_id {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_owner_id', ?1)",
-            [owner],
-        )
-        .ok();
-    }
-    if let Some(ref ann) = body.announce_token {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_announce_token', ?1)",
-            [ann],
-        )
-        .ok();
-    }
-    if let Some(ref ntf) = body.notify_token {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_notify_token', ?1)",
-            [ntf],
-        )
-        .ok();
-    }
-    if let Some(ref cmd2) = body.command_token_2 {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_command_token_2', ?1)",
-            [cmd2],
-        )
-        .ok();
-    }
-    if let Some(ref provider2) = body.command_provider_2 {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_command_provider_2', ?1)",
-            [provider2],
-        )
-        .ok();
-    }
-
-    // Create/update agents for each channel mapping
-    let mut created = 0;
-    for mapping in &resolved_channels {
-        conn.execute(
-            "INSERT INTO agents (id, name, discord_channel_id, description, system_prompt, status, xp) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'active', 0) \
-             ON CONFLICT(id) DO UPDATE SET \
-               name = COALESCE(excluded.name, agents.name), \
-               discord_channel_id = excluded.discord_channel_id, \
-               description = COALESCE(excluded.description, agents.description), \
-               system_prompt = COALESCE(excluded.system_prompt, agents.system_prompt)",
-            rusqlite::params![mapping.role_id, mapping.role_id, mapping.channel_id, mapping.description, mapping.system_prompt],
-        )
-        .ok();
-        created += 1;
-    }
-
-    // Create default office + department and assign agents
-    if !resolved_channels.is_empty() {
-        let (template_name, template_name_ko, template_icon, template_color) =
-            match body.template.as_deref() {
-                Some("household") => (
-                    "Household & Schedule",
-                    "가사 및 일정 도우미",
-                    "🏠",
-                    "#10b981",
-                ),
-                Some("startup") => ("Small Startup", "소규모 스타트업", "🚀", "#8b5cf6"),
-                Some("office") => ("Office Work", "사무업무", "🏢", "#3b82f6"),
-                _ => ("General", "일반", "📁", "#6b7280"),
-            };
-
-        let office_id = "hq";
-        conn.execute(
-            "INSERT OR IGNORE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
-        )
-        .ok();
-
-        let dept_id = body.template.as_deref().unwrap_or("general").to_string();
-        conn.execute(
-            "INSERT OR IGNORE INTO departments (id, name, name_ko, icon, color, office_id, sort_order) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-            rusqlite::params![
-                dept_id,
-                template_name,
-                template_name_ko,
-                template_icon,
-                template_color,
-                office_id,
-            ],
-        )
-        .ok();
-
-        for mapping in &resolved_channels {
-            conn.execute(
-                "INSERT OR REPLACE INTO office_agents (office_id, agent_id, department_id) \
-                 VALUES (?1, ?2, ?3)",
-                rusqlite::params![office_id, mapping.role_id, dept_id],
-            )
-            .ok();
-            conn.execute(
-                "UPDATE agents SET department = ?1 WHERE id = ?2",
-                rusqlite::params![dept_id, mapping.role_id],
-            )
-            .ok();
-        }
-    }
-
     let Some(root) = crate::cli::agentdesk_runtime_root() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -949,14 +1071,35 @@ pub async fn complete(
     }
 
     let config_dir = crate::runtime_layout::config_dir(&root);
-    std::fs::create_dir_all(&config_dir).ok();
+    if let Err(error) = std::fs::create_dir_all(&config_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({"error": format!("failed to create config dir {}: {error}", config_dir.display())}),
+            ),
+        );
+    }
 
     // Create workspace directories for each agent
     let workspaces_dir = root.join("workspaces");
-    std::fs::create_dir_all(&workspaces_dir).ok();
+    if let Err(error) = std::fs::create_dir_all(&workspaces_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({"error": format!("failed to create workspaces dir {}: {error}", workspaces_dir.display())}),
+            ),
+        );
+    }
     for mapping in &resolved_channels {
         let ws_dir = workspaces_dir.join(&mapping.role_id);
-        std::fs::create_dir_all(&ws_dir).ok();
+        if let Err(error) = std::fs::create_dir_all(&ws_dir) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({"error": format!("failed to create workspace {}: {error}", ws_dir.display())}),
+                ),
+            );
+        }
     }
 
     let mut by_channel_id = serde_json::Map::new();
@@ -990,8 +1133,22 @@ pub async fn complete(
     });
 
     let role_map_path = crate::runtime_layout::role_map_path(&root);
-    if let Ok(json_str) = serde_json::to_string_pretty(&role_map) {
-        std::fs::write(&role_map_path, json_str).ok();
+    let role_map_json = match serde_json::to_string_pretty(&role_map) {
+        Ok(json_str) => json_str,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to serialize role map: {error}")})),
+            );
+        }
+    };
+    if let Err(error) = std::fs::write(&role_map_path, role_map_json) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                json!({"error": format!("failed to write role map {}: {error}", role_map_path.display())}),
+            ),
+        );
     }
 
     if let Err(error) = write_agentdesk_channel_bindings(&root, provider, &resolved_channels) {
@@ -1000,14 +1157,6 @@ pub async fn complete(
             Json(json!({"error": format!("failed to write agentdesk.yaml: {error}")})),
         );
     }
-
-    // Mark onboarding complete
-    conn.execute(
-        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_complete', 'true')",
-        [],
-    )
-    .ok();
-    drop(conn);
 
     if let Err(e) = write_agentdesk_discord_config(
         &root,
@@ -1038,13 +1187,274 @@ pub async fn complete(
         );
     }
 
+    let settings_report = match verify_onboarding_settings_artifacts(
+        &root,
+        &body.token,
+        provider,
+        body.command_token_2.as_deref(),
+        body.command_provider_2.as_deref(),
+        &body.guild_id,
+        body.owner_id.as_deref(),
+        body.announce_token.as_deref(),
+        body.notify_token.as_deref(),
+        &resolved_channels,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("onboarding settings verification failed: {error}")})),
+            );
+        }
+    };
+
+    let pipeline_report = match verify_onboarding_pipeline_artifact(&root) {
+        Ok(report) => report,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("onboarding pipeline verification failed: {error}")})),
+            );
+        }
+    };
+
+    let mut conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+    let tx = match conn.transaction() {
+        Ok(tx) => tx,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to start onboarding transaction: {error}")})),
+            );
+        }
+    };
+
+    for (key, value) in [
+        ("onboarding_bot_token", Some(body.token.trim())),
+        ("onboarding_guild_id", Some(body.guild_id.trim())),
+        ("onboarding_provider", Some(provider)),
+        (
+            "onboarding_owner_id",
+            body.owner_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        (
+            "onboarding_announce_token",
+            body.announce_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        (
+            "onboarding_notify_token",
+            body.notify_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        (
+            "onboarding_command_token_2",
+            body.command_token_2
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        (
+            "onboarding_command_provider_2",
+            body.command_provider_2
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ),
+        ("onboarding_complete", Some("true")),
+    ] {
+        match value {
+            Some(value) => {
+                if let Err(error) = tx.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![key, value],
+                ) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({"error": format!("failed to persist kv_meta {}: {error}", key)}),
+                        ),
+                    );
+                }
+            }
+            None => {
+                if let Err(error) = tx.execute("DELETE FROM kv_meta WHERE key = ?1", [key]) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("failed to clear kv_meta {}: {error}", key)})),
+                    );
+                }
+            }
+        }
+    }
+
+    for mapping in &resolved_channels {
+        if let Err(error) = tx.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, description, system_prompt, status, xp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'active', 0) \
+             ON CONFLICT(id) DO UPDATE SET \
+               name = COALESCE(excluded.name, agents.name), \
+               discord_channel_id = excluded.discord_channel_id, \
+               description = COALESCE(excluded.description, agents.description), \
+               system_prompt = COALESCE(excluded.system_prompt, agents.system_prompt)",
+            rusqlite::params![
+                mapping.role_id,
+                mapping.role_id,
+                mapping.channel_id,
+                mapping.description,
+                mapping.system_prompt
+            ],
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to upsert agent {}: {error}", mapping.role_id)})),
+            );
+        }
+    }
+
+    if !resolved_channels.is_empty() {
+        let (template_name, template_name_ko, template_icon, template_color) =
+            match body.template.as_deref() {
+                Some("delivery") => ("Delivery Squad", "전달 스쿼드", "🚀", "#8b5cf6"),
+                Some("operations") => ("Operations Cell", "운영 셀", "🛠️", "#10b981"),
+                Some("insight") => ("Insight Desk", "인사이트 데스크", "📚", "#3b82f6"),
+                _ => ("General", "일반", "📁", "#6b7280"),
+            };
+
+        let office_id = "hq";
+        if let Err(error) = tx.execute(
+            "INSERT OR IGNORE INTO offices (id, name, name_ko, icon) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![office_id, "Headquarters", "본사", "🏛️"],
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to upsert default office: {error}")})),
+            );
+        }
+
+        let dept_id = body.template.as_deref().unwrap_or("general").to_string();
+        if let Err(error) = tx.execute(
+            "INSERT OR IGNORE INTO departments (id, name, name_ko, icon, color, office_id, sort_order) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+            rusqlite::params![
+                dept_id,
+                template_name,
+                template_name_ko,
+                template_icon,
+                template_color,
+                office_id,
+            ],
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to upsert onboarding department: {error}")})),
+            );
+        }
+
+        for mapping in &resolved_channels {
+            if let Err(error) = tx.execute(
+                "INSERT OR REPLACE INTO office_agents (office_id, agent_id, department_id) \
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![office_id, mapping.role_id, dept_id],
+            ) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("failed to assign office agent {}: {error}", mapping.role_id)}),
+                    ),
+                );
+            }
+            if let Err(error) = tx.execute(
+                "UPDATE agents SET department = ?1 WHERE id = ?2",
+                rusqlite::params![dept_id, mapping.role_id],
+            ) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({"error": format!("failed to set agent department {}: {error}", mapping.role_id)}),
+                    ),
+                );
+            }
+        }
+    }
+
+    if let Err(error) = tx.commit() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to commit onboarding transaction: {error}")})),
+        );
+    }
+
+    let checklist = vec![
+        json!({
+            "key": "channels",
+            "ok": true,
+            "label": "Discord channels ready",
+            "detail": format!(
+                "{} channel mappings resolved ({} created, {} reused)",
+                resolved_channels.len(),
+                channels_created,
+                resolved_channels.len().saturating_sub(channels_created),
+            ),
+        }),
+        json!({
+            "key": "settings",
+            "ok": true,
+            "label": "Settings persisted",
+            "detail": format!(
+                "agentdesk config, credentials, role-map, and {} workspaces verified",
+                resolved_channels.len()
+            ),
+        }),
+        json!({
+            "key": "pipeline",
+            "ok": true,
+            "label": "Pipeline ready",
+            "detail": format!(
+                "default pipeline verified at {}",
+                pipeline_report["path"].as_str().unwrap_or("(unknown)")
+            ),
+        }),
+    ];
+
     (
         StatusCode::OK,
         Json(json!({
             "ok": true,
-            "agents_created": created,
+            "agents_created": resolved_channels.len(),
             "channels_created": channels_created,
             "provider": provider,
+            "checklist": checklist,
+            "artifacts": {
+                "settings": settings_report,
+                "pipeline": pipeline_report,
+                "channel_mappings": resolved_channels
+                    .iter()
+                    .map(|mapping| {
+                        json!({
+                            "role_id": mapping.role_id,
+                            "channel_id": mapping.channel_id,
+                            "channel_name": mapping.channel_name,
+                            "created": mapping.created,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            }
         })),
     )
 }

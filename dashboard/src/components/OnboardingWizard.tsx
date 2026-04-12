@@ -138,6 +138,20 @@ interface OnboardingStatusResponse {
   };
 }
 
+interface ChecklistItem {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+interface CompletionChecklistItem {
+  key: string;
+  ok: boolean;
+  label: string;
+  detail: string;
+}
+
 interface Props {
   isKo: boolean;
   onComplete: () => void;
@@ -166,167 +180,140 @@ interface Template {
 
 const TEMPLATES: Template[] = [
   {
-    key: "household",
-    name: "가사 및 일정 도우미",
-    nameEn: "Household & Schedule",
-    icon: "🏠",
-    description: "가정생활을 돕는 AI 에이전트 팀",
-    descriptionEn: "AI agent team for household management",
-    agents: [
-      {
-        id: "scheduler",
-        name: "일정봇",
-        nameEn: "Scheduler",
-        description: "가족 일정 관리, 리마인더, 약속 조율",
-        descriptionEn: "Family scheduling, reminders, appointments",
-        prompt:
-          "당신은 가족 일정 관리 도우미입니다. 가족 구성원의 일정을 조율하고, 중요한 약속을 리마인드합니다. 충돌하는 일정이 있으면 미리 알려주고 대안을 제안합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 일정 변경은 반드시 확인 후 반영합니다",
-      },
-      {
-        id: "household",
-        name: "가사봇",
-        nameEn: "Household",
-        description: "장보기 목록, 청소 루틴, 가사 분담 관리",
-        descriptionEn: "Shopping lists, cleaning routines, chore management",
-        prompt:
-          "당신은 가사 관리 도우미입니다. 장보기 목록을 관리하고, 청소 루틴을 설정하며, 가족 간 가사 분담을 조율합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 실용적이고 구체적인 제안을 합니다",
-      },
-      {
-        id: "cooking",
-        name: "요리봇",
-        nameEn: "Cooking",
-        description: "레시피 추천, 식단 계획, 영양 관리",
-        descriptionEn: "Recipe suggestions, meal planning, nutrition",
-        prompt:
-          "당신은 요리 및 식단 관리 도우미입니다. 가족의 식성과 영양 균형을 고려한 레시피를 추천하고, 주간 식단을 계획합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 재료와 조리법을 명확하게 안내합니다",
-      },
-      {
-        id: "health",
-        name: "건강봇",
-        nameEn: "Health",
-        description: "건강 관리, 운동 추천, 복약 알림",
-        descriptionEn: "Health tracking, exercise, medication reminders",
-        prompt:
-          "당신은 가족 건강 관리 도우미입니다. 운동 루틴을 추천하고, 복약 시간을 알려주며, 건강 관련 정보를 제공합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 의학적 판단은 전문가 상담을 권유합니다",
-      },
-      {
-        id: "shopping",
-        name: "쇼핑봇",
-        nameEn: "Shopping",
-        description: "가격 비교, 쿠폰 검색, 온라인 구매 도우미",
-        descriptionEn: "Price comparison, coupons, online shopping",
-        prompt:
-          "당신은 스마트 쇼핑 도우미입니다. 제품 가격을 비교하고, 할인 정보와 쿠폰을 찾아주며, 효율적인 구매를 돕습니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 가성비 중심으로 추천합니다",
-      },
-    ],
-  },
-  {
-    key: "startup",
-    name: "소규모 스타트업",
-    nameEn: "Small Startup",
+    key: "delivery",
+    name: "전달 스쿼드",
+    nameEn: "Delivery Squad",
     icon: "🚀",
-    description: "스타트업 팀을 위한 AI 에이전트 팀",
-    descriptionEn: "AI agent team for startup teams",
+    description: "출시와 납품에 집중하는 역할별 실행 팀",
+    descriptionEn: "Role-based execution team focused on shipping",
     agents: [
       {
         id: "pm",
         name: "PM",
         nameEn: "PM",
-        description: "프로젝트 관리, 스프린트 계획, 이슈 추적",
-        descriptionEn: "Project management, sprint planning, issue tracking",
+        description: "우선순위, 범위, 일정 조율",
+        descriptionEn: "Priorities, scope, and delivery coordination",
         prompt:
-          "당신은 프로젝트 매니저입니다. 스프린트를 계획하고, 이슈를 추적하며, 팀원 간 작업을 조율합니다. 우선순위를 관리하고 데드라인을 지키도록 돕습니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 결정과 근거를 명확히 전달합니다",
-      },
-      {
-        id: "developer",
-        name: "개발자",
-        nameEn: "Developer",
-        description: "코드 작성, 버그 수정, 코드 리뷰",
-        descriptionEn: "Coding, bug fixes, code review",
-        prompt:
-          "당신은 소프트웨어 개발자입니다. 기능 구현, 버그 수정, 코드 리뷰를 수행합니다. 클린 코드와 테스트를 중시합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 코드 변경은 이유와 함께 설명합니다",
+          "당신은 제품 전달 스쿼드의 PM입니다. 목표를 작업 단위로 쪼개고, 우선순위와 일정 리스크를 관리하며, 결정 사항과 남은 이슈를 명확히 정리합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 결정과 근거를 짧고 선명하게 전달합니다",
       },
       {
         id: "designer",
         name: "디자이너",
         nameEn: "Designer",
-        description: "UI/UX 디자인, 프로토타입, 디자인 시스템",
-        descriptionEn: "UI/UX design, prototyping, design system",
+        description: "화면 구조, 흐름, 인터랙션 설계",
+        descriptionEn: "Interface structure, flows, and interaction design",
         prompt:
-          "당신은 UI/UX 디자이너입니다. 사용자 중심의 인터페이스를 설계하고, 프로토타입을 제작하며, 일관된 디자인 시스템을 유지합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 디자인 결정의 근거를 설명합니다",
+          "당신은 제품 전달 스쿼드의 디자이너입니다. 사용 흐름을 설계하고, 핵심 화면의 정보 구조와 인터랙션을 제안하며, 구현 가능한 수준으로 디자인 의도를 정리합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 디자인 결정의 이유와 사용자 영향을 함께 설명합니다",
+      },
+      {
+        id: "developer",
+        name: "개발자",
+        nameEn: "Developer",
+        description: "기능 구현, 버그 수정, 테스트 보강",
+        descriptionEn: "Implementation, bug fixes, and test coverage",
+        prompt:
+          "당신은 제품 전달 스쿼드의 개발자입니다. 요구사항을 실제 코드 변경으로 옮기고, 테스트와 검증까지 마무리해 배포 가능한 상태를 만듭니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 구현 전제와 리스크를 숨기지 않고 설명합니다",
       },
       {
         id: "qa",
         name: "QA",
         nameEn: "QA",
-        description: "테스트 자동화, 품질 관리, 버그 리포트",
-        descriptionEn: "Test automation, quality assurance, bug reports",
+        description: "회귀 확인, 재현 경로, 릴리스 체크",
+        descriptionEn: "Regression checks, repro steps, and release checks",
         prompt:
-          "당신은 QA 엔지니어입니다. 테스트 케이스를 작성하고, 자동화 테스트를 구축하며, 발견된 버그를 체계적으로 보고합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 재현 경로를 정확히 기술합니다",
-      },
-      {
-        id: "marketing",
-        name: "마케팅",
-        nameEn: "Marketing",
-        description: "마케팅 전략, SNS 관리, 콘텐츠 제작",
-        descriptionEn: "Marketing strategy, social media, content creation",
-        prompt:
-          "당신은 마케팅 담당자입니다. 마케팅 전략을 수립하고, SNS 콘텐츠를 제작하며, 고객 분석과 캠페인을 관리합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 데이터 기반으로 의사결정합니다",
+          "당신은 제품 전달 스쿼드의 QA입니다. 변경 사항을 검증하고, 회귀 위험과 누락된 테스트를 찾으며, 재현 가능한 형태로 품질 이슈를 정리합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 발견 사항은 재현 경로와 영향 범위를 함께 적습니다",
       },
     ],
   },
   {
-    key: "office",
-    name: "사무업무",
-    nameEn: "Office Work",
-    icon: "🏢",
-    description: "사무 업무를 자동화하는 AI 에이전트 팀",
-    descriptionEn: "AI agent team for office automation",
+    key: "operations",
+    name: "운영 셀",
+    nameEn: "Operations Cell",
+    icon: "🛠️",
+    description: "반복 업무와 실행 흐름을 안정화하는 운영 팀",
+    descriptionEn: "Role-based operations team for recurring workflows",
     agents: [
       {
-        id: "schedule-mgr",
-        name: "일정관리",
-        nameEn: "Schedule Manager",
-        description: "회의 일정 조율, 캘린더 관리, 알림",
-        descriptionEn: "Meeting scheduling, calendar management, reminders",
+        id: "ops-lead",
+        name: "운영 리드",
+        nameEn: "Ops Lead",
+        description: "운영 정책, 우선순위, 예외 처리 기준",
+        descriptionEn: "Operational policy, priorities, and escalation rules",
         prompt:
-          "당신은 일정 관리 비서입니다. 회의 일정을 조율하고, 캘린더를 관리하며, 중요한 일정을 리마인드합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 일정 변경 시 참석자 전원에게 알립니다",
+          "당신은 운영 셀의 운영 리드입니다. 반복 업무를 표준화하고, 예외 상황을 분류하며, 누가 무엇을 언제 처리해야 하는지 운영 기준을 정리합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 운영 판단은 기준과 우선순위를 함께 제시합니다",
       },
       {
-        id: "email-asst",
-        name: "이메일",
-        nameEn: "Email",
-        description: "이메일 작성, 분류, 자동 응답",
-        descriptionEn: "Email drafting, sorting, auto-reply",
+        id: "scheduler",
+        name: "스케줄러",
+        nameEn: "Scheduler",
+        description: "일정 배치, 리마인더, 대기열 정리",
+        descriptionEn: "Scheduling, reminders, and queue hygiene",
         prompt:
-          "당신은 이메일 관리 비서입니다. 이메일을 작성하고, 수신 메일을 분류하며, 일상적인 문의에 자동 응답을 작성합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 비즈니스 메일은 격식체로 작성합니다",
+          "당신은 운영 셀의 스케줄러입니다. 반복 일정과 마감 일정을 정리하고, 충돌을 감지하며, 늦어지는 항목을 먼저 끌어올립니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 시간, 우선순위, 다음 액션을 분리해서 설명합니다",
       },
       {
-        id: "doc-writer",
-        name: "문서작성",
-        nameEn: "Document Writer",
-        description: "보고서, 제안서, 회의록 작성",
-        descriptionEn: "Reports, proposals, meeting notes",
+        id: "support",
+        name: "서포트",
+        nameEn: "Support",
+        description: "문의 응답, 장애 분류, 사용자 커뮤니케이션",
+        descriptionEn: "Support triage, incidents, and user communication",
         prompt:
-          "당신은 문서 작성 전문가입니다. 보고서, 제안서, 회의록 등 비즈니스 문서를 깔끔하고 전문적으로 작성합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 명확한 구조와 간결한 문장을 사용합니다",
+          "당신은 운영 셀의 서포트 담당입니다. 문의를 분류하고, 즉시 답할 수 있는 항목과 에스컬레이션이 필요한 항목을 구분해 안내합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 불확실한 내용은 추측하지 않고 상태를 투명하게 공유합니다",
       },
+      {
+        id: "records",
+        name: "기록 담당",
+        nameEn: "Records",
+        description: "회의록, 운영 로그, SOP 정리",
+        descriptionEn: "Notes, runbooks, and SOP maintenance",
+        prompt:
+          "당신은 운영 셀의 기록 담당입니다. 회의 내용과 운영 결정을 잃지 않도록 정리하고, 실행 가능한 체크리스트와 SOP로 바꿔 팀에 남깁니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 맥락보다 실행 항목이 먼저 보이도록 정리합니다",
+      },
+    ],
+  },
+  {
+    key: "insight",
+    name: "인사이트 데스크",
+    nameEn: "Insight Desk",
+    icon: "📚",
+    description: "조사, 분석, 문서화를 담당하는 인사이트 팀",
+    descriptionEn: "Role-based research and analysis team",
+    agents: [
       {
         id: "researcher",
-        name: "리서치",
+        name: "리서처",
         nameEn: "Researcher",
-        description: "시장 조사, 자료 수집, 경쟁사 분석",
-        descriptionEn: "Market research, data collection, competitive analysis",
+        description: "자료 조사, 출처 수집, 사실 확인",
+        descriptionEn: "Research, source collection, and fact checks",
         prompt:
-          "당신은 리서치 전문가입니다. 시장 동향을 조사하고, 경쟁사를 분석하며, 의사결정에 필요한 자료를 수집하고 정리합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 출처를 명시하고 객관적으로 분석합니다",
+          "당신은 인사이트 데스크의 리서처입니다. 문제와 관련된 자료를 빠르게 찾고, 신뢰할 수 있는 출처와 함께 정리해 후속 분석이 가능하도록 만듭니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 출처와 확인 시점을 함께 남깁니다",
       },
       {
-        id: "data-analyst",
-        name: "데이터분석",
-        nameEn: "Data Analyst",
-        description: "데이터 분석, 시각화, 인사이트 도출",
-        descriptionEn: "Data analysis, visualization, insights",
+        id: "analyst",
+        name: "애널리스트",
+        nameEn: "Analyst",
+        description: "패턴 분석, 비교, 핵심 인사이트 도출",
+        descriptionEn: "Pattern analysis, comparison, and insight synthesis",
         prompt:
-          "당신은 데이터 분석가입니다. 비즈니스 데이터를 분석하고, 시각화 자료를 제작하며, 실행 가능한 인사이트를 도출합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 수치와 근거를 명확히 제시합니다",
+          "당신은 인사이트 데스크의 애널리스트입니다. 수집된 자료를 구조화하고, 의미 있는 비교와 패턴을 뽑아 다음 의사결정에 바로 쓸 수 있는 인사이트를 만듭니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 숫자와 근거를 먼저 제시합니다",
+      },
+      {
+        id: "strategist",
+        name: "전략가",
+        nameEn: "Strategist",
+        description: "옵션 평가, 우선순위, 실행 방향 제안",
+        descriptionEn: "Options, prioritization, and strategic recommendations",
+        prompt:
+          "당신은 인사이트 데스크의 전략가입니다. 분석 결과를 바탕으로 선택지를 정리하고, 비용과 리스크를 비교해 실행 방향을 제안합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 추천안과 보류안을 분명히 구분합니다",
+      },
+      {
+        id: "writer",
+        name: "라이터",
+        nameEn: "Writer",
+        description: "보고서, 브리프, 공유용 문서 정리",
+        descriptionEn: "Reports, briefs, and shareable writeups",
+        prompt:
+          "당신은 인사이트 데스크의 라이터입니다. 조사와 분석 결과를 팀이 바로 읽고 행동할 수 있는 브리프, 보고서, 회의 자료로 압축합니다.\n\n## 소통 원칙\n- 한국어로 소통합니다\n- 길이보다 전달력을 우선합니다",
       },
     ],
   },
@@ -349,6 +336,37 @@ function Tip({ text }: { text: string }) {
         {text}
       </span>
     </span>
+  );
+}
+
+function ChecklistPanel({ title, items }: { title: string; items: ChecklistItem[] | CompletionChecklistItem[] }) {
+  return (
+    <div
+      className="rounded-xl border p-4 space-y-2"
+      style={{ borderColor: "rgba(148,163,184,0.16)", backgroundColor: "rgba(15,23,42,0.36)" }}
+    >
+      <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
+        {title}
+      </div>
+      {items.map((item) => (
+        <div
+          key={item.key}
+          className="rounded-lg border px-3 py-2 text-sm"
+          style={{
+            borderColor: item.ok ? "rgba(16,185,129,0.22)" : "rgba(248,113,113,0.24)",
+            backgroundColor: item.ok ? "rgba(16,185,129,0.08)" : "rgba(127,29,29,0.18)",
+          }}
+        >
+          <div className="flex items-center gap-2">
+            <span style={{ color: item.ok ? "#86efac" : "#fca5a5" }}>{item.ok ? "✓" : "!"}</span>
+            <span style={{ color: "var(--th-text-primary)" }}>{item.label}</span>
+          </div>
+          <div className="mt-1 text-xs" style={{ color: "var(--th-text-muted)" }}>
+            {item.detail}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -391,10 +409,49 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   // Step 5: Owner
   const [ownerId, setOwnerId] = useState("");
   const [completing, setCompleting] = useState(false);
+  const [completionChecklist, setCompletionChecklist] = useState<CompletionChecklistItem[] | null>(null);
   const [error, setError] = useState("");
 
   // Get primary provider from first command bot
   const primaryProvider = commandBots[0]?.provider ?? "claude";
+  const uniqueProviders = [...new Set(commandBots.map((bot) => bot.provider))];
+  const selectedTemplateInfo = TEMPLATES.find((template) => template.key === selectedTemplate) ?? null;
+  const validatedCommandCount = commandBots.filter((bot) => bot.botInfo?.valid).length;
+  const commandBotsReady =
+    commandBots.length > 0 &&
+    commandBots.every((bot) => Boolean(bot.token.trim()) && Boolean(bot.botInfo?.valid));
+  const announceReady = Boolean(announceToken.trim()) && Boolean(announceBotInfo?.valid);
+  const notifyReady = !notifyToken.trim() || Boolean(notifyBotInfo?.valid);
+  const providersReady =
+    uniqueProviders.length > 0 &&
+    uniqueProviders.every(
+      (provider) => providerStatuses[provider]?.installed && providerStatuses[provider]?.logged_in,
+    );
+  const customAgents = agents.filter((agent) => agent.custom);
+  const agentsReady =
+    agents.length > 0 &&
+    agents.every((agent) => Boolean(agent.prompt.trim()));
+  const customAgentsReady = customAgents.every((agent) => Boolean(agent.description.trim()));
+  const hasSelectedGuild = Boolean(selectedGuild.trim());
+  const channelAssignmentsReady =
+    agents.length > 0 &&
+    channelAssignments.length === agents.length &&
+    channelAssignments.every(
+      (assignment) =>
+        Boolean((assignment.channelId || assignment.channelName).trim()) &&
+        Boolean((assignment.channelName || assignment.recommendedName).trim()),
+    );
+  const newChannelCount = channelAssignments.filter((assignment) => !assignment.channelId).length;
+  const ownerIdValid = !ownerId.trim() || /^\d{17,20}$/.test(ownerId.trim());
+  const completionReady =
+    commandBotsReady &&
+    announceReady &&
+    providersReady &&
+    agentsReady &&
+    hasSelectedGuild &&
+    channelAssignmentsReady &&
+    ownerIdValid &&
+    notifyReady;
 
   // Load existing config for pre-fill
   useEffect(() => {
@@ -592,6 +649,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
         custom: true,
       },
     ]);
+    setExpandedAgent(id);
     setCustomName("");
     setCustomDesc("");
   };
@@ -628,7 +686,13 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   };
 
   const handleComplete = async () => {
+    if (!completionReady) {
+      setError(tr("완료 전 체크리스트의 실패 항목을 먼저 해결하세요.", "Resolve the failed checklist items before completing setup."));
+      return;
+    }
+
     setCompleting(true);
+    setCompletionChecklist(null);
     setError("");
     try {
       const r = await fetch("/api/onboarding/complete", {
@@ -656,7 +720,14 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       });
       const d = await r.json();
       if (d.ok) {
-        onComplete();
+        if (Array.isArray(d.checklist)) {
+          setCompletionChecklist(d.checklist);
+          window.setTimeout(() => {
+            onComplete();
+          }, 1200);
+        } else {
+          onComplete();
+        }
       } else {
         setError(d.error || tr("설정 저장 실패", "Failed to save"));
       }
@@ -693,10 +764,140 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   const btnSmall =
     "px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors";
   const labelStyle = "text-xs font-medium block mb-1";
+  const actionRow = "flex flex-col sm:flex-row gap-3 pt-2";
   const borderLight = "rgba(148,163,184,0.2)";
   const borderInput = "rgba(148,163,184,0.24)";
 
   const guild = guilds.find((g) => g.id === selectedGuild);
+  const step1Checklist: ChecklistItem[] = [
+    {
+      key: "command-bots",
+      label: tr("실행 봇 검증", "Command bots validated"),
+      ok: commandBotsReady,
+      detail: tr(
+        `${validatedCommandCount}/${commandBots.length}개 실행 봇 토큰이 검증되었습니다.`,
+        `${validatedCommandCount}/${commandBots.length} command bot tokens are validated.`,
+      ),
+    },
+    {
+      key: "announce-bot",
+      label: tr("통신 봇 검증", "Communication bot validated"),
+      ok: announceReady,
+      detail: announceReady
+        ? tr("채널 생성과 권한 설정에 사용할 통신 봇이 준비되었습니다.", "Communication bot is ready for channel creation and permissions.")
+        : tr("통신 봇이 없으면 실제 Discord 채널 생성이 진행되지 않습니다.", "Without the communication bot, real Discord channel setup cannot run."),
+    },
+    {
+      key: "notify-bot",
+      label: tr("알림 봇 상태", "Notification bot status"),
+      ok: notifyReady,
+      detail: notifyToken.trim()
+        ? tr("알림 봇 토큰이 검증되었습니다.", "Notification bot token is validated.")
+        : tr("선택 사항입니다. 비워두면 알림 봇 없이 진행합니다.", "Optional. Leave blank to continue without a notification bot."),
+    },
+  ];
+  const step2Checklist: ChecklistItem[] = uniqueProviders.map((provider) => {
+    const status = providerStatuses[provider];
+    const installed = Boolean(status?.installed);
+    const loggedIn = Boolean(status?.installed && status?.logged_in);
+    return {
+      key: provider,
+      label: tr(`${providerCliName(provider)} 준비`, `${providerCliName(provider)} ready`),
+      ok: installed && loggedIn,
+      detail: !status
+        ? tr("아직 확인 전입니다. 다시 확인을 눌러 상태를 읽어오세요.", "Not checked yet. Re-run the provider check.")
+        : installed && loggedIn
+          ? tr("CLI 설치와 로그인 상태가 모두 확인되었습니다.", "CLI installation and login are both confirmed.")
+          : !installed
+            ? providerInstallHint(provider, isKo)
+            : `${tr("로그인 필요:", "Login required:")} ${providerLoginCommand(provider)}`,
+    };
+  });
+  const step3Checklist: ChecklistItem[] = [
+    {
+      key: "preset",
+      label: tr("역할 프리셋 또는 커스텀 팀 구성", "Role preset or custom team selected"),
+      ok: agents.length > 0,
+      detail: selectedTemplateInfo
+        ? tr(
+            `${selectedTemplateInfo.name} 프리셋을 기준으로 ${agents.length}개 에이전트를 구성했습니다.`,
+            `${selectedTemplateInfo.nameEn} preset selected with ${agents.length} agents.`,
+          )
+        : tr(
+            `${agents.length}개 커스텀 에이전트를 직접 구성했습니다.`,
+            `${agents.length} custom agents configured manually.`,
+          ),
+    },
+    {
+      key: "prompts",
+      label: tr("모든 에이전트 프롬프트 준비", "All agent prompts prepared"),
+      ok: agentsReady,
+      detail: agentsReady
+        ? tr("각 에이전트에 시스템 프롬프트가 채워져 있습니다.", "Every agent has a system prompt.")
+        : tr("비어 있는 시스템 프롬프트가 있으면 완료할 수 없습니다.", "Blank system prompts block completion."),
+    },
+    {
+      key: "custom-guidance",
+      label: tr("커스텀 에이전트 설명 준비", "Custom agent descriptions ready"),
+      ok: customAgentsReady,
+      detail: customAgents.length === 0
+        ? tr("현재는 프리셋 에이전트만 사용 중입니다.", "Only preset agents are in use right now.")
+        : customAgentsReady
+          ? tr("설명 기반으로 AI 프롬프트 초안을 생성할 준비가 되었습니다.", "Descriptions are ready for AI prompt generation.")
+          : tr("커스텀 에이전트의 이름과 설명을 채워야 AI 초안이 더 정확해집니다.", "Fill in custom agent names and descriptions for better AI prompt drafts."),
+    },
+  ];
+  const step4Checklist: ChecklistItem[] = [
+    {
+      key: "guild",
+      label: tr("Discord 서버 선택", "Discord server selected"),
+      ok: hasSelectedGuild,
+      detail: hasSelectedGuild
+        ? tr("이 서버에 채널 생성/재사용을 적용합니다.", "Channel creation and reuse will target this server.")
+        : tr("실제 채널 생성을 위해 Discord 서버 선택이 필수입니다.", "Selecting a Discord server is required for real channel setup."),
+    },
+    {
+      key: "assignments",
+      label: tr("에이전트별 채널 매핑", "Agent-to-channel mapping ready"),
+      ok: channelAssignmentsReady,
+      detail: channelAssignmentsReady
+        ? tr(
+            `${channelAssignments.length}개 에이전트 채널 매핑이 준비되었습니다.`,
+            `${channelAssignments.length} agent channel mappings are ready.`,
+          )
+        : tr("모든 에이전트에 채널 이름 또는 기존 채널을 지정해야 합니다.", "Each agent needs a channel name or existing channel."),
+    },
+    {
+      key: "new-channels",
+      label: tr("새 채널 생성 준비", "New channel creation ready"),
+      ok: newChannelCount === 0 || announceReady,
+      detail:
+        newChannelCount === 0
+          ? tr("모든 에이전트가 기존 채널에 연결됩니다.", "All agents are mapped to existing channels.")
+          : tr(
+              `${newChannelCount}개 채널은 완료 시 자동 생성됩니다.`,
+              `${newChannelCount} channels will be created automatically on completion.`,
+            ),
+    },
+  ];
+  const step5Checklist: ChecklistItem[] = [
+    {
+      key: "owner-id",
+      label: tr("소유자 ID 형식", "Owner ID format"),
+      ok: ownerIdValid,
+      detail: ownerId.trim()
+        ? tr("18~19자리 Discord 사용자 ID 형식인지 확인했습니다.", "Checked that the value matches a Discord user ID format.")
+        : tr("비워두면 첫 메시지 발신자가 자동 소유자가 됩니다.", "Leave blank to make the first message sender the owner."),
+    },
+    {
+      key: "apply-ready",
+      label: tr("실제 세팅 적용 준비", "Ready to apply real setup"),
+      ok: completionReady,
+      detail: completionReady
+        ? tr("완료 시 Discord 채널, 설정 파일, 파이프라인 검증까지 서버에서 진행합니다.", "Completion will apply Discord channels, settings, and pipeline verification on the server.")
+        : tr("이전 단계의 실패 항목이 남아 있어 아직 완료를 실행할 수 없습니다.", "A previous step is still failing, so completion is blocked."),
+    },
+  ];
 
   // ── Render ──────────────────────────────────────────
 
@@ -961,7 +1162,9 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           </div>
 
           {/* Actions */}
-          <div className="flex gap-3 pt-2">
+          <ChecklistPanel title={tr("Step 1 체크리스트", "Step 1 checklist")} items={step1Checklist} />
+
+          <div className={actionRow}>
             <button
               onClick={() => void validateStep1()}
               disabled={!commandBots[0]?.token || !announceToken || validating}
@@ -983,7 +1186,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           </div>
           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {tr("토큰은 나중에 설정 파일에서 직접 입력할 수 있습니다: ", "Tokens can be set later in: ")}
-            <code className="text-xs px-1 py-0.5 rounded bg-surface-hover">~/.adk/release/agentdesk.yaml</code>
+            <code className="text-xs px-1 py-0.5 rounded bg-surface-hover">~/.adk/release/config/agentdesk.yaml</code>
           </p>
         </div>
       )}
@@ -1065,7 +1268,9 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             })}
           </div>
 
-          <div className="flex gap-3 pt-2">
+          <ChecklistPanel title={tr("Step 2 체크리스트", "Step 2 checklist")} items={step2Checklist} />
+
+          <div className={actionRow}>
             <button onClick={() => setStep(1)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
@@ -1084,12 +1289,12 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
         <div className={stepBox} style={{ borderColor: borderLight }}>
           <div>
             <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
-              {tr("에이전트 선택", "Select Agents")}
+              {tr("역할 프리셋과 에이전트 구성", "Role Presets & Agents")}
             </h2>
             <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
               {tr(
-                "용도에 맞는 에이전트 템플릿을 선택하거나, 커스텀 에이전트를 직접 만들 수 있습니다.",
-                "Choose an agent template or create custom agents.",
+                "역할별 프리셋으로 팀을 빠르게 시작하거나, 필요한 에이전트를 직접 추가할 수 있습니다.",
+                "Start from a role-based preset or add the exact agents you need.",
               )}
             </p>
           </div>
@@ -1114,6 +1319,20 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 </div>
               </button>
             ))}
+          </div>
+
+          <div
+            className="rounded-xl border p-4 space-y-2"
+            style={{ borderColor: "rgba(99,102,241,0.2)", backgroundColor: "rgba(99,102,241,0.08)" }}
+          >
+            <div className="text-sm font-medium" style={{ color: "#c7d2fe" }}>
+              {tr("커스텀 에이전트의 AI 프롬프트 초안 만들기", "Create AI prompt drafts for custom agents")}
+            </div>
+            <div className="text-xs space-y-1" style={{ color: "var(--th-text-secondary)" }}>
+              <div>{tr("1. 이름과 한줄 설명을 적고 에이전트를 추가합니다.", "1. Add an agent with a name and one-line description.")}</div>
+              <div>{tr("2. 카드 펼치기 → `AI 초안 생성`으로 시스템 프롬프트 뼈대를 만듭니다.", "2. Expand the card and click `AI Draft` to build the first system prompt draft.")}</div>
+              <div>{tr("3. 담당 업무, 금지사항, 말투를 직접 보정하면 품질이 크게 올라갑니다.", "3. Refine responsibilities, guardrails, and tone for a much better final prompt.")}</div>
+            </div>
           </div>
 
           {/* Agent list (from template or custom) */}
@@ -1159,7 +1378,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                             className={btnSmall}
                             style={{ borderColor: "rgba(99,102,241,0.4)", color: "#a5b4fc" }}
                           >
-                            {generatingPrompt ? tr("생성 중...", "Generating...") : tr("AI 생성", "AI Generate")}
+                            {generatingPrompt ? tr("생성 중...", "Generating...") : tr("AI 초안 생성", "AI Draft")}
                           </button>
                         )}
                       </div>
@@ -1183,7 +1402,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
           )}
 
           {/* Custom agent creation — single row */}
-          <div className="flex items-center gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2">
             <input
               type="text"
               placeholder={tr("에이전트 이름", "Agent name")}
@@ -1203,13 +1422,15 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             <button
               onClick={addCustomAgent}
               disabled={!customName.trim()}
-              className="px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
+              className="w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
             >
               + {tr("추가", "Add")}
             </button>
           </div>
 
-          <div className="flex gap-3 pt-2">
+          <ChecklistPanel title={tr("Step 3 체크리스트", "Step 3 checklist")} items={step3Checklist} />
+
+          <div className={actionRow}>
             <button onClick={() => setStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
@@ -1229,8 +1450,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             </h2>
             <p className="text-sm mt-1" style={{ color: "var(--th-text-muted)" }}>
               {tr(
-                "각 에이전트가 사용할 Discord 채널을 설정합니다. 추천 이름이 미리 채워져 있으며, 기존 채널을 선택하거나 새 이름을 입력할 수 있습니다.",
-                "Set up Discord channels for each agent. Recommended names are pre-filled. Select existing channels or enter new names.",
+                "각 에이전트가 사용할 Discord 채널을 실제 서버 기준으로 설정합니다. 기존 채널을 재사용하거나, 추천 이름으로 새 채널을 만들 수 있습니다.",
+                "Configure real Discord channels for each agent. Reuse existing channels or create new ones from the recommended names.",
               )}
             </p>
           </div>
@@ -1265,8 +1486,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             <div className="rounded-xl p-4 text-sm" style={{ backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)" }}>
               <div style={{ color: "#fde68a" }}>
                 {tr(
-                  "봇이 서버에 초대되지 않았거나, 봇 토큰이 입력되지 않았습니다. 이전 단계에서 봇을 설정하거나, 아래에서 채널 이름을 직접 입력하세요.",
-                  "Bot not invited to any server, or no bot token set. Set up bots in previous step, or enter channel names manually below.",
+                  "통신 봇이 어떤 서버에도 초대되지 않았거나 토큰 검증이 끝나지 않았습니다. 실제 채널 생성 보장을 위해 Step 1로 돌아가 봇 초대부터 완료하세요.",
+                  "The communication bot is not invited to any server yet, or token validation is incomplete. Go back to Step 1 and finish the invite before continuing.",
                 )}
               </div>
             </div>
@@ -1280,7 +1501,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   <span className="text-sm font-medium" style={{ color: "var(--th-text-primary)" }}>{ca.agentName}</span>
                   <span className="text-xs" style={{ color: "var(--th-text-muted)" }}>→</span>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-col sm:flex-row gap-2">
                   {guild && guild.channels.length > 0 ? (
                     <select
                       value={ca.channelId}
@@ -1307,14 +1528,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   ) : (
                     <input
                       type="text"
-                      value={ca.channelName}
-                      onChange={(e) => {
-                        setChannelAssignments((prev) => {
-                          const copy = [...prev];
-                          copy[i] = { ...ca, channelName: e.target.value };
-                          return copy;
-                        });
-                      }}
+                      value={ca.channelName || ca.recommendedName}
+                      readOnly
                       className="flex-1 rounded-lg px-3 py-2 text-sm bg-surface-subtle border"
                       style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
                       placeholder={ca.recommendedName}
@@ -1334,11 +1549,22 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             </p>
           )}
 
-          <div className="flex gap-3 pt-2">
+          {!guild && (
+            <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+              {tr(
+                "서버를 선택하면 각 추천 채널명을 기존 채널에 연결하거나 새 채널로 생성할 수 있습니다.",
+                "Once a server is selected, each recommended channel can be linked to an existing channel or created as a new one.",
+              )}
+            </p>
+          )}
+
+          <ChecklistPanel title={tr("Step 4 체크리스트", "Step 4 checklist")} items={step4Checklist} />
+
+          <div className={actionRow}>
             <button onClick={() => setStep(3)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
-            <button onClick={() => setStep(5)} className={btnPrimary}>
+            <button onClick={() => setStep(5)} disabled={!hasSelectedGuild || !channelAssignmentsReady} className={btnPrimary}>
               {tr("다음", "Next")}
             </button>
           </div>
@@ -1446,11 +1672,26 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             </div>
           </div>
 
-          <div className="flex gap-3 pt-2">
+          <ChecklistPanel
+            title={
+              completionChecklist
+                ? tr("실제 적용 결과", "Applied setup result")
+                : tr("Step 5 체크리스트", "Step 5 checklist")
+            }
+            items={completionChecklist ?? step5Checklist}
+          />
+
+          {completionChecklist && (
+            <div className="text-xs" style={{ color: "#86efac" }}>
+              {tr("설정이 실제로 저장되었습니다. 잠시 후 대시보드로 이동합니다.", "Setup has been applied. Moving to the dashboard shortly.")}
+            </div>
+          )}
+
+          <div className={actionRow}>
             <button onClick={() => setStep(4)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
               {tr("이전", "Back")}
             </button>
-            <button onClick={() => void handleComplete()} disabled={completing} className={btnPrimary}>
+            <button onClick={() => void handleComplete()} disabled={completing || completionChecklist !== null || !completionReady} className={btnPrimary}>
               {completing ? tr("설정 중...", "Setting up...") : tr("설정 완료", "Complete Setup")}
             </button>
           </div>
