@@ -38,15 +38,14 @@ import {
   KanbanSquare,
   LayoutDashboard,
   Settings,
-  SlidersHorizontal,
   Wifi,
   WifiOff,
 } from "lucide-react";
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
 
-type ViewMode = "office" | "dashboard" | "kanban" | "more";
-type ControlTab = "agents" | "departments" | "offices" | "settings" | "meetings";
-type AgentsPane = "directory" | "dispatch";
+type ViewMode = "office" | "dashboard" | "kanban" | "settings";
+type ControlTab = "organization" | "settings";
+type OrganizationPane = "agents" | "departments" | "offices" | "dispatch";
 type KanbanSignalFocus = "review" | "blocked" | "requested" | "stalled";
 
 interface ShellRoute {
@@ -69,37 +68,21 @@ const VIEW_ROUTES: ShellRoute[] = [
   { id: "office", labelKo: "오피스", labelEn: "Office", shortcutKey: "o", loadingKo: "오피스 로딩 중...", loadingEn: "Loading Office..." },
   { id: "dashboard", labelKo: "대시보드", labelEn: "Dashboard", shortcutKey: "d", loadingKo: "대시보드 로딩 중...", loadingEn: "Loading Dashboard..." },
   { id: "kanban", labelKo: "칸반", labelEn: "Kanban", shortcutKey: "b", loadingKo: "칸반 로딩 중...", loadingEn: "Loading Kanban..." },
-  { id: "more", labelKo: "컨트롤", labelEn: "Control", shortcutKey: "m", loadingKo: "컨트롤 로딩 중...", loadingEn: "Loading Control..." },
+  { id: "settings", labelKo: "설정", labelEn: "Settings", shortcutKey: "m", loadingKo: "설정 로딩 중...", loadingEn: "Loading Settings..." },
 ];
 
 const PALETTE_ROUTES: PaletteRoute[] = [
   { id: "office", labelKo: "오피스", labelEn: "Office", icon: "🏢" },
   { id: "dashboard", labelKo: "대시보드", labelEn: "Dashboard", icon: "📊" },
   { id: "kanban", labelKo: "칸반", labelEn: "Kanban", icon: "📋" },
-  { id: "more", labelKo: "컨트롤", labelEn: "Control", icon: "🎛️" },
-  { id: "control_agents", labelKo: "에이전트", labelEn: "Agents", icon: "👥" },
-  { id: "control_departments", labelKo: "부서", labelEn: "Departments", icon: "🏢" },
-  { id: "control_offices", labelKo: "오피스 관리", labelEn: "Offices", icon: "🏬" },
-  { id: "control_meetings", labelKo: "회의 기록", labelEn: "Meeting Records", icon: "📝" },
-  { id: "control_settings", labelKo: "설정", labelEn: "Settings", icon: "⚙️" },
+  { id: "settings", labelKo: "설정", labelEn: "Settings", icon: "⚙️" },
+  { id: "settings_organization", labelKo: "조직", labelEn: "Organization", icon: "🏢" },
+  { id: "settings_agents", labelKo: "에이전트", labelEn: "Agents", icon: "👥" },
+  { id: "settings_departments", labelKo: "부서", labelEn: "Departments", icon: "🏛️" },
+  { id: "settings_offices", labelKo: "오피스 관리", labelEn: "Offices", icon: "🏬" },
+  { id: "settings_dispatch", labelKo: "파견 세션", labelEn: "Dispatch Sessions", icon: "🛰️" },
+  { id: "dashboard_meetings", labelKo: "회의 기록", labelEn: "Meeting Records", icon: "📝" },
 ];
-
-function hasUnresolvedMeetingIssues(meeting: RoundTableMeeting): boolean {
-  const totalIssues = meeting.proposed_issues?.length ?? 0;
-  if (meeting.status !== "completed" || totalIssues === 0) return false;
-
-  const results = meeting.issue_creation_results ?? [];
-  if (results.length === 0) {
-    return meeting.issues_created < totalIssues;
-  }
-
-  const created = results.filter((result) => result.ok && result.discarded !== true).length;
-  const failed = results.filter((result) => !result.ok && result.discarded !== true).length;
-  const discarded = results.filter((result) => result.discarded === true).length;
-  const pending = Math.max(totalIssues - created - failed - discarded, 0);
-
-  return pending > 0 || failed > 0;
-}
 
 interface BootstrapData {
   offices: Office[];
@@ -119,7 +102,6 @@ interface BootstrapData {
 
 export default function App() {
   const [data, setData] = useState<BootstrapData | null>(null);
-  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const { notifications, pushNotification, dismissNotification } = useNotifications();
 
   // Wire up API error → toast notifications (throttled: max 1 per 3s per endpoint)
@@ -138,7 +120,6 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const partial: string[] = [];
       try {
         await api.getSession();
         const offices = await api.getOffices();
@@ -259,14 +240,14 @@ interface AppShellProps {
 
 function AppShell({ wsConnected, notifications, dismissNotification }: AppShellProps) {
   const [view, setView] = useState<ViewMode>("office");
-  const [controlTab, setControlTab] = useState<ControlTab>("agents");
-  const [agentsPane, setAgentsPane] = useState<AgentsPane>("directory");
+  const [controlTab, setControlTab] = useState<ControlTab>("organization");
+  const [organizationPane, setOrganizationPane] = useState<OrganizationPane>("agents");
   const [kanbanSignalFocus, setKanbanSignalFocus] = useState<KanbanSignalFocus | null>(null);
   const [officeInfoAgent, setOfficeInfoAgent] = useState<Agent | null>(null);
   const [showCmdPalette, setShowCmdPalette] = useState(false);
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
 
-  const { settings, setSettings, stats, refreshStats, refreshingStats, isKo, locale, tr } = useSettings();
+  const { settings, setSettings, stats, refreshStats, isKo, locale, tr } = useSettings();
   const {
     offices,
     selectedOfficeId,
@@ -288,14 +269,11 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
     refreshDepartments,
     refreshAllDepartments,
     refreshAuditLogs,
-    refreshing,
-    datasetStates,
   } = useOffice();
   const { kanbanCards, taskDispatches, upsertKanbanCard, setKanbanCards } = useKanban();
 
   const spriteMap = useSpriteMap(agents);
   const unreadCount = notifications.filter((notification) => Date.now() - notification.ts < 60_000).length;
-  const unresolvedMeetingsCount = roundTableMeetings.filter(hasUnresolvedMeetingIssues).length;
 
   const resolveTheme = useCallback(() => {
     if (settings.theme !== "auto") return settings.theme;
@@ -310,14 +288,11 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
     [isKo],
   );
 
-  const moreBadge = unresolvedMeetingsCount > 0 ? unresolvedMeetingsCount : unreadCount || undefined;
-  const moreBadgeColor = unresolvedMeetingsCount > 0 ? "bg-amber-500" : unreadCount > 0 ? "bg-red-500" : undefined;
-
   const navItems: Array<{ id: ViewMode; icon: React.ReactNode; label: string; badge?: number; badgeColor?: string }> = [
     { id: "office", icon: <Building2 size={20} />, label: isKo ? "오피스" : "Office" },
     { id: "dashboard", icon: <LayoutDashboard size={20} />, label: isKo ? "대시보드" : "Dashboard" },
     { id: "kanban", icon: <KanbanSquare size={20} />, label: isKo ? "칸반" : "Kanban" },
-    { id: "more", icon: <SlidersHorizontal size={20} />, label: isKo ? "컨트롤" : "Control", badge: moreBadge, badgeColor: moreBadgeColor },
+    { id: "settings", icon: <Settings size={20} />, label: isKo ? "설정" : "Settings", badge: unreadCount || undefined, badgeColor: unreadCount > 0 ? "bg-red-500" : undefined },
   ];
 
   const handleNavigate = useCallback(
@@ -330,23 +305,30 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
 
   const handlePaletteNavigate = useCallback(
     (routeId: string) => {
-      if (routeId === "office" || routeId === "dashboard" || routeId === "kanban" || routeId === "more") {
+      if (routeId === "office" || routeId === "dashboard" || routeId === "kanban") {
         handleNavigate(routeId);
         return;
       }
 
-      setView("more");
-      if (routeId === "control_departments") {
-        setControlTab("departments");
-      } else if (routeId === "control_offices") {
-        setControlTab("offices");
-      } else if (routeId === "control_settings") {
+      if (routeId === "dashboard_meetings") {
+        handleNavigate("dashboard");
+        return;
+      }
+
+      setView("settings");
+      if (routeId === "settings") {
         setControlTab("settings");
-      } else if (routeId === "control_meetings") {
-        setControlTab("meetings");
       } else {
-        setControlTab("agents");
-        setAgentsPane("directory");
+        setControlTab("organization");
+        if (routeId === "settings_departments") {
+          setOrganizationPane("departments");
+        } else if (routeId === "settings_offices") {
+          setOrganizationPane("offices");
+        } else if (routeId === "settings_dispatch") {
+          setOrganizationPane("dispatch");
+        } else {
+          setOrganizationPane("agents");
+        }
       }
     },
     [handleNavigate],
@@ -358,19 +340,14 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
   }, []);
 
   const openDispatchSessions = useCallback(() => {
-    setControlTab("agents");
-    setAgentsPane("dispatch");
-    setView("more");
-  }, []);
-
-  const openMeetingsView = useCallback(() => {
-    setControlTab("meetings");
-    setView("more");
+    setControlTab("organization");
+    setOrganizationPane("dispatch");
+    setView("settings");
   }, []);
 
   const openSettingsView = useCallback(() => {
     setControlTab("settings");
-    setView("more");
+    setView("settings");
   }, []);
 
   useEffect(() => {
@@ -412,7 +389,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
   }, [refreshOffices, refreshAgents, refreshAllAgents, refreshDepartments, refreshAllDepartments, refreshAuditLogs]);
 
   const showOfficeSelector =
-    offices.length > 0 && (view === "office" || view === "dashboard" || (view === "more" && controlTab !== "settings" && controlTab !== "meetings"));
+    offices.length > 0 && (view === "office" || view === "dashboard" || (view === "settings" && controlTab === "organization"));
 
   return (
     <div className="flex fixed inset-0 bg-gray-900">
@@ -429,12 +406,6 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
             label={item.label}
           />
         ))}
-        <NavBtn
-          icon={<Settings size={20} />}
-          active={view === "more" && controlTab === "settings"}
-          onClick={openSettingsView}
-          label={isKo ? "설정" : "Settings"}
-        />
         <div className="flex-1" />
         <div
           className="flex h-10 w-10 items-center justify-center rounded-lg"
@@ -451,8 +422,9 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
             selectedOfficeId={selectedOfficeId}
             onSelectOffice={setSelectedOfficeId}
             onManageOffices={() => {
-              setView("more");
-              setControlTab("offices");
+              setView("settings");
+              setControlTab("organization");
+              setOrganizationPane("offices");
             }}
             isKo={isKo}
           />
@@ -474,8 +446,9 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                 onNavigateToKanban={() => handleNavigate("kanban")}
                 onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
                 onSelectDepartment={() => {
-                  setView("more");
-                  setControlTab("departments");
+                  setView("settings");
+                  setControlTab("organization");
+                  setOrganizationPane("departments");
                 }}
                 customDeptThemes={settings.roomThemes}
               />
@@ -485,14 +458,13 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
               <DashboardPageView
                 stats={stats}
                 agents={agents}
-                sessions={visibleDispatchedSessions}
                 meetings={roundTableMeetings}
                 settings={settings}
                 onSelectAgent={(agent) => setOfficeInfoAgent(agent)}
                 onOpenKanbanSignal={openKanbanSignalFocus}
                 onOpenDispatchSessions={openDispatchSessions}
-                onOpenMeetings={openMeetingsView}
                 onOpenSettings={openSettingsView}
+                onRefreshMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
               />
             )}
 
@@ -542,12 +514,12 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
             </div>
             )}
 
-            {view === "more" && (
+            {view === "settings" && (
               <ControlCenterView
                 controlTab={controlTab}
                 onControlTabChange={setControlTab}
-                agentsPane={agentsPane}
-                onAgentsPaneChange={setAgentsPane}
+                organizationPane={organizationPane}
+                onOrganizationPaneChange={setOrganizationPane}
                 isKo={isKo}
                 language={settings.language}
                 officeId={selectedOfficeId}
@@ -572,8 +544,6 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
                   refreshOffices();
                 }}
                 onOfficesChange={handleOfficeChanged}
-                meetings={roundTableMeetings}
-                onRefreshMeetings={() => api.getRoundTableMeetings().then(setRoundTableMeetings).catch(() => {})}
                 settings={settings}
                 onSaveSettings={async (patch) => {
                   const mergedSettings = { ...settings, ...patch } as CompanySettings;
@@ -647,7 +617,7 @@ function AppShell({ wsConnected, notifications, dismissNotification }: AppShellP
             onNavigate={handlePaletteNavigate}
             onClose={() => setShowCmdPalette(false)}
             routes={PALETTE_ROUTES}
-            departmentRouteId="control_departments"
+            departmentRouteId="settings_departments"
           />
         )}
       </Suspense>

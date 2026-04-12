@@ -4,7 +4,6 @@ import type {
   Agent,
   CompanySettings,
   DashboardStats,
-  DispatchedSession,
   RoundTableMeeting,
 } from "../types";
 import TooltipLabel from "./common/TooltipLabel";
@@ -28,28 +27,30 @@ import { type TFunction } from "./dashboard/model";
 import TokenAnalyticsSection from "./dashboard/TokenAnalyticsSection";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
+const MeetingMinutesView = lazy(() => import("./MeetingMinutesView"));
 
 type DashboardKanbanSignal = "review" | "blocked" | "requested" | "stalled";
 
 interface DashboardPageViewProps {
   stats: DashboardStats | null;
   agents: Agent[];
-  sessions: DispatchedSession[];
   meetings: RoundTableMeeting[];
   settings: CompanySettings;
   onSelectAgent?: (agent: Agent) => void;
   onOpenKanbanSignal?: (signal: DashboardKanbanSignal) => void;
   onOpenDispatchSessions?: () => void;
   onOpenSettings?: () => void;
-  onOpenMeetings?: () => void;
+  onRefreshMeetings: () => void;
 }
 
 export default function DashboardPageView({
   stats,
   agents,
+  meetings,
   settings,
   onSelectAgent,
   onOpenSettings,
+  onRefreshMeetings,
 }: DashboardPageViewProps) {
   const language = settings.language;
   const localeTag = language === "ko" ? "ko-KR" : language === "ja" ? "ja-JP" : language === "zh" ? "zh-CN" : "en-US";
@@ -157,6 +158,28 @@ export default function DashboardPageView({
         numberFormatter={numberFormatter}
         onOpenSettings={onOpenSettings}
       />
+
+      <section className="space-y-4" id="dashboard-meetings">
+        <SectionHeader
+          title={t({ ko: "회의 기록", en: "Meeting Records", ja: "会議記録", zh: "会议记录" })}
+          subtitle={t({
+            ko: "라운드 테이블 기록과 후속 일감 상태를 메인 화면에서 바로 확인합니다",
+            en: "Keep round-table history and follow-up issue status directly on the main screen",
+            ja: "ラウンドテーブル記録と後続イシュー状況をメイン画面で確認します",
+            zh: "在主界面直接查看圆桌记录与后续任务状态",
+          })}
+        />
+
+        <Suspense
+          fallback={(
+            <div className="py-8 text-center text-sm" style={{ color: "var(--th-text-muted)" }}>
+              {t({ ko: "회의 기록 로딩 중...", en: "Loading meeting records...", ja: "会議記録を読み込み中...", zh: "正在加载会议记录..." })}
+            </div>
+          )}
+        >
+          <MeetingMinutesView meetings={meetings} onRefresh={onRefreshMeetings} embedded />
+        </Suspense>
+      </section>
 
       <section className="space-y-4">
         <SectionHeader

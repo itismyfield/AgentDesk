@@ -844,7 +844,7 @@ export default function SettingsView({
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="min-w-0">
             <div className="text-[11px] font-semibold uppercase tracking-[0.22em]" style={{ color: "#c7d2fe" }}>
-              {tr("설정 제어실", "Settings Control Room")}
+              {tr("설정 센터", "Settings Center")}
             </div>
             <h2 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl" style={{ color: "var(--th-text)" }}>
               {tr("AgentDesk 설정창 재정렬", "Reframing AgentDesk settings")}
