@@ -363,6 +363,7 @@ async fn validate_channel_thread_maps_on_startup_with_base_url(
 pub(super) async fn try_reuse_thread(
     client: &reqwest::Client,
     token: &str,
+    discord_api_base: &str,
     thread_id: &str,
     expected_parent: u64,
     desired_thread_name: &str,
@@ -372,7 +373,11 @@ pub(super) async fn try_reuse_thread(
     db: &crate::db::Db,
 ) -> Option<bool> {
     // 1. Fetch thread info to verify it exists and belongs to the right parent channel
-    let thread_info_url = format!("https://discord.com/api/v10/channels/{}", thread_id);
+    let thread_info_url = format!(
+        "{}/channels/{}",
+        discord_api_base.trim_end_matches('/'),
+        thread_id
+    );
     let resp = client
         .get(&thread_info_url)
         .header("Authorization", format!("Bot {}", token))
@@ -470,7 +475,8 @@ pub(super) async fn try_reuse_thread(
     }
 
     let msg_url = format!(
-        "https://discord.com/api/v10/channels/{}/messages",
+        "{}/channels/{}/messages",
+        discord_api_base.trim_end_matches('/'),
         thread_id
     );
     let msg_ok = client
