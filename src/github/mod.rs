@@ -247,10 +247,51 @@ pub struct CreatedIssue {
     pub url: String,
 }
 
-/// Run a `gh` CLI command and return its stdout as a String.
-/// Returns an error if the command fails or is not available.
-pub(crate) fn run_gh(args: &[&str]) -> Result<String, String> {
-    adapter().run(args)
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DashboardRepo {
+    #[serde(rename = "nameWithOwner")]
+    pub name_with_owner: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[serde(rename = "isPrivate")]
+    pub is_private: bool,
+    #[serde(rename = "viewerPermission")]
+    pub viewer_permission: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct IssueListEntry {
+    pub number: i64,
+    pub title: String,
+    pub body: Option<String>,
+    pub state: String,
+    pub url: String,
+    #[serde(default)]
+    pub labels: Vec<sync::GhLabel>,
+    #[serde(default)]
+    pub assignees: Vec<serde_json::Value>,
+    #[serde(rename = "createdAt")]
+    pub created_at: Option<String>,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct IssueView {
+    pub number: i64,
+    pub state: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub url: String,
+    #[serde(default)]
+    pub labels: Vec<sync::GhLabel>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct IssueComments {
+    #[serde(default)]
+    pub comments: Vec<serde_json::Value>,
+    pub body: Option<String>,
 }
 
 pub fn close_issue(repo: &str, issue_number: i64) -> Result<(), String> {
@@ -259,6 +300,116 @@ pub fn close_issue(repo: &str, issue_number: i64) -> Result<(), String> {
 
 pub fn comment_issue(repo: &str, issue_number: i64, body: &str) -> Result<(), String> {
     comment_issue_with(adapter(), repo, issue_number, body)
+}
+
+fn viewer_login_with(adapter: &dyn GitHubAdapter) -> Result<String, String> {
+    adapter
+        .run(&["api", "user", "--jq", ".login"])
+        .map(|value| value.trim().to_string())
+}
+
+pub fn viewer_login() -> Result<String, String> {
+    viewer_login_with(adapter())
+}
+
+fn list_dashboard_repos_with(adapter: &dyn GitHubAdapter) -> Result<Vec<DashboardRepo>, String> {
+    let raw = adapter.run(&[
+        "api",
+        "user/repos",
+        "--paginate",
+        "--jq",
+        r#"[.[] | {nameWithOwner: .full_name, updatedAt: .updated_at, isPrivate: .private, viewerPermission: .permissions.admin}]"#,
+    ])?;
+
+    let mut repos = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let page = serde_json::from_str::<Vec<DashboardRepo>>(line)
+            .map_err(|e| format!("parse gh repo list output: {e}"))?;
+        repos.extend(page);
+    }
+
+    Ok(repos)
+}
+
+pub fn list_dashboard_repos() -> Result<Vec<DashboardRepo>, String> {
+    list_dashboard_repos_with(adapter())
+}
+
+fn list_issue_summaries_with(
+    adapter: &dyn GitHubAdapter,
+    repo: &str,
+    state: &str,
+    limit: u32,
+) -> Result<Vec<IssueListEntry>, String> {
+    let raw = adapter.run(&[
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        state,
+        "--limit",
+        &limit.to_string(),
+        "--json",
+        "number,title,body,state,url,labels,assignees,createdAt,updatedAt",
+    ])?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse gh issue list output: {e}"))
+}
+
+pub fn list_issue_summaries(
+    repo: &str,
+    state: &str,
+    limit: u32,
+) -> Result<Vec<IssueListEntry>, String> {
+    list_issue_summaries_with(adapter(), repo, state, limit)
+}
+
+fn fetch_issue_with(
+    adapter: &dyn GitHubAdapter,
+    repo: &str,
+    issue_number: i64,
+) -> Result<IssueView, String> {
+    let number = issue_number.to_string();
+    let output = adapter.run(&[
+        "issue",
+        "view",
+        &number,
+        "--repo",
+        repo,
+        "--json",
+        "number,state,title,body,labels,url",
+    ])?;
+    serde_json::from_str(&output).map_err(|e| format!("parse gh issue view output: {e}"))
+}
+
+pub fn fetch_issue(repo: &str, issue_number: i64) -> Result<IssueView, String> {
+    fetch_issue_with(adapter(), repo, issue_number)
+}
+
+fn fetch_issue_comments_with(
+    adapter: &dyn GitHubAdapter,
+    repo: &str,
+    issue_number: i64,
+) -> Result<IssueComments, String> {
+    let number = issue_number.to_string();
+    let output = adapter.run(&[
+        "issue",
+        "view",
+        &number,
+        "--repo",
+        repo,
+        "--json",
+        "comments,body",
+    ])?;
+    serde_json::from_str(&output).map_err(|e| format!("parse gh issue comments output: {e}"))
+}
+
+pub fn fetch_issue_comments(repo: &str, issue_number: i64) -> Result<IssueComments, String> {
+    fetch_issue_comments_with(adapter(), repo, issue_number)
 }
 
 /// Reopen a GitHub issue given its full URL (e.g. https://github.com/owner/repo/issues/42).
@@ -338,46 +489,44 @@ pub struct RepoRow {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_utils {
+    use super::{GitHubAdapter, GitHubFuture};
     use std::collections::VecDeque;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     #[derive(Debug, Default)]
-    struct RecordingAdapter {
+    pub(crate) struct RecordingAdapter {
         calls: Mutex<Vec<Vec<String>>>,
         sync_responses: Mutex<VecDeque<Result<String, String>>>,
         async_responses: Mutex<VecDeque<Result<String, String>>>,
-        available: bool,
     }
 
     impl RecordingAdapter {
-        fn with_sync_responses(sync_responses: Vec<Result<String, String>>) -> Self {
+        pub(crate) fn with_sync_responses(sync_responses: Vec<Result<String, String>>) -> Self {
             Self {
+                calls: Mutex::new(Vec::new()),
                 sync_responses: Mutex::new(sync_responses.into()),
                 async_responses: Mutex::new(VecDeque::new()),
-                calls: Mutex::new(Vec::new()),
-                available: true,
             }
         }
 
-        fn with_async_responses(async_responses: Vec<Result<String, String>>) -> Self {
+        pub(crate) fn with_async_responses(async_responses: Vec<Result<String, String>>) -> Self {
             Self {
+                calls: Mutex::new(Vec::new()),
                 sync_responses: Mutex::new(VecDeque::new()),
                 async_responses: Mutex::new(async_responses.into()),
-                calls: Mutex::new(Vec::new()),
-                available: true,
             }
         }
 
-        fn calls(&self) -> Vec<Vec<String>> {
+        pub(crate) fn calls(&self) -> Vec<Vec<String>> {
             self.calls.lock().unwrap().clone()
         }
     }
 
     impl GitHubAdapter for RecordingAdapter {
         fn is_available(&self) -> bool {
-            self.available
+            true
         }
 
         fn run(&self, args: &[&str]) -> Result<String, String> {
@@ -408,6 +557,12 @@ mod tests {
             Box::pin(async move { response })
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_utils::RecordingAdapter;
+    use super::*;
 
     fn test_db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
