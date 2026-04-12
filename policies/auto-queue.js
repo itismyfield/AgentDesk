@@ -832,8 +832,14 @@ function collectRunMainChannels(runId, runInfo) {
     [runId]
   );
   for (var i = 0; i < fallbackAgents.length; i++) {
-    var ch = agentdesk.agents.resolvePrimaryChannel(fallbackAgents[i].agent_id);
-    if (ch) targets[ch] = true;
+    try {
+      var ch = agentdesk.agents && agentdesk.agents.resolvePrimaryChannel
+        ? agentdesk.agents.resolvePrimaryChannel(fallbackAgents[i].agent_id)
+        : null;
+      if (ch) targets[ch] = true;
+    } catch (e) {
+      agentdesk.log.warn("[auto-queue] resolvePrimaryChannel failed for " + fallbackAgents[i].agent_id + ": " + e);
+    }
   }
   return Object.keys(targets);
 }
