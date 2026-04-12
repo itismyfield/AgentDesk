@@ -8,7 +8,7 @@ import PipelineConfigView from "./PipelineConfigView";
 import PipelineOverrideEditor from "./PipelineOverrideEditor";
 import PipelineProgress from "./PipelineProgress";
 import MarkdownContent from "../common/MarkdownContent";
-import KanbanColumn from "./KanbanColumn";
+import KanbanBoard from "./KanbanBoard";
 import type {
   Agent,
   Department,
@@ -42,6 +42,7 @@ import {
   stringifyCardMetadata,
   type EditorState,
 } from "./kanban-utils";
+import { countActiveKanbanAdvancedFilters } from "./kanban-board-layout";
 
 interface KanbanTabProps {
   tr: (ko: string, en: string) => string;
@@ -124,12 +125,13 @@ export default function KanbanTab({
   const [repoBusy, setRepoBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [compactBoard, setCompactBoard] = useState(false);
-  const [mobileColumnStatus, setMobileColumnStatus] = useState<KanbanCardStatus>("backlog");
+  const [mobileColumnStatus, setMobileColumnStatus] = useState<KanbanCardStatus>("ready");
   const [retryAssigneeId, setRetryAssigneeId] = useState("");
   const [newChecklistItem, setNewChecklistItem] = useState("");
   const [closingIssueNumber, setClosingIssueNumber] = useState<number | null>(null);
   const [selectedBacklogIssue, setSelectedBacklogIssue] = useState<GitHubIssue | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false);
   const [reviewData, setReviewData] = useState<KanbanReview | null>(null);
   const [reviewDecisions, setReviewDecisions] = useState<Record<string, "accept" | "reject">>({});
   const [reviewBusy, setReviewBusy] = useState(false);
@@ -338,6 +340,7 @@ export default function KanbanTab({
   useEffect(() => {
     if (!externalStatusFocus) return;
     setSettingsOpen(true);
+    setAdvancedFiltersOpen(true);
     setSignalStatusFilter(externalStatusFocus);
     if (externalStatusFocus === "review") {
       setCardTypeFilter("review");
@@ -399,8 +402,9 @@ export default function KanbanTab({
     }
   }, [cardsById, selectedCardId, selectedRepo]);
 
+  const searchNeedle = search.trim().toLowerCase();
+
   const filteredCards = useMemo(() => {
-    const needle = search.trim().toLowerCase();
     return repoCards.filter((card) => {
       if (!showClosed && TERMINAL_STATUSES.has(card.status)) {
         return false;
@@ -426,14 +430,14 @@ export default function KanbanTab({
       ) {
         return false;
       }
-      if (!needle) return true;
+      if (!searchNeedle) return true;
       return (
-        card.title.toLowerCase().includes(needle) ||
-        (card.description ?? "").toLowerCase().includes(needle) ||
-        getAgentLabel(card.assignee_agent_id).toLowerCase().includes(needle)
+        card.title.toLowerCase().includes(searchNeedle) ||
+        (card.description ?? "").toLowerCase().includes(searchNeedle) ||
+        getAgentLabel(card.assignee_agent_id).toLowerCase().includes(searchNeedle)
       );
     });
-  }, [agentFilter, agentMap, cardTypeFilter, deptFilter, getAgentLabel, signalStatusFilter, repoCards, search, selectedAgentId, showClosed]);
+  }, [agentFilter, agentMap, cardTypeFilter, deptFilter, getAgentLabel, searchNeedle, signalStatusFilter, repoCards, selectedAgentId, showClosed]);
 
   const recentDoneCards = useMemo(() => {
     return repoCards
@@ -501,8 +505,15 @@ export default function KanbanTab({
 
   const backlogIssues = useMemo(() => {
     if (cardTypeFilter === "review") return []; // backlog issues are never review cards
-    return issues.filter((issue) => !activeIssueNumbers.has(issue.number));
-  }, [issues, activeIssueNumbers, cardTypeFilter]);
+    return issues.filter((issue) => {
+      if (activeIssueNumbers.has(issue.number)) return false;
+      if (!searchNeedle) return true;
+      return (
+        issue.title.toLowerCase().includes(searchNeedle)
+        || (issue.body ?? "").toLowerCase().includes(searchNeedle)
+      );
+    });
+  }, [issues, activeIssueNumbers, cardTypeFilter, searchNeedle]);
 
   const openCount = filteredCards.filter((card) => !TERMINAL_STATUSES.has(card.status)).length + backlogIssues.length;
   const hasQaCards = filteredCards.some((c) => QA_STATUSES.has(c.status));
@@ -512,6 +523,13 @@ export default function KanbanTab({
         (showClosed || !TERMINAL_STATUSES.has(column.status))
         && (!QA_STATUSES.has(column.status) || hasQaCards),
       );
+  const activeAdvancedFilterCount = countActiveKanbanAdvancedFilters({
+    showClosed,
+    agentFilter,
+    deptFilter,
+    cardTypeFilter,
+    signalStatusFilter,
+  });
 
   const canRetryCard = (card: KanbanCard | null) =>
     Boolean(card && ["blocked", "requested", "in_progress"].includes(card.status));
@@ -1009,42 +1027,7 @@ export default function KanbanTab({
               </button>
             </div>
 
-            <div className="flex flex-col gap-2 w-full">
-              <label className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm border bg-black/20" style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-secondary)" }}>
-                <input
-                  type="checkbox"
-                  checked={showClosed}
-                  onChange={(event) => setShowClosed(event.target.checked)}
-                />
-                {tr("닫힌 컬럼 표시", "Show closed columns")}
-              </label>
-              {selectedRepo && (() => {
-                const currentSource = repoSources.find((s) => s.repo === selectedRepo);
-                if (!currentSource) return null;
-                return (
-                  <label className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm border bg-black/20" style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-secondary)" }}>
-                    <span className="shrink-0">{tr("기본 담당자", "Default agent")}</span>
-                    <select
-                      value={currentSource.default_agent_id ?? ""}
-                      onChange={(event) => {
-                        const value = event.target.value || null;
-                        void api.updateKanbanRepoSource(currentSource.id, { default_agent_id: value });
-                        setRepoSources((prev) => prev.map((s) => s.id === currentSource.id ? { ...s, default_agent_id: value } : s));
-                      }}
-                      className="min-w-0 flex-1 rounded-lg px-2 py-1 text-xs bg-white/6 border"
-                      style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
-                    >
-                      <option value="">{tr("없음", "None")}</option>
-                      {agents.map((agent) => (
-                        <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
-                      ))}
-                    </select>
-                  </label>
-                );
-              })()}
-            </div>
-
-            <div className="grid gap-2 md:grid-cols-4">
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
               <input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
@@ -1052,51 +1035,108 @@ export default function KanbanTab({
                 className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
                 style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
               />
-              <select
-                value={agentFilter}
-                onChange={(event) => setAgentFilter(event.target.value)}
-                className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
-                style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+              <button
+                type="button"
+                onClick={() => setAdvancedFiltersOpen((prev) => !prev)}
+                className="rounded-xl px-4 py-2 text-sm border text-left w-full sm:w-auto"
+                style={{
+                  borderColor: advancedFiltersOpen ? "rgba(96,165,250,0.45)" : "rgba(148,163,184,0.28)",
+                  color: advancedFiltersOpen ? "#bfdbfe" : "var(--th-text-secondary)",
+                  backgroundColor: advancedFiltersOpen ? "rgba(59,130,246,0.12)" : "rgba(15,23,42,0.24)",
+                }}
               >
-                <option value="all">{tr("전체 에이전트", "All agents")}</option>
-                {agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
-                ))}
-              </select>
-              <select
-                value={deptFilter}
-                onChange={(event) => setDeptFilter(event.target.value)}
-                className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
-                style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
-              >
-                <option value="all">{tr("전체 부서", "All departments")}</option>
-                {departments.map((department) => (
-                  <option key={department.id} value={department.id}>{localeName(locale, department)}</option>
-                ))}
-              </select>
-              <select
-                value={cardTypeFilter}
-                onChange={(event) => setCardTypeFilter(event.target.value as "all" | "issue" | "review")}
-                className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
-                style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
-              >
-                <option value="all">{tr("전체 카드", "All cards")}</option>
-                <option value="issue">{tr("이슈만", "Issues only")}</option>
-                <option value="review">{tr("리뷰만", "Reviews only")}</option>
-              </select>
-              <select
-                value={signalStatusFilter}
-                onChange={(event) => setSignalStatusFilter(event.target.value as "all" | "review" | "blocked" | "requested" | "stalled")}
-                className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
-                style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
-              >
-                <option value="all">{tr("대시보드 신호 전체", "All dashboard signals")}</option>
-                <option value="review">{tr("리뷰 대기", "Review queue")}</option>
-                <option value="blocked">{tr("블록됨", "Blocked")}</option>
-                <option value="requested">{tr("수락 대기", "Waiting acceptance")}</option>
-                <option value="stalled">{tr("진행 정체", "Stale in progress")}</option>
-              </select>
+                {advancedFiltersOpen
+                  ? tr("고급 필터 숨기기", "Hide advanced filters")
+                  : tr("고급 필터 보기", "Show advanced filters")}
+                {activeAdvancedFilterCount > 0 && ` (${activeAdvancedFilterCount})`}
+              </button>
             </div>
+
+            {advancedFiltersOpen && (
+              <div className="space-y-3 rounded-2xl border p-3" style={{ borderColor: "rgba(148,163,184,0.22)", backgroundColor: "rgba(2,6,23,0.2)" }}>
+                <div className="flex flex-col gap-2 w-full">
+                  <label className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm border bg-black/20" style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-secondary)" }}>
+                    <input
+                      type="checkbox"
+                      checked={showClosed}
+                      onChange={(event) => setShowClosed(event.target.checked)}
+                    />
+                    {tr("닫힌 컬럼 표시", "Show closed columns")}
+                  </label>
+                  {selectedRepo && (() => {
+                    const currentSource = repoSources.find((s) => s.repo === selectedRepo);
+                    if (!currentSource) return null;
+                    return (
+                      <label className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm border bg-black/20" style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-secondary)" }}>
+                        <span className="shrink-0">{tr("기본 담당자", "Default agent")}</span>
+                        <select
+                          value={currentSource.default_agent_id ?? ""}
+                          onChange={(event) => {
+                            const value = event.target.value || null;
+                            void api.updateKanbanRepoSource(currentSource.id, { default_agent_id: value });
+                            setRepoSources((prev) => prev.map((s) => s.id === currentSource.id ? { ...s, default_agent_id: value } : s));
+                          }}
+                          className="min-w-0 flex-1 rounded-lg px-2 py-1 text-xs bg-white/6 border"
+                          style={{ borderColor: "rgba(148,163,184,0.2)", color: "var(--th-text-primary)" }}
+                        >
+                          <option value="">{tr("없음", "None")}</option>
+                          {agents.map((agent) => (
+                            <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
+                          ))}
+                        </select>
+                      </label>
+                    );
+                  })()}
+                </div>
+
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                  <select
+                    value={agentFilter}
+                    onChange={(event) => setAgentFilter(event.target.value)}
+                    className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
+                    style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+                  >
+                    <option value="all">{tr("전체 에이전트", "All agents")}</option>
+                    {agents.map((agent) => (
+                      <option key={agent.id} value={agent.id}>{getAgentLabel(agent.id)}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={deptFilter}
+                    onChange={(event) => setDeptFilter(event.target.value)}
+                    className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
+                    style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+                  >
+                    <option value="all">{tr("전체 부서", "All departments")}</option>
+                    {departments.map((department) => (
+                      <option key={department.id} value={department.id}>{localeName(locale, department)}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={cardTypeFilter}
+                    onChange={(event) => setCardTypeFilter(event.target.value as "all" | "issue" | "review")}
+                    className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
+                    style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+                  >
+                    <option value="all">{tr("전체 카드", "All cards")}</option>
+                    <option value="issue">{tr("이슈만", "Issues only")}</option>
+                    <option value="review">{tr("리뷰만", "Reviews only")}</option>
+                  </select>
+                  <select
+                    value={signalStatusFilter}
+                    onChange={(event) => setSignalStatusFilter(event.target.value as "all" | "review" | "blocked" | "requested" | "stalled")}
+                    className="rounded-xl px-3 py-2 text-sm bg-black/20 border"
+                    style={{ borderColor: "rgba(148,163,184,0.28)", color: "var(--th-text-primary)" }}
+                  >
+                    <option value="all">{tr("대시보드 신호 전체", "All dashboard signals")}</option>
+                    <option value="review">{tr("리뷰 대기", "Review queue")}</option>
+                    <option value="blocked">{tr("블록됨", "Blocked")}</option>
+                    <option value="requested">{tr("수락 대기", "Waiting acceptance")}</option>
+                    <option value="stalled">{tr("진행 정체", "Stale in progress")}</option>
+                  </select>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1384,142 +1424,28 @@ export default function KanbanTab({
             </>
           )}
 
-          {/* ── Recent completions ── */}
-          {selectedRepo && recentDoneCards.length > 0 && (() => {
-            const PAGE_SIZE = 10;
-            const totalPages = Math.ceil(recentDoneCards.length / PAGE_SIZE);
-            const page = Math.min(recentDonePage, totalPages - 1);
-            const pageCards = recentDoneCards.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-            return (
-              <section className="rounded-2xl border px-4 py-3" style={{ borderColor: "rgba(148,163,184,0.18)", background: "rgba(34,197,94,0.04)" }}>
-                <button
-                  onClick={() => setRecentDoneOpen((v) => !v)}
-                  className="flex w-full items-center gap-2 text-left"
-                >
-                  <span className="text-xs font-semibold uppercase" style={{ color: "var(--th-text-muted)" }}>
-                    {tr("완료 일감", "Completed Work")}
-                  </span>
-                  <span className="rounded-full px-1.5 py-0.5 text-[10px] font-bold" style={{ background: "rgba(34,197,94,0.18)", color: "#4ade80" }}>
-                    {recentDoneCards.length}
-                  </span>
-                  <span className="ml-auto text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {recentDoneOpen ? "▲" : "▼"}
-                  </span>
-                </button>
-                {recentDoneOpen && (
-                  <div className="mt-2 space-y-1.5">
-                    {pageCards.map((card) => {
-                      const cardNumber = card.github_issue_number ? `#${card.github_issue_number}` : `#${card.id.slice(0, 6)}`;
-                      return (
-                        <button
-                          key={card.id}
-                          onClick={() => setSelectedCardId(card.id)}
-                          className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition-colors hover:brightness-125"
-                          style={{ background: "rgba(148,163,184,0.06)" }}
-                        >
-                          <span className="shrink-0 text-xs font-medium" style={{ color: "var(--th-text-muted)" }}>
-                            {cardNumber}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate" style={{ color: "var(--th-text-primary)" }}>{card.title}</span>
-                          {card.github_issue_url && (
-                            <a
-                              href={card.github_issue_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="shrink-0 text-xs hover:underline"
-                              onClick={(event) => event.stopPropagation()}
-                              style={{ color: "#93c5fd" }}
-                            >
-                              GH
-                            </a>
-                          )}
-                        </button>
-                      );
-                    })}
-                    {totalPages > 1 && (
-                      <div className="flex items-center justify-center gap-3 pt-1">
-                        <button
-                          disabled={page === 0}
-                          onClick={() => setRecentDonePage((p) => Math.max(0, p - 1))}
-                          className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
-                          style={{ color: "var(--th-text-muted)" }}
-                        >
-                          ← {tr("이전", "Prev")}
-                        </button>
-                        <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                          {page + 1} / {totalPages}
-                        </span>
-                        <button
-                          disabled={page >= totalPages - 1}
-                          onClick={() => setRecentDonePage((p) => Math.min(totalPages - 1, p + 1))}
-                          className="rounded px-2 py-0.5 text-xs disabled:opacity-30"
-                          style={{ color: "var(--th-text-muted)" }}
-                        >
-                          {tr("다음", "Next")} →
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </section>
-            );
-          })()}
-
-          {!selectedRepo ? (
-            <div className="rounded-2xl border border-dashed px-4 py-10 text-center text-sm" style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-muted)" }}>
-              {tr("repo를 추가하면 repo별 backlog와 칸반을 볼 수 있습니다.", "Add a repo to view its backlog and board.")}
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {compactBoard && (
-                <>
-                  <div className="flex gap-2 overflow-x-auto pb-1">
-                    {effectiveColumnDefs.filter((column) => (showClosed || !TERMINAL_STATUSES.has(column.status)) && (!QA_STATUSES.has(column.status) || hasQaCards)).map((column) => (
-                      <button
-                        key={column.status}
-                        onClick={() => setMobileColumnStatus(column.status)}
-                        className="shrink-0 rounded-full px-3 py-1.5 text-xs font-medium border"
-                        style={{
-                          borderColor: mobileColumnStatus === column.status ? `${column.accent}88` : "rgba(148,163,184,0.24)",
-                          backgroundColor: mobileColumnStatus === column.status ? `${column.accent}22` : "rgba(255,255,255,0.04)",
-                          color: mobileColumnStatus === column.status ? "white" : "var(--th-text-secondary)",
-                        }}
-                      >
-                        {tr(column.labelKo, column.labelEn)}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="rounded-xl border px-3 py-2 text-xs" style={{ borderColor: "rgba(148,163,184,0.18)", color: "var(--th-text-muted)", backgroundColor: "rgba(15,23,42,0.35)" }}>
-                    {tr("모바일에서는 카드를 탭해 상세 패널에서 상태를 변경하세요.", "On mobile, tap a card and change status in the detail sheet.")}
-                  </div>
-                </>
-              )}
-
-              <div className={compactBoard ? "" : "pb-2"} style={compactBoard ? undefined : { overflowX: "auto", overflowY: "visible" }}>
-                <div className={compactBoard ? "space-y-4" : "flex items-start gap-4 min-w-max"}>
-                  {visibleColumns.map((column) => {
-                    const columnCards = cardsByStatus.get(column.status) ?? [];
-                    const backlogCount = column.status === "backlog" ? columnCards.length + backlogIssues.length : columnCards.length;
-                    return (
-                      <KanbanColumn
-                        key={column.status}
-                        column={column}
-                        columnCards={columnCards}
-                        backlogIssues={backlogIssues}
-                        backlogCount={backlogCount}
-                        tr={tr}
-                        compactBoard={compactBoard}
-                        initialLoading={initialLoading}
-                        loadingIssues={loadingIssues}
-                        onCardClick={setSelectedCardId}
-                        onBacklogIssueClick={setSelectedBacklogIssue}
-                      />
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
+          <KanbanBoard
+            tr={tr}
+            selectedRepo={selectedRepo}
+            compactBoard={compactBoard}
+            showClosed={showClosed}
+            initialLoading={initialLoading}
+            loadingIssues={loadingIssues}
+            hasQaCards={hasQaCards}
+            effectiveColumnDefs={effectiveColumnDefs}
+            visibleColumns={visibleColumns}
+            cardsByStatus={cardsByStatus}
+            backlogIssues={backlogIssues}
+            recentDoneCards={recentDoneCards}
+            recentDonePage={recentDonePage}
+            recentDoneOpen={recentDoneOpen}
+            mobileColumnStatus={mobileColumnStatus}
+            setRecentDonePage={setRecentDonePage}
+            setRecentDoneOpen={setRecentDoneOpen}
+            setMobileColumnStatus={setMobileColumnStatus}
+            onCardClick={setSelectedCardId}
+            onBacklogIssueClick={setSelectedBacklogIssue}
+          />
         </div>
 
         {selectedCard && (
