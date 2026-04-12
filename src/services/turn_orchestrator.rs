@@ -137,8 +137,11 @@ pub(crate) fn cancel_soft_intervention_by_message_id(
         .iter()
         .position(|item| item.mode == InterventionMode::Soft && item.message_id == message_id)
         .map(|index| queue.remove(index));
-    if let Some(intervention) = removed.clone() {
-        queue_exit_events.push(QueueExitEvent::new(intervention, QueueExitKind::Cancelled));
+    if let Some(ref intervention) = removed {
+        queue_exit_events.push(QueueExitEvent::new(
+            intervention.clone(),
+            QueueExitKind::Cancelled,
+        ));
     }
     CancelQueuedMessageResult {
         removed,
@@ -149,12 +152,17 @@ pub(crate) fn cancel_soft_intervention_by_message_id(
 pub(crate) fn requeue_intervention_front(
     queue: &mut Vec<Intervention>,
     intervention: Intervention,
-) {
-    prune_interventions(queue);
+) -> Vec<QueueExitEvent> {
+    let mut queue_exit_events = prune_interventions(queue);
     queue.insert(0, intervention);
     if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        queue.truncate(MAX_INTERVENTIONS_PER_CHANNEL);
+        queue_exit_events.extend(
+            queue
+                .drain(MAX_INTERVENTIONS_PER_CHANNEL..)
+                .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Superseded)),
+        );
     }
+    queue_exit_events
 }
 
 /// Serializable form of a queued intervention for disk persistence.
@@ -397,7 +405,7 @@ pub(crate) fn requeue_intervention_front_persisted(
     intervention: Intervention,
 ) {
     let queue = intervention_queue.entry(channel_id).or_default();
-    requeue_intervention_front(queue, intervention);
+    let _ = requeue_intervention_front(queue, intervention);
     save_channel_queue(
         provider,
         token_hash,
@@ -482,6 +490,10 @@ pub(crate) struct CancelQueuedMessageResult {
 pub(crate) struct TakeNextSoftResult {
     pub(crate) intervention: Option<Intervention>,
     pub(crate) has_more: bool,
+    pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+}
+
+pub(crate) struct RequeueInterventionResult {
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
 }
 
@@ -650,17 +662,18 @@ impl ChannelMailboxHandle {
         &self,
         intervention: Intervention,
         persistence: QueuePersistenceContext,
-    ) {
-        let _ = self
-            .request(
-                |reply| ChannelMailboxMsg::RequeueFront {
-                    intervention,
-                    persistence,
-                    reply,
-                },
-                (),
-            )
-            .await;
+    ) -> RequeueInterventionResult {
+        self.request(
+            |reply| ChannelMailboxMsg::RequeueFront {
+                intervention,
+                persistence,
+                reply,
+            },
+            RequeueInterventionResult {
+                queue_exit_events: Vec::new(),
+            },
+        )
+        .await
     }
 
     pub(crate) async fn cancel_queued_message(
@@ -897,7 +910,7 @@ enum ChannelMailboxMsg {
     RequeueFront {
         intervention: Intervention,
         persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<RequeueInterventionResult>,
     },
     CancelQueuedMessage {
         message_id: MessageId,
@@ -1104,9 +1117,12 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
-                    requeue_intervention_front(&mut state.intervention_queue, intervention);
+                    let requeue_result =
+                        requeue_intervention_front(&mut state.intervention_queue, intervention);
                     persist_queue(channel_id, &state.intervention_queue, &persistence);
-                    let _ = reply.send(());
+                    let _ = reply.send(RequeueInterventionResult {
+                        queue_exit_events: requeue_result,
+                    });
                 }
                 ChannelMailboxMsg::CancelQueuedMessage {
                     message_id,
@@ -1561,6 +1577,49 @@ mod tests {
         assert_eq!(
             handle.snapshot().await.intervention_queue.len(),
             MAX_INTERVENTIONS_PER_CHANNEL
+        );
+    }
+
+    #[tokio::test]
+    async fn requeue_front_reports_superseded_overflow_entry() {
+        let provider = ProviderKind::Claude;
+        let registry = ChannelMailboxRegistry::default();
+        let channel_id = ChannelId::new(50);
+        let handle = registry.handle(channel_id);
+        let persistence = QueuePersistenceContext::new(&provider, "mailbox-requeue-overflow", None);
+        let now = Instant::now();
+
+        handle
+            .replace_queue(
+                (0..MAX_INTERVENTIONS_PER_CHANNEL)
+                    .map(|idx| make_intervention(idx as u64 + 1, "queued", now))
+                    .collect(),
+                persistence.clone(),
+            )
+            .await;
+
+        let result = handle
+            .requeue_front(
+                make_intervention(999, "retry", now + Duration::from_secs(1)),
+                persistence,
+            )
+            .await;
+
+        assert_eq!(result.queue_exit_events.len(), 1);
+        assert_eq!(result.queue_exit_events[0].kind, QueueExitKind::Superseded);
+        assert_eq!(
+            result.queue_exit_events[0].intervention.message_id,
+            MessageId::new(MAX_INTERVENTIONS_PER_CHANNEL as u64)
+        );
+
+        let snapshot = handle.snapshot().await;
+        assert_eq!(
+            snapshot.intervention_queue.len(),
+            MAX_INTERVENTIONS_PER_CHANNEL
+        );
+        assert_eq!(
+            snapshot.intervention_queue[0].message_id,
+            MessageId::new(999)
         );
     }
 
