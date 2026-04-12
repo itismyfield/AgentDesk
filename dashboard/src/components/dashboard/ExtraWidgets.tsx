@@ -48,7 +48,7 @@ export function CookingHeartRoleBoardWidget({ agents, t, isKo }: CookingHeartWid
           {workingCount}/{chAgents.length} {t({ ko: "가동", en: "active", ja: "稼働", zh: "活跃" })}
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-1.5">
+      <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
         {chAgents.map((agent) => {
           const roleKey = CH_ROLE_PREFIXES.find((p) => agent.id.startsWith(p) || agent.name.startsWith(p));
           const roleLabel = roleKey ? (isKo ? CH_ROLE_LABELS[roleKey]?.ko : CH_ROLE_LABELS[roleKey]?.en) : "";
@@ -215,7 +215,7 @@ export function KanbanOpsWidget({ kanban, t }: KanbanOpsWidgetProps) {
         </span>
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
         {categories.map((item) => (
           <button
             key={item.key}

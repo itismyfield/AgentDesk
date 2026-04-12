@@ -325,8 +325,8 @@ export default function TokenAnalyticsSection({
               {t({ ko: "토큰 분석을 불러오는 중입니다", en: "Loading token analytics", ja: "トークン分析を読み込み中", zh: "正在加载 Token 分析" })}
             </div>
           ) : (
-            <div className="mt-4 overflow-x-auto">
-              <div className="min-w-[640px]">
+            <div className="mt-4 overflow-x-hidden">
+              <div className="min-w-0">
                 <div className="mb-2 ml-9 grid grid-cols-13 gap-1 text-[10px]" style={{ color: "var(--th-text-muted)" }}>
                   {weekLabels.map((item) => (
                     <span key={item.week} className="truncate">
@@ -474,8 +474,8 @@ function DailyTrendCard({
           {t({ ko: "표시할 토큰 추이가 없습니다", en: "No token trend to show", ja: "表示する推移がありません", zh: "暂无可显示的趋势" })}
         </div>
       ) : (
-        <div className="mt-4 overflow-x-auto">
-          <div className="min-w-[520px]">
+        <div className="mt-4 overflow-x-hidden">
+          <div className="min-w-0">
             <div className="flex h-44 items-end gap-1.5">
               {daily.map((day) => {
                 const totalHeight = Math.max(6, (day.total_tokens / trendMax) * 100);

@@ -56,7 +56,7 @@ interface DashboardHudStatsProps {
 
 export function DashboardHudStats({ hudStats, numberFormatter }: DashboardHudStatsProps) {
   return (
-    <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 sm:gap-3">
+    <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3 sm:gap-3">
       {hudStats.map((stat) => (
         <div
           key={stat.id}
