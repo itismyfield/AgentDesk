@@ -1258,6 +1258,8 @@ mod tests {
             body["transcripts"][0]["turn_id"],
             "discord:agent-transcript:1"
         );
+        assert!(body["transcripts"][0]["card_title"].is_null());
+        assert!(body["transcripts"][0]["github_issue_number"].is_null());
         assert_eq!(body["transcripts"][0]["duration_ms"], 4200);
         assert_eq!(body["transcripts"][0]["events"][0]["kind"], "tool_use");
         assert_eq!(body["transcripts"][0]["events"][0]["tool_name"], "Bash");

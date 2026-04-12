@@ -816,6 +816,8 @@ export interface SessionTranscript {
   dispatch_id: string | null;
   kanban_card_id: string | null;
   dispatch_title: string | null;
+  card_title: string | null;
+  github_issue_number: number | null;
   user_message: string;
   assistant_message: string;
   events: SessionTranscriptEvent[];

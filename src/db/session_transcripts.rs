@@ -99,6 +99,8 @@ pub struct SessionTranscriptRecord {
     pub dispatch_id: Option<String>,
     pub kanban_card_id: Option<String>,
     pub dispatch_title: Option<String>,
+    pub card_title: Option<String>,
+    pub github_issue_number: Option<i64>,
     pub user_message: String,
     pub assistant_message: String,
     pub events: Vec<SessionTranscriptEvent>,
@@ -238,6 +240,8 @@ pub fn list_transcripts_for_agent(
                 st.dispatch_id,
                 td.kanban_card_id,
                 td.title,
+                kc.title,
+                kc.github_issue_number,
                 st.user_message,
                 st.assistant_message,
                 st.events_json,
@@ -246,6 +250,8 @@ pub fn list_transcripts_for_agent(
          FROM session_transcripts st
          LEFT JOIN task_dispatches td
            ON td.id = st.dispatch_id
+         LEFT JOIN kanban_cards kc
+           ON kc.id = td.kanban_card_id
          WHERE st.agent_id = ?1
             OR (st.agent_id IS NULL AND td.to_agent_id = ?1)
          ORDER BY st.created_at DESC, st.id DESC
@@ -272,6 +278,8 @@ pub fn list_transcripts_for_card(
                 st.dispatch_id,
                 td.kanban_card_id,
                 td.title,
+                kc.title,
+                kc.github_issue_number,
                 st.user_message,
                 st.assistant_message,
                 st.events_json,
@@ -280,6 +288,8 @@ pub fn list_transcripts_for_card(
          FROM session_transcripts st
          JOIN task_dispatches td
            ON td.id = st.dispatch_id
+         LEFT JOIN kanban_cards kc
+           ON kc.id = td.kanban_card_id
          WHERE td.kanban_card_id = ?1
          ORDER BY st.created_at DESC, st.id DESC
          LIMIT ?2",
@@ -290,7 +300,7 @@ pub fn list_transcripts_for_card(
 }
 
 fn session_transcript_record_from_row(row: &Row<'_>) -> rusqlite::Result<SessionTranscriptRecord> {
-    let events_json: Option<String> = row.get(11)?;
+    let events_json: Option<String> = row.get(13)?;
     Ok(SessionTranscriptRecord {
         id: row.get(0)?,
         turn_id: row.get(1)?,
@@ -301,11 +311,13 @@ fn session_transcript_record_from_row(row: &Row<'_>) -> rusqlite::Result<Session
         dispatch_id: row.get(6)?,
         kanban_card_id: row.get(7)?,
         dispatch_title: row.get(8)?,
-        user_message: row.get(9)?,
-        assistant_message: row.get(10)?,
+        card_title: row.get(9)?,
+        github_issue_number: row.get(10)?,
+        user_message: row.get(11)?,
+        assistant_message: row.get(12)?,
         events: parse_events_json(events_json.as_deref()),
-        duration_ms: row.get(12)?,
-        created_at: row.get(13)?,
+        duration_ms: row.get(14)?,
+        created_at: row.get(15)?,
     })
 }
 
@@ -629,8 +641,8 @@ mod tests {
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
-                 VALUES ('card-1', 'Card 1', 'in_progress', datetime('now'), datetime('now'))",
+                "INSERT INTO kanban_cards (id, title, status, github_issue_number, created_at, updated_at)
+                 VALUES ('card-1', 'Card 1', 'in_progress', 101, datetime('now'), datetime('now'))",
                 [],
             )
             .unwrap();
@@ -688,6 +700,8 @@ mod tests {
             transcripts[0].dispatch_title.as_deref(),
             Some("Card Dispatch")
         );
+        assert_eq!(transcripts[0].card_title.as_deref(), Some("Card 1"));
+        assert_eq!(transcripts[0].github_issue_number, Some(101));
         assert_eq!(transcripts[0].kanban_card_id.as_deref(), Some("card-1"));
         assert_eq!(transcripts[0].events.len(), 2);
         assert_eq!(transcripts[0].duration_ms, Some(12000));

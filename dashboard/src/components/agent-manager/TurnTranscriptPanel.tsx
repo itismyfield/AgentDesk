@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { formatElapsedCompact } from "../../agent-insights";
 import * as api from "../../api";
+import {
+  formatTranscriptTimestamp,
+  normalizeActiveEventIndex,
+  transcriptSelectionLabel,
+} from "./turn-transcript-utils";
 
 type TranscriptSource =
   | { type: "agent"; id: string; refreshSeed?: string | number | null; limit?: number }
@@ -55,24 +60,6 @@ const TONE_STYLE: Record<
     text: "#fee2e2",
   },
 };
-
-function parseDate(value: string | null | undefined): Date | null {
-  if (!value) return null;
-  const normalized = value.includes("T") ? value : value.replace(" ", "T");
-  const parsed = new Date(normalized);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function formatTimestamp(value: string, isKo: boolean): string {
-  const parsed = parseDate(value);
-  if (!parsed) return value;
-  return parsed.toLocaleString(isKo ? "ko-KR" : "en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 function eventTone(event: api.SessionTranscriptEvent): TranscriptTone {
   if (event.is_error || event.kind === "error") return "error";
@@ -230,13 +217,6 @@ function buildCopyText(
   return lines.join("\n");
 }
 
-function transcriptLabel(
-  transcript: api.SessionTranscript,
-  isKo: boolean,
-): string {
-  return transcript.dispatch_title || formatTimestamp(transcript.created_at, isKo);
-}
-
 async function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -308,8 +288,8 @@ export default function TurnTranscriptPanel({
   const [copyState, setCopyState] = useState<"idle" | "done" | "error">("idle");
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [activeEventIndex, setActiveEventIndex] = useState<number | null>(null);
+  const [promptExpanded, setPromptExpanded] = useState(false);
   const requestSeqRef = useRef(0);
-  const eventRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -375,9 +355,20 @@ export default function TurnTranscriptPanel({
   const selectedTranscript =
     transcripts.find((item) => item.turn_id === selectedTurnId) ?? transcripts[0] ?? null;
   const events = transcriptEvents(selectedTranscript);
+  const selectedEvent =
+    activeEventIndex == null ? null : events[activeEventIndex] ?? null;
   const toolCount = events.filter((event) => event.kind === "tool_use").length;
   const thinkingCount = events.filter((event) => event.kind === "thinking").length;
   const errorCount = events.filter((event) => eventTone(event) === "error").length;
+
+  useEffect(() => {
+    setPromptExpanded(false);
+    setActiveEventIndex(events.length > 0 ? 0 : null);
+  }, [selectedTranscript?.turn_id]);
+
+  useEffect(() => {
+    setActiveEventIndex((prev) => normalizeActiveEventIndex(prev, events.length));
+  }, [events.length]);
 
   const handleCopyAll = async () => {
     if (!selectedTranscript) return;
@@ -391,12 +382,8 @@ export default function TurnTranscriptPanel({
     window.setTimeout(() => setCopyState("idle"), 1800);
   };
 
-  const handleJumpToEvent = (index: number) => {
+  const handleSelectEvent = (index: number) => {
     setActiveEventIndex(index);
-    eventRefs.current[index]?.scrollIntoView({
-      behavior: "smooth",
-      block: "center",
-    });
   };
 
   return (
@@ -490,7 +477,7 @@ export default function TurnTranscriptPanel({
                 >
                   {transcripts.map((transcript) => (
                     <option key={transcript.turn_id} value={transcript.turn_id}>
-                      {`${transcriptLabel(transcript, isKo)} · ${(transcript.provider ?? "unknown").toUpperCase()}`}
+                      {transcriptSelectionLabel(transcript, isKo)}
                     </option>
                   ))}
                 </select>
@@ -511,10 +498,10 @@ export default function TurnTranscriptPanel({
                       }}
                     >
                       <div className="text-xs font-medium truncate" style={{ color: "var(--th-text-primary)" }}>
-                        {transcriptLabel(transcript, isKo)}
+                        {transcriptSelectionLabel(transcript, isKo)}
                       </div>
                       <div className="text-[11px] truncate" style={{ color: "var(--th-text-muted)" }}>
-                        {(transcript.provider ?? "unknown").toUpperCase()} · {formatTimestamp(transcript.created_at, isKo)}
+                        {(transcript.provider ?? "unknown").toUpperCase()} · {formatTranscriptTimestamp(transcript.created_at, isKo)}
                       </div>
                     </button>
                   );
@@ -593,27 +580,65 @@ export default function TurnTranscriptPanel({
                     background: "rgba(255,255,255,0.03)",
                   }}
                 >
-                  <div
-                    className="text-xs font-semibold uppercase tracking-widest"
-                    style={{ color: "var(--th-text-muted)" }}
+                  <button
+                    type="button"
+                    onClick={() => setPromptExpanded((prev) => !prev)}
+                    className="flex w-full items-start justify-between gap-3 text-left"
+                    aria-expanded={promptExpanded}
                   >
-                    {tr("사용자 요청", "Prompt")}
-                  </div>
-                  <div
-                    className="mt-2 text-sm whitespace-pre-wrap"
-                    style={{ color: "var(--th-text-primary)" }}
-                  >
-                    {selectedTranscript.user_message.trim()}
-                  </div>
+                    <div className="min-w-0">
+                      <div
+                        className="text-xs font-semibold uppercase tracking-widest"
+                        style={{ color: "var(--th-text-muted)" }}
+                      >
+                        {tr("사용자 요청", "Prompt")}
+                      </div>
+                      {!promptExpanded && (
+                        <div
+                          className="mt-1 truncate text-xs"
+                          style={{ color: "var(--th-text-muted)" }}
+                        >
+                          {selectedTranscript.user_message.trim().replace(/\s+/g, " ")}
+                        </div>
+                      )}
+                    </div>
+                    <span
+                      className="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium"
+                      style={{
+                        background: "rgba(148,163,184,0.16)",
+                        color: "var(--th-text-secondary)",
+                      }}
+                    >
+                      {promptExpanded ? tr("접기", "Collapse") : tr("펼치기", "Expand")}
+                    </span>
+                  </button>
+                  {promptExpanded && (
+                    <div
+                      className="mt-3 border-t pt-3 text-sm whitespace-pre-wrap"
+                      style={{
+                        borderColor: "rgba(148,163,184,0.16)",
+                        color: "var(--th-text-primary)",
+                      }}
+                    >
+                      {selectedTranscript.user_message.trim()}
+                    </div>
+                  )}
                 </div>
               )}
 
               <div className="mt-4">
-                <div
-                  className="text-xs font-semibold uppercase tracking-widest"
-                  style={{ color: "var(--th-text-muted)" }}
-                >
-                  {tr("타임라인", "Timeline")}
+                <div className="flex items-center justify-between gap-2">
+                  <div
+                    className="text-xs font-semibold uppercase tracking-widest"
+                    style={{ color: "var(--th-text-muted)" }}
+                  >
+                    {tr("타임라인", "Timeline")}
+                  </div>
+                  {selectedEvent && (
+                    <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                      {activeEventIndex! + 1}/{events.length}
+                    </span>
+                  )}
                 </div>
                 {events.length === 0 ? (
                   <div className="mt-2 text-sm" style={{ color: "var(--th-text-muted)" }}>
@@ -630,7 +655,7 @@ export default function TurnTranscriptPanel({
                         <button
                           key={`${selectedTranscript.turn_id}-${index}`}
                           type="button"
-                          onClick={() => handleJumpToEvent(index)}
+                          onClick={() => handleSelectEvent(index)}
                           className="h-10 min-w-0 rounded-lg border transition-transform hover:-translate-y-0.5"
                           style={{
                             backgroundColor: TONE_STYLE[tone].bar,
@@ -645,6 +670,7 @@ export default function TurnTranscriptPanel({
                           }}
                           title={`${index + 1}. ${eventTitle(event, tr)}`}
                           aria-label={`${index + 1}. ${eventTitle(event, tr)}`}
+                          aria-pressed={activeEventIndex === index}
                         />
                       );
                     })}
@@ -652,24 +678,18 @@ export default function TurnTranscriptPanel({
                 )}
               </div>
 
-              <div className="mt-4 max-h-[26rem] space-y-3 overflow-y-auto pr-1">
-                {events.map((event, index) => {
-                  const tone = eventTone(event);
-                  const style = TONE_STYLE[tone];
-                  const body = eventBody(event);
-                  return (
+              {selectedEvent && (() => {
+                const tone = eventTone(selectedEvent);
+                const style = TONE_STYLE[tone];
+                const body = eventBody(selectedEvent);
+
+                return (
+                  <div className="mt-4 max-h-[26rem] overflow-y-auto pr-1">
                     <div
-                      key={`${selectedTranscript.turn_id}-event-${index}`}
-                      ref={(node) => {
-                        eventRefs.current[index] = node;
-                      }}
                       className="rounded-2xl border p-4"
                       style={{
                         borderColor: style.border,
-                        backgroundColor:
-                          activeEventIndex === index
-                            ? "rgba(255,255,255,0.06)"
-                            : "rgba(255,255,255,0.03)",
+                        backgroundColor: "rgba(255,255,255,0.05)",
                       }}
                     >
                       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -682,31 +702,23 @@ export default function TurnTranscriptPanel({
                                 color: style.chipText,
                               }}
                             >
-                              {eventTitle(event, tr)}
+                              {eventTitle(selectedEvent, tr)}
                             </span>
                             <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                              #{index + 1}
+                              #{activeEventIndex! + 1}
                             </span>
-                            {event.status && (
+                            {selectedEvent.status && (
                               <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                                {event.status}
+                                {selectedEvent.status}
                               </span>
                             )}
                           </div>
-                          {(event.summary || event.tool_name) && (
+                          {(selectedEvent.summary || selectedEvent.tool_name) && (
                             <div className="mt-2 text-sm" style={{ color: style.text }}>
-                              {event.summary || event.tool_name}
+                              {selectedEvent.summary || selectedEvent.tool_name}
                             </div>
                           )}
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => handleJumpToEvent(index)}
-                          className="text-[11px]"
-                          style={{ color: "var(--th-text-muted)" }}
-                        >
-                          {tr("포커스", "Focus")}
-                        </button>
                       </div>
                       {body && (
                         <div
@@ -717,9 +729,9 @@ export default function TurnTranscriptPanel({
                         </div>
                       )}
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                );
+              })()}
             </>
           )}
         </>
