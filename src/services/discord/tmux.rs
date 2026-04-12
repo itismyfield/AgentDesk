@@ -47,6 +47,7 @@ pub(super) struct WatcherLineOutcome {
     pub found_result: bool,
     pub is_prompt_too_long: bool,
     pub is_auth_error: bool,
+    pub auth_error_message: Option<String>,
     pub is_provider_overloaded: bool,
     pub provider_overload_message: Option<String>,
     pub result_tokens: Option<u64>,
@@ -70,6 +71,11 @@ fn is_auth_error_message(text: &str) -> bool {
         || lower.contains("unauthorized")
         || lower.contains("please run /login")
         || lower.contains("oauth")
+        || lower.contains("access token could not be refreshed")
+        || (lower.contains("refresh token")
+            && (lower.contains("expired")
+                || lower.contains("invalid")
+                || lower.contains("revoked")))
         || lower.contains("token expired")
         || lower.contains("invalid api key")
         || (lower.contains("api key")
@@ -307,6 +313,26 @@ async fn clear_provider_session_for_retry(
     if let Some(sid) = stale_sid {
         let _ = super::internal_api::clear_stale_session_id(&sid).await;
     }
+}
+
+async fn resolve_watcher_dispatch_id(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    inflight_state: Option<&super::inflight::InflightTurnState>,
+) -> Option<String> {
+    inflight_state
+        .and_then(|state| state.dispatch_id.clone())
+        .or_else(|| {
+            inflight_state.and_then(|state| super::adk_session::parse_dispatch_id(&state.user_text))
+        })
+        .or(super::adk_session::lookup_pending_dispatch_for_thread(
+            shared.api_port,
+            channel_id.get(),
+        )
+        .await)
+        .or_else(|| {
+            resolve_dispatched_thread_dispatch_from_db(shared.db.as_ref(), channel_id.get())
+        })
 }
 
 /// #226: Atomically claim a channel for watcher creation using DashMap::entry().
@@ -832,6 +858,7 @@ pub(super) async fn tmux_output_watcher(
         let mut found_result = initial_outcome.found_result;
         let mut is_prompt_too_long = initial_outcome.is_prompt_too_long;
         let mut is_auth_error = initial_outcome.is_auth_error;
+        let mut auth_error_message = initial_outcome.auth_error_message;
         let mut is_provider_overloaded = initial_outcome.is_provider_overloaded;
         let mut provider_overload_message = initial_outcome.provider_overload_message;
         let mut result_tokens = initial_outcome.result_tokens;
@@ -891,6 +918,9 @@ pub(super) async fn tmux_output_watcher(
                         found_result = found_result || outcome.found_result;
                         is_prompt_too_long = is_prompt_too_long || outcome.is_prompt_too_long;
                         is_auth_error = is_auth_error || outcome.is_auth_error;
+                        if auth_error_message.is_none() {
+                            auth_error_message = outcome.auth_error_message;
+                        }
                         is_provider_overloaded =
                             is_provider_overloaded || outcome.is_provider_overloaded;
                         stale_resume_detected =
@@ -1035,11 +1065,32 @@ pub(super) async fn tmux_output_watcher(
         // Handle auth error: kill session and notify user to re-authenticate
         if is_auth_error {
             clear_provider_overload_retry_state(channel_id);
+            let inflight_state =
+                super::inflight::load_inflight_state(&watcher_provider, channel_id.get());
+            let fallback_session_id = inflight_state
+                .as_ref()
+                .and_then(|state| state.session_id.as_deref());
+            let dispatch_id =
+                resolve_watcher_dispatch_id(&shared, channel_id, inflight_state.as_ref()).await;
+            let auth_detail = auth_error_message
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("authentication expired");
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
-                "  [{ts}] 👁 Auth error detected in watcher for {tmux_session_name}, killing session"
+                "  [{ts}] 👁 Auth error detected in watcher for {tmux_session_name}: {}",
+                truncate_str(auth_detail, 300)
             );
             prompt_too_long_killed = true; // reuse flag to suppress duplicate "session ended" message
+
+            clear_provider_session_for_retry(
+                &shared,
+                channel_id,
+                &tmux_session_name,
+                fallback_session_id,
+            )
+            .await;
 
             let sess = tmux_session_name.clone();
             let _ = tokio::time::timeout(
@@ -1059,18 +1110,37 @@ pub(super) async fn tmux_output_watcher(
             )
             .await;
 
-            let notice = "⚠️ 인증이 만료되었습니다. 세션을 종료합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 시도해주세요.";
+            let notice = format!(
+                "⚠️ 인증이 만료되어 현재 dispatch를 실패 처리했습니다. 세션을 종료합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 디스패치해주세요.\n\n사유: {}",
+                truncate_str(auth_detail, 300)
+            );
             match placeholder_msg_id {
                 Some(msg_id) => {
                     rate_limit_wait(&shared, channel_id).await;
                     let _ = channel_id
-                        .edit_message(&http, msg_id, serenity::EditMessage::new().content(notice))
+                        .edit_message(&http, msg_id, serenity::EditMessage::new().content(&notice))
                         .await;
                 }
                 None => {
-                    let _ = channel_id.say(&http, notice).await;
+                    let _ = channel_id.say(&http, &notice).await;
                 }
             }
+            if let Some(state) = inflight_state.as_ref() {
+                let user_msg_id = serenity::MessageId::new(state.user_msg_id);
+                super::formatting::remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
+                super::formatting::add_reaction_raw(&http, channel_id, user_msg_id, '⚠').await;
+            }
+            super::inflight::clear_inflight_state(&watcher_provider, channel_id.get());
+            let failure_text = format!(
+                "authentication expired; re-authentication required: {}",
+                truncate_str(auth_detail, 300)
+            );
+            super::turn_bridge::fail_dispatch_with_retry(
+                shared.api_port,
+                dispatch_id.as_deref(),
+                &failure_text,
+            )
+            .await;
             continue;
         }
 
@@ -1089,19 +1159,8 @@ pub(super) async fn tmux_output_watcher(
             let fallback_session_id = inflight_state
                 .as_ref()
                 .and_then(|state| state.session_id.as_deref());
-            let dispatch_id = inflight_state
-                .as_ref()
-                .and_then(|state| state.dispatch_id.clone())
-                .or_else(|| {
-                    inflight_state
-                        .as_ref()
-                        .and_then(|state| super::adk_session::parse_dispatch_id(&state.user_text))
-                })
-                .or(super::adk_session::lookup_pending_dispatch_for_thread(
-                    shared.api_port,
-                    channel_id.get(),
-                )
-                .await);
+            let dispatch_id =
+                resolve_watcher_dispatch_id(&shared, channel_id, inflight_state.as_ref()).await;
 
             let decision = retry_text
                 .as_deref()
@@ -2028,6 +2087,7 @@ pub(super) fn process_watcher_lines(
                         }
                         if is_auth_error_message(&result_str) {
                             outcome.is_auth_error = true;
+                            outcome.auth_error_message.get_or_insert(result_str.clone());
                         }
                         if let Some(message) = detect_provider_overload_message(&result_str) {
                             outcome.is_provider_overloaded = true;
@@ -2092,6 +2152,24 @@ pub(super) fn process_watcher_lines(
                 }
                 _ => {}
             }
+        } else if is_auth_error_message(trimmed) {
+            outcome.found_result = true;
+            outcome.is_auth_error = true;
+            outcome
+                .auth_error_message
+                .get_or_insert(trimmed.to_string());
+            push_transcript_event(
+                &mut tool_state.transcript_events,
+                SessionTranscriptEvent {
+                    kind: SessionTranscriptEventKind::Error,
+                    tool_name: None,
+                    summary: Some("authentication error".to_string()),
+                    content: trimmed.to_string(),
+                    status: Some("error".to_string()),
+                    is_error: true,
+                },
+            );
+            state.final_result = Some(String::new());
         } else if let Some(message) = detect_provider_overload_message(trimmed) {
             outcome.found_result = true;
             outcome.is_provider_overloaded = true;
@@ -2884,6 +2962,8 @@ mod tests {
         assert!(is_auth_error_message("Unauthorized"));
         assert!(is_auth_error_message("Please run /login first"));
         assert!(is_auth_error_message("OAuth token refresh failed"));
+        assert!(is_auth_error_message("access token could not be refreshed"));
+        assert!(is_auth_error_message("refresh token expired"));
         assert!(is_auth_error_message("Token expired"));
         assert!(is_auth_error_message("Invalid API key"));
         assert!(is_auth_error_message("API key is missing"));
@@ -3096,7 +3176,27 @@ mod tests {
 
         assert!(outcome.found_result);
         assert!(outcome.is_auth_error);
+        assert_eq!(outcome.auth_error_message.as_deref(), Some("not logged in"));
         assert!(!outcome.is_provider_overloaded);
+    }
+
+    #[test]
+    fn plain_text_auth_error_is_detected_and_preserved() {
+        let mut buffer = "access token could not be refreshed\n".to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_auth_error);
+        assert_eq!(
+            outcome.auth_error_message.as_deref(),
+            Some("access token could not be refreshed")
+        );
+        assert!(full_response.is_empty());
     }
 
     // ── #378 E2E: mixed error + overload in errors array ──
