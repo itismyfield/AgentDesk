@@ -174,7 +174,11 @@ pub(super) fn build_system_prompt(
          - Avoid long horizontal lines or decorative separators.\n\n\
          IMPORTANT: The user is on Discord and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
          All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
-         Never use tools that expect user interaction. If you need clarification, just ask in plain text.{}{}",
+         Never use tools that expect user interaction. If you need clarification, just ask in plain text.\n\n\
+         Reply context: When a user message includes a [Reply context] tag, the user is responding to the **replied-to message**, \
+         not necessarily your most recent message. Prioritize the reply target over the latest message when interpreting user intent. \
+         If ambiguous, ask which message the user is responding to. \
+         Avoid mixing status reports and action questions in a single message — it makes the reply target unclear.{}{}",
         discord_context,
         current_path,
         channel_id.get(),
