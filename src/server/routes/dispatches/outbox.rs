@@ -1,4 +1,58 @@
-use super::thread_reuse::clear_all_threads;
+use super::{
+    discord_delivery::{discord_api_base_url, discord_api_url},
+    thread_reuse::clear_all_threads,
+};
+use std::process::Command;
+
+#[derive(Clone, Debug)]
+pub(crate) struct DispatchFollowupConfig {
+    pub discord_api_base: String,
+    pub notify_bot_token: Option<String>,
+    pub announce_bot_token: Option<String>,
+}
+
+impl DispatchFollowupConfig {
+    fn from_runtime() -> Self {
+        Self {
+            discord_api_base: discord_api_base_url(),
+            notify_bot_token: crate::credential::read_bot_token("notify"),
+            announce_bot_token: crate::credential::read_bot_token("announce"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompletedDispatchInfo {
+    dispatch_type: String,
+    status: String,
+    card_id: String,
+    result_json: Option<String>,
+    context_json: Option<String>,
+    thread_id: Option<String>,
+    duration_seconds: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchMergeStatus {
+    Noop,
+    Pending,
+    Merged,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DispatchChangeStats {
+    files_changed: u64,
+    additions: u64,
+    deletions: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DispatchCompletionSummary {
+    stats: DispatchChangeStats,
+    merge_status: DispatchMergeStatus,
+    duration_seconds: Option<i64>,
+}
 
 // ── Outbox worker trait ───────────────────────────────────────
 
@@ -225,50 +279,436 @@ pub(super) fn extract_review_verdict(result_json: Option<&str>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+fn parse_json_value(raw: Option<&str>) -> Option<serde_json::Value> {
+    raw.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+}
+
+fn json_string_field<'a>(value: Option<&'a serde_json::Value>, key: &str) -> Option<&'a str> {
+    value
+        .and_then(|value| value.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn is_work_dispatch_type(dispatch_type: &str) -> bool {
+    matches!(dispatch_type, "implementation" | "rework")
+}
+
+fn resolve_thread_id(
+    thread_id: Option<&str>,
+    context_json: Option<&serde_json::Value>,
+) -> Option<String> {
+    thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| json_string_field(context_json, "thread_id").map(str::to_string))
+}
+
+fn resolve_worktree_path(
+    result_json: Option<&serde_json::Value>,
+    context_json: Option<&serde_json::Value>,
+) -> Option<String> {
+    json_string_field(result_json, "completed_worktree_path")
+        .or_else(|| json_string_field(result_json, "worktree_path"))
+        .or_else(|| json_string_field(context_json, "worktree_path"))
+        .map(str::to_string)
+}
+
+fn resolve_completed_branch(
+    result_json: Option<&serde_json::Value>,
+    context_json: Option<&serde_json::Value>,
+    worktree_path: Option<&str>,
+) -> Option<String> {
+    json_string_field(result_json, "completed_branch")
+        .or_else(|| json_string_field(result_json, "worktree_branch"))
+        .or_else(|| json_string_field(result_json, "branch"))
+        .or_else(|| json_string_field(context_json, "worktree_branch"))
+        .or_else(|| json_string_field(context_json, "branch"))
+        .map(str::to_string)
+        .or_else(|| worktree_path.and_then(crate::services::platform::shell::git_branch_name))
+}
+
+fn resolve_completed_commit(result_json: Option<&serde_json::Value>) -> Option<String> {
+    json_string_field(result_json, "completed_commit")
+        .or_else(|| json_string_field(result_json, "reviewed_commit"))
+        .map(str::to_string)
+}
+
+fn resolve_start_commit(
+    result_json: Option<&serde_json::Value>,
+    context_json: Option<&serde_json::Value>,
+) -> Option<String> {
+    json_string_field(context_json, "reviewed_commit")
+        .or_else(|| json_string_field(result_json, "reviewed_commit"))
+        .map(str::to_string)
+}
+
+fn dispatch_completed_without_changes(result_json: Option<&serde_json::Value>) -> bool {
+    json_string_field(result_json, "work_outcome") == Some("noop")
+        || result_json
+            .and_then(|value| value.get("completed_without_changes"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+}
+
+fn git_ref_exists(repo_dir: &str, git_ref: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", git_ref])
+        .current_dir(repo_dir)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn resolve_upstream_base_ref(repo_dir: &str) -> Option<String> {
+    ["origin/main", "main", "origin/master", "master"]
+        .into_iter()
+        .find(|candidate| git_ref_exists(repo_dir, candidate))
+        .map(str::to_string)
+}
+
+fn git_diff_stats(repo_dir: &str, diff_spec: &str) -> Result<DispatchChangeStats, String> {
+    let output = Command::new("git")
+        .args(["diff", "--numstat", "--find-renames", diff_spec])
+        .current_dir(repo_dir)
+        .output()
+        .map_err(|err| format!("git diff failed: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git diff {} failed with status {}",
+            diff_spec, output.status
+        ));
+    }
+
+    let mut stats = DispatchChangeStats::default();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.splitn(3, '\t');
+        let additions = parts.next().unwrap_or_default();
+        let deletions = parts.next().unwrap_or_default();
+        let path = parts.next().unwrap_or_default();
+        if path.trim().is_empty() {
+            continue;
+        }
+        stats.files_changed += 1;
+        stats.additions += additions.parse::<u64>().unwrap_or(0);
+        stats.deletions += deletions.parse::<u64>().unwrap_or(0);
+    }
+
+    Ok(stats)
+}
+
+fn compute_dispatch_change_stats(
+    worktree_path: Option<&str>,
+    start_commit: Option<&str>,
+    completed_commit: Option<&str>,
+    completed_without_changes: bool,
+) -> Option<DispatchChangeStats> {
+    if completed_without_changes {
+        return Some(DispatchChangeStats::default());
+    }
+
+    let repo_dir = worktree_path.filter(|path| std::path::Path::new(path).is_dir())?;
+    let diff_spec =
+        if let (Some(start_commit), Some(completed_commit)) = (start_commit, completed_commit) {
+            format!("{start_commit}..{completed_commit}")
+        } else {
+            let completed_commit = completed_commit?;
+            let base_ref = resolve_upstream_base_ref(repo_dir)?;
+            format!("{base_ref}...{completed_commit}")
+        };
+
+    git_diff_stats(repo_dir, &diff_spec).ok()
+}
+
+fn compute_dispatch_merge_status(
+    worktree_path: Option<&str>,
+    completed_commit: Option<&str>,
+    completed_branch: Option<&str>,
+    completed_without_changes: bool,
+) -> DispatchMergeStatus {
+    if completed_without_changes {
+        return DispatchMergeStatus::Noop;
+    }
+
+    let Some(repo_dir) = worktree_path.filter(|path| std::path::Path::new(path).is_dir()) else {
+        return DispatchMergeStatus::Unknown;
+    };
+
+    if let Some(completed_commit) = completed_commit {
+        let Some(base_ref) = resolve_upstream_base_ref(repo_dir) else {
+            return DispatchMergeStatus::Unknown;
+        };
+        return match Command::new("git")
+            .args(["merge-base", "--is-ancestor", completed_commit, &base_ref])
+            .current_dir(repo_dir)
+            .status()
+        {
+            Ok(status) if status.success() => DispatchMergeStatus::Merged,
+            Ok(status) if status.code() == Some(1) => DispatchMergeStatus::Pending,
+            _ => DispatchMergeStatus::Unknown,
+        };
+    }
+
+    match completed_branch {
+        Some("main") | Some("master") => DispatchMergeStatus::Merged,
+        Some(_) => DispatchMergeStatus::Pending,
+        None => DispatchMergeStatus::Unknown,
+    }
+}
+
+fn format_dispatch_duration(duration_seconds: Option<i64>) -> String {
+    let Some(total_seconds) = duration_seconds.filter(|value| *value > 0) else {
+        return "확인 불가".to_string();
+    };
+    let total_minutes = (total_seconds + 59) / 60;
+    if total_minutes < 60 {
+        return format!("{total_minutes}분");
+    }
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    if minutes == 0 {
+        format!("{hours}시간")
+    } else {
+        format!("{hours}시간 {minutes}분")
+    }
+}
+
+fn format_merge_status(merge_status: DispatchMergeStatus) -> &'static str {
+    match merge_status {
+        DispatchMergeStatus::Noop => "noop",
+        DispatchMergeStatus::Pending => "머지 대기",
+        DispatchMergeStatus::Merged => "main 반영됨",
+        DispatchMergeStatus::Unknown => "머지 상태 확인 불가",
+    }
+}
+
+fn build_dispatch_completion_summary(info: &CompletedDispatchInfo) -> Option<String> {
+    if !is_work_dispatch_type(&info.dispatch_type) {
+        return None;
+    }
+
+    let result_json = parse_json_value(info.result_json.as_deref());
+    let context_json = parse_json_value(info.context_json.as_deref());
+    let completed_without_changes = dispatch_completed_without_changes(result_json.as_ref());
+    let worktree_path = resolve_worktree_path(result_json.as_ref(), context_json.as_ref());
+    let completed_commit = resolve_completed_commit(result_json.as_ref());
+    let start_commit = resolve_start_commit(result_json.as_ref(), context_json.as_ref());
+    let completed_branch = resolve_completed_branch(
+        result_json.as_ref(),
+        context_json.as_ref(),
+        worktree_path.as_deref(),
+    );
+    let stats = compute_dispatch_change_stats(
+        worktree_path.as_deref(),
+        start_commit.as_deref(),
+        completed_commit.as_deref(),
+        completed_without_changes,
+    )?;
+    let merge_status = compute_dispatch_merge_status(
+        worktree_path.as_deref(),
+        completed_commit.as_deref(),
+        completed_branch.as_deref(),
+        completed_without_changes,
+    );
+    let summary = DispatchCompletionSummary {
+        stats,
+        merge_status,
+        duration_seconds: info.duration_seconds,
+    };
+
+    Some(format!(
+        "🔔 완료 요약: {}개 파일, +{}/-{}, {}\n소요 시간 {}",
+        summary.stats.files_changed,
+        summary.stats.additions,
+        summary.stats.deletions,
+        format_merge_status(summary.merge_status),
+        format_dispatch_duration(summary.duration_seconds),
+    ))
+}
+
+async fn ensure_thread_is_postable(
+    client: &reqwest::Client,
+    token: &str,
+    discord_api_base: &str,
+    thread_id: &str,
+) -> Result<(), String> {
+    let info_url = discord_api_url(discord_api_base, &format!("/channels/{thread_id}"));
+    let response = client
+        .get(&info_url)
+        .header("Authorization", format!("Bot {}", token))
+        .send()
+        .await
+        .map_err(|err| format!("failed to inspect dispatch thread {thread_id}: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "dispatch thread {thread_id} unavailable: HTTP {}",
+            response.status()
+        ));
+    }
+
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|err| format!("failed to parse dispatch thread {thread_id}: {err}"))?;
+    let metadata = body.get("thread_metadata");
+    let is_locked = metadata
+        .and_then(|value| value.get("locked"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if is_locked {
+        return Err(format!("dispatch thread {thread_id} is locked"));
+    }
+
+    let is_archived = metadata
+        .and_then(|value| value.get("archived"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !is_archived {
+        return Ok(());
+    }
+
+    let response = client
+        .patch(&info_url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({"archived": false}))
+        .send()
+        .await
+        .map_err(|err| format!("failed to unarchive dispatch thread {thread_id}: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "failed to unarchive dispatch thread {thread_id}: HTTP {}",
+            response.status()
+        ));
+    }
+
+    Ok(())
+}
+
+async fn post_dispatch_completion_summary(
+    dispatch_id: &str,
+    thread_id: &str,
+    message: &str,
+    config: &DispatchFollowupConfig,
+) -> Result<(), String> {
+    let Some(token) = config.notify_bot_token.as_deref() else {
+        return Err("no notify bot token".to_string());
+    };
+
+    let client = reqwest::Client::new();
+    ensure_thread_is_postable(&client, token, &config.discord_api_base, thread_id).await?;
+
+    let message_url = discord_api_url(
+        &config.discord_api_base,
+        &format!("/channels/{thread_id}/messages"),
+    );
+    let response = client
+        .post(&message_url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({"content": message}))
+        .send()
+        .await
+        .map_err(|err| format!("failed to post dispatch summary for {dispatch_id}: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "failed to post dispatch summary for {dispatch_id}: HTTP {}",
+            response.status()
+        ));
+    }
+
+    Ok(())
+}
+
+async fn archive_dispatch_thread(
+    thread_id: &str,
+    dispatch_id: &str,
+    config: &DispatchFollowupConfig,
+) -> Result<(), String> {
+    let Some(token) = config.announce_bot_token.as_deref() else {
+        return Err("no announce bot token".to_string());
+    };
+
+    let archive_url = discord_api_url(&config.discord_api_base, &format!("/channels/{thread_id}"));
+    let client = reqwest::Client::new();
+    let response = client
+        .patch(&archive_url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({"archived": true}))
+        .send()
+        .await
+        .map_err(|err| format!("failed to archive thread {thread_id}: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "failed to archive thread {thread_id} for completed dispatch {dispatch_id}: HTTP {}",
+            response.status()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Send Discord notifications for a completed dispatch (review verdicts, etc.).
 /// Callers of `finalize_dispatch` should spawn this after the sync call returns.
 pub(crate) async fn handle_completed_dispatch_followups(
     db: &crate::db::Db,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    let info: Option<(String, String, String, String, String, Option<String>)> = {
+    handle_completed_dispatch_followups_with_config(
+        db,
+        dispatch_id,
+        &DispatchFollowupConfig::from_runtime(),
+    )
+    .await
+}
+
+pub(crate) async fn handle_completed_dispatch_followups_with_config(
+    db: &crate::db::Db,
+    dispatch_id: &str,
+    config: &DispatchFollowupConfig,
+) -> Result<(), String> {
+    let info: Option<CompletedDispatchInfo> = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return Err("db lock failed for dispatch lookup".into()),
         };
         conn.query_row(
-            "SELECT td.dispatch_type, td.status, kc.id, COALESCE(kc.assigned_agent_id, ''), kc.title, td.result \
+            "SELECT td.dispatch_type, td.status, kc.id, td.result, td.context, td.thread_id, \
+                    CAST(ROUND((julianday(COALESCE(td.completed_at, td.updated_at, td.created_at)) - julianday(td.created_at)) * 86400) AS INTEGER) \
              FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.id = ?1",
             [dispatch_id],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
+                Ok(CompletedDispatchInfo {
+                    dispatch_type: row.get(0)?,
+                    status: row.get(1)?,
+                    card_id: row.get(2)?,
+                    result_json: row.get(3)?,
+                    context_json: row.get(4)?,
+                    thread_id: row.get(5)?,
+                    duration_seconds: row.get(6)?,
+                })
             },
         )
         .ok()
     };
 
-    let Some((dispatch_type, status, card_id, _agent_id, _title, result_json)) = info else {
+    let Some(mut info) = info else {
         return Err(format!("dispatch {dispatch_id} not found"));
     };
-    if status != "completed" {
+    if info.status != "completed" {
         return Ok(()); // Not an error — dispatch not yet completed
     }
+    let context_json_value = parse_json_value(info.context_json.as_deref());
+    info.thread_id = resolve_thread_id(info.thread_id.as_deref(), context_json_value.as_ref());
 
-    if dispatch_type == "review" {
-        let verdict = extract_review_verdict(result_json.as_deref());
+    if info.dispatch_type == "review" {
+        let verdict = extract_review_verdict(info.result_json.as_deref());
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] 🔍 REVIEW-FOLLOWUP: dispatch={dispatch_id} verdict={verdict} result={:?}",
-            result_json.as_deref().unwrap_or("NULL")
+            info.result_json.as_deref().unwrap_or("NULL")
         );
         // Skip Discord notification for auto-completed reviews without an explicit verdict.
         // The policy engine's onDispatchCompleted hook handles those (review-automation.js).
@@ -277,7 +717,7 @@ pub(crate) async fn handle_completed_dispatch_followups(
         if verdict != "unknown" {
             super::discord_delivery::send_review_result_to_primary(
                 db,
-                &card_id,
+                &info.card_id,
                 dispatch_id,
                 &verdict,
             )
@@ -289,13 +729,26 @@ pub(crate) async fn handle_completed_dispatch_followups(
         }
     }
 
+    if let (Some(thread_id), Some(summary_message)) = (
+        info.thread_id.as_deref(),
+        build_dispatch_completion_summary(&info),
+    ) {
+        if let Err(err) =
+            post_dispatch_completion_summary(dispatch_id, thread_id, &summary_message, config).await
+        {
+            tracing::warn!(
+                "[dispatch] Failed to post completion summary for dispatch {dispatch_id} to thread {thread_id}: {err}"
+            );
+        }
+    }
+
     // Archive thread on dispatch completion — but only if the card is done.
     // When the card has an active lifecycle (not done), keep the thread open for reuse
     // by subsequent dispatches (rework, review-decision, etc.).
     let card_status: Option<String> = db.lock().ok().and_then(|conn| {
         conn.query_row(
             "SELECT status FROM kanban_cards WHERE id = ?1",
-            [&card_id],
+            [&info.card_id],
             |row| row.get(0),
         )
         .ok()
@@ -303,29 +756,12 @@ pub(crate) async fn handle_completed_dispatch_followups(
     let should_archive = card_status.as_deref() == Some("done");
 
     if should_archive {
-        let thread_id: Option<String> = {
-            let conn = match db.lock() {
-                Ok(c) => c,
-                Err(_) => return Ok(()), // Best effort — archiving is not critical
-            };
-            conn.query_row(
-                "SELECT COALESCE(thread_id, json_extract(context, '$.thread_id')) FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-        };
-        if let Some(ref tid) = thread_id {
-            if let Some(token) = crate::credential::read_bot_token("announce") {
-                let archive_url = format!("https://discord.com/api/v10/channels/{}", tid);
-                let client = reqwest::Client::new();
-                let _ = client
-                    .patch(&archive_url)
-                    .header("Authorization", format!("Bot {}", token))
-                    .json(&serde_json::json!({"archived": true}))
-                    .send()
-                    .await;
+        if let Some(ref tid) = info.thread_id {
+            if let Err(err) = archive_dispatch_thread(tid, dispatch_id, config).await {
+                tracing::warn!(
+                    "[dispatch] Failed to archive thread {tid} for completed dispatch {dispatch_id}: {err}"
+                );
+            } else {
                 tracing::info!(
                     "[dispatch] Archived thread {tid} for completed dispatch {dispatch_id} (card done)"
                 );
@@ -333,7 +769,7 @@ pub(crate) async fn handle_completed_dispatch_followups(
         }
         // Clear all thread mappings when card is done
         if let Ok(conn) = db.lock() {
-            clear_all_threads(&conn, &card_id);
+            clear_all_threads(&conn, &info.card_id);
         }
     }
 

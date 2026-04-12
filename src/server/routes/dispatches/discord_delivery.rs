@@ -22,7 +22,7 @@ struct SlotThreadBinding {
     thread_id: Option<String>,
 }
 
-fn discord_api_base_url() -> String {
+pub(crate) fn discord_api_base_url() -> String {
     std::env::var("AGENTDESK_DISCORD_API_BASE_URL")
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
@@ -30,7 +30,7 @@ fn discord_api_base_url() -> String {
         .unwrap_or_else(|| DISCORD_API_BASE.to_string())
 }
 
-fn discord_api_url(base_url: &str, path: &str) -> String {
+pub(crate) fn discord_api_url(base_url: &str, path: &str) -> String {
     format!(
         "{}/{}",
         base_url.trim_end_matches('/'),
