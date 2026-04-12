@@ -218,6 +218,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
                 channel_name
                     .as_deref()
                     .and_then(super::adk_session::parse_thread_channel_id_from_name),
+                None,
                 api_port,
             )
             .await;

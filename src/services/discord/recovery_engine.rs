@@ -1295,6 +1295,7 @@ pub(super) async fn restore_inflight_turns(
             channel_name.as_deref(),
             last_path.as_deref(),
         );
+        let role_binding = resolve_role_binding(channel_id, channel_name.as_deref());
         let adk_thread_channel_id = adk_session_name
             .as_deref()
             .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name);
@@ -1313,6 +1314,9 @@ pub(super) async fn restore_inflight_turns(
                 .or_else(|| parse_dispatch_id(&state.user_text))
                 .as_deref(),
             adk_thread_channel_id,
+            role_binding
+                .as_ref()
+                .map(|binding| binding.role_id.as_str()),
             shared.api_port,
         )
         .await;
@@ -1394,8 +1398,6 @@ pub(super) async fn restore_inflight_turns(
         let mut state = state;
         state.session_key = state.session_key.or_else(|| adk_session_key.clone());
         state.dispatch_id = state.dispatch_id.or_else(|| recovery_dispatch_id.clone());
-        let role_binding = resolve_role_binding(channel_id, channel_name.as_deref());
-
         spawn_turn_bridge(
             shared.clone(),
             cancel_token,

@@ -81,6 +81,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT;");
     ensure_session_transcripts_schema(conn)?;
+    backfill_session_agent_ids(conn)?;
+    backfill_session_transcript_agent_ids(conn)?;
     ensure_memento_feedback_stats_schema(conn)?;
 
     // Office/department extended columns
@@ -1015,6 +1017,86 @@ fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn backfill_session_agent_ids(conn: &Connection) -> Result<()> {
+    let sessions = conn
+        .prepare(
+            "SELECT session_key, thread_channel_id, active_dispatch_id
+             FROM sessions
+             WHERE NULLIF(TRIM(agent_id), '') IS NULL",
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (session_key, thread_channel_id, dispatch_id) in sessions {
+        let Some(agent_id) = crate::db::session_agent_resolution::resolve_agent_id_for_session(
+            conn,
+            None,
+            Some(session_key.as_str()),
+            None,
+            thread_channel_id.as_deref(),
+            dispatch_id.as_deref(),
+        ) else {
+            continue;
+        };
+
+        conn.execute(
+            "UPDATE sessions
+             SET agent_id = ?2
+             WHERE session_key = ?1
+               AND NULLIF(TRIM(agent_id), '') IS NULL",
+            rusqlite::params![session_key, agent_id],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn backfill_session_transcript_agent_ids(conn: &Connection) -> Result<()> {
+    let transcripts = conn
+        .prepare(
+            "SELECT id, session_key, dispatch_id
+             FROM session_transcripts
+             WHERE NULLIF(TRIM(agent_id), '') IS NULL",
+        )?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (id, session_key, dispatch_id) in transcripts {
+        let Some(agent_id) = crate::db::session_agent_resolution::resolve_agent_id_for_session(
+            conn,
+            None,
+            session_key.as_deref(),
+            None,
+            None,
+            dispatch_id.as_deref(),
+        ) else {
+            continue;
+        };
+
+        conn.execute(
+            "UPDATE session_transcripts
+             SET agent_id = ?2
+             WHERE id = ?1
+               AND NULLIF(TRIM(agent_id), '') IS NULL",
+            rusqlite::params![id, agent_id],
+        )?;
+    }
+
+    Ok(())
+}
+
 fn ensure_memento_feedback_stats_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memento_feedback_turn_stats (
@@ -1367,5 +1449,80 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fts_count, 1);
+    }
+
+    #[test]
+    fn migrate_backfills_session_and_transcript_agent_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_alt)
+             VALUES ('project-skillmanager', 'SkillManager', 'project-skillmanager-extremely-verbose-channel-cdx')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, created_at, updated_at)
+             VALUES ('card-backfill-agent', 'Backfill Agent', 'in_progress', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches
+             (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES (
+                'dispatch-backfill-agent',
+                'card-backfill-agent',
+                'project-skillmanager',
+                'implementation',
+                'dispatched',
+                'Backfill Agent',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        let session_key = "codex/hash123/mac-mini:AgentDesk-codex-project-skillmanager-extremely-v";
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at
+             ) VALUES (
+                ?1, NULL, 'codex', 'working', 'dispatch-backfill-agent', datetime('now'), datetime('now')
+             )",
+            [session_key],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_transcripts (
+                turn_id, session_key, channel_id, agent_id, provider, dispatch_id, user_message, assistant_message, events_json
+             ) VALUES (
+                'discord:backfill:1', ?1, '1492661418665971792', NULL, 'codex', 'dispatch-backfill-agent', 'legacy user', 'legacy assistant', '[]'
+             )",
+            [session_key],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let session_agent_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_agent_id.as_deref(), Some("project-skillmanager"));
+
+        let transcript_agent_id: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM session_transcripts WHERE turn_id = 'discord:backfill:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(transcript_agent_id.as_deref(), Some("project-skillmanager"));
     }
 }
