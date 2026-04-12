@@ -3,6 +3,7 @@ pub mod runtime;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
+use tracing::field::{Empty, display};
 
 use crate::db::{
     Db,
@@ -13,6 +14,130 @@ use crate::db::{
 };
 use crate::engine::PolicyEngine;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+
+#[derive(Debug, Clone, Default)]
+pub struct AutoQueueLogContext<'a> {
+    pub run_id: Option<&'a str>,
+    pub entry_id: Option<&'a str>,
+    pub card_id: Option<&'a str>,
+    pub dispatch_id: Option<&'a str>,
+    pub thread_group: Option<i64>,
+    pub batch_phase: Option<i64>,
+    pub slot_index: Option<i64>,
+    pub agent_id: Option<&'a str>,
+}
+
+impl<'a> AutoQueueLogContext<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn run(mut self, run_id: &'a str) -> Self {
+        self.run_id = Some(run_id);
+        self
+    }
+
+    pub fn entry(mut self, entry_id: &'a str) -> Self {
+        self.entry_id = Some(entry_id);
+        self
+    }
+
+    pub fn card(mut self, card_id: &'a str) -> Self {
+        self.card_id = Some(card_id);
+        self
+    }
+
+    pub fn dispatch(mut self, dispatch_id: &'a str) -> Self {
+        self.dispatch_id = Some(dispatch_id);
+        self
+    }
+
+    pub fn maybe_dispatch(mut self, dispatch_id: Option<&'a str>) -> Self {
+        self.dispatch_id = normalize_auto_queue_log_id(dispatch_id);
+        self
+    }
+
+    pub fn agent(mut self, agent_id: &'a str) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
+    pub fn thread_group(mut self, thread_group: i64) -> Self {
+        self.thread_group = Some(thread_group);
+        self
+    }
+
+    pub fn batch_phase(mut self, batch_phase: i64) -> Self {
+        self.batch_phase = Some(batch_phase);
+        self
+    }
+
+    pub fn slot_index(mut self, slot_index: i64) -> Self {
+        self.slot_index = Some(slot_index);
+        self
+    }
+
+    pub fn maybe_slot_index(mut self, slot_index: Option<i64>) -> Self {
+        self.slot_index = slot_index;
+        self
+    }
+}
+
+fn normalize_auto_queue_log_id(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+pub fn auto_queue_trace_span(action: &'static str, ctx: &AutoQueueLogContext<'_>) -> tracing::Span {
+    let span = tracing::info_span!(
+        "auto_queue",
+        action = action,
+        run_id = Empty,
+        entry_id = Empty,
+        card_id = Empty,
+        dispatch_id = Empty,
+        thread_group = Empty,
+        batch_phase = Empty,
+        slot_index = Empty,
+        agent_id = Empty,
+    );
+
+    if let Some(run_id) = ctx.run_id {
+        span.record("run_id", display(run_id));
+    }
+    if let Some(entry_id) = ctx.entry_id {
+        span.record("entry_id", display(entry_id));
+    }
+    if let Some(card_id) = ctx.card_id {
+        span.record("card_id", display(card_id));
+    }
+    if let Some(dispatch_id) = ctx.dispatch_id {
+        span.record("dispatch_id", display(dispatch_id));
+    }
+    if let Some(thread_group) = ctx.thread_group {
+        span.record("thread_group", thread_group);
+    }
+    if let Some(batch_phase) = ctx.batch_phase {
+        span.record("batch_phase", batch_phase);
+    }
+    if let Some(slot_index) = ctx.slot_index {
+        span.record("slot_index", slot_index);
+    }
+    if let Some(agent_id) = ctx.agent_id {
+        span.record("agent_id", display(agent_id));
+    }
+
+    span
+}
+
+#[macro_export]
+macro_rules! auto_queue_log {
+    ($level:ident, $action:expr, $ctx:expr, $($arg:tt)+) => {{
+        let __ctx = &$ctx;
+        let __span = $crate::services::auto_queue::auto_queue_trace_span($action, __ctx);
+        let __guard = __span.enter();
+        tracing::$level!($($arg)+);
+    }};
+}
 
 #[derive(Clone)]
 pub struct AutoQueueService {

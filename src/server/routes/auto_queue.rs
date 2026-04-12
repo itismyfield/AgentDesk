@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::AppState;
-use crate::services::provider::ProviderKind;
+use crate::services::{auto_queue::AutoQueueLogContext, provider::ProviderKind};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -400,6 +400,11 @@ fn handle_activate_preflight_metadata(
     let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(metadata) else {
         return ActivatePreflightOutcome::Continue;
     };
+    let log_ctx = AutoQueueLogContext::new()
+        .entry(entry_id)
+        .card(card_id)
+        .agent(agent_id)
+        .thread_group(group);
 
     match parsed.get("preflight_status").and_then(|v| v.as_str()) {
         Some("consult_required") => {
@@ -466,7 +471,10 @@ fn handle_activate_preflight_metadata(
                 )
             });
             if dispatch_result.is_err() {
-                tracing::warn!(
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_preflight_consultation_dispatch_failed",
+                    log_ctx.clone(),
                     "[auto-queue] consultation dispatch failed for entry {entry_id} (group {group})"
                 );
                 return ActivatePreflightOutcome::Continue;
@@ -503,6 +511,13 @@ fn handle_activate_preflight_metadata(
             )
             .ok();
             ActivatePreflightOutcome::Dispatched(deps.entry_json(entry_id))
+            crate::auto_queue_log!(
+                info,
+                "activate_preflight_consultation_dispatch_created",
+                log_ctx.clone().dispatch(&dispatch_id),
+                "[auto-queue] created consultation dispatch for entry {entry_id} (group {group})"
+            );
+            ActivatePreflightOutcome::Dispatched(deps.entry_json(entry_id))
         }
         Some("invalid") | Some("already_applied") => {
             let conn = deps.db.separate_conn().unwrap();
@@ -514,7 +529,10 @@ fn handle_activate_preflight_metadata(
                 [entry_id],
             )
             .ok();
-            tracing::info!(
+            crate::auto_queue_log!(
+                info,
+                "activate_preflight_skipped",
+                log_ctx,
                 "[auto-queue] skipping entry {entry_id} for card {card_id} due to preflight_status={}",
                 parsed
                     .get("preflight_status")
@@ -1810,6 +1828,7 @@ pub(crate) fn activate_with_deps(
             Json(json!({ "dispatched": [], "count": 0, "message": "No active run" })),
         );
     };
+    let run_log_ctx = AutoQueueLogContext::new().run(&run_id);
 
     if crate::db::auto_queue::run_has_blocking_phase_gate(&conn, &run_id) {
         return (
@@ -1840,7 +1859,10 @@ pub(crate) fn activate_with_deps(
             *slot_index,
         );
         if cleared > 0 {
-            tracing::info!(
+            crate::auto_queue_log!(
+                info,
+                "activate_release_completed_slot",
+                run_log_ctx.clone().agent(agent_id).slot_index(*slot_index),
                 "[auto-queue] cleared {cleared} slot thread session(s) before releasing {agent_id} slot {slot_index}"
             );
         }
@@ -1864,7 +1886,10 @@ pub(crate) fn activate_with_deps(
             "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?1",
             [&run_id],
         ).ok();
-        tracing::info!(
+        crate::auto_queue_log!(
+            info,
+            "activate_stale_empty_run_completed",
+            run_log_ctx.clone(),
             "[auto-queue] Completed stale empty run {run_id} — no entries, skipping fallback populate (#85)"
         );
         return (
@@ -1907,7 +1932,10 @@ pub(crate) fn activate_with_deps(
         }
         .unwrap_or(false);
         if has_inflight {
-            tracing::info!(
+            crate::auto_queue_log!(
+                info,
+                "activate_inflight_guard_blocked",
+                run_log_ctx.clone().agent(agt),
                 "[auto-queue] Skipping activate: agent {agt} already has a dispatched entry in-flight"
             );
             return (
@@ -2093,9 +2121,16 @@ pub(crate) fn activate_with_deps(
         );
         drop(conn);
 
-        let Some((entry_id, card_id, agent_id)) = entry else {
+        let Some((entry_id, card_id, agent_id, batch_phase)) = entry else {
             continue;
         };
+        let entry_log_ctx = AutoQueueLogContext::new()
+            .run(&run_id)
+            .entry(&entry_id)
+            .card(&card_id)
+            .agent(&agent_id)
+            .thread_group(*group)
+            .batch_phase(batch_phase);
 
         let initial_state = {
             let conn = deps.db.separate_conn().unwrap();
@@ -2104,7 +2139,10 @@ pub(crate) fn activate_with_deps(
             match card_state {
                 Ok(card_state) => card_state,
                 Err(error) => {
-                    tracing::warn!(
+                    crate::auto_queue_log!(
+                        warn,
+                        "activate_load_card_failed",
+                        entry_log_ctx.clone(),
                         "[auto-queue] failed to load card {} before activate for entry {}: {error}",
                         card_id,
                         entry_id
@@ -2132,7 +2170,10 @@ pub(crate) fn activate_with_deps(
         drop(conn);
 
         if busy {
-            tracing::info!(
+            crate::auto_queue_log!(
+                info,
+                "activate_busy_agent_guard_blocked",
+                entry_log_ctx.clone(),
                 "[auto-queue] Skipping activate for {agent_id}: agent has active cards outside auto-queue"
             );
             continue;
@@ -2225,7 +2266,10 @@ pub(crate) fn activate_with_deps(
                                 "activate_consultation_reserve",
                                 &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
                             ) {
-                                tracing::warn!(
+                                crate::auto_queue_log!(
+                                    warn,
+                                    "activate_consultation_reserve_failed",
+                                    entry_log_ctx.clone(),
                                     "[auto-queue] failed to reserve consultation entry {} before dispatch creation: {}",
                                     entry_id,
                                     error
@@ -2310,14 +2354,20 @@ pub(crate) fn activate_with_deps(
                                         &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
                                     )
                                 {
-                                    tracing::warn!(
+                                    crate::auto_queue_log!(
+                                        warn,
+                                        "activate_consultation_reserve_revert_failed",
+                                        entry_log_ctx.clone(),
                                         "[auto-queue] failed to revert consultation reservation for entry {}: {}",
                                         entry_id,
                                         error
                                     );
                                 }
                                 drop(conn);
-                                tracing::warn!(
+                                crate::auto_queue_log!(
+                                    warn,
+                                    "activate_consultation_dispatch_failed",
+                                    entry_log_ctx.clone(),
                                     "[auto-queue] consultation dispatch failed for entry {entry_id} (group {group})"
                                 );
                                 continue;
@@ -2354,13 +2404,23 @@ pub(crate) fn activate_with_deps(
                                     slot_index: None,
                                 },
                             ) {
-                                tracing::warn!(
+                                crate::auto_queue_log!(
+                                    warn,
+                                    "activate_consultation_mark_dispatched_failed",
+                                    entry_log_ctx.clone().dispatch(&dispatch_id),
                                     "[auto-queue] failed to mark consultation entry {} dispatched: {}",
                                     entry_id,
                                     error
                                 );
                             }
                             dispatched.push(deps.entry_json(&entry_id));
+                            dispatched.push(deps.entry_json(&entry_id));
+                            crate::auto_queue_log!(
+                                info,
+                                "activate_consultation_dispatched",
+                                entry_log_ctx.clone().dispatch(&dispatch_id),
+                                "[auto-queue] consultation dispatch ready for entry {entry_id}"
+                            );
                             drop(conn);
                             continue;
                         }
@@ -2373,14 +2433,20 @@ pub(crate) fn activate_with_deps(
                                 "activate_preflight_invalid",
                                 &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
                             ) {
-                                tracing::warn!(
+                                crate::auto_queue_log!(
+                                    warn,
+                                    "activate_preflight_invalid_skip_failed",
+                                    entry_log_ctx.clone(),
                                     "[auto-queue] failed to skip preflight-invalid entry {}: {}",
                                     entry_id,
                                     error
                                 );
                             }
                             drop(conn);
-                            tracing::info!(
+                            crate::auto_queue_log!(
+                                info,
+                                "activate_preflight_invalid_skipped",
+                                entry_log_ctx.clone(),
                                 "[auto-queue] skipping entry {entry_id} for card {card_id} due to preflight_status={}",
                                 parsed
                                     .get("preflight_status")
@@ -2397,7 +2463,10 @@ pub(crate) fn activate_with_deps(
 
         // #500: Silent walk with hooks enabled
         if let Some(path) = walk_path {
-            tracing::info!(
+            crate::auto_queue_log!(
+                info,
+                "activate_silent_walk_start",
+                entry_log_ctx.clone(),
                 "[auto-queue] Silent walk: card {} from '{}' through {:?} (canonical reducer, hooks enabled)",
                 card_id,
                 initial_state.status,
@@ -2413,7 +2482,10 @@ pub(crate) fn activate_with_deps(
                     "auto-queue-walk",
                     false,
                 ) {
-                    tracing::warn!(
+                    crate::auto_queue_log!(
+                        warn,
+                        "activate_silent_walk_failed",
+                        entry_log_ctx.clone(),
                         "[auto-queue] Silent walk failed for card {} at step '{}': {e}",
                         card_id,
                         step
@@ -2434,7 +2506,10 @@ pub(crate) fn activate_with_deps(
             match state_after_walk {
                 Ok(card_state) => card_state,
                 Err(error) => {
-                    tracing::warn!(
+                    crate::auto_queue_log!(
+                        warn,
+                        "activate_reload_card_failed",
+                        entry_log_ctx.clone(),
                         "[auto-queue] failed to reload card {} after walk for entry {}: {error}",
                         card_id,
                         entry_id
@@ -2508,7 +2583,10 @@ pub(crate) fn activate_with_deps(
             crate::db::auto_queue::allocate_slot_for_group_agent(&conn, &run_id, *group, &agent_id);
         let slot_index = slot_allocation.as_ref().map(|(slot_index, _)| *slot_index);
         if slot_allocation.is_none() {
-            tracing::info!(
+            crate::auto_queue_log!(
+                info,
+                "activate_slot_pool_exhausted",
+                entry_log_ctx.clone(),
                 "[auto-queue] Skipping group {group} for {agent_id}: no free slot in pool"
             );
             continue;
@@ -2523,7 +2601,10 @@ pub(crate) fn activate_with_deps(
                     assigned_slot,
                 );
                 if cleared > 0 {
-                    tracing::info!(
+                    crate::auto_queue_log!(
+                        info,
+                        "activate_slot_cleared_before_dispatch",
+                        entry_log_ctx.clone().slot_index(assigned_slot),
                         "[auto-queue] cleared {cleared} slot thread session(s) before dispatching {agent_id} slot {assigned_slot} group {group}"
                     );
                 }
@@ -2542,7 +2623,10 @@ pub(crate) fn activate_with_deps(
                 slot_index,
             },
         ) {
-            tracing::warn!(
+            crate::auto_queue_log!(
+                warn,
+                "activate_dispatch_reserve_failed",
+                entry_log_ctx.clone().maybe_slot_index(slot_index),
                 "[auto-queue] failed to reserve entry {} before create_dispatch: {}",
                 entry_id,
                 error
@@ -2578,14 +2662,20 @@ pub(crate) fn activate_with_deps(
                 "activate_dispatch_reserve_revert",
                 &crate::db::auto_queue::EntryStatusUpdateOptions::default(),
             ) {
-                tracing::warn!(
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_dispatch_reserve_revert_failed",
+                    entry_log_ctx.clone().maybe_slot_index(slot_index),
                     "[auto-queue] failed to revert reservation for entry {} after create_dispatch error: {}",
                     entry_id,
                     error
                 );
             }
             drop(conn);
-            tracing::error!(
+            crate::auto_queue_log!(
+                error,
+                "activate_dispatch_create_failed",
+                entry_log_ctx.clone().maybe_slot_index(slot_index),
                 "[auto-queue] create_dispatch failed for entry {entry_id} (group {group}), leaving as pending for retry"
             );
             continue;
@@ -2603,11 +2693,17 @@ pub(crate) fn activate_with_deps(
             crate::db::auto_queue::ENTRY_STATUS_DISPATCHED,
             "activate_dispatch_created",
             &crate::db::auto_queue::EntryStatusUpdateOptions {
-                dispatch_id: Some(dispatch_id),
+                dispatch_id: Some(dispatch_id.clone()),
                 slot_index,
             },
         ) {
-            tracing::warn!(
+            crate::auto_queue_log!(
+                warn,
+                "activate_dispatch_mark_failed",
+                entry_log_ctx
+                    .clone()
+                    .dispatch(&dispatch_id)
+                    .maybe_slot_index(slot_index),
                 "[auto-queue] failed to mark entry {} dispatched after create_dispatch: {}",
                 entry_id,
                 error
@@ -2639,7 +2735,10 @@ pub(crate) fn activate_with_deps(
             .unwrap_or(0);
         if still_dispatched == 0 {
             if let Err(error) = crate::db::auto_queue::complete_run_on_conn(&conn, &run_id) {
-                tracing::warn!(
+                crate::auto_queue_log!(
+                    warn,
+                    "activate_finalize_run_failed",
+                    run_log_ctx.clone(),
                     "[auto-queue] failed to finalize run {} after dispatch drain: {}",
                     run_id,
                     error
@@ -3277,11 +3376,17 @@ pub async fn reset(
             )
             .unwrap_or(0);
         if protected_active_runs > 0 {
-            tracing::warn!(
+            crate::auto_queue_log!(
+                warn,
+                "reset_global_preserved_active_runs",
+                AutoQueueLogContext::new(),
                 "[auto-queue] Global reset requested without agent_id; preserving {protected_active_runs} active run(s)"
             );
         } else {
-            tracing::warn!(
+            crate::auto_queue_log!(
+                warn,
+                "reset_global_unscoped",
+                AutoQueueLogContext::new(),
                 "[auto-queue] Global reset requested without agent_id; applying unscoped reset"
             );
         }
@@ -3504,7 +3609,10 @@ pub async fn cancel(State(state): State<AppState>) -> (StatusCode, Json<serde_js
         ) {
             Ok(result) if result.changed => cancelled_entries += 1,
             Ok(_) => {}
-            Err(error) => tracing::warn!(
+            Err(error) => crate::auto_queue_log!(
+                warn,
+                "cancel_entry_skip_failed",
+                AutoQueueLogContext::new().entry(&entry_id),
                 "[auto-queue] failed to cancel entry {} during run cancel: {}",
                 entry_id,
                 error
@@ -3669,6 +3777,7 @@ pub async fn submit_order(
         }
     }
     let run_repo = run_info.as_ref().and_then(|(_, r)| r.clone());
+    let run_log_ctx = AutoQueueLogContext::new().run(&run_id);
 
     // Create entries from the ordered list
     let mut created = 0;
@@ -3711,7 +3820,10 @@ pub async fn submit_order(
             .map(|p| p.dispatchable_states().iter().any(|s| *s == card_status))
             .unwrap_or(card_status == "ready");
         if !dispatchable_check {
-            tracing::info!(
+            crate::auto_queue_log!(
+                info,
+                "submit_order_card_not_dispatchable",
+                run_log_ctx.clone().card(&card_id),
                 "[auto-queue] Skipping card {card_id} (status={card_status}, not dispatchable)"
             );
             continue;
@@ -3749,7 +3861,10 @@ pub async fn submit_order(
         )
         .ok();
     } else {
-        tracing::warn!(
+        crate::auto_queue_log!(
+            warn,
+            "submit_order_no_ready_cards",
+            run_log_ctx.clone(),
             "[auto-queue] submit_order: no ready cards enqueued, run {run_id} stays pending"
         );
         conn.execute(
