@@ -2,6 +2,9 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 const AGENTDESK_REPO_ID: &str = "itismyfield/AgentDesk";
+const SESSION_AGENT_ID_BACKFILL_META_KEY: &str = "session_agent_id_backfill:v1";
+const SESSION_TRANSCRIPT_AGENT_ID_BACKFILL_META_KEY: &str =
+    "session_transcript_agent_id_backfill:v1";
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -81,8 +84,16 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT;");
     ensure_session_transcripts_schema(conn)?;
-    backfill_session_agent_ids(conn)?;
-    backfill_session_transcript_agent_ids(conn)?;
+    run_migration_once(
+        conn,
+        SESSION_AGENT_ID_BACKFILL_META_KEY,
+        backfill_session_agent_ids,
+    )?;
+    run_migration_once(
+        conn,
+        SESSION_TRANSCRIPT_AGENT_ID_BACKFILL_META_KEY,
+        backfill_session_transcript_agent_ids,
+    )?;
     ensure_memento_feedback_stats_schema(conn)?;
 
     // Office/department extended columns
@@ -1017,6 +1028,30 @@ fn ensure_session_transcripts_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn run_migration_once(
+    conn: &Connection,
+    meta_key: &str,
+    migration: fn(&Connection) -> Result<()>,
+) -> Result<()> {
+    let already_ran = conn
+        .query_row(
+            "SELECT 1 FROM kv_meta WHERE key = ?1 LIMIT 1",
+            [meta_key],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if already_ran {
+        return Ok(());
+    }
+
+    migration(conn)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, '1')",
+        [meta_key],
+    )?;
+    Ok(())
+}
+
 fn backfill_session_agent_ids(conn: &Connection) -> Result<()> {
     let sessions = conn
         .prepare(
@@ -1454,7 +1489,20 @@ mod tests {
     #[test]
     fn migrate_backfills_session_and_transcript_agent_ids() {
         let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE kv_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO kv_meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO agents (id, name, discord_channel_alt)
@@ -1485,6 +1533,22 @@ mod tests {
         )
         .unwrap();
 
+        conn.execute_batch(
+            "CREATE TABLE session_transcripts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_id           TEXT NOT NULL UNIQUE,
+                session_key       TEXT,
+                channel_id        TEXT,
+                agent_id          TEXT,
+                provider          TEXT,
+                dispatch_id       TEXT,
+                user_message      TEXT NOT NULL DEFAULT '',
+                assistant_message TEXT NOT NULL DEFAULT '',
+                created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+
         let session_key = "codex/hash123/mac-mini:AgentDesk-codex-project-skillmanager-extremely-v";
         conn.execute(
             "INSERT INTO sessions (
@@ -1497,9 +1561,9 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO session_transcripts (
-                turn_id, session_key, channel_id, agent_id, provider, dispatch_id, user_message, assistant_message, events_json
+                turn_id, session_key, channel_id, agent_id, provider, dispatch_id, user_message, assistant_message
              ) VALUES (
-                'discord:backfill:1', ?1, '1492661418665971792', NULL, 'codex', 'dispatch-backfill-agent', 'legacy user', 'legacy assistant', '[]'
+                'discord:backfill:1', ?1, '1492661418665971792', NULL, 'codex', 'dispatch-backfill-agent', 'legacy user', 'legacy assistant'
              )",
             [session_key],
         )
@@ -1524,5 +1588,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(transcript_agent_id.as_deref(), Some("project-skillmanager"));
+
+        let session_backfill_flag: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [SESSION_AGENT_ID_BACKFILL_META_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_backfill_flag, "1");
+
+        let transcript_backfill_flag: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [SESSION_TRANSCRIPT_AGENT_ID_BACKFILL_META_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(transcript_backfill_flag, "1");
     }
 }
