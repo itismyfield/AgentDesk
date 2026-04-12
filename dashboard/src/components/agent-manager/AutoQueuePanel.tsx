@@ -15,6 +15,7 @@ import {
   normalizeAutoQueueStatus,
   shouldClearSuppressedAutoQueueRun,
 } from "./auto-queue-panel-state";
+import { buildDiscordThreadLinks } from "./discord-routing";
 
 interface Props {
   tr: (ko: string, en: string) => string;
@@ -138,6 +139,22 @@ function batchPhaseColor(phase: number): string {
 
 function batchPhaseLabel(phase: number): string {
   return `P${phase}`;
+}
+
+function labelForThreadLink(
+  label: string | undefined,
+  tr: (ko: string, en: string) => string,
+): string {
+  switch (label) {
+    case "work":
+      return tr("작업", "Work");
+    case "review":
+      return tr("리뷰", "Review");
+    case "active":
+      return tr("활성", "Active");
+    default:
+      return label ?? tr("스레드", "Thread");
+  }
 }
 
 function isCompletedEntry(entry: DispatchQueueEntryType): boolean {
@@ -284,6 +301,48 @@ function EntryRow({
             style={{ color: "var(--th-text-muted)" }}
           >
             {entry.reason}
+          </div>
+        )}
+        {entry.thread_links && entry.thread_links.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {entry.thread_links.map((threadLink) => {
+              const { webUrl, deepLink } = buildDiscordThreadLinks(threadLink);
+              if (!webUrl && !deepLink) return null;
+              const linkLabel = labelForThreadLink(threadLink.label, tr);
+              return (
+                <div
+                  key={`${threadLink.role}-${threadLink.thread_id}`}
+                  className="flex flex-wrap gap-1"
+                >
+                  {webUrl && (
+                    <a
+                      href={webUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="rounded-full px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-80"
+                      style={{
+                        backgroundColor: "rgba(59,130,246,0.14)",
+                        color: "#93c5fd",
+                      }}
+                    >
+                      {linkLabel} Web
+                    </a>
+                  )}
+                  {deepLink && (
+                    <a
+                      href={deepLink}
+                      className="rounded-full px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-80"
+                      style={{
+                        backgroundColor: "rgba(34,197,94,0.14)",
+                        color: "#86efac",
+                      }}
+                    >
+                      {linkLabel} App
+                    </a>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

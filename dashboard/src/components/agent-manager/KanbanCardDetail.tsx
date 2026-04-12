@@ -298,6 +298,10 @@ export default function KanbanCardDetail({
                         setActionError(tr("review checklist를 모두 완료해야 done으로 이동할 수 있습니다.", "Complete the review checklist before moving to done."));
                         return;
                       }
+                      if (target === "backlog") {
+                        setCancelConfirm({ cardIds: [selectedCard.id], source: "single" });
+                        return;
+                      }
                       setSavingCard(true);
                       setActionError(null);
                       try {
@@ -802,7 +806,7 @@ export default function KanbanCardDetail({
                 className="rounded-xl px-4 py-2 text-sm font-medium"
                 style={{ color: "#9ca3af", backgroundColor: "rgba(107,114,128,0.18)" }}
               >
-                {tr("카드 취소", "Cancel card")}
+                {tr("백로그로 되돌리기", "Move to backlog")}
               </button>
             )}
           </div>

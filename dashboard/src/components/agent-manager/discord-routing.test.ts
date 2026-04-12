@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildDiscordChannelLinks,
+  buildDiscordThreadLinks,
   describeDiscordTarget,
   describeDispatchedSession,
   formatDiscordSummary,
@@ -35,6 +36,17 @@ describe("discord-routing", () => {
     expect(summary.title).toBe("리뷰 스레드");
     expect(summary.subtitle).toBe("#adk-cdx");
     expect(summary.deepLink).toBe("discord://discord.com/channels/123/456");
+  });
+
+  it("builds Discord thread web and app links from auto-queue thread URLs", () => {
+    expect(
+      buildDiscordThreadLinks({
+        url: "https://discord.com/channels/123/456",
+      }),
+    ).toEqual({
+      webUrl: "https://discord.com/channels/123/456",
+      deepLink: "discord://discord.com/channels/123/456",
+    });
   });
 
   it("parses tmux-backed session keys into channel names", () => {

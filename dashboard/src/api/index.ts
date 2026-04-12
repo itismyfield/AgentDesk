@@ -98,6 +98,7 @@ export {
 } from "./client";
 
 export type {
+  AutoQueueThreadLink,
   AutoQueueRun,
   AutoQueueStatus,
   DispatchQueueEntry,

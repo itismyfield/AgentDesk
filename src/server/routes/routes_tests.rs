@@ -1649,6 +1649,297 @@ async fn kanban_update_card_status() {
 }
 
 #[tokio::test]
+async fn kanban_update_card_rejects_manual_non_backlog_transition() {
+    let db = test_db();
+    let engine = test_engine(&db);
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, priority, created_at, updated_at) VALUES ('c1', 'Card1', 'ready', 'medium', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/kanban-cards/c1")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"status":"in_progress"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("backlog"),
+        "error must explain the restricted manual transition rule"
+    );
+
+    let conn = db.lock().unwrap();
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = 'c1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "ready");
+}
+
+#[tokio::test]
+async fn kanban_update_card_to_backlog_cleans_up_dispatches_auto_queue_and_turns() {
+    let db = test_db();
+    let engine = test_engine(&db);
+    seed_agent(&db, "agent-manual-backlog");
+    seed_repo(&db, "test-repo");
+    ensure_auto_queue_tables(&db);
+
+    let tmux_name = format!("manual-backlog-{}", uuid::Uuid::new_v4().simple());
+    let session_key = format!("host:{tmux_name}");
+    let tmux_created = if crate::services::platform::tmux::is_available() {
+        let output = crate::services::platform::tmux::create_session(&tmux_name, None, "sleep 120")
+            .expect("tmux session should spawn");
+        assert!(
+            output.status.success(),
+            "tmux session should start for turn cancellation test"
+        );
+        true
+    } else {
+        false
+    };
+
+    {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, assigned_agent_id, repo_id,
+                github_issue_number, latest_dispatch_id, review_status, review_round, review_notes,
+                suggestion_pending_at, review_entered_at, awaiting_dod_at,
+                created_at, updated_at, started_at
+            ) VALUES (
+                'card-manual-backlog', 'Manual Backlog Cleanup', 'in_progress', 'medium', 'agent-manual-backlog', 'test-repo',
+                541, 'dispatch-manual-backlog', 'reviewing', 3, 'stale review state',
+                datetime('now', '-12 minutes'), datetime('now', '-11 minutes'), datetime('now', '-10 minutes'),
+                datetime('now', '-20 minutes'), datetime('now', '-20 minutes'), datetime('now', '-20 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (
+                id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at
+            ) VALUES (
+                'dispatch-manual-backlog', 'card-manual-backlog', 'agent-manual-backlog', 'implementation', 'pending',
+                'live impl', datetime('now', '-10 minutes'), datetime('now', '-10 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_key, agent_id, provider, status, active_dispatch_id, last_heartbeat, created_at
+            ) VALUES (
+                ?1, 'agent-manual-backlog', 'codex', 'working', 'dispatch-manual-backlog',
+                datetime('now', '-9 minutes'), datetime('now', '-9 minutes')
+            )",
+            rusqlite::params![session_key],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-manual-backlog', 'test-repo', 'agent-manual-backlog', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status, dispatch_id, dispatched_at
+            ) VALUES (
+                'entry-manual-backlog-dispatched', 'run-manual-backlog', 'card-manual-backlog', 'agent-manual-backlog',
+                'dispatched', 'dispatch-manual-backlog', datetime('now', '-10 minutes')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (
+                id, run_id, kanban_card_id, agent_id, status
+            ) VALUES (
+                'entry-manual-backlog-pending', 'run-manual-backlog', 'card-manual-backlog', 'agent-manual-backlog', 'pending'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO card_review_state (
+                card_id, state, pending_dispatch_id, review_round, last_verdict, last_decision,
+                approach_change_round, session_reset_round, review_entered_at, updated_at
+            ) VALUES (
+                'card-manual-backlog', 'suggestion_pending', 'dispatch-manual-backlog', 3, 'pass', 'approved',
+                2, 3, datetime('now', '-11 minutes'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = test_api_router(db.clone(), engine, None);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/kanban-cards/card-manual-backlog")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"status":"backlog"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["card"]["status"], "backlog");
+
+    let conn = db.lock().unwrap();
+    let (
+        card_status,
+        latest_dispatch_id,
+        review_status,
+        review_round,
+        review_notes,
+        suggestion_pending_at,
+        review_entered_at,
+        awaiting_dod_at,
+    ): (
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT status, latest_dispatch_id, review_status, review_round, review_notes,
+                    suggestion_pending_at, review_entered_at, awaiting_dod_at
+             FROM kanban_cards WHERE id = 'card-manual-backlog'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(card_status, "backlog");
+    assert!(latest_dispatch_id.is_none());
+    assert!(review_status.is_none());
+    assert_eq!(review_round, 0);
+    assert!(review_notes.is_none());
+    assert!(suggestion_pending_at.is_none());
+    assert!(review_entered_at.is_none());
+    assert!(awaiting_dod_at.is_none());
+
+    let dispatch_status: String = conn
+        .query_row(
+            "SELECT status FROM task_dispatches WHERE id = 'dispatch-manual-backlog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dispatch_status, "cancelled");
+
+    let entry_rows: Vec<(String, Option<String>)> = conn
+        .prepare(
+            "SELECT status, dispatch_id FROM auto_queue_entries
+             WHERE kanban_card_id = 'card-manual-backlog'
+             ORDER BY id ASC",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        entry_rows,
+        vec![("skipped".to_string(), None), ("skipped".to_string(), None),],
+    );
+
+    let (session_status, active_dispatch_id): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, active_dispatch_id
+             FROM sessions
+             WHERE session_key = ?1",
+            rusqlite::params![session_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(session_status, "disconnected");
+    assert!(active_dispatch_id.is_none());
+
+    let (
+        review_state_round,
+        review_state_status,
+        review_state_pending_dispatch,
+        review_state_verdict,
+        review_state_decision,
+    ): (i64, String, Option<String>, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT review_round, state, pending_dispatch_id, last_verdict, last_decision
+             FROM card_review_state WHERE card_id = 'card-manual-backlog'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(review_state_round, 0);
+    assert_eq!(review_state_status, "idle");
+    assert!(review_state_pending_dispatch.is_none());
+    assert!(review_state_verdict.is_none());
+    assert!(review_state_decision.is_none());
+
+    drop(conn);
+
+    if tmux_created {
+        assert!(
+            !crate::services::platform::tmux::has_session(&tmux_name),
+            "manual backlog revert must kill the live tmux turn"
+        );
+    }
+}
+
+#[tokio::test]
 async fn kanban_update_card_not_found() {
     let db = test_db();
     let engine = test_engine(&db);

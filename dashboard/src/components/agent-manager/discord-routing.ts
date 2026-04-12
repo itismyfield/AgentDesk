@@ -1,4 +1,4 @@
-import type { DiscordChannelInfo } from "../../api";
+import type { AutoQueueThreadLink, DiscordChannelInfo } from "../../api";
 import type { DiscordBinding } from "../../api/client";
 import type { DispatchedSession } from "../../types";
 
@@ -37,6 +37,23 @@ export function buildDiscordChannelLinks(
   return {
     webUrl: `https://discord.com/channels/${guildId}/${channelId}`,
     deepLink: `discord://discord.com/channels/${guildId}/${channelId}`,
+  };
+}
+
+export function buildDiscordThreadLinks(
+  link: Pick<AutoQueueThreadLink, "url">,
+): Pick<DiscordTargetSummary, "webUrl" | "deepLink"> {
+  if (!link.url) {
+    return {
+      webUrl: null,
+      deepLink: null,
+    };
+  }
+
+  const match = link.url.match(/^https:\/\/discord\.com\/channels\/([^/]+)\/([^/]+)$/);
+  return {
+    webUrl: link.url,
+    deepLink: match ? `discord://discord.com/channels/${match[1]}/${match[2]}` : null,
   };
 }
 

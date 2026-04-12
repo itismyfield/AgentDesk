@@ -192,10 +192,7 @@ export default function KanbanTab({
     if (!cancelConfirm) return;
     setCancelBusy(true);
     try {
-      // Both bulk and single cancel use bulkKanbanAction which calls
-      // transition_status with force=true, avoiding blocked transitions.
-      // GitHub issues are automatically closed server-side when status → done.
-      await api.bulkKanbanAction("cancel", cancelConfirm.cardIds);
+      await api.bulkKanbanAction("transition", cancelConfirm.cardIds, "backlog");
       cancelConfirm.cardIds.forEach((cardId) => invalidateCardActivity(cardId));
       if (cancelConfirm.source === "bulk") {
         setStalledSelected(new Set());
@@ -590,6 +587,10 @@ export default function KanbanTab({
 
   const handleUpdateCardStatus = async (cardId: string, targetStatus: KanbanCardStatus): Promise<boolean> => {
     setActionError(null);
+    if (targetStatus === "backlog") {
+      setCancelConfirm({ cardIds: [cardId], source: "single" });
+      return false;
+    }
     // When moving to "ready" without an assignee, show assignee selection modal
     if (targetStatus === "ready") {
       const card = cardsById.get(cardId);
@@ -1314,7 +1315,7 @@ export default function KanbanTab({
                   className="text-[11px] px-3 py-1 rounded-lg border font-medium"
                   style={{ borderColor: "rgba(107,114,128,0.4)", color: "#9ca3af", backgroundColor: "rgba(107,114,128,0.12)" }}
                 >
-                  {bulkBusy ? "…" : tr(`일괄 Cancel (${stalledSelected.size})`, `Cancel All (${stalledSelected.size})`)}
+                  {bulkBusy ? "…" : tr(`일괄 Backlog 복귀 (${stalledSelected.size})`, `Move All to Backlog (${stalledSelected.size})`)}
                 </button>
               </div>
             )}
@@ -1322,7 +1323,7 @@ export default function KanbanTab({
         )}
       </section>
 
-      {/* Cancel confirmation modal — ask whether to also close GitHub issues */}
+      {/* Backlog revert confirmation modal */}
       {cancelConfirm && (() => {
         const ghCards = cancelConfirm.cardIds
           .map((id) => cardsById.get(id))
@@ -1335,12 +1336,12 @@ export default function KanbanTab({
               style={{ backgroundColor: "rgba(2,6,23,0.96)", borderColor: "rgba(148,163,184,0.24)" }}
             >
               <h3 className="text-base font-semibold" style={{ color: "var(--th-text-heading)" }}>
-                {tr("카드 취소 확인", "Cancel cards")}
+                {tr("백로그 복귀 확인", "Move to backlog")}
               </h3>
               <p className="text-sm" style={{ color: "var(--th-text-secondary)" }}>
                 {tr(
-                  `${cancelConfirm.cardIds.length}건의 카드를 취소합니다.`,
-                  `Cancel ${cancelConfirm.cardIds.length} card(s).`,
+                  `${cancelConfirm.cardIds.length}건의 카드를 backlog로 되돌립니다. 진행 중인 디스패치와 자동큐, 턴은 함께 정리됩니다.`,
+                  `Move ${cancelConfirm.cardIds.length} card(s) back to backlog. Active dispatches, auto-queue entries, and turns will be cancelled together.`,
                 )}
               </p>
               {ghCards.length > 0 && (
@@ -1360,8 +1361,8 @@ export default function KanbanTab({
                   </ul>
                   <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                     {tr(
-                      "※ GitHub 이슈는 카드 완료 시 자동으로 닫힙니다.",
-                      "※ GitHub issues are automatically closed when the card is completed.",
+                      "※ backlog 복귀는 GitHub 이슈를 닫지 않습니다.",
+                      "※ Returning to backlog does not close GitHub issues.",
                     )}
                   </p>
                 </div>
@@ -1381,7 +1382,7 @@ export default function KanbanTab({
                   className="rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
                   style={{ backgroundColor: "#dc2626" }}
                 >
-                  {cancelBusy ? tr("처리 중…", "Processing…") : tr("취소 확정", "Confirm cancel")}
+                  {cancelBusy ? tr("처리 중…", "Processing…") : tr("백로그로 되돌리기", "Move to backlog")}
                 </button>
               </div>
             </div>
@@ -2139,7 +2140,7 @@ export default function KanbanTab({
                         className="rounded-xl px-4 py-2 text-sm font-medium"
                         style={{ color: "#9ca3af", backgroundColor: "rgba(107,114,128,0.18)" }}
                       >
-                        {tr("카드 취소", "Cancel card")}
+                        {tr("백로그로 되돌리기", "Move to backlog")}
                       </button>
                     )}
                   </div>
