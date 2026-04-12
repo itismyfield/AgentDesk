@@ -616,20 +616,15 @@ pub(in crate::services::discord) async fn handle_text_message(
                     session.restore_provider_session(restored.clone());
                 }
                 memento_context_loaded = true;
-                // Notify: session restored from previous server instance
-                if let Some(ref db) = shared.db {
-                    if let Ok(conn) = db.lock() {
-                        let sid_full = restored.as_deref().unwrap_or("?");
-                        let sid_short: String = sid_full.chars().take(8).collect();
-                        let _ = conn.execute(
-                            "INSERT INTO message_outbox (target, content, bot, source) VALUES (?1, ?2, 'notify', 'system')",
-                            rusqlite::params![
-                                format!("channel:{}", channel_id.get()),
-                                format!("📋 세션 복원: {} (session: {})", provider.as_str(), sid_short),
-                            ],
-                        );
-                    }
-                }
+                // Notify: session restored — send immediately (before agent response)
+                let sid_full = restored.as_deref().unwrap_or("?");
+                let sid_short: String = sid_full.chars().take(8).collect();
+                let restore_msg = format!(
+                    "📋 세션 복원: {} (session: {})",
+                    provider.as_str(),
+                    sid_short
+                );
+                let _ = channel_id.say(&ctx.http, &restore_msg).await;
             }
             session_id = restored;
         }
