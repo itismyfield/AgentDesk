@@ -230,6 +230,13 @@ function buildCopyText(
   return lines.join("\n");
 }
 
+function transcriptLabel(
+  transcript: api.SessionTranscript,
+  isKo: boolean,
+): string {
+  return transcript.dispatch_title || formatTimestamp(transcript.created_at, isKo);
+}
+
 async function copyText(text: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -468,30 +475,52 @@ export default function TurnTranscriptPanel({
       ) : (
         <>
           {transcripts.length > 1 && (
-            <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
-              {transcripts.map((transcript) => {
-                const selected = transcript.turn_id === selectedTranscript?.turn_id;
-                return (
-                  <button
-                    key={transcript.turn_id}
-                    type="button"
-                    onClick={() => setSelectedTurnId(transcript.turn_id)}
-                    className="shrink-0 rounded-xl border px-3 py-2 text-left"
-                    style={{
-                      borderColor: selected ? "rgba(59,130,246,0.45)" : "rgba(148,163,184,0.16)",
-                      backgroundColor: selected ? "rgba(37,99,235,0.12)" : "rgba(255,255,255,0.03)",
-                    }}
-                  >
-                    <div className="text-xs font-medium" style={{ color: "var(--th-text-primary)" }}>
-                      {transcript.dispatch_title || formatTimestamp(transcript.created_at, isKo)}
-                    </div>
-                    <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-                      {(transcript.provider ?? "unknown").toUpperCase()} · {formatTimestamp(transcript.created_at, isKo)}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+            <>
+              <div className="mt-3 sm:hidden">
+                <select
+                  value={selectedTranscript?.turn_id ?? transcripts[0]?.turn_id ?? ""}
+                  onChange={(event) => setSelectedTurnId(event.target.value)}
+                  className="w-full rounded-xl px-3 py-2 text-sm outline-none"
+                  style={{
+                    background: "rgba(255,255,255,0.03)",
+                    border: "1px solid rgba(148,163,184,0.16)",
+                    color: "var(--th-text-primary)",
+                  }}
+                  aria-label={tr("턴 선택", "Select turn")}
+                >
+                  {transcripts.map((transcript) => (
+                    <option key={transcript.turn_id} value={transcript.turn_id}>
+                      {`${transcriptLabel(transcript, isKo)} · ${(transcript.provider ?? "unknown").toUpperCase()}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="mt-3 hidden flex-wrap gap-2 sm:flex">
+                {transcripts.map((transcript) => {
+                  const selected = transcript.turn_id === selectedTranscript?.turn_id;
+                  return (
+                    <button
+                      key={transcript.turn_id}
+                      type="button"
+                      onClick={() => setSelectedTurnId(transcript.turn_id)}
+                      className="min-w-0 flex-[1_1_12rem] rounded-xl border px-3 py-2 text-left"
+                      style={{
+                        borderColor: selected ? "rgba(59,130,246,0.45)" : "rgba(148,163,184,0.16)",
+                        backgroundColor: selected ? "rgba(37,99,235,0.12)" : "rgba(255,255,255,0.03)",
+                      }}
+                    >
+                      <div className="text-xs font-medium truncate" style={{ color: "var(--th-text-primary)" }}>
+                        {transcriptLabel(transcript, isKo)}
+                      </div>
+                      <div className="text-[11px] truncate" style={{ color: "var(--th-text-muted)" }}>
+                        {(transcript.provider ?? "unknown").toUpperCase()} · {formatTimestamp(transcript.created_at, isKo)}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
           )}
 
           {selectedTranscript && (
@@ -591,7 +620,10 @@ export default function TurnTranscriptPanel({
                     {tr("이 턴에는 구조화 이벤트가 없습니다.", "No structured events for this turn.")}
                   </div>
                 ) : (
-                  <div className="mt-2 flex gap-1 overflow-x-auto pb-1">
+                  <div
+                    className="mt-2 grid gap-1"
+                    style={{ gridTemplateColumns: `repeat(${events.length}, minmax(0, 1fr))` }}
+                  >
                     {events.map((event, index) => {
                       const tone = eventTone(event);
                       return (
@@ -599,10 +631,8 @@ export default function TurnTranscriptPanel({
                           key={`${selectedTranscript.turn_id}-${index}`}
                           type="button"
                           onClick={() => handleJumpToEvent(index)}
-                          className="h-10 rounded-lg border transition-transform hover:-translate-y-0.5"
+                          className="h-10 min-w-0 rounded-lg border transition-transform hover:-translate-y-0.5"
                           style={{
-                            minWidth: "28px",
-                            flex: "1 0 28px",
                             backgroundColor: TONE_STYLE[tone].bar,
                             borderColor:
                               activeEventIndex === index
