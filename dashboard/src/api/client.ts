@@ -663,6 +663,8 @@ export interface PipelineStageInput {
   max_retries?: number;
   skip_condition?: string | null;
   parallel_with?: string | null;
+  applies_to_agent_id?: string | null;
+  trigger_after?: "ready" | "review_pass";
 }
 
 export async function getPipelineStages(

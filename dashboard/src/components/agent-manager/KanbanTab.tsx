@@ -1,11 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../../api";
 import type { GitHubIssue, GitHubRepoOption, KanbanRepoSource } from "../../api";
-import AutoQueuePanel from "./AutoQueuePanel";
 import CardTimeline from "./CardTimeline";
-import PipelineEditor from "./PipelineEditor";
-import PipelineConfigView from "./PipelineConfigView";
-import PipelineOverrideEditor from "./PipelineOverrideEditor";
+import KanbanPipelinePanel from "./KanbanPipelinePanel";
 import PipelineProgress from "./PipelineProgress";
 import MarkdownContent from "../common/MarkdownContent";
 import KanbanBoard from "./KanbanBoard";
@@ -1393,36 +1390,13 @@ export default function KanbanTab({
       <div className={showDesktopDetailPanel ? "grid min-w-0 items-start gap-4 md:grid-cols-[minmax(0,1fr)_24rem] xl:grid-cols-[minmax(0,1fr)_28rem]" : "min-w-0"}>
         <div className="min-w-0 space-y-4">
           {selectedRepo && (
-            <>
-              <AutoQueuePanel
+            <KanbanPipelinePanel
                 tr={tr}
                 locale={locale}
                 agents={agents}
                 selectedRepo={selectedRepo}
                 selectedAgentId={selectedAgentId}
               />
-              <PipelineConfigView
-                tr={tr}
-                locale={locale}
-                repo={selectedRepo}
-                agents={agents}
-                selectedAgentId={selectedAgentId}
-              />
-              <PipelineOverrideEditor
-                tr={tr}
-                locale={locale}
-                repo={selectedRepo}
-                agents={agents}
-                selectedAgentId={selectedAgentId}
-              />
-              <PipelineEditor
-                tr={tr}
-                locale={locale}
-                repo={selectedRepo}
-                agents={agents}
-                selectedAgentId={selectedAgentId}
-              />
-            </>
           )}
 
           <KanbanBoard

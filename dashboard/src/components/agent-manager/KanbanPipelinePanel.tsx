@@ -1,8 +1,6 @@
 import type { Agent, UiLanguage } from "../../types";
 import AutoQueuePanel from "./AutoQueuePanel";
-import PipelineConfigView from "./PipelineConfigView";
-import PipelineOverrideEditor from "./PipelineOverrideEditor";
-import PipelineEditor from "./PipelineEditor";
+import PipelineVisualEditor from "./PipelineVisualEditor";
 
 interface KanbanPipelinePanelProps {
   tr: (ko: string, en: string) => string;
@@ -28,21 +26,7 @@ export default function KanbanPipelinePanel({
         selectedRepo={selectedRepo}
         selectedAgentId={selectedAgentId}
       />
-      <PipelineConfigView
-        tr={tr}
-        locale={locale}
-        repo={selectedRepo}
-        agents={agents}
-        selectedAgentId={selectedAgentId}
-      />
-      <PipelineOverrideEditor
-        tr={tr}
-        locale={locale}
-        repo={selectedRepo}
-        agents={agents}
-        selectedAgentId={selectedAgentId}
-      />
-      <PipelineEditor
+      <PipelineVisualEditor
         tr={tr}
         locale={locale}
         repo={selectedRepo}
